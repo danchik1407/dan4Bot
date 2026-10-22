@@ -150,31 +150,22 @@ async def process_random_coin_drop(message: Message):
     username = message.from_user.username or f"id{message.from_user.id}"
 
     try:
-        # Используем локальный файл картинки
-        photo_path = "drop.jpg"
-        if os.path.exists(photo_path):
-            photo = FSInputFile(photo_path)
-            await message.answer_photo(
-                photo=photo,
-                caption=(
-                    f"🎉 <b>Поздравляю!</b>\n\n"
-                    f"🎁 Ты выиграл(а) <b>{coins_amount} </b>\n\n"
-                    f" Пиши сообщения в чате и получай возможность так же находить Коины!"
-                ),
-                parse_mode="HTML"
-            )
-        else:
-            logger.warning(f"Файл {photo_path} не найден")
-            await message.answer(
+        # Берем картинку прямо из папки с ботом
+        photo = FSInputFile("drop.jpg")
+        await message.answer_photo(
+            photo=photo,
+            caption=(
                 f"🎉 <b>Поздравляю!</b>\n\n"
                 f"🎁 Ты выиграл(а) <b>{coins_amount} 🪙</b>\n\n"
-                f"💬 Пиши сообщения в чате и получай возможность так же находить Коины!",
-                parse_mode="HTML"
-            )
+                f"💬 Пиши сообщения в чате и получай возможность так же находить Коины!"
+            ),
+            parse_mode="HTML"
+        )
     except Exception as e:
+        # Если вдруг файл не найден, бот не упадет, а просто отправит текст
         logger.warning(f"Не удалось отправить картинку: {e}")
         await message.answer(
-            f" <b>Поздравляю!</b>\n\n"
+            f"🎉 <b>Поздравляю!</b>\n\n"
             f"🎁 Ты выиграл(а) <b>{coins_amount} 🪙</b>\n\n"
             f"💬 Пиши сообщения в чате и получай возможность так же находить Коины!",
             parse_mode="HTML"
