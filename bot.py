@@ -1113,7 +1113,7 @@ async def handle_contest(message: Message):
 
 
 async def start_fake_website():
-    """Этот код обманывает Render, заставляя его думать, что это сайт"""
+    """Этот код обманывает Render, открывая порт"""
     port = int(os.environ.get('PORT', 10000))
     app = web.Application()
 
@@ -1128,17 +1128,10 @@ async def start_fake_website():
     site = web.TCPSite(runner, '0.0.0.0', port)
     await site.start()
     print(f"🌐 Веб-порт {port} открыт. Render доволен!")
-# ================= ЗАПУСК =================
-async def main():
-    print("✅ Бот запущен!")
-    print(f"🔐 Админы: {ADMIN_IDS}")
-    print("📦 Сундуки, 💰 Экономика, 🎲 Кубы, 📢 Созывы")
-    print("🎯 Перебив: +запустить перебив, +завершить перебив, +статус перебива")
-    await dp.start_polling(bot)
 
 
 async def main():
-    # 1. СНАЧАЛА запускаем "сайт", чтобы Render не убил процесс
+    # 1. СНАЧАЛА открываем порт для Render
     await start_fake_website()
 
     # 2. ПОТОМ запускаем бота
@@ -1147,3 +1140,7 @@ async def main():
     print("📦 Сундуки, 💰 Экономика, 🎲 Кубы, 📢 Созывы")
 
     await dp.start_polling(bot)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
