@@ -8,7 +8,7 @@ import html as html_module
 import logging
 from dotenv import load_dotenv
 from aiogram import Bot, Dispatcher, F
-from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, FSInputFile
 from aiogram.enums import ChatMemberStatus
 from aiohttp import web
 
@@ -29,8 +29,8 @@ DATA_FILE = "data.json"
 COOLDOWN_SECONDS = 5 * 60 * 60  # 5 часов
 CHALLENGE_TIMEOUT = 60
 
-# Шанс выпадения коинов (20%)
-COIN_DROP_CHANCE = 0.20
+# Шанс выпадения коинов (2%)
+COIN_DROP_CHANCE = 0.02
 COIN_DROP_MIN = 1
 COIN_DROP_MAX = 20
 
@@ -131,49 +131,52 @@ async def try_delete(message: Message):
         pass
 
 
-# ================= 🎁 СЛУЧАЙНЫЙ ДРОП КОИНОВ =================
+# =================  СЛУЧАЙНЫЙ ДРОП КОИНОВ =================
 async def process_random_coin_drop(message: Message):
-    """Обработка случайного выпадения коинов (20% шанс)."""
+    """Обработка случайного выпадения коинов (2% шанс)."""
     if not message.from_user or message.from_user.is_bot:
         return
 
-    # Проверяем шанс 20%
     if random.random() > COIN_DROP_CHANCE:
         return
 
-    # Генерируем количество коинов (1-20)
     coins_amount = random.randint(COIN_DROP_MIN, COIN_DROP_MAX)
 
-    # Добавляем коины пользователю
     data = load_data()
     user = get_or_create_user(data, message.from_user.id, message.from_user.username)
     user["coins"] += coins_amount
     save_data(data)
 
-    # Отправляем сообщение с наградой
     username = message.from_user.username or f"id{message.from_user.id}"
 
-    # Картинка (ID файла или URL)
-    # ЗАМЕНИ на свою картинку! Загрузи её в Telegram и получи file_id
-    image_url = "https://i.imgur.com/your_image.jpg"  # Или используй file_id
-
     try:
-        # Если есть картинка - отправляем с ней
-        await message.answer_photo(
-            photo="https://github.com/danchik1407/dan4Bot/blob/main/photo_2026-10-22_21-36-22.jpg?raw=true",
-            caption=(
-                f" <b>Поздравляю!</b>\n\n"
-                f"🎁 Ты выиграл(а) <b>{coins_amount} 🪙</b> от @{bot.me.username}\n\n"
-                f"💬 Пиши сообщения в чате и получай возможность так же задувать Коины!"
-            ),
-            parse_mode="HTML"
-        )
-    except Exception:
-        # Если картинки нет - отправляем текст
+        # Используем локальный файл картинки
+        photo_path = "drop.jpg"
+        if os.path.exists(photo_path):
+            photo = FSInputFile(photo_path)
+            await message.answer_photo(
+                photo=photo,
+                caption=(
+                    f"🎉 <b>Поздравляю!</b>\n\n"
+                    f"🎁 Ты выиграл(а) <b>{coins_amount} </b>\n\n"
+                    f" Пиши сообщения в чате и получай возможность так же находить Коины!"
+                ),
+                parse_mode="HTML"
+            )
+        else:
+            logger.warning(f"Файл {photo_path} не найден")
+            await message.answer(
+                f"🎉 <b>Поздравляю!</b>\n\n"
+                f"🎁 Ты выиграл(а) <b>{coins_amount} 🪙</b>\n\n"
+                f"💬 Пиши сообщения в чате и получай возможность так же находить Коины!",
+                parse_mode="HTML"
+            )
+    except Exception as e:
+        logger.warning(f"Не удалось отправить картинку: {e}")
         await message.answer(
-            f"🎉 <b>Поздравляю!</b>\n\n"
-            f"🎁 Ты выиграл(а) <b>{coins_amount} 🪙</b>!\n\n"
-            f"💬 Пиши сообщения в чате и получай возможность так же задувать Коины!",
+            f" <b>Поздравляю!</b>\n\n"
+            f"🎁 Ты выиграл(а) <b>{coins_amount} 🪙</b>\n\n"
+            f"💬 Пиши сообщения в чате и получай возможность так же находить Коины!",
             parse_mode="HTML"
         )
 
@@ -183,23 +186,15 @@ async def process_random_coin_drop(message: Message):
 # ================= 🛍️ МАГАЗИН =================
 @dp.message(F.text.regexp(r'(?i)^[/!]?магазин$'))
 async def cmd_shop(message: Message):
-    """Команда Магазин."""
     await try_delete(message)
-
-    shop_text = (
-        "🛍️ <b>Магазин AURA:</b>\n\n"
-        "❌ Предметов для покупки пока нет"
-    )
-
+    shop_text = "🛍️ <b>Магазин AURA:</b>\n\n❌ Предметов для покупки пока нет"
     await message.answer(shop_text, parse_mode="HTML")
 
 
 # ================= 💰 СУНДУКИ =================
 @dp.message(F.text.regexp(r'(?i)^[/!]?открыть$'))
 async def cmd_open(message: Message):
-    """Открыть сундук."""
     await try_delete(message)
-
     user_id = message.from_user.id
     username = message.from_user.username
     data = load_data()
@@ -221,43 +216,32 @@ async def cmd_open(message: Message):
     save_data(data)
 
     if is_golden:
-        await message.answer(f"✨ <b>ЗОЛОТОЙ СУНДУК!</b> 🔑\n Невероятная удача!\n🎉 Тебе выпало: <b>{reward}</b> 🪙",
-                             parse_mode="HTML")
+        await message.answer(f"✨ <b>ЗОЛОТОЙ СУНДУК!</b> 🔑\n🎉 Тебе выпало: <b>{reward}</b> 🪙", parse_mode="HTML")
     else:
-        await message.answer(f" <b>Сундук открыт!</b>\n🎉 Тебе выпало: <b>{reward}</b> 🪙", parse_mode="HTML")
+        await message.answer(f"🎁 <b>Сундук открыт!</b>\n🎉 Тебе выпало: <b>{reward}</b> ", parse_mode="HTML")
 
 
 # ================= 💵 КАРМАН =================
 @dp.message(F.text.regexp(r'(?i)^[/!]?посмотреть карман$|^[/!]?карман$|^[/!]?баланс$'))
 async def cmd_pocket(message: Message):
-    """Показать баланс."""
     await try_delete(message)
-
     data = load_data()
-    target = message.reply_to_message.from_user if message.reply_to_message else None
 
-    if not target and len(message.text.split()) >= 2:
-        username_arg = message.text.split()[-1].lstrip("@").lower()
-        for uid_str, udata in data["users"].items():
-            if udata.get("username", "").lower() == username_arg:
-                target = type('User', (), {'id': int(uid_str), 'username': udata.get("username")})()
-                break
-
-    if not target:
+    # Если ответ на сообщение
+    if message.reply_to_message and message.reply_to_message.from_user:
+        target = message.reply_to_message.from_user
+    else:
         target = message.from_user
 
     user = get_or_create_user(data, target.id, target.username)
     display_name = f"@{target.username}" if getattr(target, 'username', None) else f"id{target.id}"
-
     await message.answer(f"💰 <b>Карман {safe_text(display_name)}</b>\n\n{user.get('coins', 0)} 🪙", parse_mode="HTML")
 
 
 # ================= 📊 ТОП =================
 @dp.message(F.text.regexp(r'(?i)^[/!]?топ монет$|^[/!]?топ$'))
 async def cmd_top_coins(message: Message):
-    """Топ-10 по монетам."""
     await try_delete(message)
-
     data = load_data()
     users_list = [{"username": udata.get("username", f"id{uid}"), "coins": udata.get("coins", 0)}
                   for uid, udata in data["users"].items()]
@@ -265,25 +249,21 @@ async def cmd_top_coins(message: Message):
     top10 = users_list[:10]
 
     if not top10 or top10[0]["coins"] == 0:
-        await message.answer(" Топ пока пуст. Открывай сундуки!")
+        await message.answer("📊 Топ пока пуст. Открывай сундуки!")
         return
 
     msg = "💰 <b>ТОП-10 ПО КОИНАМ</b>\n━━━━━━━━━━━━━━━━━━━━\n\n"
-    medals = ["", "🥈", "🥉"]
-
+    medals = ["🥇", "🥈", "🥉"]
     for i, u in enumerate(top10):
         prefix = medals[i] if i < 3 else f"{i + 1}."
         msg += f"{prefix} {safe_text(u['username'])} — <b>{u['coins']}</b> 🪙\n"
-
     await message.answer(msg, parse_mode="HTML")
 
 
 # ================= 💸 ПЕРЕВОД =================
 @dp.message(F.text.regexp(r'(?i)^[/!]?перевод$'))
 async def cmd_transfer(message: Message):
-    """Перевод коинов."""
     await try_delete(message)
-
     sender_id = message.from_user.id
     sender_username = message.from_user.username
     data = load_data()
@@ -292,11 +272,12 @@ async def cmd_transfer(message: Message):
     target_user = None
     amount = 0
 
-    if message.reply_to_message:
+    # Если ответ на сообщение
+    if message.reply_to_message and message.reply_to_message.from_user:
         target_user = message.reply_to_message.from_user
         parts = message.text.strip().split()
         if len(parts) < 2:
-            await message.answer(" Укажи сумму: <code>!перевод 50</code>", parse_mode="HTML")
+            await message.answer("❌ Укажи сумму: <code>!перевод 50</code>", parse_mode="HTML")
             return
         try:
             amount = int(parts[1])
@@ -304,9 +285,10 @@ async def cmd_transfer(message: Message):
             await message.answer("❌ Сумма должна быть числом.")
             return
     else:
+        # Формат: !перевод @username сумма
         parts = message.text.strip().split()
         if len(parts) < 3:
-            await message.answer(" Формат: <code>!перевод @username 50</code>", parse_mode="HTML")
+            await message.answer("❌ Формат: <code>!перевод @username 50</code>", parse_mode="HTML")
             return
 
         username_arg = parts[1].lstrip("@").lower()
@@ -326,11 +308,11 @@ async def cmd_transfer(message: Message):
             return
 
     if amount <= 0 or target_user.id == sender_id:
-        await message.answer(" Сумма должна быть > 0 и нельзя переводить самому себе.")
+        await message.answer("❌ Сумма должна быть > 0 и нельзя переводить самому себе.")
         return
 
     if sender["coins"] < amount:
-        await message.answer(f"❌ Недостаточно коинов. У тебя: <b>{sender['coins']}</b> 🪙", parse_mode="HTML")
+        await message.answer(f"❌ Недостаточно коинов. У тебя: <b>{sender['coins']}</b> ", parse_mode="HTML")
         return
 
     sender["coins"] -= amount
@@ -342,25 +324,94 @@ async def cmd_transfer(message: Message):
     target_name = f"@{target_user.username}" if target_user.username else f"id{target_user.id}"
 
     await message.answer(
-        f"✅ <b>Перевод выполнен!</b>\n\n"
-        f"👤 От: {safe_text(sender_name)}\n"
-        f"👤 Кому: {safe_text(target_name)}\n"
-        f"💸 Сумма: <b>{amount}</b> 🪙",
+        f"✅ <b>Перевод выполнен!</b>\n\n👤 От: {safe_text(sender_name)}\n👤 Кому: {safe_text(target_name)}\n💸 Сумма: <b>{amount}</b> 🪙",
         parse_mode="HTML"
     )
 
 
-# ================= 🎲 КУБЫ =================
-@dp.message(F.text.regexp(r'(?i)^[/!]?кубы$'))
-async def cmd_dice_challenge(message: Message):
-    """Игра в кости."""
+# ================= 💸 АДМИН: ЗАБРАТЬ С КАРМАНА =================
+@dp.message(F.text.regexp(r'(?i)^[/!]?забрать с кармана$|^[/!]?забрать$'))
+async def cmd_admin_withdraw(message: Message):
+    """Списание коинов у пользователя (только для админов)."""
     await try_delete(message)
+
+    if not is_admin(message.from_user.id):
+        await message.answer("❌ Команда доступна только администраторам.")
+        return
 
     parts = message.text.strip().split()
     target_user = None
     amount = 0
 
-    if message.reply_to_message:
+    # Если ответ на сообщение
+    if message.reply_to_message and message.reply_to_message.from_user:
+        target_user = message.reply_to_message.from_user
+        if len(parts) >= 2:
+            try:
+                amount = int(parts[1])
+            except ValueError:
+                await message.answer("❌ Укажи число коинов для списания.")
+                return
+    # Если через @username
+    elif len(parts) >= 3:
+        username_arg = parts[1].lstrip("@").lower()
+        try:
+            amount = int(parts[2])
+        except ValueError:
+            await message.answer("❌ Укажи число коинов для списания.")
+            return
+
+        data = load_data()
+        for uid_str, udata in data["users"].items():
+            if udata.get("username", "").lower() == username_arg:
+                target_user = type('User', (), {'id': int(uid_str), 'username': udata.get("username")})()
+                break
+
+        if not target_user:
+            await message.answer("❌ Пользователь не найден в базе данных.")
+            return
+    else:
+        await message.answer(
+            "❌ Формат: <code>!забрать @username 100</code> или ответом на сообщение <code>!забрать 100</code>",
+            parse_mode="HTML"
+        )
+        return
+
+    if amount <= 0:
+        await message.answer("❌ Сумма должна быть больше 0.")
+        return
+
+    data = load_data()
+    target_data = get_or_create_user(data, target_user.id, target_user.username)
+
+    if target_data["coins"] < amount:
+        await message.answer(f"❌ У пользователя недостаточно коинов. Текущий баланс: {target_data['coins']} 🪙")
+        return
+
+    target_data["coins"] -= amount
+    save_data(data)
+
+    target_name = f"@{target_user.username}" if getattr(target_user, 'username', None) else f"id{target_user.id}"
+
+    await message.answer(
+        f"💸 <b>Коины списаны!</b>\n\n"
+        f"👤 У кого: {safe_text(target_name)}\n"
+        f"➖ Снято: <b>{amount}</b> 🪙\n"
+        f" Остаток: <b>{target_data['coins']}</b> 🪙",
+        parse_mode="HTML"
+    )
+
+
+# =================  КУБЫ =================
+@dp.message(F.text.regexp(r'(?i)^[/!]?кубы$'))
+async def cmd_dice_challenge(message: Message):
+    await try_delete(message)
+    parts = message.text.strip().split()
+    target_user = None
+    amount = 0
+
+    # Если ответ на сообщение
+    if message.reply_to_message and message.reply_to_message.from_user:
         target_user = message.reply_to_message.from_user
         if len(parts) < 2:
             await message.answer("🎲 <b>Игра «Кубы»</b>\n\nФормат: <code>!кубы ставка</code>", parse_mode="HTML")
@@ -371,6 +422,7 @@ async def cmd_dice_challenge(message: Message):
             await message.answer("❌ Ставка должна быть числом.")
             return
     else:
+        # Формат: !кубы @username ставка
         if len(parts) < 3:
             await message.answer("🎲 <b>Игра «Кубы»</b>\n\nФормат: <code>!кубы @username ставка</code>",
                                  parse_mode="HTML")
@@ -405,7 +457,7 @@ async def cmd_dice_challenge(message: Message):
         return
 
     if challenger["coins"] < amount:
-        await message.answer(f"❌ У тебя недостаточно коинов.\nНужно: <b>{amount}</b> 🪙", parse_mode="HTML")
+        await message.answer(f" У тебя недостаточно коинов.\nНужно: <b>{amount}</b> 🪙", parse_mode="HTML")
         return
 
     challenged = get_or_create_user(data, target_user.id, target_user.username)
@@ -414,9 +466,7 @@ async def cmd_dice_challenge(message: Message):
                              parse_mode="HTML")
         return
 
-    # Создаем вызов
     challenge_id = f"{message.from_user.id}_{target_user.id}_{int(time.time())}"
-
     challenger_name = get_name_by_id(data, message.from_user.id, message.from_user.username)
     challenged_name = get_name_by_id(data, target_user.id, target_user.username)
 
@@ -438,7 +488,6 @@ async def cmd_dice_challenge(message: Message):
 
 # ================= 📢 СОЗЫВЫ =================
 async def summon_all_members(chat_id: int, call_text: str, starter_id: int):
-    """Массовый созыв."""
     active_summons[chat_id] = True
     try:
         data = load_data()
@@ -446,7 +495,7 @@ async def summon_all_members(chat_id: int, call_text: str, starter_id: int):
         random.shuffle(users_to_tag)
 
         if not users_to_tag:
-            await bot.send_message(chat_id, "❌ Некого созывать. Пользователи должны хотя бы раз написать боту.")
+            await bot.send_message(chat_id, "❌ Некого созывать.")
             return
 
         for i in range(0, len(users_to_tag), 15):
@@ -469,9 +518,7 @@ async def summon_all_members(chat_id: int, call_text: str, starter_id: int):
 
 @dp.message(F.text.regexp(r'(?i)^[/!]?all$'))
 async def cmd_all(message: Message):
-    """Массовый созыв."""
     await try_delete(message)
-
     if message.chat.type not in ["group", "supergroup"]:
         await message.answer("❌ Эта команда работает только в групповых чатах!")
         return
@@ -485,40 +532,35 @@ async def cmd_all(message: Message):
     call_text = " ".join(parts[1:]) if len(parts) > 1 else "📢 Общий сбор всех участников!"
 
     await message.answer(
-        f"🔄 Начинаю массовый созыв...\nТекст: {safe_text(call_text)}\n\n️ Для остановки напишите: <code>!stop</code>",
+        f"🔄 Начинаю массовый созыв...\nТекст: {safe_text(call_text)}\n\n⚠️ Для остановки напишите: <code>!stop</code>",
         parse_mode="HTML")
     asyncio.create_task(summon_all_members(message.chat.id, call_text, user_id))
 
 
 @dp.message(F.text.regexp(r'(?i)^[/!]?stop$|^[/!]?стоп$'))
 async def cmd_stop(message: Message):
-    """Остановить созыв."""
     await try_delete(message)
-
     chat_id = message.chat.id
     if active_summons.get(chat_id, False):
         active_summons[chat_id] = False
-        await message.answer("️ Команда остановки принята. Созыв прекратится после текущего сообщения.")
+        await message.answer("⏹️ Команда остановки принята. Созыв прекратится.")
     else:
         await message.answer("❌ Активных массовых созывов в этом чате нет.")
 
 
 @dp.message(F.text.regexp(r'(?i)^[/!]?admins$|^[/!]?админы$'))
 async def cmd_admins(message: Message):
-    """Созыв админов."""
     await try_delete(message)
-
     if message.chat.type not in ["group", "supergroup"]:
         await message.answer("❌ Эта команда работает только в групповых чатах!")
         return
 
     parts = message.text.strip().split()
-    call_text = " ".join(parts[1:]) if len(parts) > 1 else " Сбор администраторов!"
+    call_text = " ".join(parts[1:]) if len(parts) > 1 else "📢 Сбор администраторов!"
 
     try:
         members = await bot.get_chat_administrators(chat_id=message.chat.id)
         admins_to_tag = [m.user for m in members if not m.user.is_bot]
-
         if not admins_to_tag:
             await message.answer("❌ Администраторы не найдены.")
             return
@@ -532,9 +574,7 @@ async def cmd_admins(message: Message):
 # ================= 📛 ПОЗЫВНЫЕ =================
 @dp.message(F.text.regexp(r'(?i)^[/!]?me$|^[/!]?позывной$'))
 async def cmd_me(message: Message):
-    """Показать позывной."""
     await try_delete(message)
-
     user_id = message.from_user.id
     data = load_data()
     user = get_or_create_user(data, user_id, message.from_user.username)
@@ -550,12 +590,10 @@ async def cmd_me(message: Message):
 
 @dp.message(F.text.regexp(r'(?i)^[/!]?setme\s+(.+)$'))
 async def cmd_setme(message: Message):
-    """Установить позывной."""
     await try_delete(message)
-
     parts = message.text.strip().split()
     if len(parts) < 2:
-        await message.answer("❌ Формат: <code>!setme эмодзи</code>\nПример: <code>!setme 🔥</code>", parse_mode="HTML")
+        await message.answer("❌ Формат: <code>!setme эмодзи</code>", parse_mode="HTML")
         return
 
     emoji = parts[1]
@@ -567,54 +605,63 @@ async def cmd_setme(message: Message):
     user = get_or_create_user(data, message.from_user.id, message.from_user.username)
     user["call_sign"] = emoji
     save_data(data)
-
     await message.answer(f"✅ Твой новый позывной: {emoji}")
 
 
 @dp.message(F.text.regexp(r'(?i)^[/!]?changeme$'))
 async def cmd_changeme(message: Message):
-    """Случайный позывной."""
     await try_delete(message)
-
-    emojis = ["🔥", "", "🐺", "", "🐻", "🦁", "🐯", "🐲", "👻", "🤖", "", "🎯", "💀", "👑", "🎭", "", "🦈", "🐍"]
+    emojis = ["🔥", "⚡", "🐺", "🦊", "", "🦁", "🐯", "🐲", "👻", "🤖", "👽", "", "💀", "👑", "🎭", "🦅", "", "🐍"]
     emoji = random.choice(emojis)
 
     data = load_data()
     user = get_or_create_user(data, message.from_user.id, message.from_user.username)
     user["call_sign"] = emoji
     save_data(data)
-
     await message.answer(f"✅ Твой новый случайный позывной: {emoji}")
 
 
-# ================= 🔐 АДМИН: ПОПОЛНИТЬ КАРМАН =================
+# =================  АДМИН: ПОПОЛНИТЬ КАРМАН =================
 @dp.message(F.text.regexp(r'(?i)^\+пополнить карман$'))
 async def cmd_admin_add(message: Message):
-    """Пополнить карман (админ)."""
     await try_delete(message)
-
     if not is_admin(message.from_user.id):
-        await message.answer("❌ Команда недоступна")
+        await message.answer(" Команда доступна только администраторам.")
         return
 
     parts = message.text.strip().split()
-    target_user = message.reply_to_message.from_user if message.reply_to_message else None
+    target_user = None
     amount = None
 
-    if target_user and len(parts) >= 2:
-        try:
-            amount = int(parts[1])
-        except:
-            await message.answer(" Укажи число.")
-            return
-    elif len(parts) == 3:
+    # Если ответ на сообщение
+    if message.reply_to_message and message.reply_to_message.from_user:
+        target_user = message.reply_to_message.from_user
+        if len(parts) >= 2:
+            try:
+                amount = int(parts[1])
+            except:
+                await message.answer("❌ Укажи число.")
+                return
+    # Если через @username
+    elif len(parts) >= 3:
+        username_arg = parts[1].lstrip("@").lower()
         try:
             amount = int(parts[2])
         except:
             await message.answer("❌ Укажи число.")
             return
+
+        data = load_data()
+        for uid_str, udata in data["users"].items():
+            if udata.get("username", "").lower() == username_arg:
+                target_user = type('User', (), {'id': int(uid_str), 'username': udata.get("username")})()
+                break
+
+        if not target_user:
+            await message.answer("❌ Пользователь не найден.")
+            return
     else:
-        await message.answer("❌ Формат: <code>+пополнить карман 500</code> или ответом", parse_mode="HTML")
+        await message.answer("❌ Формат: <code>+пополнить карман @username 500</code> или ответом", parse_mode="HTML")
         return
 
     if not target_user:
@@ -626,12 +673,8 @@ async def cmd_admin_add(message: Message):
     save_data(data)
 
     target_name = get_name_by_id(data, target_user.id, target_user.username)
-
     await message.answer(
-        f"💰 <b>Карман пополнен!</b>\n\n"
-        f"👤 Кому: {target_name}\n"
-        f"➕ Начислено: <b>{amount}</b> 🪙\n"
-        f"📊 Баланс: <b>{user['coins']}</b> 🪙",
+        f"💰 <b>Карман пополнен!</b>\n\n👤 Кому: {target_name}\n➕ Начислено: <b>{amount}</b> 🪙\n📊 Баланс: <b>{user['coins']}</b> 🪙",
         parse_mode="HTML"
     )
 
@@ -639,23 +682,24 @@ async def cmd_admin_add(message: Message):
 # ================= 🔧 ПОМОЩЬ =================
 @dp.message(F.text.regexp(r'(?i)^[/!]?помощь$|^[/!]?команды$|^[/!]?help$'))
 async def cmd_help(message: Message):
-    """Справка."""
     await try_delete(message)
-
     help_text = (
         "📖 <b>СПИСОК КОМАНД БОТА</b>\n"
         "━━━━━━━━━━━━━━━━━━━━\n\n"
         "🎁 <b>Случайные коины:</b>\n"
-        "• Просто пиши в чате — с шансом 20% получишь 1-20 🪙\n\n"
+        "• Просто пиши в чате — с шансом 2% получишь 1-20 🪙\n\n"
         "📦 <b>Сундуки:</b>\n"
         "• <code>!открыть</code> — открыть сундук (КД 5 часов)\n\n"
         "💰 <b>Экономика:</b>\n"
-        "• <code>!карман</code> / <code>!карман @user</code> — баланс\n"
+        "• <code>!карман</code> — твой баланс\n"
+        "• <code>!карман</code> (ответом) — баланс другого\n"
         "• <code>!перевод @user сумма</code> — перевести\n"
+        "• <code>!перевод сумма</code> (ответом) — быстрый перевод\n"
         "• <code>!топ</code> — топ-10 богачей\n"
         "• <code>!магазин</code> — магазин\n\n"
         " <b>Игры:</b>\n"
-        "• <code>!кубы @user ставка</code> — дуэль в кости\n\n"
+        "• <code>!кубы @user ставка</code> — дуэль в кости\n"
+        "• <code>!кубы ставка</code> (ответом) — быстрый вызов\n\n"
         "📢 <b>Созывы:</b>\n"
         "• <code>!all</code> — массовый созыв\n"
         "• <code>!admins</code> — созыв админов\n"
@@ -664,47 +708,26 @@ async def cmd_help(message: Message):
         "• <code>!me</code> — мой позывной\n"
         "• <code>!setme эмодзи</code> — установить\n"
         "• <code>!changeme</code> — случайный\n\n"
-        "🔧 <b>Системные:</b>\n"
+        "🔧 <b>Админ:</b>\n"
+        "• <code>+пополнить карман @user сумма</code> — выдать коины\n"
+        "• <code>+пополнить карман сумма</code> (ответом) — быстрый способ\n"
+        "• <code>!забрать @user сумма</code> — списать коины\n"
+        "• <code>!забрать сумма</code> (ответом) — быстрый способ\n\n"
         "• <code>!тег</code> — проверка бота\n"
         "• <code>!помощь</code> — эта справка"
     )
-
     await message.answer(help_text, parse_mode="HTML")
 
 
 @dp.message(F.text.regexp(r'(?i)^[/!]?тег$'))
 async def cmd_tag(message: Message):
-    """Проверка бота."""
     await try_delete(message)
     await message.answer(f"👋 Я на месте, {safe_text(message.from_user.full_name)}!")
-
-
-# =================  ОБРАБОТЧИК КУБОВ (CALLBACK) =================
-@dp.callback_query(F.data.startswith("dice_accept_"))
-async def cb_dice_accept(callback: CallbackQuery):
-    """Принять вызов в кости."""
-    challenge_id = callback.data.replace("dice_accept_", "")
-
-    await callback.answer("🎲 Бросаем кубики...")
-
-    data = load_data()
-    challenger = get_or_create_user(data, callback.from_user.id, callback.from_user.username)
-    amount = 10  # Пример
-
-    challenger["coins"] -= amount
-    save_data(data)
-
-    dice_msg = await bot.send_dice(chat_id=callback.message.chat.id, emoji="🎲")
-    await asyncio.sleep(2)
-
-    result = dice_msg.dice.value
-    await callback.message.answer(f"🎲 Выпало: {result}")
 
 
 # ================= 🎁 ОБРАБОТЧИК СООБЩЕНИЙ (ДРОП КОИНОВ) =================
 @dp.message()
 async def handle_all_messages(message: Message):
-    """Обработка всех сообщений для случайного дропа."""
     try:
         await process_random_coin_drop(message)
     except Exception as e:
@@ -713,7 +736,6 @@ async def handle_all_messages(message: Message):
 
 # ================= 🌐 ВЕБ-СЕРВЕР ДЛЯ RENDER =================
 async def start_fake_website():
-    """Открываем порт для Render."""
     port = int(os.environ.get('PORT', 10000))
     app = web.Application()
 
@@ -732,14 +754,11 @@ async def start_fake_website():
 
 # ================= ЗАПУСК =================
 async def main():
-    # Сначала открываем порт для Render
     await start_fake_website()
-
     print("✅ Бот запущен!")
     print(f"🔐 Админы: {ADMIN_IDS}")
-    print("🎁 Случайный дроп: 20% шанс, 1-20 🪙")
-    print("📦 Сундуки, 💰 Экономика, 🎲 Кубы,  Созывы, 🛍️ Магазин")
-
+    print("🎁 Случайный дроп: 2% шанс, 1-20 ")
+    print("📦 Сундуки, 💰 Экономика, 🎲 Кубы, 📢 Созывы, 🛍️ Магазин")
     await dp.start_polling(bot)
 
 
