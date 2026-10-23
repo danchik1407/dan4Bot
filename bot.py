@@ -4,8 +4,9 @@ import json
 import random
 import time
 import asyncio
-import html as html_module
 import logging
+from types import SimpleNamespace
+from typing import Optional
 from dotenv import load_dotenv
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, FSInputFile
@@ -23,23 +24,33 @@ admin_ids_str = os.getenv("ADMIN_IDS", "")
 ADMIN_IDS = [int(x.strip()) for x in admin_ids_str.split(",") if x.strip().isdigit()]
 
 if not BOT_TOKEN:
-    print("❌ ОШИБКА: Не найден BOT_TOKEN в файле .env!")
+    raise SystemExit("❌ ОШИБКА: Не найден BOT_TOKEN в файле .env!")
 
-DATA_FILE = "data.json"
-COOLDOWN_SECONDS = 5 * 60 * 60  # 5 часов
+# Постоянный диск на Render (например /var/data). По умолчанию — текущая папка.
+DATA_DIR = os.getenv("DATA_DIR", ".")
+os.makedirs(DATA_DIR, exist_ok=True)
+DATA_FILE = os.path.join(DATA_DIR, "data.json")
+
+COOLDOWN_SECONDS = 2 * 60 * 60   # 2 часа
 CHALLENGE_TIMEOUT = 60
 
-# Шанс выпадения коинов (2%)
-COIN_DROP_CHANCE = 0.02
+COIN_DROP_CHANCE = 0.05          # 5%
 COIN_DROP_MIN = 1
 COIN_DROP_MAX = 20
 
-active_summons = {}
-active_challenges = {}
+DROP_IMAGE = "drop.jpg"
+SUMMON_BATCH_SIZE = 25
+SUMMON_BATCH_DELAY = 2.0
+SUMMON_MAX_MESSAGES = 5
+
+active_summons: dict[int, dict] = {}
+active_challenges: dict[str, dict] = {}
+
+_db_lock = asyncio.Lock()
 
 
 # ================= БАЗА ДАННЫХ =================
-def load_data():
+def _load_data_sync():
     if not os.path.exists(DATA_FILE):
         return {"users": {}}
     try:
@@ -48,19 +59,34 @@ def load_data():
             if not content:
                 return {"users": {}}
             data = json.loads(content)
-            if "users" not in data:
-                data["users"] = {}
+            data.setdefault("users", {})
             return data
-    except Exception:
+    except Exception as e:
+        logger.error(f"Ошибка чтения БД: {e}")
         return {"users": {}}
 
 
-def save_data(data):
-    with open(DATA_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+def _save_data_sync(data):
+    tmp = DATA_FILE + ".tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, DATA_FILE)
+    except Exception as e:
+        logger.error(f"Ошибка записи БД: {e}")
 
 
-def get_or_create_user(data, user_id: int, username: str):
+async def load_data():
+    async with _db_lock:
+        return _load_data_sync()
+
+
+async def save_data(data):
+    async with _db_lock:
+        _save_data_sync(data)
+
+
+def get_or_create_user(data, user_id: int, username: Optional[str]):
     uid_str = str(user_id)
     if uid_str not in data["users"]:
         data["users"][uid_str] = {
@@ -68,16 +94,23 @@ def get_or_create_user(data, user_id: int, username: str):
             "username": username or f"id{user_id}",
             "last_chest": 0,
             "last_call": 0,
-            "call_sign": None
+            "call_sign": None,
         }
     else:
         u = data["users"][uid_str]
         if username:
             u["username"] = username
-        for key in ["last_chest", "last_call", "call_sign"]:
-            if key not in u:
-                u[key] = 0 if key != "call_sign" else None
+        for key, default in (("last_chest", 0), ("last_call", 0), ("call_sign", None), ("coins", 0)):
+            u.setdefault(key, default)
     return data["users"][uid_str]
+
+
+def find_user_by_username(data, username_arg: str) -> Optional[SimpleNamespace]:
+    target = username_arg.removeprefix("@").lower()
+    for uid_str, udata in data["users"].items():
+        if (udata.get("username") or "").lower() == target:
+            return SimpleNamespace(id=int(uid_str), username=udata.get("username"))
+    return None
 
 
 # ================= ИНИЦИАЛИЗАЦИЯ =================
@@ -85,7 +118,7 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
 
-# ================= ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ =================
+# ================= ВСПОМОГАТЕЛЬНЫЕ =================
 def is_admin(user_id: int) -> bool:
     return user_id in ADMIN_IDS
 
@@ -94,106 +127,104 @@ async def is_chat_admin(user_id: int, chat_id: int) -> bool:
     try:
         member = await bot.get_chat_member(chat_id=chat_id, user_id=user_id)
         return member.status in (ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR)
-    except Exception:
+    except Exception as e:
+        logger.warning(f"is_chat_admin({user_id}, {chat_id}) fail: {e}")
         return False
 
 
 def format_time(seconds: float) -> str:
-    h = int(seconds // 3600)
-    m = int((seconds % 3600) // 60)
-    s = int(seconds % 60)
-    if h > 0:
-        return f"{h}ч {m}м {s}с"
-    elif m > 0:
-        return f"{m}м {s}с"
-    return f"{s} сек"
+    seconds = int(seconds)
+    h, rem = divmod(seconds, 3600)
+    m, s = divmod(rem, 60)
+    parts = []
+    if h:
+        parts.append(f"{h}ч")
+    if m:
+        parts.append(f"{m}м")
+    if s and not h:
+        parts.append(f"{s}с")
+    return " ".join(parts) or "0с"
 
 
-def get_name_by_id(data, user_id, fallback_username=None):
+def safe_text(text) -> str:
+    import html as html_module
+    return html_module.escape(str(text))
+
+
+def get_name_by_id(data, user_id, fallback_username=None) -> str:
     uid_str = str(user_id)
     if uid_str in data["users"]:
         u = data["users"][uid_str]
         if u.get("username"):
-            return f"@{html_module.escape(u['username'])}"
+            return f"@{safe_text(u['username'])}"
     if fallback_username:
-        return f"@{html_module.escape(fallback_username)}"
-    return f"id{user_id}"
-
-
-def safe_text(text: str) -> str:
-    return html_module.escape(str(text))
+        return f"@{safe_text(fallback_username)}"
+    return f"Пользователь {user_id}"
 
 
 async def try_delete(message: Message):
+    try:
+        await message.delete()
+    except Exception as e:
+        logger.warning(f"Не удалось удалить сообщение: {e}")
+
+
+async def delete_later(message: Message, delay: float):
+    await asyncio.sleep(delay)
     try:
         await message.delete()
     except Exception:
         pass
 
 
-# =================  СЛУЧАЙНЫЙ ДРОП КОИНОВ =================
+# ================= 🎁 РАНДОМНЫЙ ДРОП =================
 async def process_random_coin_drop(message: Message):
-    """Обработка случайного выпадения коинов (2% шанс)."""
     if not message.from_user or message.from_user.is_bot:
         return
-
+    text = message.text or ""
+    if text.startswith("!") or text.startswith("/"):
+        return
     if random.random() > COIN_DROP_CHANCE:
         return
 
-    coins_amount = random.randint(COIN_DROP_MIN, COIN_DROP_MAX)
-
-    data = load_data()
+    amount = random.randint(COIN_DROP_MIN, COIN_DROP_MAX)
+    data = await load_data()
     user = get_or_create_user(data, message.from_user.id, message.from_user.username)
-    user["coins"] += coins_amount
-    save_data(data)
+    user["coins"] += amount
+    await save_data(data)
 
-    username = message.from_user.username or f"id{message.from_user.id}"
-
+    caption = (
+        f"🎉 <b>Поздравляю!</b>\n\n"
+        f"🎁 Ты выиграл(а) <b>{amount} 🪙</b>\n\n"
+        f"💬 Пиши сообщения в чате и получай возможность находить Коины!"
+    )
     try:
-        # Берем картинку прямо из папки с ботом
-        photo = FSInputFile("drop.jpg")
-        await message.answer_photo(
-            photo=photo,
-            caption=(
-                f"🎉 <b>Поздравляю!</b>\n\n"
-                f"🎁 Ты выиграл(а) <b>{coins_amount} 🪙</b>\n\n"
-                f"💬 Пиши сообщения в чате и получай возможность так же находить Коины!"
-            ),
-            parse_mode="HTML"
-        )
+        if os.path.exists(DROP_IMAGE):
+            await message.answer_photo(photo=FSInputFile(DROP_IMAGE), caption=caption, parse_mode="HTML")
+        else:
+            await message.answer(caption, parse_mode="HTML")
     except Exception as e:
-        # Если вдруг файл не найден, бот не упадет, а просто отправит текст
-        logger.warning(f"Не удалось отправить картинку: {e}")
-        await message.answer(
-            f"🎉 <b>Поздравляю!</b>\n\n"
-            f"🎁 Ты выиграл(а) <b>{coins_amount} 🪙</b>\n\n"
-            f"💬 Пиши сообщения в чате и получай возможность так же находить Коины!",
-            parse_mode="HTML"
-        )
+        logger.warning(f"Дроп не отправлен: {e}")
+        await message.answer(caption, parse_mode="HTML")
 
-    logger.info(f"💰 Дроп коинов: {message.from_user.id} получил {coins_amount} 🪙")
+    logger.info(f"💰 Дроп: {message.from_user.id} → {amount} 🪙")
 
 
 # ================= 🛍️ МАГАЗИН =================
-@dp.message(F.text.regexp(r'(?i)^[/!]?магазин$'))
+@dp.message(F.text & F.text.regexp(r'(?i)^[/!]?магазин\s*$'))
 async def cmd_shop(message: Message):
     await try_delete(message)
-    shop_text = "🛍️ <b>Магазин AURA:</b>\n\n❌ Предметов для покупки пока нет"
-    await message.answer(shop_text, parse_mode="HTML")
+    await message.answer("🛍️ <b>Магазин AURA:</b>\n\n❌ Предметов для покупки пока нет", parse_mode="HTML")
 
 
-# ================= 💰 СУНДУКИ =================
-@dp.message(F.text.regexp(r'(?i)^[/!]?открыть$'))
+# ================= 📦 СУНДУКИ =================
+@dp.message(F.text & F.text.regexp(r'(?i)^[/!]?открыть\s*$'))
 async def cmd_open(message: Message):
     await try_delete(message)
-    user_id = message.from_user.id
-    username = message.from_user.username
-    data = load_data()
-    user = get_or_create_user(data, user_id, username)
+    data = await load_data()
+    user = get_or_create_user(data, message.from_user.id, message.from_user.username)
     now = time.time()
-    last_chest = user.get("last_chest", 0)
-    remaining = COOLDOWN_SECONDS - (now - last_chest)
-
+    remaining = COOLDOWN_SECONDS - (now - user.get("last_chest", 0))
     if remaining > 0:
         await message.answer(f"⏳ Открытие доступно через {format_time(remaining)}")
         return
@@ -201,48 +232,44 @@ async def cmd_open(message: Message):
     roll = random.randint(1, 100)
     is_golden = roll > 92
     reward = random.randint(10, 100) if is_golden else random.randint(1, 10)
-
     user["coins"] += reward
     user["last_chest"] = now
-    save_data(data)
+    await save_data(data)
 
     if is_golden:
         await message.answer(f"✨ <b>ЗОЛОТОЙ СУНДУК!</b> 🔑\n🎉 Тебе выпало: <b>{reward}</b> 🪙", parse_mode="HTML")
     else:
-        await message.answer(f"🎁 <b>Сундук открыт!</b>\n🎉 Тебе выпало: <b>{reward}</b> ", parse_mode="HTML")
+        await message.answer(f"🎁 <b>Сундук открыт!</b>\n🎉 Тебе выпало: <b>{reward}</b> 🪙", parse_mode="HTML")
 
 
 # ================= 💵 КАРМАН =================
-@dp.message(F.text.regexp(r'(?i)^[/!]?посмотреть карман$|^[/!]?карман$|^[/!]?баланс$'))
+@dp.message(F.text & F.text.regexp(r'(?i)^[/!]?(посмотреть\s+карман|карман|баланс)\s*$'))
 async def cmd_pocket(message: Message):
     await try_delete(message)
-    data = load_data()
-
-    # Если ответ на сообщение
+    data = await load_data()
     if message.reply_to_message and message.reply_to_message.from_user:
         target = message.reply_to_message.from_user
     else:
         target = message.from_user
-
     user = get_or_create_user(data, target.id, target.username)
-    display_name = f"@{target.username}" if getattr(target, 'username', None) else f"id{target.id}"
-    await message.answer(f"💰 <b>Карман {safe_text(display_name)}</b>\n\n{user.get('coins', 0)} 🪙", parse_mode="HTML")
+    name = f"@{safe_text(target.username)}" if getattr(target, "username", None) else f"Пользователь {target.id}"
+    await message.answer(f"💰 <b>Карман {name}</b>\n\n{user.get('coins', 0)} 🪙", parse_mode="HTML")
 
 
 # ================= 📊 ТОП =================
-@dp.message(F.text.regexp(r'(?i)^[/!]?топ монет$|^[/!]?топ$'))
+@dp.message(F.text & F.text.regexp(r'(?i)^[/!]?(топ\s+монет|топ)\s*$'))
 async def cmd_top_coins(message: Message):
     await try_delete(message)
-    data = load_data()
-    users_list = [{"username": udata.get("username", f"id{uid}"), "coins": udata.get("coins", 0)}
-                  for uid, udata in data["users"].items()]
+    data = await load_data()
+    users_list = [
+        {"username": udata.get("username") or f"id{uid}", "coins": udata.get("coins", 0)}
+        for uid, udata in data["users"].items()
+    ]
     users_list.sort(key=lambda x: x["coins"], reverse=True)
     top10 = users_list[:10]
-
     if not top10 or top10[0]["coins"] == 0:
         await message.answer("📊 Топ пока пуст. Открывай сундуки!")
         return
-
     msg = "💰 <b>ТОП-10 ПО КОИНАМ</b>\n━━━━━━━━━━━━━━━━━━━━\n\n"
     medals = ["🥇", "🥈", "🥉"]
     for i, u in enumerate(top10):
@@ -252,21 +279,17 @@ async def cmd_top_coins(message: Message):
 
 
 # ================= 💸 ПЕРЕВОД =================
-@dp.message(F.text.regexp(r'(?i)^[/!]?перевод$'))
+@dp.message(F.text & F.text.regexp(r'(?i)^[/!]?перевод(?:\s|$)'))
 async def cmd_transfer(message: Message):
     await try_delete(message)
-    sender_id = message.from_user.id
-    sender_username = message.from_user.username
-    data = load_data()
-    sender = get_or_create_user(data, sender_id, sender_username)
-
+    data = await load_data()
+    sender = get_or_create_user(data, message.from_user.id, message.from_user.username)
+    parts = message.text.strip().split()
     target_user = None
     amount = 0
 
-    # Если ответ на сообщение
     if message.reply_to_message and message.reply_to_message.from_user:
         target_user = message.reply_to_message.from_user
-        parts = message.text.strip().split()
         if len(parts) < 2:
             await message.answer("❌ Укажи сумму: <code>!перевод 50</code>", parse_mode="HTML")
             return
@@ -276,136 +299,163 @@ async def cmd_transfer(message: Message):
             await message.answer("❌ Сумма должна быть числом.")
             return
     else:
-        # Формат: !перевод @username сумма
-        parts = message.text.strip().split()
         if len(parts) < 3:
             await message.answer("❌ Формат: <code>!перевод @username 50</code>", parse_mode="HTML")
             return
-
-        username_arg = parts[1].lstrip("@").lower()
+        target_user = find_user_by_username(data, parts[1])
+        if not target_user:
+            await message.answer("❌ Пользователь не найден.")
+            return
         try:
             amount = int(parts[2])
         except ValueError:
             await message.answer("❌ Сумма должна быть числом.")
             return
 
-        for uid_str, udata in data["users"].items():
-            if udata.get("username", "").lower() == username_arg:
-                target_user = type('User', (), {'id': int(uid_str), 'username': udata.get("username")})()
-                break
-
-        if not target_user:
-            await message.answer("❌ Пользователь не найден.")
-            return
-
-    if amount <= 0 or target_user.id == sender_id:
+    if amount <= 0 or target_user.id == message.from_user.id:
         await message.answer("❌ Сумма должна быть > 0 и нельзя переводить самому себе.")
         return
-
     if sender["coins"] < amount:
-        await message.answer(f"❌ Недостаточно коинов. У тебя: <b>{sender['coins']}</b> ", parse_mode="HTML")
+        await message.answer(f"❌ Недостаточно коинов. У тебя: <b>{sender['coins']}</b> 🪙", parse_mode="HTML")
         return
 
     sender["coins"] -= amount
     target = get_or_create_user(data, target_user.id, target_user.username)
     target["coins"] += amount
-    save_data(data)
+    await save_data(data)
 
-    sender_name = f"@{sender_username}" if sender_username else f"id{sender_id}"
-    target_name = f"@{target_user.username}" if target_user.username else f"id{target_user.id}"
-
+    sender_name = f"@{safe_text(message.from_user.username)}" if message.from_user.username else f"id{message.from_user.id}"
+    target_name = f"@{safe_text(target_user.username)}" if getattr(target_user, "username", None) else f"id{target_user.id}"
     await message.answer(
-        f"✅ <b>Перевод выполнен!</b>\n\n👤 От: {safe_text(sender_name)}\n👤 Кому: {safe_text(target_name)}\n💸 Сумма: <b>{amount}</b> 🪙",
-        parse_mode="HTML"
+        f"✅ <b>Перевод выполнен!</b>\n\n👤 От: {sender_name}\n👤 Кому: {target_name}\n💸 Сумма: <b>{amount}</b> 🪙",
+        parse_mode="HTML",
     )
 
 
-# ================= 💸 АДМИН: ЗАБРАТЬ С КАРМАНА =================
-@dp.message(F.text.regexp(r'(?i)^[/!]?забрать с кармана$|^[/!]?забрать$'))
+# ================= 💸 АДМИН: СПИСАТЬ =================
+@dp.message(F.text & F.text.regexp(r'(?i)^[/!]?забрать(?:\s|$)'))
 async def cmd_admin_withdraw(message: Message):
-    """Списание коинов у пользователя (только для админов)."""
     await try_delete(message)
-
     if not is_admin(message.from_user.id):
         await message.answer("❌ Команда доступна только администраторам.")
         return
+    if message.chat.type in ("group", "supergroup") and not await is_chat_admin(message.from_user.id, message.chat.id):
+        await message.answer("❌ Только для админов этого чата.")
+        return
 
+    data = await load_data()
     parts = message.text.strip().split()
     target_user = None
     amount = 0
 
-    # Если ответ на сообщение
     if message.reply_to_message and message.reply_to_message.from_user:
         target_user = message.reply_to_message.from_user
-        if len(parts) >= 2:
-            try:
-                amount = int(parts[1])
-            except ValueError:
-                await message.answer("❌ Укажи число коинов для списания.")
-                return
-    # Если через @username
-    elif len(parts) >= 3:
-        username_arg = parts[1].lstrip("@").lower()
+        if len(parts) < 2:
+            await message.answer("❌ Укажи сумму: <code>!забрать 100</code>", parse_mode="HTML")
+            return
+        try:
+            amount = int(parts[1])
+        except ValueError:
+            await message.answer("❌ Укажи число.")
+            return
+    else:
+        if len(parts) < 3:
+            await message.answer("❌ Формат: <code>!забрать @username 100</code>", parse_mode="HTML")
+            return
+        target_user = find_user_by_username(data, parts[1])
+        if not target_user:
+            await message.answer("❌ Пользователь не найден.")
+            return
         try:
             amount = int(parts[2])
         except ValueError:
-            await message.answer("❌ Укажи число коинов для списания.")
+            await message.answer("❌ Укажи число.")
             return
-
-        data = load_data()
-        for uid_str, udata in data["users"].items():
-            if udata.get("username", "").lower() == username_arg:
-                target_user = type('User', (), {'id': int(uid_str), 'username': udata.get("username")})()
-                break
-
-        if not target_user:
-            await message.answer("❌ Пользователь не найден в базе данных.")
-            return
-    else:
-        await message.answer(
-            "❌ Формат: <code>!забрать @username 100</code> или ответом на сообщение <code>!забрать 100</code>",
-            parse_mode="HTML"
-        )
-        return
 
     if amount <= 0:
         await message.answer("❌ Сумма должна быть больше 0.")
         return
 
-    data = load_data()
     target_data = get_or_create_user(data, target_user.id, target_user.username)
-
     if target_data["coins"] < amount:
-        await message.answer(f"❌ У пользователя недостаточно коинов. Текущий баланс: {target_data['coins']} 🪙")
+        await message.answer(f"❌ У пользователя только {target_data['coins']} 🪙")
         return
 
     target_data["coins"] -= amount
-    save_data(data)
-
-    target_name = f"@{target_user.username}" if getattr(target_user, 'username', None) else f"id{target_user.id}"
-
+    await save_data(data)
+    name = f"@{safe_text(target_user.username)}" if getattr(target_user, "username", None) else f"id{target_user.id}"
     await message.answer(
-        f"💸 <b>Коины списаны!</b>\n\n"
-        f"👤 У кого: {safe_text(target_name)}\n"
-        f"➖ Снято: <b>{amount}</b> 🪙\n"
-        f" Остаток: <b>{target_data['coins']}</b> 🪙",
-        parse_mode="HTML"
+        f"💸 <b>Коины списаны!</b>\n\n👤 У кого: {name}\n➖ Снято: <b>{amount}</b> 🪙\nОстаток: <b>{target_data['coins']}</b> 🪙",
+        parse_mode="HTML",
     )
 
 
-# =================  КУБЫ =================
-@dp.message(F.text.regexp(r'(?i)^[/!]?кубы$'))
+# ================= 🎲 КУБЫ =================
+async def _start_dice_duel(message: Message, target_user, amount: int):
+    data = await load_data()
+    challenger = get_or_create_user(data, message.from_user.id, message.from_user.username)
+    if target_user.id == message.from_user.id:
+        await message.answer("❌ Нельзя играть сам с собой 😄")
+        return
+    if challenger["coins"] < amount:
+        await message.answer(f"❌ У тебя недостаточно коинов.\nНужно: <b>{amount}</b> 🪙", parse_mode="HTML")
+        return
+    challenged = get_or_create_user(data, target_user.id, target_user.username)
+    if challenged["coins"] < amount:
+        await message.answer(f"❌ У {get_name_by_id(data, target_user.id, target_user.username)} недостаточно коинов.", parse_mode="HTML")
+        return
+
+    challenge_id = f"{message.from_user.id}_{target_user.id}_{int(time.time())}"
+    active_challenges[challenge_id] = {
+        "challenger_id": message.from_user.id,
+        "challenged_id": target_user.id,
+        "amount": amount,
+        "created_at": time.time(),
+    }
+
+    challenger_name = get_name_by_id(data, message.from_user.id, message.from_user.username)
+    challenged_name = get_name_by_id(data, target_user.id, target_user.username)
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="✅ Принять", callback_data=f"dice_accept|{challenge_id}"),
+        InlineKeyboardButton(text="❌ Отказ", callback_data=f"dice_decline|{challenge_id}"),
+    ]])
+
+    msg = await message.answer(
+        f"🎲 <b>ВЫЗОВ НА ДУЭЛЬ!</b>\n\n"
+        f"👤 {challenger_name} вызывает {challenged_name}\n"
+        f"💰 Ставка: <b>{amount}</b> 🪙\n"
+        f"🎯 Победитель забирает: <b>{amount * 2}</b> 🪙\n\n"
+        f"⏳ Время на ответ: {CHALLENGE_TIMEOUT} секунд",
+        parse_mode="HTML",
+        reply_markup=kb,
+    )
+    asyncio.create_task(_dice_timeout(challenge_id, msg))
+
+
+async def _dice_timeout(challenge_id: str, msg: Message):
+    await asyncio.sleep(CHALLENGE_TIMEOUT)
+    ch = active_challenges.pop(challenge_id, None)
+    if not ch:
+        return
+    try:
+        await msg.edit_text("⌛ Время вышло — вызов отменён.")
+    except Exception:
+        pass
+
+
+@dp.message(F.text & F.text.regexp(r'(?i)^[/!]?кубы(?:\s|$)'))
 async def cmd_dice_challenge(message: Message):
     await try_delete(message)
+    data = await load_data()
     parts = message.text.strip().split()
     target_user = None
     amount = 0
 
-    # Если ответ на сообщение
     if message.reply_to_message and message.reply_to_message.from_user:
         target_user = message.reply_to_message.from_user
         if len(parts) < 2:
-            await message.answer("🎲 <b>Игра «Кубы»</b>\n\nФормат: <code>!кубы ставка</code>", parse_mode="HTML")
+            await message.answer("🎲 Формат: <code>!кубы ставка</code> (ответом)", parse_mode="HTML")
             return
         try:
             amount = int(parts[1])
@@ -413,274 +463,282 @@ async def cmd_dice_challenge(message: Message):
             await message.answer("❌ Ставка должна быть числом.")
             return
     else:
-        # Формат: !кубы @username ставка
         if len(parts) < 3:
-            await message.answer("🎲 <b>Игра «Кубы»</b>\n\nФормат: <code>!кубы @username ставка</code>",
-                                 parse_mode="HTML")
+            await message.answer("🎲 Формат: <code>!кубы @username ставка</code>", parse_mode="HTML")
             return
-
-        username_arg = parts[1].lstrip("@").lower()
+        target_user = find_user_by_username(data, parts[1])
+        if not target_user:
+            await message.answer("❌ Пользователь не найден.")
+            return
         try:
             amount = int(parts[2])
         except ValueError:
             await message.answer("❌ Ставка должна быть числом.")
             return
 
-        data = load_data()
-        for uid_str, udata in data["users"].items():
-            if udata.get("username", "").lower() == username_arg:
-                target_user = type('User', (), {'id': int(uid_str), 'username': udata.get("username")})()
-                break
-
-        if not target_user:
-            await message.answer("❌ Пользователь не найден.")
-            return
-
     if amount <= 0:
         await message.answer("❌ Ставка должна быть больше 0.")
         return
+    await _start_dice_duel(message, target_user, amount)
 
-    data = load_data()
-    challenger = get_or_create_user(data, message.from_user.id, message.from_user.username)
 
-    if target_user.id == message.from_user.id:
-        await message.answer("❌ Нельзя играть сам с собой 😄")
+@dp.callback_query(F.data.startswith("dice_accept|"))
+async def cb_dice_accept(callback: CallbackQuery):
+    challenge_id = callback.data.split("|", 1)[1]
+    ch = active_challenges.get(challenge_id)
+    if not ch:
+        await callback.answer("⌛ Вызов уже неактуален", show_alert=True)
+        return
+    if callback.from_user.id != ch["challenged_id"]:
+        await callback.answer("Это не твой вызов!", show_alert=True)
         return
 
-    if challenger["coins"] < amount:
-        await message.answer(f" У тебя недостаточно коинов.\nНужно: <b>{amount}</b> 🪙", parse_mode="HTML")
+    amount = ch["amount"]
+    data = await load_data()
+    challenger = get_or_create_user(data, ch["challenger_id"], None)
+    challenged = get_or_create_user(data, ch["challenged_id"], callback.from_user.username)
+
+    if challenger["coins"] < amount or challenged["coins"] < amount:
+        active_challenges.pop(challenge_id, None)
+        await callback.message.edit_text("❌ У кого-то не хватает коинов. Вызов отменён.")
+        await callback.answer()
         return
 
-    challenged = get_or_create_user(data, target_user.id, target_user.username)
-    if challenged["coins"] < amount:
-        await message.answer(f"❌ У {get_name_by_id(data, target_user.id, target_user.username)} недостаточно коинов.",
-                             parse_mode="HTML")
+    r1 = random.randint(1, 6)
+    r2 = random.randint(1, 6)
+    if r1 == r2:
+        result = f"🤝 <b>Ничья!</b> {r1} : {r2}\nНикто не получает коины."
+    else:
+        winner_id = ch["challenger_id"] if r1 > r2 else ch["challenged_id"]
+        loser_id = ch["challenged_id"] if winner_id == ch["challenger_id"] else ch["challenger_id"]
+        winner = get_or_create_user(data, winner_id, None)
+        loser = get_or_create_user(data, loser_id, None)
+        winner["coins"] += amount
+        loser["coins"] -= amount
+        winner_name = get_name_by_id(data, winner_id)
+        result = f"🏆 Победил {winner_name} ({r1} : {r2})\n💰 +{amount} 🪙"
+
+    await save_data(data)
+    active_challenges.pop(challenge_id, None)
+    await callback.message.edit_text(f"🎲 <b>Кубы брошены!</b>\n\n{result}", parse_mode="HTML")
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("dice_decline|"))
+async def cb_dice_decline(callback: CallbackQuery):
+    challenge_id = callback.data.split("|", 1)[1]
+    ch = active_challenges.get(challenge_id)
+    if not ch:
+        await callback.answer("⌛ Вызов уже неактуален", show_alert=True)
         return
-
-    challenge_id = f"{message.from_user.id}_{target_user.id}_{int(time.time())}"
-    challenger_name = get_name_by_id(data, message.from_user.id, message.from_user.username)
-    challenged_name = get_name_by_id(data, target_user.id, target_user.username)
-
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="✅ Принять", callback_data=f"dice_accept_{challenge_id}"),
-        InlineKeyboardButton(text="❌ Отказ", callback_data=f"dice_decline_{challenge_id}")
-    ]])
-
-    await message.answer(
-        f"🎲 <b>ВЫЗОВ НА ДУЭЛЬ!</b>\n\n"
-        f"👤 {challenger_name} вызывает {challenged_name}\n"
-        f"💰 Ставка: <b>{amount}</b> 🪙\n"
-        f"🎯 Победитель забирает: <b>{amount * 2}</b> 🪙\n\n"
-        f"⏳ Время на ответ: {CHALLENGE_TIMEOUT} секунд",
-        parse_mode="HTML",
-        reply_markup=keyboard
-    )
+    if callback.from_user.id != ch["challenged_id"]:
+        await callback.answer("Это не твой вызов!", show_alert=True)
+        return
+    active_challenges.pop(challenge_id, None)
+    await callback.message.edit_text("❌ Вызов отклонён.")
+    await callback.answer()
 
 
 # ================= 📢 СОЗЫВЫ =================
 async def summon_all_members(chat_id: int, call_text: str, starter_id: int):
-    active_summons[chat_id] = True
+    state = {"active": True}
+    active_summons[chat_id] = state
     try:
-        data = load_data()
-        users_to_tag = [int(uid_str) for uid_str in data["users"].keys() if int(uid_str) != starter_id]
+        data = await load_data()
+        users_to_tag = [int(uid) for uid in data["users"].keys() if int(uid) != starter_id]
         random.shuffle(users_to_tag)
-
         if not users_to_tag:
             await bot.send_message(chat_id, "❌ Некого созывать.")
             return
 
-        for i in range(0, len(users_to_tag), 15):
-            if not active_summons.get(chat_id, False):
-                await bot.send_message(chat_id, "⏹️ Созыв остановлен.")
+        sent = 0
+        for i in range(0, len(users_to_tag), SUMMON_BATCH_SIZE):
+            if not state["active"] or sent >= SUMMON_MAX_MESSAGES:
+                if sent >= SUMMON_MAX_MESSAGES:
+                    await bot.send_message(chat_id, "⏹️ Достигнут лимит сообщений — созыв остановлен.")
                 break
-
-            batch = users_to_tag[i:i + 15]
-            mentions = [f"[Пользователь](tg://user?id={uid})" for uid in batch]
-            full_text = f"📢 {call_text}\n\n" + "\n".join(mentions)
-
-            await bot.send_message(chat_id, full_text, parse_mode="Markdown")
-            await asyncio.sleep(1.5)
+            batch = users_to_tag[i:i + SUMMON_BATCH_SIZE]
+            mentions = [f'<a href="tg://user?id={uid}">Пользователь</a>' for uid in batch]
+            await bot.send_message(chat_id, f"📢 {call_text}\n\n" + "\n".join(mentions), parse_mode="HTML")
+            sent += 1
+            await asyncio.sleep(SUMMON_BATCH_DELAY)
     except Exception as e:
-        await bot.send_message(chat_id, f"❌ Ошибка при созыве: {e}")
+        logger.error(f"summon error: {e}")
+        try:
+            await bot.send_message(chat_id, f"❌ Ошибка при созыве: {e}")
+        except Exception:
+            pass
     finally:
-        if chat_id in active_summons:
-            del active_summons[chat_id]
+        active_summons.pop(chat_id, None)
 
 
-@dp.message(F.text.regexp(r'(?i)^[/!]?all$'))
+@dp.message(F.text & F.text.regexp(r'(?i)^[/!]?all(?:\s|$)'))
 async def cmd_all(message: Message):
     await try_delete(message)
-    if message.chat.type not in ["group", "supergroup"]:
-        await message.answer("❌ Эта команда работает только в групповых чатах!")
+    if message.chat.type not in ("group", "supergroup"):
+        await message.answer("❌ Только для групповых чатов!")
         return
-
     user_id = message.from_user.id
     if not is_admin(user_id) and not await is_chat_admin(user_id, message.chat.id):
         await message.answer("❌ Команда недоступна (только для админов чата)")
         return
-
-    parts = message.text.strip().split()
-    call_text = " ".join(parts[1:]) if len(parts) > 1 else "📢 Общий сбор всех участников!"
-
+    parts = message.text.strip().split(maxsplit=1)
+    call_text = parts[1] if len(parts) > 1 else "📢 Общий сбор всех участников!"
     await message.answer(
-        f"🔄 Начинаю массовый созыв...\nТекст: {safe_text(call_text)}\n\n⚠️ Для остановки напишите: <code>!stop</code>",
-        parse_mode="HTML")
+        f"🔄 Начинаю массовый созыв...\nТекст: {safe_text(call_text)}\n\n⚠️ Остановить: <code>!stop</code>",
+        parse_mode="HTML",
+    )
     asyncio.create_task(summon_all_members(message.chat.id, call_text, user_id))
 
 
-@dp.message(F.text.regexp(r'(?i)^[/!]?stop$|^[/!]?стоп$'))
+@dp.message(F.text & F.text.regexp(r'(?i)^[/!]?(stop|стоп)\s*$'))
 async def cmd_stop(message: Message):
     await try_delete(message)
-    chat_id = message.chat.id
-    if active_summons.get(chat_id, False):
-        active_summons[chat_id] = False
-        await message.answer("⏹️ Команда остановки принята. Созыв прекратится.")
+    if message.chat.type in ("group", "supergroup"):
+        if not is_admin(message.from_user.id) and not await is_chat_admin(message.from_user.id, message.chat.id):
+            await message.answer("❌ Остановить созыв может только админ.")
+            return
+    state = active_summons.get(message.chat.id)
+    if state and state.get("active"):
+        state["active"] = False
+        await message.answer("⏹️ Созыв прекращён.")
     else:
-        await message.answer("❌ Активных массовых созывов в этом чате нет.")
+        await message.answer("❌ Активных созывов нет.")
 
 
-@dp.message(F.text.regexp(r'(?i)^[/!]?admins$|^[/!]?админы$'))
+@dp.message(F.text & F.text.regexp(r'(?i)^[/!]?(admins|админы)(?:\s|$)'))
 async def cmd_admins(message: Message):
     await try_delete(message)
-    if message.chat.type not in ["group", "supergroup"]:
-        await message.answer("❌ Эта команда работает только в групповых чатах!")
+    if message.chat.type not in ("group", "supergroup"):
+        await message.answer("❌ Только для групповых чатов!")
         return
-
-    parts = message.text.strip().split()
-    call_text = " ".join(parts[1:]) if len(parts) > 1 else "📢 Сбор администраторов!"
-
+    parts = message.text.strip().split(maxsplit=1)
+    call_text = parts[1] if len(parts) > 1 else "📢 Сбор администраторов!"
     try:
         members = await bot.get_chat_administrators(chat_id=message.chat.id)
-        admins_to_tag = [m.user for m in members if not m.user.is_bot]
-        if not admins_to_tag:
+        admins = [m.user for m in members if not m.user.is_bot]
+        if not admins:
             await message.answer("❌ Администраторы не найдены.")
             return
-
-        mentions = [f"[{u.full_name[:20]}](tg://user?id={u.id})" for u in admins_to_tag]
-        await message.answer(f"📢 {call_text}\n\n" + ", ".join(mentions), parse_mode="Markdown")
+        mentions = [f'<a href="tg://user?id={u.id}">{safe_text(u.full_name[:20])}</a>' for u in admins]
+        await message.answer(f"📢 {safe_text(call_text)}\n\n" + ", ".join(mentions), parse_mode="HTML")
     except Exception as e:
         await message.answer(f"❌ Ошибка: {e}")
 
 
 # ================= 📛 ПОЗЫВНЫЕ =================
-@dp.message(F.text.regexp(r'(?i)^[/!]?me$|^[/!]?позывной$'))
+@dp.message(F.text & F.text.regexp(r'(?i)^[/!]?(me|позывной)\s*$'))
 async def cmd_me(message: Message):
     await try_delete(message)
-    user_id = message.from_user.id
-    data = load_data()
-    user = get_or_create_user(data, user_id, message.from_user.username)
+    data = await load_data()
+    user = get_or_create_user(data, message.from_user.id, message.from_user.username)
     call_sign = user.get("call_sign")
     name = message.from_user.full_name
-
     if call_sign:
         await message.answer(f"📛 Твой позывной: {call_sign}\n👤 Имя: {safe_text(name)}")
     else:
-        await message.answer(f"👤 Имя: {safe_text(name)}\n💡 Установи позывной командой: <code>!setme 🔥</code>",
-                             parse_mode="HTML")
+        await message.answer(
+            f"👤 Имя: {safe_text(name)}\n💡 Установи позывной: <code>!setme 🔥</code>",
+            parse_mode="HTML",
+        )
 
 
-@dp.message(F.text.regexp(r'(?i)^[/!]?setme\s+(.+)$'))
+@dp.message(F.text & F.text.regexp(r'(?i)^[/!]?setme\s+(.+)$'))
 async def cmd_setme(message: Message):
     await try_delete(message)
-    parts = message.text.strip().split()
+    parts = message.text.strip().split(maxsplit=1)
     if len(parts) < 2:
         await message.answer("❌ Формат: <code>!setme эмодзи</code>", parse_mode="HTML")
         return
-
-    emoji = parts[1]
+    emoji = parts[1].strip()
     if len(emoji) > 8:
         await message.answer("❌ Позывной должен быть коротким.")
         return
-
-    data = load_data()
+    data = await load_data()
     user = get_or_create_user(data, message.from_user.id, message.from_user.username)
     user["call_sign"] = emoji
-    save_data(data)
-    await message.answer(f"✅ Твой новый позывной: {emoji}")
+    await save_data(data)
+    await message.answer(f"✅ Новый позывной: {emoji}")
 
 
-@dp.message(F.text.regexp(r'(?i)^[/!]?changeme$'))
+@dp.message(F.text & F.text.regexp(r'(?i)^[/!]?changeme\s*$'))
 async def cmd_changeme(message: Message):
     await try_delete(message)
-    emojis = ["🔥", "⚡", "🐺", "🦊", "", "🦁", "🐯", "🐲", "👻", "🤖", "👽", "", "💀", "👑", "🎭", "🦅", "", "🐍"]
+    emojis = ["🔥", "⚡", "🐺", "🦊", "🦁", "🐯", "🐲", "👻", "🤖", "👽", "💀", "👑", "🎭", "🦅", "🐍"]
     emoji = random.choice(emojis)
-
-    data = load_data()
+    data = await load_data()
     user = get_or_create_user(data, message.from_user.id, message.from_user.username)
     user["call_sign"] = emoji
-    save_data(data)
-    await message.answer(f"✅ Твой новый случайный позывной: {emoji}")
+    await save_data(data)
+    await message.answer(f"✅ Новый случайный позывной: {emoji}")
 
 
-# =================  АДМИН: ПОПОЛНИТЬ КАРМАН =================
-@dp.message(F.text.regexp(r'(?i)^\+пополнить карман$'))
+# ================= 🔧 АДМИН: ПОПОЛНИТЬ =================
+@dp.message(F.text & F.text.regexp(r'(?i)^\+пополнить\s+карман(?:\s|$)'))
 async def cmd_admin_add(message: Message):
     await try_delete(message)
     if not is_admin(message.from_user.id):
-        await message.answer(" Команда доступна только администраторам.")
+        await message.answer("❌ Команда доступна только администраторам бота.")
+        return
+    if message.chat.type in ("group", "supergroup") and not await is_chat_admin(message.from_user.id, message.chat.id):
+        await message.answer("❌ Только для админов этого чата.")
         return
 
+    data = await load_data()
     parts = message.text.strip().split()
     target_user = None
     amount = None
 
-    # Если ответ на сообщение
     if message.reply_to_message and message.reply_to_message.from_user:
         target_user = message.reply_to_message.from_user
-        if len(parts) >= 2:
-            try:
-                amount = int(parts[1])
-            except:
-                await message.answer("❌ Укажи число.")
-                return
-    # Если через @username
-    elif len(parts) >= 3:
-        username_arg = parts[1].lstrip("@").lower()
+        if len(parts) < 3:
+            await message.answer("❌ Укажи сумму: <code>+пополнить карман 500</code>", parse_mode="HTML")
+            return
         try:
             amount = int(parts[2])
-        except:
+        except ValueError:
             await message.answer("❌ Укажи число.")
             return
-
-        data = load_data()
-        for uid_str, udata in data["users"].items():
-            if udata.get("username", "").lower() == username_arg:
-                target_user = type('User', (), {'id': int(uid_str), 'username': udata.get("username")})()
-                break
-
+    else:
+        if len(parts) < 4:
+            await message.answer("❌ Формат: <code>+пополнить карман @username 500</code>", parse_mode="HTML")
+            return
+        target_user = find_user_by_username(data, parts[2])
         if not target_user:
             await message.answer("❌ Пользователь не найден.")
             return
-    else:
-        await message.answer("❌ Формат: <code>+пополнить карман @username 500</code> или ответом", parse_mode="HTML")
+        try:
+            amount = int(parts[3])
+        except ValueError:
+            await message.answer("❌ Укажи число.")
+            return
+
+    if amount is None or amount <= 0:
+        await message.answer("❌ Сумма должна быть больше 0.")
         return
 
-    if not target_user:
-        target_user = message.from_user
-
-    data = load_data()
     user = get_or_create_user(data, target_user.id, target_user.username)
     user["coins"] += amount
-    save_data(data)
+    await save_data(data)
 
     target_name = get_name_by_id(data, target_user.id, target_user.username)
     await message.answer(
         f"💰 <b>Карман пополнен!</b>\n\n👤 Кому: {target_name}\n➕ Начислено: <b>{amount}</b> 🪙\n📊 Баланс: <b>{user['coins']}</b> 🪙",
-        parse_mode="HTML"
+        parse_mode="HTML",
     )
 
 
 # ================= 🔧 ПОМОЩЬ =================
-@dp.message(F.text.regexp(r'(?i)^[/!]?помощь$|^[/!]?команды$|^[/!]?help$'))
+@dp.message(F.text & F.text.regexp(r'(?i)^[/!]?(помощь|команды|help)\s*$'))
 async def cmd_help(message: Message):
     await try_delete(message)
     help_text = (
         "📖 <b>СПИСОК КОМАНД БОТА</b>\n"
         "━━━━━━━━━━━━━━━━━━━━\n\n"
         "🎁 <b>Случайные коины:</b>\n"
-        "• Просто пиши в чате — с шансом 2% получишь 1-20 🪙\n\n"
+        "• Просто пиши в чате — с шансом 5% получишь 1-20 🪙\n\n"
         "📦 <b>Сундуки:</b>\n"
-        "• <code>!открыть</code> — открыть сундук (КД 5 часов)\n\n"
+        "• <code>!открыть</code> — открыть сундук (КД 2 часа)\n\n"
         "💰 <b>Экономика:</b>\n"
         "• <code>!карман</code> — твой баланс\n"
         "• <code>!карман</code> (ответом) — баланс другого\n"
@@ -688,14 +746,14 @@ async def cmd_help(message: Message):
         "• <code>!перевод сумма</code> (ответом) — быстрый перевод\n"
         "• <code>!топ</code> — топ-10 богачей\n"
         "• <code>!магазин</code> — магазин\n\n"
-        " <b>Игры:</b>\n"
+        "🎲 <b>Игры:</b>\n"
         "• <code>!кубы @user ставка</code> — дуэль в кости\n"
         "• <code>!кубы ставка</code> (ответом) — быстрый вызов\n\n"
         "📢 <b>Созывы:</b>\n"
         "• <code>!all</code> — массовый созыв\n"
         "• <code>!admins</code> — созыв админов\n"
         "• <code>!stop</code> — остановить созыв\n\n"
-        " <b>Позывные:</b>\n"
+        "📛 <b>Позывные:</b>\n"
         "• <code>!me</code> — мой позывной\n"
         "• <code>!setme эмодзи</code> — установить\n"
         "• <code>!changeme</code> — случайный\n\n"
@@ -710,19 +768,20 @@ async def cmd_help(message: Message):
     await message.answer(help_text, parse_mode="HTML")
 
 
-@dp.message(F.text.regexp(r'(?i)^[/!]?тег$'))
+@dp.message(F.text & F.text.regexp(r'(?i)^[/!]?тег\s*$'))
 async def cmd_tag(message: Message):
     await try_delete(message)
     await message.answer(f"👋 Я на месте, {safe_text(message.from_user.full_name)}!")
 
 
-# ================= 🎁 ОБРАБОТЧИК СООБЩЕНИЙ (ДРОП КОИНОВ) =================
+# ================= 🎁 FALLBACK-ОБРАБОТЧИК =================
 @dp.message()
 async def handle_all_messages(message: Message):
     try:
+        logger.info(f"📩 MSG from {message.from_user.id if message.from_user else '?'}: {(message.text or '')[:80]!r}")
         await process_random_coin_drop(message)
     except Exception as e:
-        logger.error(f"Ошибка в обработчике дропа: {e}")
+        logger.error(f"Ошибка в обработчике дропа: {e}", exc_info=True)
 
 
 # ================= 🌐 ВЕБ-СЕРВЕР ДЛЯ RENDER =================
@@ -746,10 +805,15 @@ async def start_fake_website():
 # ================= ЗАПУСК =================
 async def main():
     await start_fake_website()
+    me = await bot.get_me()
+    logger.info(f"🤖 Бот: @{me.username} | can_read_all_group_messages={me.can_read_all_group_messages}")
+    if not me.can_read_all_group_messages:
+        logger.warning("⚠️ Privacy Mode включён! Бот НЕ видит '!команды' в группах.")
+        logger.warning("⚠️ Иди в @BotFather → /setprivacy → Disable → перезапусти бота.")
     print("✅ Бот запущен!")
     print(f"🔐 Админы: {ADMIN_IDS}")
-    print("🎁 Случайный дроп: 2% шанс, 1-20 ")
-    print("📦 Сундуки, 💰 Экономика, 🎲 Кубы, 📢 Созывы, 🛍️ Магазин")
+    print(f"💾 Файл БД: {DATA_FILE}")
+    print("🎁 Дроп: 5%, 1-20 🪙")
     await dp.start_polling(bot)
 
 
