@@ -7,7 +7,7 @@ import logging
 from types import SimpleNamespace
 from dotenv import load_dotenv
 from aiogram import Bot, Dispatcher, F
-from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, FSInputFile
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, FSInputFile, Dice
 from aiogram.enums import ChatMemberStatus
 from aiohttp import web
 from supabase import create_client, Client
@@ -303,7 +303,27 @@ async def cb_dice_accept(callback: CallbackQuery):
         active_challenges.pop(challenge_id, None)
         return await callback.message.edit_text("❌ У кого-то не хватает коинов. Вызов отменён.")
 
-    r1, r2 = random.randint(1, 6), random.randint(1, 6)
+    # Убираем кнопки у старого сообщения
+    await callback.message.edit_reply_markup(reply_markup=None)
+
+    # Отправляем анимированные кубики
+    dice_msg1 = await callback.message.answer_dice(emoji="🎲")
+    dice_msg2 = await callback.message.answer_dice(emoji="🎲")
+
+    # Ждем 3.5 секунды, пока крутится анимация
+    await asyncio.sleep(3.5)
+
+    # Получаем выпавшие значения (от 1 до 6)
+    r1 = dice_msg1.dice.value
+    r2 = dice_msg2.dice.value
+
+    # Удаляем сообщения с кубиками, чтобы не засорять чат
+    try:
+        await dice_msg1.delete()
+        await dice_msg2.delete()
+    except Exception:
+        pass
+
     if r1 == r2:
         result = f"🤝 <b>Ничья!</b> {r1} : {r2}\nНикто не получает коины."
     else:
@@ -313,12 +333,14 @@ async def cb_dice_accept(callback: CallbackQuery):
         loser = await get_user(loser_id)
         await update_user(winner_id, coins=winner["coins"] + amount)
         await update_user(loser_id, coins=loser["coins"] - amount)
-        result = f"🏆 Победил @{winner['username']} ({r1} : {r2})\n💰 +{amount} 🪙"
+        winner_name = f"@{winner['username']}"
+        result = f"🏆 Победил {winner_name} ({r1} : {r2})\n💰 +{amount} 🪙"
 
     active_challenges.pop(challenge_id, None)
-    await callback.message.edit_text(f"🎲 <b>Кубы брошены!</b>\n\n{result}", parse_mode="HTML")
-    await callback.answer()
 
+    # Отправляем итоговый результат
+    await callback.message.answer(f"🎲 <b>Кубы брошены!</b>\n\n{result}", parse_mode="HTML")
+    await callback.answer()
 
 @dp.callback_query(F.data.startswith("dice_decline|"))
 async def cb_dice_decline(callback: CallbackQuery):
@@ -331,7 +353,7 @@ async def cb_dice_decline(callback: CallbackQuery):
     await callback.answer()
 
 
-# ================= 💣 МИНЫ =================
+# ================= 💣 ИГРА МИНЫ =================
 MINES_COEFS = {1: 1.25, 2: 1.85, 3: 3.75}
 
 
@@ -395,7 +417,7 @@ async def cb_mines_open(callback: CallbackQuery):
     game = active_mines_games[game_id]
     if game["opened"][idx]: return await callback.answer("Уже открыто!", show_alert=True)
 
-    if game["board"][idx]:
+    if game["board"][idx]:  # БУМ
         game["active"] = False
         active_mines_games.pop(game_id, None)
         user = await get_user(callback.from_user.id)
@@ -411,28 +433,43 @@ async def cb_mines_open(callback: CallbackQuery):
         return await callback.answer("💥 БУМ!")
 
     game["opened"][idx] = True
+
     safe_opened = sum(1 for i in range(16) if game["opened"][i] and not game["board"][i])
     total_safe = 16 - game["mines_count"]
 
     if safe_opened == total_safe:
         return await cashout_mines(callback, game_id, game)
 
-    current_coef = round(MINES_COEFS[game["mines_count"]] * (safe_opened / total_safe), 2)
+    # Считаем кэф с точностью до сотых
+    base_coef = MINES_COEFS[game["mines_count"]]
+    current_coef = round(base_coef * (safe_opened / total_safe), 2)
     if current_coef < 1.0: current_coef = 1.0
+
+    # Считаем сумму для забора (используем round, чтобы 1.16 давало 116, а не 115)
+    win_amount = round(game["amount"] * current_coef)
 
     kb = InlineKeyboardMarkup(inline_keyboard=[])
     for r in range(4):
-        kb.inline_keyboard.append([InlineKeyboardButton(text="✅" if game["opened"][r * 4 + c] else "⬜",
-                                                        callback_data="ignore" if game["opened"][
-                                                            r * 4 + c] else f"mines_open_{r * 4 + c}") for c in
-                                   range(4)])
+        kb.inline_keyboard.append([
+            InlineKeyboardButton(
+                text="✅" if game["opened"][r * 4 + c] else "⬜",
+                callback_data="ignore" if game["opened"][r * 4 + c] else f"mines_open_{r * 4 + c}"
+            ) for c in range(4)
+        ])
 
-    win_amount = int(game["amount"] * current_coef)
-    kb.inline_keyboard.append([InlineKeyboardButton(text=f"💰 Забрать ({win_amount} 🪙)", callback_data="mines_cashout")])
+    # Выводим сумму и кэф прямо на кнопку
+    kb.inline_keyboard.append([
+        InlineKeyboardButton(text=f"💰 Забрать ({win_amount} 🪙) | Кэф: x{current_coef}", callback_data="mines_cashout")
+    ])
 
     await callback.message.edit_text(
-        f"💣 <b>Мины: {game['mines_count']}</b>\nСтавка: <b>{game['amount']}</b> 🪙\nТекущий кэф: <b>x{current_coef}</b>\nОткрыто: {safe_opened}/{total_safe}",
-        reply_markup=kb, parse_mode="HTML")
+        f"💣 <b>Мины: {game['mines_count']}</b>\n"
+        f"Ставка: <b>{game['amount']}</b> 🪙\n"
+        f"Текущий кэф: <b>x{current_coef}</b>\n"
+        f"Открыто: {safe_opened}/{total_safe}",
+        reply_markup=kb,
+        parse_mode="HTML"
+    )
     await callback.answer()
 
 
@@ -450,9 +487,14 @@ async def cashout_mines(callback: CallbackQuery, game_id: str, game: dict):
 
     safe_opened = sum(1 for i in range(16) if game["opened"][i] and not game["board"][i])
     total_safe = 16 - game["mines_count"]
-    coef = round(MINES_COEFS[game["mines_count"]] * (safe_opened / total_safe), 2) if safe_opened > 0 else 1.0
-    if coef < 1.0: coef = 1.0
-    win_amount = int(game["amount"] * coef)
+
+    if safe_opened == 0:
+        coef = 1.0
+    else:
+        coef = round(MINES_COEFS[game["mines_count"]] * (safe_opened / total_safe), 2)
+        if coef < 1.0: coef = 1.0
+
+    win_amount = round(game["amount"] * coef)
 
     user = await get_user(callback.from_user.id)
     profit = win_amount - game["amount"]
@@ -465,8 +507,13 @@ async def cashout_mines(callback: CallbackQuery, game_id: str, game: dict):
              range(4)])
 
     await callback.message.edit_text(
-        f"💰 <b>Забрано!</b>\nКэф: <b>x{coef}</b>\nВыигрыш: <b>{win_amount}</b> 🪙\nПрибыль: <b>{profit}</b> 🪙",
-        reply_markup=kb, parse_mode="HTML")
+        f"💰 <b>Забрано!</b>\n"
+        f"Кэф: <b>x{coef}</b>\n"
+        f"Выигрыш: <b>{win_amount}</b> 🪙\n"
+        f"Прибыль: <b>{profit}</b> 🪙",
+        reply_markup=kb,
+        parse_mode="HTML"
+    )
     await callback.answer("💰 Забрано!")
 
 
@@ -483,34 +530,6 @@ async def cb_mines_cancel(callback: CallbackQuery):
 @dp.callback_query(F.data == "ignore")
 async def cb_ignore(callback: CallbackQuery):
     await callback.answer()
-
-
-# ================= 📛 ПОЗЫВНЫЕ =================
-@dp.message(F.text & F.text.regexp(r'(?i)^[/!]?(me|позывной)\s*$'))
-async def cmd_me(message: Message):
-    user = await get_user(message.from_user.id, message.from_user.username)
-    if user.get("call_sign"):
-        await message.answer(f"📛 Твой позывной: {user['call_sign']}\n👤 Имя: {safe_text(message.from_user.full_name)}")
-    else:
-        await message.answer(
-            f"👤 Имя: {safe_text(message.from_user.full_name)}\n💡 Установи позывной: <code>!setme 🔥</code>",
-            parse_mode="HTML")
-
-
-@dp.message(F.text & F.text.regexp(r'(?i)^[/!]?setme\s+(.+)$'))
-async def cmd_setme(message: Message):
-    emoji = message.text.split(maxsplit=1)[1].strip()
-    if len(emoji) > 8: return await message.answer("❌ Слишком длинный позывной.")
-    await update_user(message.from_user.id, call_sign=emoji)
-    await message.answer(f"✅ Новый позывной: {emoji}")
-
-
-@dp.message(F.text & F.text.regexp(r'(?i)^[/!]?changeme\s*$'))
-async def cmd_changeme(message: Message):
-    emoji = random.choice(["🔥", "⚡", "🐺", "🦊", "🦁", "🐯", "🐲", "👻", "🤖", "👽", "💀", "👑", "🎭", "🦅", "🐍"])
-    await update_user(message.from_user.id, call_sign=emoji)
-    await message.answer(f"✅ Новый случайный позывной: {emoji}")
-
 
 # ================= 📢 СОЗЫВЫ =================
 async def summon_all_members(chat_id: int, call_text: str, starter_id: int):
