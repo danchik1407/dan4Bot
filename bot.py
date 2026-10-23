@@ -33,12 +33,13 @@ if not SUPABASE_URL or not SUPABASE_KEY:
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-COOLDOWN_SECONDS = 2 * 60 * 60  # 2 часа
+COOLDOWN_SECONDS = 5 * 60 * 60  # 5 часов
 CHALLENGE_TIMEOUT = 60
 COIN_DROP_CHANCE = 0.05  # 5%
 COIN_DROP_MIN = 1
 COIN_DROP_MAX = 20
 DROP_IMAGE = "drop.jpg"
+MIN_BET = 10  # Минимальная ставка для игр
 
 active_summons: dict[int, dict] = {}
 active_challenges: dict[str, dict] = {}
@@ -174,10 +175,14 @@ async def cmd_open(message: Message):
     user = await get_user(message.from_user.id, message.from_user.username)
     now = time.time()
     rem = COOLDOWN_SECONDS - (now - user["last_chest"])
-    if rem > 0: return await message.answer(f"⏳ Открытие доступно через {format_time(rem)}")
+
+    if rem > 0:
+        return await message.answer(f"⏳ Открытие доступно через {format_time(rem)}")
 
     is_gold = random.random() > 0.92
     reward = random.randint(10, 100) if is_gold else random.randint(1, 10)
+
+    # Обновляем и монеты, и время
     await update_user(message.from_user.id, coins=user["coins"] + reward, last_chest=now)
 
     if is_gold:
@@ -276,7 +281,7 @@ async def cmd_dice(message: Message):
         except ValueError:
             return await message.answer("❌ Ставка должна быть числом.")
 
-    if amount <= 0: return await message.answer("❌ Ставка > 0.")
+    if amount < MIN_BET: return await message.answer(f"❌ Минимальная ставка: {MIN_BET} 🪙")
     await _start_dice_duel(message, target, amount)
 
 
@@ -342,7 +347,7 @@ async def cmd_mines_bet(message: Message):
     amount = int(message.text.split()[1])
     user = await get_user(message.from_user.id, message.from_user.username)
 
-    if amount <= 0: return await message.answer("❌ Ставка должна быть больше 0.")
+    if amount < MIN_BET: return await message.answer(f"❌ Минимальная ставка: {MIN_BET} 🪙")
     if user["coins"] < amount: return await message.answer(f"❌ Мало коинов! У тебя {user['coins']} 🪙")
 
     game_id = str(random.randint(100000, 999999))
@@ -635,7 +640,7 @@ async def cmd_help(message: Message):
         "🎁 <b>Случайные коины:</b>\n"
         "• Просто пиши в чате — с шансом 5% получишь 1-20 🪙\n\n"
         "📦 <b>Сундуки:</b>\n"
-        "• <code>!открыть</code> — открыть сундук (КД 2 часа)\n\n"
+        "• <code>!открыть</code> — открыть сундук (КД 5 часов)\n\n"
         "💰 <b>Экономика:</b>\n"
         "• <code>!карман</code> — твой баланс\n"
         "• <code>!карман</code> (ответом) — баланс другого\n"
