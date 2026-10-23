@@ -121,7 +121,7 @@ def safe_text(text) -> str:
     return html_module.escape(str(text))
 
 
-# ================= 🎁 ДРОП =================
+# ================= 🎁 РАНДОМНЫЙ ДРОП =================
 async def process_random_coin_drop(message: Message):
     if not message.from_user or message.from_user.is_bot: return
     text = message.text or ""
@@ -133,13 +133,23 @@ async def process_random_coin_drop(message: Message):
     await update_user(message.from_user.id, coins=user["coins"] + amount)
 
     caption = f"🎉 <b>Поздравляю!</b>\n\n🎁 Ты выиграл(а) <b>{amount} 🪙</b>\n\n💬 Пиши сообщения в чате и получай коины!"
+
     try:
         if os.path.exists(DROP_IMAGE):
-            await message.answer_photo(photo=FSInputFile(DROP_IMAGE), caption=caption, parse_mode="HTML")
+            await message.answer_photo(
+                photo=FSInputFile(DROP_IMAGE),
+                caption=caption,
+                parse_mode="HTML",
+                reply_to_message_id=message.message_id  # <--- ВОТ ЭТА СТРОКА ДЕЛАЕТ РЕПЛАЙ
+            )
         else:
-            await message.answer(caption, parse_mode="HTML")
-    except Exception:
-        pass
+            await message.answer(
+                caption,
+                parse_mode="HTML",
+                reply_to_message_id=message.message_id  # <--- И ТУТ ТОЖЕ
+            )
+    except Exception as e:
+        logger.error(f"Ошибка дропа: {e}")
 
 
 # ================= 🛍️ МАГАЗИН =================
