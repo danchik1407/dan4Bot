@@ -1,75 +1,61 @@
 const tg = window.Telegram.WebApp;
 tg.expand();
 
-// Ссылка на твой API (убедись, что БЕЗ слэша в конце)
+// ССЫЛКА НА ТВОЙ API
 const API_URL = "https://aura-api-mptt.onrender.com";
 
 let balance = 0;
 let keys = 0;
 let currentBet = 10;
-let caseClaimed = false; // Флаг, что кейс забран
+let caseReady = false;
 let normalChestAvailable = true;
+let caseClaimed = false;
 
-// Загрузка данных
 async function loadUserData() {
     const balanceEl = document.getElementById('user-balance');
-    balanceEl.innerText = "...";
-
     try {
         const response = await fetch(`${API_URL}/api/user`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ initData: tg.initData })
         });
-
-        if (!response.ok) throw new Error("API Error");
-
         const data = await response.json();
         balance = data.coins;
         keys = data.keys || 0;
-        caseClaimed = data.case_claimed || false; // Если сервер вернул флаг
+        caseReady = data.case_ready;
 
         updateUI();
 
-        // Восстанавливаем состояние кейса
-        const text = document.getElementById('case-status');
-        const icon = document.getElementById('case-icon');
-        if (caseClaimed) {
-            text.innerText = 'Забрано!';
-            text.style.color = '#34c759';
-            icon.innerText = '💎';
+        if (!caseReady) {
+            document.getElementById('case-status').innerText = 'Ждите 24 часа!';
+            document.getElementById('case-status').style.color = '#ff3b30';
         }
     } catch (e) {
-        console.error("Ошибка загрузки", e);
         balanceEl.innerText = "Ошибка";
-        balanceEl.onclick = () => loadUserData(); // Если нажать на ошибку - перезагрузка
+        balanceEl.onclick = () => loadUserData();
     }
 }
 
 async function changeBalance(amount) {
-    try {
-        const response = await fetch(`${API_URL}/api/update_balance`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ initData: tg.initData, amount: amount })
-        });
-        const data = await response.json();
-        balance = data.new_balance;
-        updateUI();
-    } catch (e) { console.error("Ошибка обновления", e); }
+    const response = await fetch(`${API_URL}/api/update_balance`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ initData: tg.initData, amount: amount })
+    });
+    const data = await response.json();
+    balance = data.new_balance;
+    updateUI();
 }
 
 async function changeKeys(amount) {
-    try {
-        const response = await fetch(`${API_URL}/api/update_keys`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ initData: tg.initData, amount: amount })
-        });
-        const data = await response.json();
-        keys = data.new_keys;
-        updateUI();
-    } catch (e) { console.error("Ошибка обновления ключей", e); }
+    const response = await fetch(`${API_URL}/api/update_keys`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ initData: tg.initData, amount: amount })
+    });
+    const data = await response.json();
+    keys = data.new_keys;
+    updateUI();
 }
 
 function updateUI() {
@@ -82,7 +68,6 @@ function updateUI() {
 
 loadUserData();
 
-// --- НАВИГАЦИЯ ---
 function switchTab(tabId, element) {
     document.querySelectorAll('.tab').forEach(tab => tab.classList.remove('active'));
     document.getElementById('tab-' + tabId).classList.add('active');
@@ -107,9 +92,8 @@ function closeGame() {
     if (tg.HapticFeedback) tg.HapticFeedback.impactOccurred('light');
 }
 
-// ==================== КЕЙС ====================
 function claimDailyCase() {
-    if (caseClaimed) return tg.showAlert("Вы уже забирали кейс сегодня!");
+    if (!caseReady || caseClaimed) return tg.showAlert("Кейс пока недоступен!");
     const icon = document.getElementById('case-icon');
     const text = document.getElementById('case-status');
 
@@ -117,19 +101,25 @@ function claimDailyCase() {
     setTimeout(() => icon.style.transform = 'scale(1.2) rotate(-10deg)', 100);
     setTimeout(() => icon.style.transform = 'scale(1.2) rotate(10deg)', 200);
     setTimeout(() => icon.style.transform = 'scale(1) rotate(0)', 300);
-    if (tg.HapticFeedback) tg.HapticFeedback.notificationOccurred('success');
 
-    setTimeout(() => {
+    setTimeout(async () => {
+        await fetch(`${API_URL}/api/claim_case`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ initData: tg.initData })
+        });
+
         changeBalance(50);
         icon.innerText = '💎';
         text.innerText = 'Забрано!';
         text.style.color = '#34c759';
         caseClaimed = true;
+        caseReady = false;
+        if (tg.HapticFeedback) tg.HapticFeedback.notificationOccurred('success');
         showWin(50);
     }, 500);
 }
 
-// ==================== СУНДУКИ ====================
 function openNormalChest() {
     if (!normalChestAvailable) return tg.showAlert("Сундук перезаряжается!");
     const icon = document.getElementById('normal-chest-icon');
@@ -137,22 +127,14 @@ function openNormalChest() {
 
     icon.style.transform = 'scale(1.2) rotate(10deg)';
     setTimeout(() => icon.style.transform = 'scale(1) rotate(0)', 300);
-    if (tg.HapticFeedback) tg.HapticFeedback.impactOccurred('heavy');
 
     setTimeout(() => {
-        if (Math.random() < 0.01) { // 1% шанс на ключ
+        if (Math.random() < 0.01) {
             changeKeys(1);
             icon.innerText = '🔑';
             showWin("ЗОЛОТОЙ КЛЮЧ!");
-            if (tg.HapticFeedback) tg.HapticFeedback.notificationOccurred('success');
         } else {
-            let amount = 1;
-            let rand = Math.random();
-            if (rand > 0.9) amount = 10;
-            else if (rand > 0.7) amount = 7;
-            else if (rand > 0.4) amount = 5;
-            else amount = Math.floor(Math.random() * 3) + 1;
-
+            let amount = Math.floor(Math.random() * 10) + 1;
             changeBalance(amount);
             icon.innerText = '💎';
             showWin(amount);
@@ -177,11 +159,10 @@ function openGoldChest() {
     const icon = document.getElementById('gold-chest-icon');
     icon.style.transform = 'scale(1.2) rotate(10deg)';
     setTimeout(() => icon.style.transform = 'scale(1) rotate(0)', 300);
-    if (tg.HapticFeedback) tg.HapticFeedback.impactOccurred('heavy');
 
     setTimeout(() => {
         changeKeys(-1);
-        let amount = Math.floor(Math.random() * (100 - 10 + 1)) + 10;
+        let amount = Math.floor(Math.random() * 90) + 10;
         changeBalance(amount);
         icon.innerText = '💎';
         showWin(amount);
@@ -207,11 +188,8 @@ function setBet(game, amount) {
 }
 
 // ==================== МИНЫ ====================
-let minesActive = false;
-let minesCoef = 1.0;
-let minesSafeOpened = 0;
+let minesActive = false, minesCoef = 1.0, minesSafeOpened = 0;
 const board = document.getElementById('mines-board');
-
 for (let i = 0; i < 16; i++) {
     const cell = document.createElement('div');
     cell.className = 'cell';
@@ -219,7 +197,6 @@ for (let i = 0; i < 16; i++) {
     cell.onclick = () => clickMineCell(cell);
     board.appendChild(cell);
 }
-
 document.getElementById('mines-btn').innerText = `Сделать ставку (${currentBet} 🪙)`;
 
 function minesAction() {
@@ -227,14 +204,10 @@ function minesAction() {
     if (balance < currentBet) return tg.showAlert("Недостаточно средств!");
 
     changeBalance(-currentBet);
-    minesActive = true;
-    minesCoef = 1.0;
-    minesSafeOpened = 0;
+    minesActive = true; minesCoef = 1.0; minesSafeOpened = 0;
 
     document.querySelectorAll('.cell').forEach(c => {
-        c.className = 'cell';
-        c.innerText = '';
-        c.style.pointerEvents = 'auto';
+        c.className = 'cell'; c.innerText = ''; c.style.pointerEvents = 'auto';
     });
 
     document.getElementById('mines-btn').innerText = 'Забрать (0 🪙)';
@@ -247,7 +220,6 @@ function minesAction() {
         let r = Math.floor(Math.random() * 16);
         if(window.mineIndices.indexOf(r) === -1) window.mineIndices.push(r);
     }
-    if (tg.HapticFeedback) tg.HapticFeedback.impactOccurred('medium');
 }
 
 function clickMineCell(cell) {
@@ -269,7 +241,6 @@ function clickMineCell(cell) {
             });
             document.body.classList.add('shake');
             setTimeout(() => document.body.classList.remove('shake'), 500);
-            if (tg.HapticFeedback) tg.HapticFeedback.notificationOccurred('error');
             document.getElementById('mines-btn').innerText = `Играть снова (${currentBet} 🪙)`;
             document.getElementById('mines-btn').style.background = '#007aff';
         } else {
@@ -280,7 +251,6 @@ function clickMineCell(cell) {
             document.getElementById('mines-current-coef').innerText = `x${minesCoef.toFixed(2)}`;
             document.getElementById('mines-cashout-amount').innerText = cashout;
             document.getElementById('mines-btn').innerText = `Забрать (${cashout} 🪙)`;
-            if (tg.HapticFeedback) tg.HapticFeedback.impactOccurred('light');
         }
     }, 200);
 }
@@ -296,11 +266,8 @@ function cashoutMines() {
     showWin(cashout);
 }
 
-// ==================== КРАШ ====================
-let crashActive = false;
-let crashInterval;
-let currentCoef = 1.0;
-
+// ==================== КРАШ (ЗАМЕДЛЕН) ====================
+let crashActive = false, crashInterval, currentCoef = 1.0;
 document.getElementById('crash-btn').innerText = `Сделать ставку (${currentBet} 🪙)`;
 
 function crashAction() {
@@ -308,8 +275,7 @@ function crashAction() {
     if (balance < currentBet) return tg.showAlert("Недостаточно средств!");
 
     changeBalance(-currentBet);
-    crashActive = true;
-    currentCoef = 1.0;
+    crashActive = true; currentCoef = 1.0;
 
     const box = document.getElementById('rocket-box');
     const rocket = document.getElementById('crash-rocket');
@@ -321,23 +287,20 @@ function crashAction() {
     btn.style.background = '#34c759';
     coefText.innerText = 'x1.00';
 
-    if (tg.HapticFeedback) tg.HapticFeedback.impactOccurred('medium');
-
+    // Медленный рост
     crashInterval = setInterval(() => {
-        currentCoef += 0.05 + (currentCoef / 100);
+        currentCoef += 0.02 + (currentCoef / 300);
         coefText.innerText = `x${currentCoef.toFixed(2)}`;
         const winAmount = Math.floor(currentBet * currentCoef);
         btn.innerText = `Забрать (${winAmount} 🪙)`;
-        rocket.style.transform = `translate(${Math.random() * 20}px, -${currentCoef * 5}px)`;
-        if (Math.random() < (0.01 + currentCoef / 200)) { crashed(); }
-    }, 100);
+        rocket.style.transform = `translate(${Math.random() * 10}px, -${currentCoef * 3}px)`;
+        if (Math.random() < (0.005 + currentCoef / 300)) { crashed(); }
+    }, 200);
 }
 
 function cashedOut() {
     if (!crashActive) return;
-    clearInterval(crashInterval);
-    crashActive = false;
-
+    clearInterval(crashInterval); crashActive = false;
     const winAmount = Math.floor(currentBet * currentCoef);
     changeBalance(winAmount);
     document.getElementById('rocket-box').classList.add('cashed');
@@ -348,8 +311,7 @@ function cashedOut() {
 
 function crashed() {
     if (!crashActive) return;
-    clearInterval(crashInterval);
-    crashActive = false;
+    clearInterval(crashInterval); crashActive = false;
     const box = document.getElementById('rocket-box');
     box.classList.add('crashed');
     box.querySelector('.rocket-emoji').className = 'rocket-emoji crashed';
@@ -357,5 +319,4 @@ function crashed() {
     document.getElementById('crash-btn').style.background = '#007aff';
     document.body.classList.add('shake');
     setTimeout(() => document.body.classList.remove('shake'), 500);
-    if (tg.HapticFeedback) tg.HapticFeedback.notificationOccurred('error');
 }

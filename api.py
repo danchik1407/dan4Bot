@@ -8,13 +8,13 @@ from urllib.parse import parse_qsl
 from dotenv import load_dotenv
 from supabase import create_client, Client
 import json
+import time
 import uvicorn
 
 load_dotenv()
 
 app = FastAPI()
 
-# Разрешаем запросы с любых доменов (для Telegram Mini App)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -33,21 +33,15 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 def verify_telegram_data(init_data: str):
     try:
         parsed_data = dict(parse_qsl(init_data))
-        if "hash" not in parsed_data:
-            return None
-
+        if "hash" not in parsed_data: return None
         hash_ = parsed_data.pop("hash")
         data_check_string = "\n".join(f"{k}={v}" for k, v in sorted(parsed_data.items()))
-
         secret_key = hmac.new(b"WebAppData", BOT_TOKEN.encode(), hashlib.sha256).digest()
         calculated_hash = hmac.new(secret_key, data_check_string.encode(), hashlib.sha256).hexdigest()
-
         if calculated_hash == hash_:
-            user_data = json.loads(parsed_data.get("user", "{}"))
-            return user_data
+            return json.loads(parsed_data.get("user", "{}"))
         return None
-    except Exception as e:
-        print(f"Auth Error: {e}")
+    except:
         return None
 
 
@@ -65,11 +59,14 @@ class UpdateKeys(BaseModel):
     amount: int
 
 
+class ClaimCase(BaseModel):
+    initData: str
+
+
 @app.post("/api/user")
 async def get_user(auth: UserAuth):
     user = verify_telegram_data(auth.initData)
-    if not user:
-        raise HTTPException(status_code=401, detail="Invalid auth data")
+    if not user: raise HTTPException(status_code=401, detail="Invalid auth data")
 
     user_id = user["id"]
     username = user.get("username", f"id{user_id}")
@@ -78,32 +75,53 @@ async def get_user(auth: UserAuth):
     if not res.data:
         new_user = {
             "user_id": user_id, "coins": 0, "keys": 0, "username": username,
-            "last_chest": 0, "last_call": 0, "call_sign": None, "chat_id": 0
+            "last_chest": 0, "last_call": 0, "last_daily_case": 0, "call_sign": None, "chat_id": 0
         }
         supabase.table("users").insert(new_user).execute()
-        return {"coins": 0, "keys": 0}
+        return {"coins": 0, "keys": 0, "case_ready": True}
 
     db_user = res.data[0]
-    return {"coins": db_user.get("coins", 0), "keys": db_user.get("keys", 0)}
+    now = int(time.time())
+    last_case = db_user.get("last_daily_case", 0) or 0
+    case_ready = (now - last_case) > 86400
+
+    return {
+        "coins": db_user.get("coins", 0),
+        "keys": db_user.get("keys", 0),
+        "case_ready": case_ready
+    }
+
+
+@app.post("/api/claim_case")
+async def claim_case(data: ClaimCase):
+    user = verify_telegram_data(data.initData)
+    if not user: raise HTTPException(status_code=401, detail="Invalid auth data")
+
+    user_id = user["id"]
+    now = int(time.time())
+
+    res = supabase.table("users").select("last_daily_case").eq("user_id", user_id).execute()
+    if not res.data: raise HTTPException(status_code=404, detail="User not found")
+
+    last_case = res.data[0].get("last_daily_case", 0) or 0
+    if (now - last_case) <= 86400:
+        raise HTTPException(status_code=400, detail="Case not ready yet")
+
+    supabase.table("users").update({"last_daily_case": now}).eq("user_id", user_id).execute()
+    return {"success": True}
 
 
 @app.post("/api/update_balance")
 async def update_balance(data: UpdateBalance):
     user = verify_telegram_data(data.initData)
-    if not user:
-        raise HTTPException(status_code=401, detail="Invalid auth data")
+    if not user: raise HTTPException(status_code=401, detail="Invalid auth data")
 
     user_id = user["id"]
-
     res = supabase.table("users").select("coins").eq("user_id", user_id).execute()
-    if not res.data:
-        raise HTTPException(status_code=404, detail="User not found")
+    if not res.data: raise HTTPException(status_code=404, detail="User not found")
 
-    current_coins = res.data[0]["coins"]
-    new_coins = current_coins + data.amount
-
-    if new_coins < 0:
-        new_coins = 0
+    new_coins = res.data[0]["coins"] + data.amount
+    if new_coins < 0: new_coins = 0
 
     supabase.table("users").update({"coins": new_coins}).eq("user_id", user_id).execute()
     return {"success": True, "new_balance": new_coins}
@@ -112,26 +130,19 @@ async def update_balance(data: UpdateBalance):
 @app.post("/api/update_keys")
 async def update_keys(data: UpdateKeys):
     user = verify_telegram_data(data.initData)
-    if not user:
-        raise HTTPException(status_code=401, detail="Invalid auth data")
+    if not user: raise HTTPException(status_code=401, detail="Invalid auth data")
 
     user_id = user["id"]
-
     res = supabase.table("users").select("keys").eq("user_id", user_id).execute()
-    if not res.data:
-        raise HTTPException(status_code=404, detail="User not found")
+    if not res.data: raise HTTPException(status_code=404, detail="User not found")
 
-    current_keys = res.data[0].get("keys", 0) or 0
-    new_keys = current_keys + data.amount
-
-    if new_keys < 0:
-        new_keys = 0
+    new_keys = (res.data[0].get("keys", 0) or 0) + data.amount
+    if new_keys < 0: new_keys = 0
 
     supabase.table("users").update({"keys": new_keys}).eq("user_id", user_id).execute()
     return {"success": True, "new_keys": new_keys}
 
 
-# Этот блок нужен, чтобы FastAPI работал на Render
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run(app, host="0.0.0.0", port=port)
