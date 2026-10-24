@@ -20,6 +20,50 @@ let localBallState = { x: 50, y: 50, vx: 0, vy: 0 };
 let hasBetThisRound = false;
 let hasShownWinner = false;
 
+// ==================== ЗВУКИ ====================
+const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+
+function playSound(type) {
+    if (audioCtx.state === 'suspended') audioCtx.resume();
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.connect(gain);
+    gain.connect(audioCtx.destination);
+
+    const now = audioCtx.currentTime;
+
+    if (type === 'click') {
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(800, now);
+        osc.frequency.exponentialRampToValueAtTime(300, now + 0.1);
+        gain.gain.setValueAtTime(0.1, now);
+        gain.gain.exponentialRampToValueAtTime(0.01, now + 0.1);
+        osc.start(now); osc.stop(now + 0.1);
+    } else if (type === 'win') {
+        osc.type = 'triangle';
+        osc.frequency.setValueAtTime(400, now);
+        osc.frequency.setValueAtTime(600, now + 0.1);
+        osc.frequency.setValueAtTime(800, now + 0.2);
+        gain.gain.setValueAtTime(0.2, now);
+        gain.gain.exponentialRampToValueAtTime(0.01, now + 0.4);
+        osc.start(now); osc.stop(now + 0.4);
+    } else if (type === 'lose') {
+        osc.type = 'sawtooth';
+        osc.frequency.setValueAtTime(300, now);
+        osc.frequency.exponentialRampToValueAtTime(100, now + 0.5);
+        gain.gain.setValueAtTime(0.2, now);
+        gain.gain.exponentialRampToValueAtTime(0.01, now + 0.5);
+        osc.start(now); osc.stop(now + 0.5);
+    } else if (type === 'boom') {
+        osc.type = 'square';
+        osc.frequency.setValueAtTime(100, now);
+        osc.frequency.exponentialRampToValueAtTime(20, now + 0.3);
+        gain.gain.setValueAtTime(0.3, now);
+        gain.gain.exponentialRampToValueAtTime(0.01, now + 0.3);
+        osc.start(now); osc.stop(now + 0.3);
+    }
+}
+
 // ==================== ХОККЕЙ ====================
 async function placeHockeyBet() {
     if (isProcessing) return;
@@ -43,6 +87,7 @@ async function placeHockeyBet() {
         balance = data.new_balance;
         updateUI();
         hasBetThisRound = true;
+        playSound('click');
         document.getElementById('hockey-controls').style.display = 'none';
     } catch(e) { tg.showAlert("Ошибка соединения"); }
     isProcessing = false;
@@ -52,6 +97,7 @@ function flashCorner(cornerId) {
     const el = document.getElementById(cornerId);
     if (el) {
         el.classList.add('flash');
+        playSound('click');
         setTimeout(() => el.classList.remove('flash'), 300);
     }
 }
@@ -65,19 +111,16 @@ function animateBall(arenaWidth, arenaHeight) {
     localBallState.x += localBallState.vx;
     localBallState.y += localBallState.vy;
 
-    // Отскок от стен
     if (localBallState.x < 0) { localBallState.x = 0; localBallState.vx *= -1; }
     if (localBallState.x > 100) { localBallState.x = 100; localBallState.vx *= -1; }
     if (localBallState.y < 0) { localBallState.y = 0; localBallState.vy *= -1; }
     if (localBallState.y > 100) { localBallState.y = 100; localBallState.vy *= -1; }
 
-    // Проверка на углы
     if ((localBallState.x < 10 && localBallState.y < 10) && !(prevX < 10 && prevY < 10)) flashCorner('corner-tl');
     if ((localBallState.x > 90 && localBallState.y < 10) && !(prevX > 90 && prevY < 10)) flashCorner('corner-tr');
     if ((localBallState.x < 10 && localBallState.y > 90) && !(prevX < 10 && prevY > 90)) flashCorner('corner-bl');
     if ((localBallState.x > 90 && localBallState.y > 90) && !(prevX > 90 && prevY > 90)) flashCorner('corner-br');
 
-    // Торможение
     localBallState.vx *= 0.985;
     localBallState.vy *= 0.985;
 
@@ -88,14 +131,11 @@ function animateBall(arenaWidth, arenaHeight) {
         ball.style.left = localBallState.x + '%';
         ball.style.top = localBallState.y + '%';
 
-        // ЗУМ СЛЕДУЕТ ЗА ШАРОМ
         const speed = Math.sqrt(localBallState.vx**2 + localBallState.vy**2);
         if (speed < 2) {
-            // Если зум еще не применен - применяем
             if (!arena.classList.contains('zoomed')) {
                 arena.classList.add('zoomed');
             }
-            // Обновляем точку фокуса на каждом кадре, чтобы камера следила за шаром
             arena.style.transformOrigin = `${localBallState.x}% ${localBallState.y}%`;
         }
     }
@@ -127,10 +167,8 @@ async function pollHockeyState() {
 
             hasBetThisRound = false;
             hasShownWinner = false;
-
-            // СБРОС ЗУМА
             arena.classList.remove('zoomed');
-            arena.style.transformOrigin = 'center center'; // Возвращаем в центр
+            arena.style.transformOrigin = 'center center';
             document.getElementById('winner-modal').classList.remove('active');
 
         } else if (state.status === 'rolling') {
@@ -159,9 +197,11 @@ async function pollHockeyState() {
                 modal.classList.add('active');
 
                 if (state.winner.id === user.id) {
+                    playSound('win');
                     if (tg.HapticFeedback) tg.HapticFeedback.notificationOccurred('success');
                     await loadUserData();
                 } else {
+                    playSound('lose');
                     if (tg.HapticFeedback) tg.HapticFeedback.notificationOccurred('error');
                 }
             }
@@ -407,6 +447,7 @@ async function openChest(type) {
         document.getElementById('chest-win-icon').innerText = isKey ? '🔑' : '💎';
         document.getElementById('chest-win-text').innerText = isKey ? 'ЗОЛОТОЙ КЛЮЧ!' : `Вы получили ${finalAmount} 🪙`;
         modal.classList.add('active');
+        playSound('win');
         if (tg.HapticFeedback) tg.HapticFeedback.notificationOccurred('success');
     }, 8200);
 }
@@ -441,6 +482,7 @@ async function buyItem(itemId, price) {
         inventory = data.inventory;
         updateUI();
         showWin("✅ Успешно куплено!");
+        playSound('click');
     } catch(e) { tg.showAlert("Ошибка соединения"); }
     isProcessing = false;
 }
@@ -516,6 +558,7 @@ function selectMines(count, element) {
     selectedMines = count;
     document.querySelectorAll('.mine-btn').forEach(btn => btn.classList.remove('active'));
     element.classList.add('active');
+    playSound('click');
     if (tg.HapticFeedback) tg.HapticFeedback.impactOccurred('soft');
 }
 
@@ -526,7 +569,7 @@ async function minesAction() {
         const cashout = Math.floor(currentBet * minesCoef);
         const btn = document.getElementById('mines-btn');
         btn.disabled = true; btn.innerText = 'Забрано!'; btn.style.background = '#555';
-        await changeBalance(cashout); showWin(cashout);
+        await changeBalance(cashout); showWin(cashout); playSound('win');
         document.querySelectorAll('.cell').forEach(c => c.style.pointerEvents = 'none');
         isProcessing = false; return;
     }
@@ -539,6 +582,7 @@ async function minesAction() {
     document.getElementById('mines-btn').style.background = '#34c759';
     document.getElementById('mines-current-coef').innerText = 'x1.00';
     document.getElementById('mines-cashout-amount').innerText = '0';
+    playSound('click');
     window.mineIndices = [];
     while(window.mineIndices.length < selectedMines) {
         let r = Math.floor(Math.random() * 16);
@@ -551,6 +595,7 @@ function clickMineCell(cell) {
     const idx = parseInt(cell.dataset.index);
     if (cell.classList.contains('flipped')) return;
     isProcessing = true; cell.classList.add('flipped');
+    playSound('click');
     if (tg.HapticFeedback) tg.HapticFeedback.impactOccurred('soft');
     setTimeout(() => {
         if (window.mineIndices.includes(idx)) {
@@ -559,6 +604,7 @@ function clickMineCell(cell) {
             document.querySelectorAll('.cell').forEach(c => c.style.pointerEvents = 'none');
             window.mineIndices.forEach(i => { const c = board.children[i]; if(!c.classList.contains('flipped')) { c.classList.add('flipped', 'bad'); c.innerText = '💣'; } });
             document.body.classList.add('shake'); setTimeout(() => document.body.classList.remove('shake'), 500);
+            playSound('boom');
             const btn = document.getElementById('mines-btn');
             btn.innerText = `Играть снова`; btn.style.background = '#007aff';
         } else {

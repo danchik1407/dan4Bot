@@ -25,7 +25,8 @@ game_state = {
     "players": [],
     "ball": {"x": 50, "y": 50, "vx": 0, "vy": 0},
     "winner": None,
-    "last_update": time.time()
+    "last_update": time.time(),
+    "last_bot_added": 0
 }
 
 
@@ -59,32 +60,28 @@ async def get_hockey_state():
     time_left = 20 - (now - game_state["last_update"])
 
     if game_state["status"] == "waiting":
-        # Боты заходят за 5 секунд до конца, если их меньше 5
-        if time_left <= 5 and len(game_state["players"]) < 20:
+        # ЛОГИКА ПЛАВНОГО ДОБАВЛЕНИЯ БОТОВ
+        # Если до конца осталось меньше 6 секунд, и ботов меньше 5
+        if time_left <= 6 and len(game_state["players"]) < 20:
             current_bots = sum(1 for p in game_state["players"] if p["is_bot"])
 
-            if current_bots < 5:
-                # Генерируем случайное количество ботов от 1 до 5
-                num_bots = random.randint(1, 5)
+            # Если прошло больше 1 секунды с момента последнего добавления бота
+            if current_bots < 5 and (now - game_state["last_bot_added"]) > 1.0:
+                # Добавляем ОДНОГО бота
+                bot_bet = random.randint(10, 100)
+                bot_name = random.choice(BOT_NAMES) + str(random.randint(1, 99))
+                bot_color = random.choice(BOT_COLORS)
 
-                for _ in range(num_bots):
-                    if len(game_state["players"]) >= 20: break
-                    if sum(1 for p in game_state["players"] if p["is_bot"]) >= 5: break
-
-                    bot_bet = random.randint(10, 100)
-                    bot_name = random.choice(BOT_NAMES) + str(random.randint(1, 99))
+                while any(p["color"] == bot_color for p in game_state["players"]):
                     bot_color = random.choice(BOT_COLORS)
 
-                    # Уникальный цвет
-                    while any(p["color"] == bot_color for p in game_state["players"]):
-                        bot_color = random.choice(BOT_COLORS)
-
-                    bot_shape = random.choice(["circle", "square", "oval", "triangle"])
-                    game_state["players"].append({
-                        "id": random.randint(10000, 99999), "name": bot_name, "avatar": "", "bet": bot_bet,
-                        "color": bot_color, "shape": bot_shape, "is_bot": True
-                    })
-                    game_state["bank"] += bot_bet
+                bot_shape = random.choice(["circle", "square", "oval", "triangle"])
+                game_state["players"].append({
+                    "id": random.randint(10000, 99999), "name": bot_name, "avatar": "", "bet": bot_bet,
+                    "color": bot_color, "shape": bot_shape, "is_bot": True
+                })
+                game_state["bank"] += bot_bet
+                game_state["last_bot_added"] = now
 
         if time_left <= 0:
             game_state["status"] = "rolling"
@@ -120,7 +117,8 @@ async def get_hockey_state():
             game_state = {
                 "status": "waiting", "timer": 20, "bank": 0, "players": [],
                 "ball": {"x": 50, "y": 50, "vx": 0, "vy": 0},
-                "winner": None, "last_update": now
+                "winner": None, "last_update": now,
+                "last_bot_added": 0
             }
 
     game_state["timer"] = max(0, int(time_left) if game_state["status"] == "waiting" else 0)
@@ -145,7 +143,6 @@ async def place_bet(data: PlaceBet):
     name = user.get("username", user.get("first_name", f"id{user_id}"))
     avatar = user.get("photo_url", "")
 
-    # Если игрок уже ставил - увеличиваем его ставку
     existing_player = next((p for p in game_state["players"] if p["id"] == user_id and not p["is_bot"]), None)
 
     if existing_player:
@@ -154,7 +151,6 @@ async def place_bet(data: PlaceBet):
     else:
         if len(game_state["players"]) >= 20: raise HTTPException(status_code=400, detail="Комната заполнена")
 
-        # Уникальный цвет для игрока
         player_color = "#007aff"
         while any(p["color"] == player_color for p in game_state["players"]):
             player_color = f"hsl({random.randint(0, 360)}, 80%, 50%)"
