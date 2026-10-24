@@ -823,14 +823,12 @@ async def cmd_help(message: Message):
         "• <code>!кубы @user ставка</code> — дуэль в кости\n"
         "• <code>!кубы ставка</code> (ответом) — быстрый вызов\n"
         "• <code>!мины сумма</code> — игра в мины\n\n"
-        "📢 <b>Созывы:</b>\n"
-        "• <code>!all</code> — массовый созыв\n"
-        "• <code>!admins</code> — созыв админов\n"
-        "• <code>!stop</code> — остановить созыв\n\n"
         "📛 <b>Позывные:</b>\n"
         "• <code>!me</code> — мой позывной\n"
         "• <code>!setme эмодзи</code> — установить\n"
         "• <code>!changeme</code> — случайный\n\n"
+        "📱 <b>Мини-приложение:</b>\n"
+        "• <code>!апка</code> — ссылка на наше казино\n\n"
         "• <code>!тег</code> — проверка бота\n"
         "• <code>!помощь</code> — эта справка"
     )
@@ -840,6 +838,17 @@ async def cmd_help(message: Message):
 @dp.message(F.text & F.text.regexp(r'(?i)^[/!]?тег\s*$'))
 async def cmd_tag(message: Message):
     await message.answer(f"👋 Я на месте, {safe_text(message.from_user.full_name)}!")
+
+
+@dp.message(F.text & F.text.regexp(r'(?i)^[/!]?апка\s*$'))
+async def cmd_apka(message: Message):
+    text = (
+        "📱 <b>Наше Mini App!</b>\n\n"
+        "🎮 Заходи в наше казино прямо из Telegram:\n"
+        "👉 <a href='http://t.me/Auragameplay_bot/Auragame'>http://t.me/Auragameplay_bot/Auragame</a>\n\n"
+        "💰 Там тебя ждут сундуки, рулетка, мины и краш с общим балансом!"
+    )
+    await message.answer(text, parse_mode="HTML")
 
 
 # ================= 🌐 FALLBACK =================
@@ -869,23 +878,6 @@ async def main():
     logger.info(f"🤖 Бот: @{me.username} | can_read_all_group_messages={me.can_read_all_group_messages}")
     if not me.can_read_all_group_messages:
         logger.warning("⚠️ Privacy Mode ВКЛЮЧЕН! Бот не видит '!команды'. Отключи в BotFather.")
-
-    # Кнопка меню НЕ устанавливается автоматически.
-    # Если нужно будет включить, раскомментируй код ниже:
-    """
-    web_app_url = "https://dan4bot-1.onrender.com"
-    try:
-        await bot.set_chat_menu_button(
-            menu_button=MenuButtonWebApp(
-                text="🎮 AURA GAME",
-                web_app=WebAppInfo(url=web_app_url)
-            )
-        )
-        logger.info("Кнопка Mini App установлена!")
-    except Exception as e:
-        logger.error(f"Не удалось установить кнопку: {e}")
-    """
-
     await dp.start_polling(bot)
 
 
