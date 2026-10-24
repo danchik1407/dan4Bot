@@ -9,7 +9,6 @@ let currentBet = 10;
 let inventory = [];
 let lastChestTime = 0;
 
-// Загрузка данных
 async function loadUserData() {
     try {
         const response = await fetch(`${API_URL}/api/user`, {
@@ -73,11 +72,12 @@ function checkChestCooldown() {
     const diff = now - lastChestTime;
     const btn = document.getElementById('normal-chest-btn');
 
-    if (diff < 18000) { // 5 часов
+    if (diff < 18000) {
         btn.disabled = true;
         let hours = Math.floor((18000 - diff) / 3600);
         let mins = Math.floor(((18000 - diff) % 3600) / 60);
         btn.innerText = `КД: ${hours}ч ${mins}м`;
+        setTimeout(checkChestCooldown, 60000);
     } else {
         btn.disabled = false;
         btn.innerText = 'Открыть (Бесплатно)';
@@ -132,7 +132,13 @@ async function buyItem(itemId, price) {
         balance = data.new_balance;
         inventory = data.inventory;
         updateUI();
-        tg.showAlert("Успешно куплено!");
+
+        // Всплывающее окно вместо alert
+        const popup = document.getElementById('win-popup');
+        popup.querySelector('.win-text').innerText = "✅ Успешно куплено!";
+        popup.classList.add('show');
+        setTimeout(() => popup.classList.remove('show'), 2000);
+        if (tg.HapticFeedback) tg.HapticFeedback.notificationOccurred('success');
     } catch(e) { tg.showAlert("Ошибка соединения"); }
 }
 
@@ -149,15 +155,7 @@ function switchTab(tabId, element) {
     document.querySelectorAll('.tab').forEach(tab => tab.classList.remove('active'));
     document.getElementById('tab-' + tabId).classList.add('active');
     document.querySelectorAll('.nav-item').forEach(nav => nav.classList.remove('active'));
-    element.classList.add('active');
-    if (tg.HapticFeedback) tg.HapticFeedback.impactOccurred('soft');
-}
-
-function openGame(game) {
-    document.getElementById('main-header').style.display = 'none';
-    document.getElementById('main-nav').style.display = 'none';
-    document.querySelectorAll('.tab').forEach(t => t.style.display = 'none');
-    document.getElementById('screen-' + game).classList.add('active');
+    if (element) element.classList.add('active');
     if (tg.HapticFeedback) tg.HapticFeedback.impactOccurred('soft');
 }
 
@@ -165,14 +163,18 @@ function closeGame() {
     document.querySelectorAll('.game-screen').forEach(s => s.classList.remove('active'));
     document.getElementById('main-header').style.display = 'flex';
     document.getElementById('main-nav').style.display = 'flex';
-    document.querySelectorAll('.tab').forEach(t => t.style.display = 'none');
-    document.getElementById('tab-play').style.display = 'block';
-    document.querySelectorAll('.nav-item').forEach(nav => nav.classList.remove('active'));
-    document.querySelectorAll('.nav-item')[0].classList.add('active');
+    switchTab('play', document.querySelectorAll('.nav-item')[0]);
     if (tg.HapticFeedback) tg.HapticFeedback.impactOccurred('soft');
 }
 
-// --- ВВОД СТАВОК ---
+function openGame(game) {
+    document.getElementById('main-header').style.display = 'none';
+    document.getElementById('main-nav').style.display = 'none';
+    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active')); // Исправлено
+    document.getElementById('screen-' + game).classList.add('active');
+    if (tg.HapticFeedback) tg.HapticFeedback.impactOccurred('soft');
+}
+
 function addBet(game, amount) {
     const input = document.getElementById(game + '-bet');
     let current = parseInt(input.value) || 10;

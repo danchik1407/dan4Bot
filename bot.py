@@ -1,14 +1,14 @@
 # -*- coding: utf-8 -*-
 import os
-import json
 import random
 import time
 import asyncio
 import logging
+import json
 from types import SimpleNamespace
 from dotenv import load_dotenv
 from aiogram import Bot, Dispatcher, F
-from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, FSInputFile, Dice
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, FSInputFile, Dice, WebAppInfo, MenuButtonWebApp
 from aiogram.enums import ChatMemberStatus
 from aiohttp import web
 from supabase import create_client, Client
@@ -33,9 +33,9 @@ if not SUPABASE_URL or not SUPABASE_KEY:
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-COOLDOWN_SECONDS = 5 * 60 * 60
+COOLDOWN_SECONDS = 5 * 60 * 60  # 5 часов
 CHALLENGE_TIMEOUT = 60
-COIN_DROP_CHANCE = 0.005  # 0.5% шанс
+COIN_DROP_CHANCE = 0.005  # 0.5% шанс дропа
 COIN_DROP_MIN = 1
 COIN_DROP_MAX = 5
 DROP_IMAGE = "drop.jpg"
@@ -56,8 +56,9 @@ async def get_user(user_id: int, username: str = None, chat_id: int = None):
 
     if not user:
         new_user = {
-            "user_id": user_id, "coins": 0, "username": username or f"id{user_id}",
-            "last_chest": 0, "last_call": 0, "call_sign": None, "chat_id": chat_id
+            "user_id": user_id, "coins": 0, "keys": 0, "username": username or f"id{user_id}",
+            "last_chest": 0, "last_call": 0, "last_daily_case": 0, "call_sign": None, "chat_id": chat_id,
+            "inventory": "[]"
         }
         await asyncio.to_thread(lambda: supabase.table("users").insert(new_user).execute())
         return new_user
@@ -131,8 +132,6 @@ def safe_text(text) -> str:
 # ================= 🎁 ДРОП =================
 async def process_random_coin_drop(message: Message):
     if not message.from_user or message.from_user.is_bot: return
-
-    # Добавляем проверку: если это не группа, выходим
     if message.chat.type not in ("group", "supergroup"): return
 
     text = message.text or ""
@@ -141,10 +140,8 @@ async def process_random_coin_drop(message: Message):
     chat_id = message.chat.id
     user = await get_user(message.from_user.id, message.from_user.username, chat_id)
 
-    # Проверка шанса (0.5%)
     if random.random() > COIN_DROP_CHANCE: return
 
-    # Награда от 1 до 5
     amount = random.randint(COIN_DROP_MIN, COIN_DROP_MAX)
     await update_user(message.from_user.id, coins=user["coins"] + amount)
 
@@ -158,6 +155,7 @@ async def process_random_coin_drop(message: Message):
     except Exception:
         pass
 
+
 # ================= 🛍️ МАГАЗИН =================
 @dp.message(F.text & F.text.regexp(r'(?i)^[/!]?магазин\s*$'))
 async def cmd_shop(message: Message):
@@ -165,7 +163,7 @@ async def cmd_shop(message: Message):
         "🛍️ <b>Магазин AURA</b>\n\n"
         "💊 <b>Капсула</b> — 100 🪙\n"
         "⚱️ <b>Уник. Капсула</b> — 500 🪙\n\n"
-        "Нажми на кнопку ниже, чтобы купить предмет. Он появится в твоем инвентаре (в команде <code>!карман</code>)."
+        "Нажми на кнопку ниже, чтобы купить предмет. Он появится в твоем инвентаре."
     )
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="💊 Купить Капсулу (100 🪙)", callback_data="buy_capsule")],
@@ -182,19 +180,12 @@ async def cb_buy_capsule(callback: CallbackQuery):
     if user["coins"] < price:
         return await callback.answer("❌ Недостаточно коинов!", show_alert=True)
 
-    # Списываем коины
     new_coins = user["coins"] - price
-    # Добавляем предмет в инвентарь
     inv = json.loads(user.get("inventory") or "[]")
     inv.append("capsule")
 
-    # Обновляем в базе
     await update_user(callback.from_user.id, coins=new_coins, inventory=json.dumps(inv))
-
-    await callback.answer("✅ Ты купил Капсулу!", show_alert=True)
-    await callback.message.edit_text(
-        f"✅ <b>Успешно!</b>\nТы купил 💊 Капсулу за {price} 🪙.\n\nПроверь свой инвентарь: <code>!карман</code>",
-        parse_mode="HTML")
+    await callback.answer("✅ Успешно куплено! Проверь !карман", show_alert=True)
 
 
 @dp.callback_query(F.data == "buy_uniq_capsule")
@@ -205,28 +196,21 @@ async def cb_buy_uniq_capsule(callback: CallbackQuery):
     if user["coins"] < price:
         return await callback.answer("❌ Недостаточно коинов!", show_alert=True)
 
-    # Списываем коины
     new_coins = user["coins"] - price
-    # Добавляем предмет в инвентарь
     inv = json.loads(user.get("inventory") or "[]")
     inv.append("uniq_capsule")
 
-    # Обновляем в базе
     await update_user(callback.from_user.id, coins=new_coins, inventory=json.dumps(inv))
+    await callback.answer("✅ Успешно куплено! Проверь !карман", show_alert=True)
 
-    await callback.answer("✅ Ты купил Уник. Капсулу!", show_alert=True)
-    await callback.message.edit_text(
-        f"✅ <b>Успешно!</b>\nТы купил ⚱️ Уник. Капсулу за {price} 🪙.\n\nПроверь свой инвентарь: <code>!карман</code>",
-        parse_mode="HTML")
+
 # ================= 💰 ЭКОНОМИКА =================
 @dp.message(F.text & F.text.regexp(r'(?i)^[/!]?(карман|баланс)\s*$'))
 async def cmd_pocket(message: Message):
     target = message.reply_to_message.from_user if message.reply_to_message else message.from_user
     user = await get_user(target.id, target.username)
 
-    # Получаем капсулы
     inv = json.loads(user.get("inventory") or "[]")
-
     name = f"@{safe_text(target.username)}" if target.username else f"id{target.id}"
 
     text = f"💰 <b>Карман {name}</b>\n\n"
@@ -244,6 +228,7 @@ async def cmd_pocket(message: Message):
 
     await message.answer(text, parse_mode="HTML")
 
+
 @dp.message(F.text & F.text.regexp(r'(?i)^[/!]?(топ)\s*$'))
 async def cmd_top(message: Message):
     users = await get_users_from_chat(message.chat.id) if message.chat.type in ("group",
@@ -252,9 +237,19 @@ async def cmd_top(message: Message):
     users.sort(key=lambda x: x.get("coins", 0), reverse=True)
     msg = "💰 <b>ТОП-10 ПО КОИНАМ</b>\n━━━━━━━━━━━━━━━━━━━━\n\n"
     medals = ["🥇", "🥈", "🥉"]
+
     for i, u in enumerate(users[:10]):
         prefix = medals[i] if i < 3 else f"{i + 1}."
-        msg += f"{prefix} {safe_text(u['username'])} — <b>{u['coins']}</b> 🪙\n"
+        user_id = u.get("user_id")
+        username = u.get("username", f"id{user_id}")
+
+        if user_id:
+            name_str = f'<a href="tg://user?id={user_id}">{safe_text(username)}</a>'
+        else:
+            name_str = safe_text(username)
+
+        msg += f"{prefix} {name_str} — <b>{u['coins']}</b> 🪙\n"
+
     await message.answer(msg, parse_mode="HTML")
 
 
@@ -445,17 +440,10 @@ async def cmd_mines_bet(message: Message):
     if user["coins"] < amount: return await message.answer(f"❌ Мало коинов! У тебя {user['coins']} 🪙")
 
     game_id = f"{message.from_user.id}_{message.message_id}"
-    active_mines_games[game_id] = {
-        "user_id": message.from_user.id,
-        "amount": amount,
-        "active": False
-    }
+    active_mines_games[game_id] = {"user_id": message.from_user.id, "amount": amount, "active": False}
 
-    await message.answer(
-        f"💣 <b>Ставка: {amount} 🪙</b>\nВыбери количество мин:",
-        reply_markup=get_mines_kb(game_id),
-        parse_mode="HTML"
-    )
+    await message.answer(f"💣 <b>Ставка: {amount} 🪙</b>\nВыбери количество мин:", reply_markup=get_mines_kb(game_id),
+                         parse_mode="HTML")
 
 
 @dp.callback_query(F.data.startswith("mines_start_"))
@@ -465,13 +453,9 @@ async def cb_mines_start(callback: CallbackQuery):
     game_id = parts[1]
 
     game = active_mines_games.get(game_id)
-    if not game:
-        return await callback.answer("❌ Игра устарела. Напиши !мины заново.", show_alert=True)
-    if game["user_id"] != callback.from_user.id:
-        return await callback.answer("❌ Это не твоя игра!", show_alert=True)
-
-    if game["active"]:
-        return await callback.answer("❌ Игра уже начата!", show_alert=True)
+    if not game: return await callback.answer("❌ Игра устарела. Напиши !мины заново.", show_alert=True)
+    if game["user_id"] != callback.from_user.id: return await callback.answer("❌ Это не твоя игра!", show_alert=True)
+    if game["active"]: return await callback.answer("❌ Игра уже начата!", show_alert=True)
 
     game["active"], game["mines_count"] = True, mines_count
     game["board"] = [False] * 16
@@ -480,26 +464,15 @@ async def cb_mines_start(callback: CallbackQuery):
 
     kb = InlineKeyboardMarkup(inline_keyboard=[])
     for r in range(4):
-        kb.inline_keyboard.append([
-            InlineKeyboardButton(text="⬜", callback_data=f"mines_open_{r * 4 + c}|{game_id}")
-            for c in range(4)
-        ])
+        kb.inline_keyboard.append(
+            [InlineKeyboardButton(text="⬜", callback_data=f"mines_open_{r * 4 + c}|{game_id}") for c in range(4)])
 
-    kb.inline_keyboard.append([
-        InlineKeyboardButton(
-            text=f"💰 Забрать ({game['amount']} 🪙) | Кэф: x1.0",
-            callback_data=f"mines_cashout|{game_id}"
-        )
-    ])
+    kb.inline_keyboard.append([InlineKeyboardButton(text=f"💰 Забрать ({game['amount']} 🪙) | Кэф: x1.0",
+                                                    callback_data=f"mines_cashout|{game_id}")])
 
     await callback.message.edit_text(
-        f"💣 <b>Мины: {mines_count}</b>\n"
-        f"Ставка: <b>{game['amount']}</b> 🪙\n"
-        f"Текущий кэф: <b>x1.0</b>\n"
-        f"Открыто: 0/16",
-        reply_markup=kb,
-        parse_mode="HTML"
-    )
+        f"💣 <b>Мины: {mines_count}</b>\nСтавка: <b>{game['amount']}</b> 🪙\nТекущий кэф: <b>x1.0</b>\nОткрыто: 0/16",
+        reply_markup=kb, parse_mode="HTML")
     await callback.answer()
 
 
@@ -510,13 +483,9 @@ async def cb_mines_open(callback: CallbackQuery):
     game_id = parts[1]
 
     game = active_mines_games.get(game_id)
-    if not game:
-        return await callback.answer("❌ Игра устарела или сброшена.", show_alert=True)
-    if game["user_id"] != callback.from_user.id:
-        return await callback.answer("❌ Это не твоя игра!", show_alert=True)
-
-    if game["opened"][idx]:
-        return await callback.answer("Уже открыто!", show_alert=True)
+    if not game: return await callback.answer("❌ Игра устарела.", show_alert=True)
+    if game["user_id"] != callback.from_user.id: return await callback.answer("❌ Это не твоя игра!", show_alert=True)
+    if game["opened"][idx]: return await callback.answer("Уже открыто!", show_alert=True)
 
     if game["board"][idx]:
         game["active"] = False
@@ -526,15 +495,11 @@ async def cb_mines_open(callback: CallbackQuery):
 
         kb = InlineKeyboardMarkup(inline_keyboard=[])
         for r in range(4):
-            kb.inline_keyboard.append([
-                InlineKeyboardButton(text="💥" if game["board"][r * 4 + c] else "⬜", callback_data="ignore")
-                for c in range(4)
-            ])
-        await callback.message.edit_text(
-            f"💥 <b>БАБАХ!</b>\nТы потерял {game['amount']} 🪙",
-            reply_markup=kb,
-            parse_mode="HTML"
-        )
+            kb.inline_keyboard.append(
+                [InlineKeyboardButton(text="💥" if game["board"][r * 4 + c] else "⬜", callback_data="ignore") for c in
+                 range(4)])
+        await callback.message.edit_text(f"💥 <b>БАБАХ!</b>\nТы потерял {game['amount']} 🪙", reply_markup=kb,
+                                         parse_mode="HTML")
         return await callback.answer("💥 БУМ!")
 
     game["opened"][idx] = True
@@ -546,28 +511,17 @@ async def cb_mines_open(callback: CallbackQuery):
 
     kb = InlineKeyboardMarkup(inline_keyboard=[])
     for r in range(4):
-        kb.inline_keyboard.append([
-            InlineKeyboardButton(
-                text="✅" if game["opened"][r * 4 + c] else "⬜",
-                callback_data="ignore" if game["opened"][r * 4 + c] else f"mines_open_{r * 4 + c}|{game_id}"
-            ) for c in range(4)
-        ])
+        kb.inline_keyboard.append([InlineKeyboardButton(text="✅" if game["opened"][r * 4 + c] else "⬜",
+                                                        callback_data="ignore" if game["opened"][
+                                                            r * 4 + c] else f"mines_open_{r * 4 + c}|{game_id}") for c
+                                   in range(4)])
 
-    kb.inline_keyboard.append([
-        InlineKeyboardButton(
-            text=f"💰 Забрать ({win_amount} 🪙) | Кэф: x{current_coef}",
-            callback_data=f"mines_cashout|{game_id}"
-        )
-    ])
+    kb.inline_keyboard.append([InlineKeyboardButton(text=f"💰 Забрать ({win_amount} 🪙) | Кэф: x{current_coef}",
+                                                    callback_data=f"mines_cashout|{game_id}")])
 
     await callback.message.edit_text(
-        f"💣 <b>Мины: {game['mines_count']}</b>\n"
-        f"Ставка: <b>{game['amount']}</b> 🪙\n"
-        f"Текущий кэф: <b>x{current_coef}</b>\n"
-        f"Открыто: {safe_opened}/16",
-        reply_markup=kb,
-        parse_mode="HTML"
-    )
+        f"💣 <b>Мины: {game['mines_count']}</b>\nСтавка: <b>{game['amount']}</b> 🪙\nТекущий кэф: <b>x{current_coef}</b>\nОткрыто: {safe_opened}/16",
+        reply_markup=kb, parse_mode="HTML")
     await callback.answer()
 
 
@@ -577,10 +531,8 @@ async def cb_mines_cashout(callback: CallbackQuery):
     game_id = parts[1]
 
     game = active_mines_games.get(game_id)
-    if not game:
-        return await callback.answer("❌ Эта игра уже завершена.", show_alert=True)
-    if game["user_id"] != callback.from_user.id:
-        return await callback.answer("❌ Это не твоя игра!", show_alert=True)
+    if not game: return await callback.answer("❌ Эта игра уже завершена.", show_alert=True)
+    if game["user_id"] != callback.from_user.id: return await callback.answer("❌ Это не твоя игра!", show_alert=True)
 
     game["active"] = False
     active_mines_games.pop(game_id, None)
@@ -600,19 +552,13 @@ async def cb_mines_cashout(callback: CallbackQuery):
 
     kb = InlineKeyboardMarkup(inline_keyboard=[])
     for r in range(4):
-        kb.inline_keyboard.append([
-            InlineKeyboardButton(text="💣" if game["board"][r * 4 + c] else "✅", callback_data="ignore")
-            for c in range(4)
-        ])
+        kb.inline_keyboard.append(
+            [InlineKeyboardButton(text="💣" if game["board"][r * 4 + c] else "✅", callback_data="ignore") for c in
+             range(4)])
 
     await callback.message.edit_text(
-        f"💰 <b>Забрано!</b>\n"
-        f"Кэф: <b>x{coef}</b>\n"
-        f"Выигрыш: <b>{win_amount}</b> 🪙\n"
-        f"Прибыль: <b>{profit}</b> 🪙",
-        reply_markup=kb,
-        parse_mode="HTML"
-    )
+        f"💰 <b>Забрано!</b>\nКэф: <b>x{coef}</b>\nВыигрыш: <b>{win_amount}</b> 🪙\nПрибыль: <b>{profit}</b> 🪙",
+        reply_markup=kb, parse_mode="HTML")
     await callback.answer("💰 Забрано!")
 
     # Автоудаление сообщения с результатом через 2 минуты
@@ -628,10 +574,8 @@ async def cb_mines_cancel(callback: CallbackQuery):
     game_id = callback.data.split("|")[1]
 
     game = active_mines_games.get(game_id)
-    if not game:
-        return await callback.answer("❌ Игра уже неактивна.", show_alert=True)
-    if game["user_id"] != callback.from_user.id:
-        return await callback.answer("❌ Это не твоя игра!", show_alert=True)
+    if not game: return await callback.answer("❌ Игра уже неактивна.", show_alert=True)
+    if game["user_id"] != callback.from_user.id: return await callback.answer("❌ Это не твоя игра!", show_alert=True)
 
     active_mines_games.pop(game_id, None)
     await callback.message.edit_text("❌ Игра отменена.")
@@ -670,7 +614,7 @@ async def cmd_changeme(message: Message):
     await message.answer(f"✅ Новый случайный позывной: {emoji}")
 
 
-# ================= 📢 СОЗЫВЫ (скрыто из помощи) =================
+# ================= 📢 СОЗЫВЫ =================
 async def summon_all_members(chat_id: int, call_text: str, starter_id: int):
     active_summons[chat_id] = True
     try:
@@ -811,7 +755,7 @@ async def cmd_help(message: Message):
         "📖 <b>СПИСОК КОМАНД БОТА</b>\n"
         "━━━━━━━━━━━━━━━━━━━━\n\n"
         "🎁 <b>Случайные коины:</b>\n"
-        "• Просто пиши в чате — с шансом 3% получишь 2-10 🪙\n\n"
+        "• Просто пиши в чате — с шансом 0.5% получишь 1-5 🪙\n\n"
         "📦 <b>Сундуки:</b>\n"
         "• <code>!открыть</code> — открыть сундук (КД 5 часов)\n\n"
         "💰 <b>Экономика:</b>\n"
@@ -825,6 +769,10 @@ async def cmd_help(message: Message):
         "• <code>!кубы @user ставка</code> — дуэль в кости\n"
         "• <code>!кубы ставка</code> (ответом) — быстрый вызов\n"
         "• <code>!мины сумма</code> — игра в мины\n\n"
+        "📢 <b>Созывы:</b>\n"
+        "• <code>!all</code> — массовый созыв\n"
+        "• <code>!admins</code> — созыв админов\n"
+        "• <code>!stop</code> — остановить созыв\n\n"
         "📛 <b>Позывные:</b>\n"
         "• <code>!me</code> — мой позывной\n"
         "• <code>!setme эмодзи</code> — установить\n"
@@ -861,37 +809,26 @@ async def start_fake_website():
     await site.start()
 
 
-@dp.message(F.text & F.text.regexp(r'(?i)^[/!]?инвентарь\s*$'))
-async def cmd_inventory(message: Message):
-    user = await get_user(message.from_user.id, message.from_user.username)
-    inv = json.loads(user.get("inventory") or "[]")
-
-    text = "🎒 <b>Твой инвентарь:</b>\n\n"
-    has_items = False
-
-    if user.get("keys", 0) > 0:
-        text += f"🔑 Золотые ключи: <b>{user['keys']}</b>\n"
-        has_items = True
-
-    for item in inv:
-        if item == 'capsule':
-            text += "💊 Капсула (Скоро)\n"
-            has_items = True
-        if item == 'uniq_capsule':
-            text += "⚱️ Уник. Капсула (Скоро)\n"
-            has_items = True
-
-    if not has_items:
-        text += "❌ Пусто"
-
-    await message.answer(text, parse_mode="HTML")
-
 async def main():
     await start_fake_website()
     me = await bot.get_me()
     logger.info(f"🤖 Бот: @{me.username} | can_read_all_group_messages={me.can_read_all_group_messages}")
     if not me.can_read_all_group_messages:
         logger.warning("⚠️ Privacy Mode ВКЛЮЧЕН! Бот не видит '!команды'. Отключи в BotFather.")
+
+    # Установка кнопки меню для Mini App в ЛС
+    web_app_url = "https://dan4bot-1.onrender.com"  # УКАЖИ СВОЮ ССЫЛКУ НА MINI APP
+    try:
+        await bot.set_chat_menu_button(
+            menu_button=MenuButtonWebApp(
+                text="🎮 AURA GAME",
+                web_app=WebAppInfo(url=web_app_url)
+            )
+        )
+        logger.info("Кнопка Mini App успешно установлена!")
+    except Exception as e:
+        logger.error(f"Не удалось установить кнопку меню: {e}")
+
     await dp.start_polling(bot)
 
 

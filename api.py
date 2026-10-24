@@ -95,7 +95,7 @@ async def open_chest(auth: UserAuth):
     if not res.data: raise HTTPException(status_code=404, detail="User not found")
 
     last_chest = res.data[0].get("last_chest", 0) or 0
-    # КД 5 часов (18000 секунд), как в чате
+    # КД 5 часов (18000 секунд)
     if (now - last_chest) < 18000:
         raise HTTPException(status_code=400, detail="Cooldown")
 
