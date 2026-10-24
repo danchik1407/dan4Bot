@@ -95,7 +95,7 @@ async function pollHockeyState() {
 function startHockeyPolling() {
     if (hockeyInterval) clearInterval(hockeyInterval);
     pollHockeyState();
-    hockeyInterval = setInterval(pollHockeyState, 500);
+    hockeyInterval = setInterval(pollHockeyState, 100); // Ускорено до 100мс
 }
 
 function stopHockeyPolling() {
@@ -119,7 +119,7 @@ function showToastLose(text) {
     if (tg.HapticFeedback) tg.HapticFeedback.notificationOccurred('error');
 }
 
-// ОСТАЛЬНЫЕ ФУНКЦИИ
+// ОСТАЛЬНЫЕ ФУНКЦИИ (без изменений)
 async function loadUserData() {
     try {
         const response = await fetch(`${API_URL}/api/user`, {

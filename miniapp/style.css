@@ -99,7 +99,7 @@ main { padding: 0 16px; }
 .hockey-header { display: flex; justify-content: space-between; align-items: center; width: 100%; max-width: 350px; margin-bottom: 10px; padding: 15px; background: var(--card); border-radius: 16px; border: 1px solid #333; box-shadow: 0 0 15px rgba(0, 0, 0, 0.5); }
 .hockey-arena { width: 100%; max-width: 350px; height: 350px; background: linear-gradient(135deg, #0f172a 0%, #020617 100%); border: 3px solid #1e3a8a; border-radius: 20px; position: relative; overflow: hidden; margin-bottom: 15px; box-shadow: inset 0 0 50px rgba(0, 0, 0, 0.9), 0 0 20px rgba(30, 58, 138, 0.5); }
 .hockey-arena::before { content: ''; position: absolute; top: 0; left: 0; width: 100%; height: 100%; background-image: linear-gradient(rgba(30, 58, 138, 0.2) 1px, transparent 1px), linear-gradient(90deg, rgba(30, 58, 138, 0.2) 1px, transparent 1px); background-size: 20px 20px; pointer-events: none; }
-.hockey-ball { width: 24px; height: 24px; background: radial-gradient(circle, #fff 0%, #a0a0a0 100%); border-radius: 50%; position: absolute; box-shadow: 0 0 20px #fff, 0 0 40px rgba(255, 255, 255, 0.5); transform: translate(-50%, -50%); transition: left 0.1s linear, top 0.1s linear; z-index: 10; }
+.hockey-ball { width: 24px; height: 24px; background: radial-gradient(circle, #fff 0%, #a0a0a0 100%); border-radius: 50%; position: absolute; box-shadow: 0 0 20px #fff, 0 0 40px rgba(255, 255, 255, 0.5); transform: translate(-50%, -50%); transition: left 0.05s linear, top 0.05s linear; z-index: 10; }
 .hockey-player { position: absolute; border-radius: 15px; display: flex; justify-content: center; align-items: center; font-weight: 900; color: white; transform: translate(-50%, -50%); box-shadow: 0 0 15px rgba(0,0,0,0.8); overflow: hidden; border: 2px solid rgba(255,255,255,0.3); z-index: 5; transition: all 0.3s ease; }
 .hockey-player img { width: 100%; height: 100%; object-fit: cover; }
 .hockey-player .bet-amount { position: absolute; bottom: -25px; font-size: 12px; background: rgba(0,0,0,0.8); padding: 2px 8px; border-radius: 10px; border: 1px solid #444; color: #fff; white-space: nowrap; }
@@ -111,7 +111,12 @@ main { padding: 0 16px; }
 .toast-lose { background: linear-gradient(45deg, #991b1b, #ef4444); border: 1px solid #ef4444; }
 .toast-icon { font-size: 28px; }
 
-/* Остальные стили (рулетка, модалка) */
+/* Кнопки */
+.action-btn { background: var(--accent); color: white; border: none; border-radius: 15px; padding: 15px; font-size: 18px; font-weight: 800; cursor: pointer; margin-bottom: 20px; width: 100%; max-width: 350px; transition: 0.2s; display: block; text-align: center; -webkit-appearance: none; appearance: none; }
+.action-btn:active { transform: scale(0.98); opacity: 0.8; }
+.action-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* Рулетка и модалки */
 .roulette-container { width: 100%; max-width: 350px; margin: 0 auto 20px auto; position: relative; background: var(--card); border: 2px solid var(--accent); border-radius: 15px; padding: 10px 0; overflow: hidden; box-shadow: 0 0 15px rgba(0, 122, 255, 0.5); }
 .roulette-pointer { text-align: center; color: var(--accent); font-size: 24px; position: absolute; top: -5px; left: 50%; transform: translateX(-50%); z-index: 10; text-shadow: 0 0 5px #000; }
 .roulette-window { height: 80px; overflow: hidden; display: flex; align-items: center; position: relative; }
