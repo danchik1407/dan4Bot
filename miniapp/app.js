@@ -15,14 +15,11 @@ const API_URL = "https://aura-api-mptt.onrender.com";
 
 let balance = 0, keys = 0, currentBet = 10, inventory = [], lastChestTime = 0, isProcessing = false;
 let hockeyInterval = null;
-let animationFrameId = null;
-let localBallState = { x: 50, y: 50, vx: 0, vy: 0 };
 let hasBetThisRound = false;
 let hasShownWinner = false;
 
 // ==================== ЗВУКИ ====================
 const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-
 function playSound(type) {
     if (audioCtx.state === 'suspended') audioCtx.resume();
     const osc = audioCtx.createOscillator();
@@ -98,58 +95,6 @@ async function placeHockeyBet() {
     isProcessing = false;
 }
 
-function flashCorner(cornerId) {
-    const el = document.getElementById(cornerId);
-    if (el) {
-        el.classList.add('flash');
-        playSound('click');
-        setTimeout(() => el.classList.remove('flash'), 300);
-    }
-}
-
-function animateBall(arenaWidth, arenaHeight) {
-    if (localBallState.vx === 0 && localBallState.vy === 0) return;
-
-    const prevX = localBallState.x;
-    const prevY = localBallState.y;
-
-    localBallState.x += localBallState.vx;
-    localBallState.y += localBallState.vy;
-
-    if (localBallState.x < 0) { localBallState.x = 0; localBallState.vx *= -1; }
-    if (localBallState.x > 100) { localBallState.x = 100; localBallState.vx *= -1; }
-    if (localBallState.y < 0) { localBallState.y = 0; localBallState.vy *= -1; }
-    if (localBallState.y > 100) { localBallState.y = 100; localBallState.vy *= -1; }
-
-    if ((localBallState.x < 10 && localBallState.y < 10) && !(prevX < 10 && prevY < 10)) flashCorner('corner-tl');
-    if ((localBallState.x > 90 && localBallState.y < 10) && !(prevX > 90 && prevY < 10)) flashCorner('corner-tr');
-    if ((localBallState.x < 10 && localBallState.y > 90) && !(prevX < 10 && prevY > 90)) flashCorner('corner-bl');
-    if ((localBallState.x > 90 && localBallState.y > 90) && !(prevX > 90 && prevY > 90)) flashCorner('corner-br');
-
-    localBallState.vx *= 0.985;
-    localBallState.vy *= 0.985;
-
-    const ball = document.getElementById('hockey-ball');
-    const arena = document.getElementById('hockey-arena');
-
-    if (ball && arena) {
-        ball.style.left = localBallState.x + '%';
-        ball.style.top = localBallState.y + '%';
-
-        const speed = Math.sqrt(localBallState.vx**2 + localBallState.vy**2);
-        if (speed < 2) {
-            if (!arena.classList.contains('zoomed')) {
-                arena.classList.add('zoomed');
-            }
-            arena.style.transformOrigin = `${localBallState.x}% ${localBallState.y}%`;
-        }
-    }
-
-    if (Math.abs(localBallState.vx) > 0.1 || Math.abs(localBallState.vy) > 0.1) {
-        animationFrameId = requestAnimationFrame(() => animateBall(arenaWidth, arenaHeight));
-    }
-}
-
 async function pollHockeyState() {
     if (!document.getElementById('screen-hockey').classList.contains('active')) return;
     try {
@@ -165,11 +110,6 @@ async function pollHockeyState() {
             statusEl.style.color = '#ffcc00';
             document.getElementById('hockey-controls').style.display = 'block';
 
-            cancelAnimationFrame(animationFrameId);
-            localBallState = { x: 50, y: 50, vx: 0, vy: 0 };
-            const ball = document.getElementById('hockey-ball');
-            if(ball) { ball.style.left = '50%'; ball.style.top = '50%'; }
-
             hasBetThisRound = false;
             hasShownWinner = false;
             arena.classList.remove('zoomed');
@@ -181,15 +121,9 @@ async function pollHockeyState() {
             statusEl.style.color = '#007aff';
             document.getElementById('hockey-controls').style.display = 'none';
 
-            if (localBallState.vx === 0 && localBallState.vy === 0) {
-                localBallState = { x: 50, y: 50, vx: state.ball.vx, vy: state.ball.vy };
-                animateBall(350, 350);
-            }
-
         } else if (state.status === 'finished') {
             statusEl.innerText = 'Раунд окончен!';
             statusEl.style.color = '#ff3b30';
-            cancelAnimationFrame(animationFrameId);
 
             arena.classList.remove('zoomed');
             arena.style.transformOrigin = 'center center';
@@ -204,10 +138,7 @@ async function pollHockeyState() {
                 if (state.winner.id === user.id) {
                     playSound('win');
                     if (tg.HapticFeedback) tg.HapticFeedback.notificationOccurred('success');
-                    // Ждем начисления на сервере, затем обновляем баланс
-                    setTimeout(async () => {
-                        await loadUserData();
-                    }, 1000);
+                    setTimeout(async () => { await loadUserData(); }, 1000);
                 } else {
                     playSound('lose');
                     if (tg.HapticFeedback) tg.HapticFeedback.notificationOccurred('error');
@@ -253,11 +184,20 @@ async function pollHockeyState() {
             arena.appendChild(sector);
         });
 
-        if (!document.querySelector('.hockey-ball')) {
-            const ball = document.createElement('div');
-            ball.className = 'hockey-ball';
-            ball.id = 'hockey-ball';
-            arena.appendChild(ball);
+        // Отрисовка шарика на основе данных сервера
+        const ball = document.getElementById('hockey-ball');
+        if (ball) {
+            ball.style.left = state.ball.x + '%';
+            ball.style.top = state.ball.y + '%';
+
+            // Зум при замедлении
+            const speed = Math.sqrt(state.ball.vx**2 + state.ball.vy**2);
+            if (speed < 2 && state.status === 'rolling') {
+                if (!arena.classList.contains('zoomed')) {
+                    arena.classList.add('zoomed');
+                }
+                arena.style.transformOrigin = `${state.ball.x}% ${state.ball.y}%`;
+            }
         }
 
         const list = document.getElementById('hockey-participants');
@@ -294,13 +234,12 @@ async function pollHockeyState() {
 function startHockeyPolling() {
     if (hockeyInterval) clearInterval(hockeyInterval);
     pollHockeyState();
-    hockeyInterval = setInterval(pollHockeyState, 200);
+    hockeyInterval = setInterval(pollHockeyState, 100);
 }
 
 function stopHockeyPolling() {
     if (hockeyInterval) clearInterval(hockeyInterval);
     hockeyInterval = null;
-    cancelAnimationFrame(animationFrameId);
 }
 
 function closeWinnerModal() {

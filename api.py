@@ -61,23 +61,20 @@ async def get_hockey_state():
     time_left = 20 - (now - game_state["last_update"])
 
     if game_state["status"] == "waiting":
-        # Боты начинают заходить с 8-й секунды
+        # Боты с 8 секунды, по 1 раз в 1.2 сек
         if time_left <= 8 and game_state["target_bots"] == 0:
             game_state["target_bots"] = random.randint(1, 5)
 
         if time_left <= 8 and game_state["target_bots"] > 0:
             current_bots = sum(1 for p in game_state["players"] if p["is_bot"])
-
-            # Заходят по одному раз в 1.2 секунды
             if current_bots < game_state["target_bots"] and (now - game_state["last_bot_added"]) > 1.2:
                 bot_bet = random.randint(10, 100)
                 bot_name = random.choice(BOT_NAMES) + str(random.randint(1, 99))
                 bot_color = random.choice(BOT_COLORS)
-
                 while any(p["color"] == bot_color for p in game_state["players"]):
                     bot_color = random.choice(BOT_COLORS)
-
                 bot_shape = random.choice(["circle", "square", "oval", "triangle"])
+
                 game_state["players"].append({
                     "id": random.randint(10000, 99999), "name": bot_name, "avatar": "", "bet": bot_bet,
                     "color": bot_color, "shape": bot_shape, "is_bot": True
@@ -97,6 +94,7 @@ async def get_hockey_state():
                 for p in game_state["players"]:
                     p["percent"] = 0
 
+            # Выбор победителя
             rand_val = random.uniform(0, 100)
             current_val = 0
             for p in game_state["players"]:
@@ -105,32 +103,49 @@ async def get_hockey_state():
                     game_state["winner"] = p
                     break
 
-            angle = random.uniform(0, 2 * math.pi)
-            game_state["ball"]["vx"] = math.cos(angle) * 10
-            game_state["ball"]["vy"] = math.sin(angle) * 10
+            # Шарик летит В СТОРОНУ ПОБЕДИТЕЛЯ
+            if game_state["winner"]:
+                # Начальная позиция (центр)
+                start_x, start_y = 50, 50
+                # Позиция победителя (берем центр его сектора по X и произвольный Y)
+                # Но так как зоны вертикальные, просто летим в сторону победителя по X
+                target_x = 50 + (random.random() - 0.5) * 10  # Чуть в сторону
+
+                angle = math.atan2(target_x - start_x, 100 - start_y)
+                game_state["ball"]["vx"] = math.cos(angle) * 10
+                game_state["ball"]["vy"] = math.sin(angle) * 10
 
     elif game_state["status"] == "rolling":
-        if now - game_state["last_update"] > 7:
+        # Обновляем шарик на сервере (физика)
+        ball = game_state["ball"]
+        ball["vx"] *= 0.985
+        ball["vy"] *= 0.985
+        ball["x"] += ball["vx"]
+        ball["y"] += ball["vy"]
+
+        # Отскоки
+        if ball["x"] < 0 or ball["x"] > 100: ball["vx"] *= -1
+        if ball["y"] < 0 or ball["y"] > 100: ball["vy"] *= -1
+
+        # Если шарик остановился или прошло 7 секунд
+        if (abs(ball["vx"]) < 0.3 and abs(ball["vy"]) < 0.3) or (now - game_state["last_update"] > 7):
             game_state["status"] = "finished"
             game_state["last_update"] = now
 
     elif game_state["status"] == "finished":
         if now - game_state["last_update"] > 4:
-            # НАЧИСЛЕНИЕ МОНЕТ ПОБЕДИТЕЛЮ
+            # Начисление монет
             if game_state["winner"]:
                 winner_id = game_state["winner"]["id"]
                 bank_amount = game_state["bank"]
-
                 try:
                     res = supabase.table("users").select("coins").eq("user_id", winner_id).execute()
                     if res.data:
                         current_coins = int(res.data[0].get("coins", 0))
                         new_coins = current_coins + bank_amount
                         supabase.table("users").update({"coins": new_coins}).eq("user_id", winner_id).execute()
-                        print(
-                            f"🏆 Выигрыш начислен! Юзер {winner_id} получил {bank_amount} монет. Новый баланс: {new_coins}")
                 except Exception as e:
-                    print(f"❌ Ошибка при начислении выигрыша: {e}")
+                    print(f"❌ Ошибка: {e}")
 
             game_state = {
                 "status": "waiting", "timer": 20, "bank": 0, "players": [],
@@ -168,7 +183,6 @@ async def place_bet(data: PlaceBet):
         game_state["bank"] += data.amount
     else:
         if len(game_state["players"]) >= 20: raise HTTPException(status_code=400, detail="Комната заполнена")
-
         player_color = "#007aff"
         while any(p["color"] == player_color for p in game_state["players"]):
             player_color = f"hsl({random.randint(0, 360)}, 80%, 50%)"
