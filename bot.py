@@ -40,7 +40,6 @@ COIN_DROP_MAX = 10
 DROP_IMAGE = "drop.jpg"
 MIN_BET = 10
 
-active_summons: dict[int, bool] = {}
 active_challenges: dict[str, dict] = {}
 active_mines_games: dict[str, dict] = {}
 
@@ -61,14 +60,16 @@ async def get_user(user_id: int, username: str = None, chat_id: int = None):
         await asyncio.to_thread(lambda: supabase.table("users").insert(new_user).execute())
         return new_user
 
-    # Обновляем данные, если они изменились (добавили chat_id)
     updates = {}
     if username and user.get("username") != username: updates["username"] = username
     if chat_id and user.get("chat_id") != chat_id: updates["chat_id"] = chat_id
 
     if updates:
-        for k, v in updates.items(): user[k] = v
-        await asyncio.to_thread(lambda: supabase.table("users").update(updates).eq("user_id", user_id).execute())
+        try:
+            await asyncio.to_thread(lambda: supabase.table("users").update(updates).eq("user_id", user_id).execute())
+            user.update(updates)
+        except Exception as e:
+            logger.error(f"Ошибка обновления юзера {user_id}: {e}")
 
     return user
 
@@ -125,13 +126,12 @@ def safe_text(text) -> str:
     return html_module.escape(str(text))
 
 
-# ================= 🎁 ДРОП (ОБНОВЛЕНО) =================
+# ================= 🎁 ДРОП =================
 async def process_random_coin_drop(message: Message):
     if not message.from_user or message.from_user.is_bot: return
     text = message.text or ""
     if text.startswith("!") or text.startswith("/"): return
 
-    # Сохраняем chat_id при любом сообщении (чтобы !all знал, кто здесь)
     chat_id = message.chat.id if message.chat.type in ("group", "supergroup") else None
     user = await get_user(message.from_user.id, message.from_user.username, chat_id)
 
@@ -344,12 +344,12 @@ async def cb_dice_decline(callback: CallbackQuery):
 MINES_STEP_COEFS = {1: 1.10, 2: 1.15, 3: 1.25}
 
 
-def get_mines_kb():
+def get_mines_kb(game_id: str):
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="1 💣 (x1.10)", callback_data="mines_start_1"),
-         InlineKeyboardButton(text="2 💣 (x1.15)", callback_data="mines_start_2"),
-         InlineKeyboardButton(text="3 💣 (x1.25)", callback_data="mines_start_3")],
-        [InlineKeyboardButton(text="❌ Отмена", callback_data="mines_cancel")]
+        [InlineKeyboardButton(text="1 💣 (x1.10)", callback_data=f"mines_start_1|{game_id}"),
+         InlineKeyboardButton(text="2 💣 (x1.15)", callback_data=f"mines_start_2|{game_id}"),
+         InlineKeyboardButton(text="3 💣 (x1.25)", callback_data=f"mines_start_3|{game_id}")],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data=f"mines_cancel|{game_id}")]
     ])
 
 
@@ -361,24 +361,33 @@ async def cmd_mines_bet(message: Message):
     if amount < MIN_BET: return await message.answer(f"❌ Минимальная ставка: {MIN_BET} 🪙")
     if user["coins"] < amount: return await message.answer(f"❌ Мало коинов! У тебя {user['coins']} 🪙")
 
-    game_id = str(random.randint(100000, 999999))
-    active_mines_games[game_id] = {"user_id": message.from_user.id, "amount": amount, "active": False}
+    game_id = f"{message.from_user.id}_{int(time.time())}"
+    active_mines_games[game_id] = {
+        "user_id": message.from_user.id,
+        "amount": amount,
+        "active": False
+    }
 
-    await message.answer(f"💣 <b>Ставка: {amount} 🪙</b>\nВыбери количество мин:", reply_markup=get_mines_kb(),
-                         parse_mode="HTML")
+    await message.answer(
+        f"💣 <b>Ставка: {amount} 🪙</b>\nВыбери количество мин:",
+        reply_markup=get_mines_kb(game_id),
+        parse_mode="HTML"
+    )
 
 
 @dp.callback_query(F.data.startswith("mines_start_"))
 async def cb_mines_start(callback: CallbackQuery):
-    mines_count = int(callback.data.split("_")[2])
-    game_id = next(
-        (gid for gid, g in active_mines_games.items() if g["user_id"] == callback.from_user.id and not g["active"]),
-        None)
+    parts = callback.data.split("|")
+    mines_count = int(parts[0].split("_")[2])
+    game_id = parts[1]
 
-    if not game_id: return await callback.message.edit_text(
-        "❌ Игра сброшена из-за перезагрузки бота. Напиши !мины <ставка> заново.")
+    game = active_mines_games.get(game_id)
+    if not game or game["user_id"] != callback.from_user.id:
+        return await callback.answer("❌ Это не твоя игра или она уже неактивна!", show_alert=True)
 
-    game = active_mines_games[game_id]
+    if game["active"]:
+        return await callback.answer("❌ Игра уже начата!", show_alert=True)
+
     game["active"], game["mines_count"] = True, mines_count
     game["board"] = [False] * 16
     game["opened"] = [False] * 16
@@ -386,29 +395,41 @@ async def cb_mines_start(callback: CallbackQuery):
 
     kb = InlineKeyboardMarkup(inline_keyboard=[])
     for r in range(4):
-        kb.inline_keyboard.append(
-            [InlineKeyboardButton(text="⬜", callback_data=f"mines_open_{r * 4 + c}") for c in range(4)])
+        kb.inline_keyboard.append([
+            InlineKeyboardButton(text="⬜", callback_data=f"mines_open_{r * 4 + c}|{game_id}")
+            for c in range(4)
+        ])
 
-    kb.inline_keyboard.append(
-        [InlineKeyboardButton(text=f"💰 Забрать ({game['amount']} 🪙) | Кэф: x1.0", callback_data="mines_cashout")])
+    kb.inline_keyboard.append([
+        InlineKeyboardButton(
+            text=f"💰 Забрать ({game['amount']} 🪙) | Кэф: x1.0",
+            callback_data=f"mines_cashout|{game_id}"
+        )
+    ])
 
     await callback.message.edit_text(
-        f"💣 <b>Мины: {mines_count}</b>\nСтавка: <b>{game['amount']}</b> 🪙\nТекущий кэф: <b>x1.0</b>\nОткрыто: 0/16",
-        reply_markup=kb, parse_mode="HTML")
+        f"💣 <b>Мины: {mines_count}</b>\n"
+        f"Ставка: <b>{game['amount']}</b> 🪙\n"
+        f"Текущий кэф: <b>x1.0</b>\n"
+        f"Открыто: 0/16",
+        reply_markup=kb,
+        parse_mode="HTML"
+    )
     await callback.answer()
 
 
 @dp.callback_query(F.data.startswith("mines_open_"))
 async def cb_mines_open(callback: CallbackQuery):
-    idx = int(callback.data.split("_")[2])
-    game_id = next(
-        (gid for gid, g in active_mines_games.items() if g["user_id"] == callback.from_user.id and g["active"]), None)
+    parts = callback.data.split("|")
+    idx = int(parts[0].split("_")[2])
+    game_id = parts[1]
 
-    if not game_id: return await callback.message.edit_text(
-        "❌ Игра сброшена из-за перезагрузки бота. Напиши !мины <ставка> заново.")
+    game = active_mines_games.get(game_id)
+    if not game or game["user_id"] != callback.from_user.id:
+        return await callback.answer("❌ Это не твоя игра!", show_alert=True)
 
-    game = active_mines_games[game_id]
-    if game["opened"][idx]: return await callback.answer("Уже открыто!", show_alert=True)
+    if game["opened"][idx]:
+        return await callback.answer("Уже открыто!", show_alert=True)
 
     if game["board"][idx]:
         game["active"] = False
@@ -418,11 +439,15 @@ async def cb_mines_open(callback: CallbackQuery):
 
         kb = InlineKeyboardMarkup(inline_keyboard=[])
         for r in range(4):
-            kb.inline_keyboard.append(
-                [InlineKeyboardButton(text="💥" if game["board"][r * 4 + c] else "⬜", callback_data="ignore") for c in
-                 range(4)])
-        await callback.message.edit_text(f"💥 <b>БАБАХ!</b>\nТы потерял {game['amount']} 🪙", reply_markup=kb,
-                                         parse_mode="HTML")
+            kb.inline_keyboard.append([
+                InlineKeyboardButton(text="💥" if game["board"][r * 4 + c] else "⬜", callback_data="ignore")
+                for c in range(4)
+            ])
+        await callback.message.edit_text(
+            f"💥 <b>БАБАХ!</b>\nТы потерял {game['amount']} 🪙",
+            reply_markup=kb,
+            parse_mode="HTML"
+        )
         return await callback.answer("💥 БУМ!")
 
     game["opened"][idx] = True
@@ -434,30 +459,40 @@ async def cb_mines_open(callback: CallbackQuery):
 
     kb = InlineKeyboardMarkup(inline_keyboard=[])
     for r in range(4):
-        kb.inline_keyboard.append([InlineKeyboardButton(text="✅" if game["opened"][r * 4 + c] else "⬜",
-                                                        callback_data="ignore" if game["opened"][
-                                                            r * 4 + c] else f"mines_open_{r * 4 + c}") for c in
-                                   range(4)])
+        kb.inline_keyboard.append([
+            InlineKeyboardButton(
+                text="✅" if game["opened"][r * 4 + c] else "⬜",
+                callback_data="ignore" if game["opened"][r * 4 + c] else f"mines_open_{r * 4 + c}|{game_id}"
+            ) for c in range(4)
+        ])
 
-    kb.inline_keyboard.append([InlineKeyboardButton(text=f"💰 Забрать ({win_amount} 🪙) | Кэф: x{current_coef}",
-                                                    callback_data="mines_cashout")])
+    kb.inline_keyboard.append([
+        InlineKeyboardButton(
+            text=f"💰 Забрать ({win_amount} 🪙) | Кэф: x{current_coef}",
+            callback_data=f"mines_cashout|{game_id}"
+        )
+    ])
 
     await callback.message.edit_text(
-        f"💣 <b>Мины: {game['mines_count']}</b>\nСтавка: <b>{game['amount']}</b> 🪙\nТекущий кэф: <b>x{current_coef}</b>\nОткрыто: {safe_opened}/16",
-        reply_markup=kb, parse_mode="HTML"
+        f"💣 <b>Мины: {game['mines_count']}</b>\n"
+        f"Ставка: <b>{game['amount']}</b> 🪙\n"
+        f"Текущий кэф: <b>x{current_coef}</b>\n"
+        f"Открыто: {safe_opened}/16",
+        reply_markup=kb,
+        parse_mode="HTML"
     )
     await callback.answer()
 
 
-@dp.callback_query(F.data == "mines_cashout")
+@dp.callback_query(F.data.startswith("mines_cashout"))
 async def cb_mines_cashout(callback: CallbackQuery):
-    game_id = next(
-        (gid for gid, g in active_mines_games.items() if g["user_id"] == callback.from_user.id and g["active"]), None)
+    parts = callback.data.split("|")
+    game_id = parts[1]
 
-    if not game_id: return await callback.message.edit_text(
-        "❌ Игра сброшена из-за перезагрузки бота. Напиши !мины <ставка> заново.")
+    game = active_mines_games.get(game_id)
+    if not game or game["user_id"] != callback.from_user.id:
+        return await callback.answer("❌ Это не твоя игра!", show_alert=True)
 
-    game = active_mines_games[game_id]
     game["active"] = False
     active_mines_games.pop(game_id, None)
 
@@ -476,22 +511,31 @@ async def cb_mines_cashout(callback: CallbackQuery):
 
     kb = InlineKeyboardMarkup(inline_keyboard=[])
     for r in range(4):
-        kb.inline_keyboard.append(
-            [InlineKeyboardButton(text="💣" if game["board"][r * 4 + c] else "✅", callback_data="ignore") for c in
-             range(4)])
+        kb.inline_keyboard.append([
+            InlineKeyboardButton(text="💣" if game["board"][r * 4 + c] else "✅", callback_data="ignore")
+            for c in range(4)
+        ])
 
     await callback.message.edit_text(
-        f"💰 <b>Забрано!</b>\nКэф: <b>x{coef}</b>\nВыигрыш: <b>{win_amount}</b> 🪙\nПрибыль: <b>{profit}</b> 🪙",
-        reply_markup=kb, parse_mode="HTML")
+        f"💰 <b>Забрано!</b>\n"
+        f"Кэф: <b>x{coef}</b>\n"
+        f"Выигрыш: <b>{win_amount}</b> 🪙\n"
+        f"Прибыль: <b>{profit}</b> 🪙",
+        reply_markup=kb,
+        parse_mode="HTML"
+    )
     await callback.answer("💰 Забрано!")
 
 
-@dp.callback_query(F.data == "mines_cancel")
+@dp.callback_query(F.data.startswith("mines_cancel|"))
 async def cb_mines_cancel(callback: CallbackQuery):
-    game_id = next(
-        (gid for gid, g in active_mines_games.items() if g["user_id"] == callback.from_user.id and not g["active"]),
-        None)
-    if game_id: active_mines_games.pop(game_id, None)
+    game_id = callback.data.split("|")[1]
+
+    game = active_mines_games.get(game_id)
+    if not game or game["user_id"] != callback.from_user.id:
+        return await callback.answer("❌ Это не твоя игра!", show_alert=True)
+
+    active_mines_games.pop(game_id, None)
     await callback.message.edit_text("❌ Игра отменена.")
     await callback.answer()
 
@@ -526,73 +570,6 @@ async def cmd_changeme(message: Message):
     emoji = random.choice(["🔥", "⚡", "🐺", "🦊", "🦁", "🐯", "🐲", "👻", "🤖", "👽", "💀", "👑", "🎭", "🦅", "🐍"])
     await update_user(message.from_user.id, call_sign=emoji)
     await message.answer(f"✅ Новый случайный позывной: {emoji}")
-
-
-# ================= 📢 СОЗЫВЫ (ОБНОВЛЕНО) =================
-async def summon_all_members(chat_id: int, call_text: str, starter_id: int):
-    active_summons[chat_id] = True
-    try:
-        # Берем только тех, кто писал в этот чат
-        users = await get_users_from_chat(chat_id)
-        users_to_tag = [u["user_id"] for u in users if u["user_id"] != starter_id]
-        random.shuffle(users_to_tag)
-
-        if not users_to_tag:
-            active_summons[chat_id] = False
-            return await bot.send_message(chat_id, "❌ В этом чате пока нет людей в базе. Напишите что-нибудь!")
-
-        for i in range(0, len(users_to_tag), 25):
-            if not active_summons.get(chat_id, False): break
-            batch = users_to_tag[i:i + 25]
-            mentions = [f'<a href="tg://user?id={uid}">Пользователь</a>' for uid in batch]
-            await bot.send_message(chat_id, f"📢 {call_text}\n\n" + "\n".join(mentions), parse_mode="HTML")
-            await asyncio.sleep(2.0)
-    except Exception as e:
-        logger.error(f"Ошибка при созыве: {e}")
-    finally:
-        active_summons.pop(chat_id, None)
-
-
-@dp.message(F.text & F.text.regexp(r'(?i)^[/!]?all(?:\s|$)'))
-async def cmd_all(message: Message):
-    if message.chat.type not in ("group", "supergroup"): return await message.answer("❌ Только для групп!")
-    if not is_admin(message.from_user.id) and not await is_chat_admin(message.from_user.id, message.chat.id):
-        return await message.answer("❌ Только для админов.")
-
-    if active_summons.get(message.chat.id):
-        return await message.answer("⚠️ Созыв уже идёт!")
-
-    parts = message.text.strip().split(maxsplit=1)
-    call_text = parts[1] if len(parts) > 1 else "📢 Общий сбор!"
-    await message.answer(f"🔄 Начинаю созыв...\nТекст: {safe_text(call_text)}", parse_mode="HTML")
-    asyncio.create_task(summon_all_members(message.chat.id, call_text, message.from_user.id))
-
-
-@dp.message(F.text & F.text.regexp(r'(?i)^[/!]?(stop|стоп)\s*$'))
-async def cmd_stop(message: Message):
-    if message.chat.type in ("group", "supergroup"):
-        if not is_admin(message.from_user.id) and not await is_chat_admin(message.from_user.id, message.chat.id):
-            return await message.answer("❌ Только для админов.")
-    if active_summons.get(message.chat.id):
-        active_summons[message.chat.id] = False
-        await message.answer("⏹️ Созыв прекращён.")
-    else:
-        await message.answer("❌ Активных созывов нет.")
-
-
-@dp.message(F.text & F.text.regexp(r'(?i)^[/!]?(admins|админы)(?:\s|$)'))
-async def cmd_admins(message: Message):
-    if message.chat.type not in ("group", "supergroup"): return await message.answer("❌ Только для групп!")
-    parts = message.text.strip().split(maxsplit=1)
-    call_text = parts[1] if len(parts) > 1 else "📢 Сбор администраторов!"
-    try:
-        members = await bot.get_chat_administrators(chat_id=message.chat.id)
-        admins = [m.user for m in members if not m.user.is_bot]
-        if not admins: return await message.answer("❌ Администраторы не найдены.")
-        mentions = [f'<a href="tg://user?id={u.id}">{safe_text(u.full_name[:20])}</a>' for u in admins]
-        await message.answer(f"📢 {safe_text(call_text)}\n\n" + ", ".join(mentions), parse_mode="HTML")
-    except Exception as e:
-        await message.answer(f"❌ Ошибка: {e}")
 
 
 # ================= 🔧 АДМИН-КОМАНДЫ =================
@@ -684,10 +661,6 @@ async def cmd_help(message: Message):
         "• <code>!кубы @user ставка</code> — дуэль в кости\n"
         "• <code>!кубы ставка</code> (ответом) — быстрый вызов\n"
         "• <code>!мины сумма</code> — игра в мины\n\n"
-        "📢 <b>Созывы:</b>\n"
-        "• <code>!all</code> — массовый созыв\n"
-        "• <code>!admins</code> — созыв админов\n"
-        "• <code>!stop</code> — остановить созыв\n\n"
         "📛 <b>Позывные:</b>\n"
         "• <code>!me</code> — мой позывной\n"
         "• <code>!setme эмодзи</code> — установить\n"
