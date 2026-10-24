@@ -23,7 +23,7 @@ game_state = {
     "timer": 20,
     "bank": 0,
     "players": [],
-    "ball": {"x": 50, "y": 50, "vx": 0, "vy": 0},  # Только начальные данные
+    "ball": {"x": 50, "y": 50, "vx": 0, "vy": 0},
     "winner": None,
     "last_update": time.time()
 }
@@ -69,6 +69,11 @@ async def get_hockey_state():
                     bot_name = random.choice(BOT_NAMES) + str(random.randint(1, 99))
                     bot_color = random.choice(BOT_COLORS)
                     bot_shape = random.choice(["circle", "square", "oval", "triangle"])
+
+                    # Проверка на уникальность цвета
+                    while any(p["color"] == bot_color for p in game_state["players"]):
+                        bot_color = random.choice(BOT_COLORS)
+
                     game_state["players"].append({
                         "id": random.randint(10000, 99999), "name": bot_name, "avatar": "", "bet": bot_bet,
                         "color": bot_color, "shape": bot_shape, "is_bot": True
@@ -87,7 +92,6 @@ async def get_hockey_state():
                 for p in game_state["players"]:
                     p["percent"] = 0
 
-            # Выбор победителя
             rand_val = random.uniform(0, 100)
             current_val = 0
             for p in game_state["players"]:
@@ -96,13 +100,11 @@ async def get_hockey_state():
                     game_state["winner"] = p
                     break
 
-            # Начальное направление
             angle = random.uniform(0, 2 * math.pi)
-            game_state["ball"]["vx"] = math.cos(angle) * 10  # Скорость для клиента
+            game_state["ball"]["vx"] = math.cos(angle) * 10
             game_state["ball"]["vy"] = math.sin(angle) * 10
 
     elif game_state["status"] == "rolling":
-        # Сервер просто ждет 7 секунд, пока клиент делает анимацию
         if now - game_state["last_update"] > 7:
             game_state["status"] = "finished"
             game_state["last_update"] = now
@@ -137,13 +139,25 @@ async def place_bet(data: PlaceBet):
     name = user.get("username", user.get("first_name", f"id{user_id}"))
     avatar = user.get("photo_url", "")
 
-    if len(game_state["players"]) >= 20: raise HTTPException(status_code=400, detail="Комната заполнена")
+    # Если игрок уже ставил - увеличиваем его ставку
+    existing_player = next((p for p in game_state["players"] if p["id"] == user_id and not p["is_bot"]), None)
 
-    game_state["players"].append({
-        "id": user_id, "name": name, "avatar": avatar, "bet": data.amount,
-        "color": "#007aff", "shape": "square", "is_bot": False
-    })
-    game_state["bank"] += data.amount
+    if existing_player:
+        existing_player["bet"] += data.amount
+        game_state["bank"] += data.amount
+    else:
+        if len(game_state["players"]) >= 20: raise HTTPException(status_code=400, detail="Комната заполнена")
+
+        # Генерируем уникальный цвет для игрока
+        player_color = "#007aff"
+        while any(p["color"] == player_color for p in game_state["players"]):
+            player_color = f"hsl({random.randint(0, 360)}, 80%, 50%)"
+
+        game_state["players"].append({
+            "id": user_id, "name": name, "avatar": avatar, "bet": data.amount,
+            "color": player_color, "shape": "square", "is_bot": False
+        })
+        game_state["bank"] += data.amount
 
     return {"success": True, "new_balance": new_coins}
 

@@ -17,12 +17,12 @@ let balance = 0, keys = 0, currentBet = 10, inventory = [], lastChestTime = 0, i
 let hockeyInterval = null;
 let animationFrameId = null;
 let localBallState = { x: 50, y: 50, vx: 0, vy: 0 };
-let hasBetThisRound = false; // Флаг, чтобы ставить только 1 раз
+let hasBetThisRound = false;
 
 // ==================== ХОККЕЙ ====================
 async function placeHockeyBet() {
     if (isProcessing) return;
-    if (hasBetThisRound) return tg.showAlert("Вы уже сделали ставку в этом раунде!");
+    if (hasBetThisRound) return tg.showAlert("Вы уже сделали ставку в этом раунде!"); // Блокировка
 
     const bet = parseInt(document.getElementById('hockey-bet').value) || 10;
     if (balance < bet) return tg.showAlert("Недостаточно коинов!");
@@ -41,7 +41,7 @@ async function placeHockeyBet() {
         const data = await res.json();
         balance = data.new_balance;
         updateUI();
-        hasBetThisRound = true; // Ставка сделана
+        hasBetThisRound = true;
         document.getElementById('hockey-controls').style.display = 'none';
     } catch(e) { tg.showAlert("Ошибка соединения"); }
     isProcessing = false;
@@ -89,7 +89,8 @@ async function pollHockeyState() {
             const ball = document.getElementById('hockey-ball');
             if(ball) { ball.style.left = '50%'; ball.style.top = '50%'; }
 
-            hasBetThisRound = false; // Сброс ставки на новый раунд
+            hasBetThisRound = false;
+            document.getElementById('winner-modal').classList.remove('active'); // Закрываем модалку при новом раунде
 
         } else if (state.status === 'rolling') {
             statusEl.innerText = 'Идёт бросок...';
@@ -106,9 +107,9 @@ async function pollHockeyState() {
             statusEl.style.color = '#ff3b30';
             cancelAnimationFrame(animationFrameId);
 
-            // Показываем модалку
-            if (state.winner && !document.getElementById('winner-modal').classList.contains('active')) {
-                const modal = document.getElementById('winner-modal');
+            const modal = document.getElementById('winner-modal');
+            // Показываем модалку ТОЛЬКО если она еще не открыта
+            if (state.winner && !modal.classList.contains('active')) {
                 document.getElementById('winner-modal-name').innerText = state.winner.name;
                 document.getElementById('winner-modal-amount').innerText = `+${state.bank} 🪙`;
                 modal.classList.add('active');
