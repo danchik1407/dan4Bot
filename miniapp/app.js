@@ -301,11 +301,11 @@ function clickMineCell(cell) {
             cell.classList.add('good'); cell.innerText = '💎';
             minesSafeOpened++;
 
-            // Математика кэфа: 1 мина = шаг 1.20, 2 мины = 1.40, 3 мины = 1.60
+            // СБАЛАНСИРОВАННЫЕ КОЭФФИЦИЕНТЫ
             let step = 1.0;
-            if (selectedMines === 1) step = 1.20;
-            if (selectedMines === 2) step = 1.40;
-            if (selectedMines === 3) step = 1.60;
+            if (selectedMines === 1) step = 1.10; // Шаг +10%
+            if (selectedMines === 2) step = 1.25; // Шаг +25%
+            if (selectedMines === 3) step = 1.45; // Шаг +45%
 
             minesCoef = Math.pow(step, minesSafeOpened);
             const cashout = Math.floor(currentBet * minesCoef);

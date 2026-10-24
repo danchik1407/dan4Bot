@@ -242,16 +242,13 @@ async def cmd_top(message: Message):
 
     for i, u in enumerate(users[:10]):
         prefix = medals[i] if i < 3 else f"{i + 1}."
-        user_id = u.get("user_id")
-        username = u.get("username", f"id{user_id}")
+        username = u.get("username", "Игрок")
 
-        # Делаем кликабельную ссылку без @
-        if user_id:
-            name_str = f'<a href="tg://user?id={user_id}">{safe_text(username)}</a>'
-        else:
-            name_str = safe_text(username)
+        # Просто выводим текст ника (без @ и без ссылок)
+        # Если ник слишком длинный, обрезаем
+        display_name = username if len(username) < 20 else username[:17] + "..."
 
-        msg += f"{prefix} {name_str} — <b>{u['coins']}</b> 🪙\n"
+        msg += f"{prefix} {safe_text(display_name)} — <b>{u['coins']}</b> 🪙\n"
 
     await message.answer(msg, parse_mode="HTML")
 
