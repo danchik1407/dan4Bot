@@ -19,6 +19,9 @@ let currentBet = 10;
 let inventory = [];
 let lastChestTime = 0;
 
+// Глобальный флаг для защиты от двойных кликов (фарма)
+let isProcessing = false;
+
 async function loadUserData() {
     try {
         const response = await fetch(`${API_URL}/api/user`, {
@@ -94,20 +97,29 @@ function checkChestCooldown() {
 let pendingChestReward = 0, pendingChestIsKey = false, pendingChestIsGold = false;
 
 async function openChest(type) {
+    if (isProcessing) return;
     const isGold = type === 'gold';
     if (isGold && keys <= 0) return tg.showAlert("У вас нет ключей!");
+
+    isProcessing = true;
     const res = await fetch(`${API_URL}/api/open_chest`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ initData: tg.initData })
     });
+    isProcessing = false;
+
     if (!isGold && !res.ok) return tg.showAlert("Сундук перезаряжается!");
 
     document.getElementById('chest-buttons').style.display = 'none';
     const roulette = document.getElementById('roulette-container');
     roulette.style.display = 'block';
+
     const track = document.getElementById('roulette-track');
+    track.style.transition = 'none'; // Сброс старой анимации
     track.style.transform = 'translateX(0)';
     track.innerHTML = '';
+
+    void track.offsetWidth; // Принудительная перерисовка
 
     let winIndex = 50, finalAmount = 0, isKey = false;
     for (let i = 0; i < 100; i++) {
@@ -130,7 +142,9 @@ async function openChest(type) {
         if (i === winIndex) div.classList.add('win');
         track.appendChild(div);
     }
+
     setTimeout(() => {
+        track.style.transition = 'transform 8s cubic-bezier(0.15, 0.9, 0.1, 1)'; // Резкое замедление
         const itemWidth = 81, windowWidth = 350;
         const centerOffset = (windowWidth / 2) - (itemWidth / 2);
         const moveX = -((winIndex * itemWidth) - centerOffset);
@@ -146,35 +160,43 @@ async function openChest(type) {
         document.getElementById('chest-win-text').innerText = isKey ? 'ЗОЛОТОЙ КЛЮЧ!' : `Вы получили ${finalAmount} 🪙`;
         modal.classList.add('active');
         if (tg.HapticFeedback) tg.HapticFeedback.notificationOccurred('success');
-    }, 10200);
+    }, 8200);
 }
 
 async function claimChestReward() {
+    if (isProcessing) return;
+    isProcessing = true;
+
     document.getElementById('chest-win-modal').classList.remove('active');
     if (pendingChestIsGold) await changeKeys(-1);
     if (pendingChestIsKey) await changeKeys(1);
     else if (pendingChestReward > 0) await changeBalance(pendingChestReward);
+
     if (!pendingChestIsGold) lastChestTime = Math.floor(Date.now() / 1000);
     document.getElementById('roulette-container').style.display = 'none';
     document.getElementById('chest-buttons').style.display = 'flex';
     checkChestCooldown();
     pendingChestReward = 0; pendingChestIsKey = false; pendingChestIsGold = false;
+    isProcessing = false;
 }
 
 async function buyItem(itemId, price) {
+    if (isProcessing) return;
     if (balance < price) return tg.showAlert("Недостаточно коинов!");
+    isProcessing = true;
     try {
         const res = await fetch(`${API_URL}/api/buy_item`, {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ initData: tg.initData, item_id: itemId, price: price })
         });
-        if (!res.ok) return tg.showAlert("Ошибка покупки");
+        if (!res.ok) { isProcessing = false; return tg.showAlert("Ошибка покупки"); }
         const data = await res.json();
         balance = data.new_balance;
         inventory = data.inventory;
         updateUI();
         showWin("✅ Успешно куплено!");
     } catch(e) { tg.showAlert("Ошибка соединения"); }
+    isProcessing = false;
 }
 
 function showWin(text) {
@@ -233,7 +255,7 @@ function getBet(game) {
     return val;
 }
 
-// МИНЫ (ХАРДКОР)
+// МИНЫ (Жесткая математика и защита от фарма)
 let minesActive = false, minesCoef = 1.0, minesSafeOpened = 0;
 let selectedMines = 1;
 
@@ -253,12 +275,34 @@ function selectMines(count, element) {
     if (tg.HapticFeedback) tg.HapticFeedback.impactOccurred('soft');
 }
 
-function minesAction() {
-    if (minesActive) { cashoutMines(); return; }
+async function minesAction() {
+    if (isProcessing) return;
+
+    if (minesActive) {
+        isProcessing = true;
+        minesActive = false;
+        const cashout = Math.floor(currentBet * minesCoef);
+
+        const btn = document.getElementById('mines-btn');
+        btn.disabled = true;
+        btn.innerText = 'Забрано!';
+        btn.style.background = '#555';
+
+        await changeBalance(cashout);
+        showWin(cashout);
+
+        document.querySelectorAll('.cell').forEach(c => c.style.pointerEvents = 'none');
+        isProcessing = false;
+        return;
+    }
+
     currentBet = getBet('mines');
     if (balance < currentBet) return tg.showAlert("Недостаточно средств!");
 
-    changeBalance(-currentBet);
+    isProcessing = true;
+    await changeBalance(-currentBet);
+    isProcessing = false;
+
     minesActive = true; minesCoef = 1.0; minesSafeOpened = 0;
 
     document.querySelectorAll('.cell').forEach(c => {
@@ -278,9 +322,11 @@ function minesAction() {
 }
 
 function clickMineCell(cell) {
-    if (!minesActive) return;
+    if (!minesActive || isProcessing) return;
     const idx = parseInt(cell.dataset.index);
     if (cell.classList.contains('flipped')) return;
+
+    isProcessing = true;
     cell.classList.add('flipped');
     if (tg.HapticFeedback) tg.HapticFeedback.impactOccurred('soft');
 
@@ -295,20 +341,19 @@ function clickMineCell(cell) {
             });
             document.body.classList.add('shake');
             setTimeout(() => document.body.classList.remove('shake'), 500);
-            document.getElementById('mines-btn').innerText = `Играть снова`;
-            document.getElementById('mines-btn').style.background = '#007aff';
+
+            const btn = document.getElementById('mines-btn');
+            btn.innerText = `Играть снова`;
+            btn.style.background = '#007aff';
         } else {
             cell.classList.add('good'); cell.innerText = '💎';
             minesSafeOpened++;
 
-            // ЖЕСТКАЯ МАТЕМАТИКА
-            // Кэф растет очень медленно. Логарифмическая шкала.
             let base = 1.0;
-            if (selectedMines === 1) base = 1.05; // Очень мало за шаг
+            if (selectedMines === 1) base = 1.05;
             if (selectedMines === 2) base = 1.15;
             if (selectedMines === 3) base = 1.30;
 
-            // Формула: 1 + (логарифм от открытых * 0.3)
             let multiplier = 1 + (Math.log2(minesSafeOpened) * 0.3);
             minesCoef = base * multiplier;
 
@@ -318,18 +363,8 @@ function clickMineCell(cell) {
             document.getElementById('mines-cashout-amount').innerText = cashout;
             document.getElementById('mines-btn').innerText = `Забрать (${cashout} 🪙)`;
         }
+        isProcessing = false;
     }, 200);
-}
-
-function cashoutMines() {
-    if (!minesActive) return;
-    minesActive = false;
-    const cashout = Math.floor(currentBet * minesCoef);
-    changeBalance(cashout);
-    document.getElementById('mines-btn').innerText = `Играть снова`;
-    document.getElementById('mines-btn').style.background = '#007aff';
-    document.querySelectorAll('.cell').forEach(c => c.style.pointerEvents = 'none');
-    showWin(cashout);
 }
 
 loadUserData();
