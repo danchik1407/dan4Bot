@@ -18,6 +18,11 @@ let hockeyInterval = null;
 let hasBetThisRound = false;
 let hasShownWinner = false;
 
+// Для плавности шарика
+let serverBall = { x: 50, y: 50, vx: 0, vy: 0 };
+let renderBall = { x: 50, y: 50 };
+let ballAnimationId = null;
+
 // ==================== ЗВУКИ ====================
 const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
 function playSound(type) {
@@ -66,6 +71,35 @@ function playSound(type) {
     }
 }
 
+// ==================== ПЛАВНЫЙ ШАРИК И ЗУМ ====================
+function animateBallSmooth() {
+    const ballEl = document.getElementById('hockey-ball');
+    const arena = document.getElementById('hockey-arena');
+
+    if (ballEl) {
+        // Линейная интерполяция (LERP) для плавности
+        renderBall.x += (serverBall.x - renderBall.x) * 0.15;
+        renderBall.y += (serverBall.y - renderBall.y) * 0.15;
+
+        ballEl.style.left = renderBall.x + '%';
+        ballEl.style.top = renderBall.y + '%';
+
+        // Логика зума
+        const speed = Math.sqrt(serverBall.vx**2 + serverBall.vy**2);
+
+        // Если шарик замедляется (меньше 2) и игра идет
+        if (speed < 2 && speed > 0 && !hasShownWinner) {
+            if (!arena.classList.contains('zoomed')) {
+                arena.classList.add('zoomed');
+            }
+            // Камера следует за шариком
+            arena.style.transformOrigin = `${renderBall.x}% ${renderBall.y}%`;
+        }
+    }
+
+    ballAnimationId = requestAnimationFrame(animateBallSmooth);
+}
+
 // ==================== ХОККЕЙ ====================
 async function placeHockeyBet() {
     if (isProcessing) return;
@@ -105,6 +139,11 @@ async function pollHockeyState() {
         const bankEl = document.getElementById('hockey-bank');
         const arena = document.getElementById('hockey-arena');
 
+        // Обновляем координаты шарика с сервера
+        if (state.ball) {
+            serverBall = state.ball;
+        }
+
         if (state.status === 'waiting') {
             statusEl.innerText = `Ставки: ${state.timer} сек`;
             statusEl.style.color = '#ffcc00';
@@ -112,8 +151,15 @@ async function pollHockeyState() {
 
             hasBetThisRound = false;
             hasShownWinner = false;
-            arena.classList.remove('zoomed');
-            arena.style.transformOrigin = 'center center';
+
+            // Сброс шарика и зума
+            serverBall = { x: 50, y: 50, vx: 0, vy: 0 };
+            renderBall = { x: 50, y: 50 };
+
+            if (arena) {
+                arena.classList.remove('zoomed');
+                arena.style.transformOrigin = 'center center';
+            }
             document.getElementById('winner-modal').classList.remove('active');
 
         } else if (state.status === 'rolling') {
@@ -125,8 +171,11 @@ async function pollHockeyState() {
             statusEl.innerText = 'Раунд окончен!';
             statusEl.style.color = '#ff3b30';
 
-            arena.classList.remove('zoomed');
-            arena.style.transformOrigin = 'center center';
+            // Убираем зум только при завершении, чтобы увидеть общую картину
+            if (arena) {
+                arena.classList.remove('zoomed');
+                arena.style.transformOrigin = 'center center';
+            }
 
             const modal = document.getElementById('winner-modal');
             if (state.winner && !hasShownWinner) {
@@ -148,6 +197,7 @@ async function pollHockeyState() {
 
         bankEl.innerText = `Банк: ${state.bank} 🪙`;
 
+        // Отрисовка секторов
         arena.querySelectorAll('.hockey-sector').forEach(el => el.remove());
 
         state.players.forEach(p => {
@@ -184,22 +234,15 @@ async function pollHockeyState() {
             arena.appendChild(sector);
         });
 
-        // Отрисовка шарика на основе данных сервера
-        const ball = document.getElementById('hockey-ball');
-        if (ball) {
-            ball.style.left = state.ball.x + '%';
-            ball.style.top = state.ball.y + '%';
-
-            // Зум при замедлении
-            const speed = Math.sqrt(state.ball.vx**2 + state.ball.vy**2);
-            if (speed < 2 && state.status === 'rolling') {
-                if (!arena.classList.contains('zoomed')) {
-                    arena.classList.add('zoomed');
-                }
-                arena.style.transformOrigin = `${state.ball.x}% ${state.ball.y}%`;
-            }
+        // Убедимся, что шарик есть в DOM
+        if (!document.getElementById('hockey-ball')) {
+            const ball = document.createElement('div');
+            ball.className = 'hockey-ball';
+            ball.id = 'hockey-ball';
+            arena.appendChild(ball);
         }
 
+        // Отрисовка списка участников
         const list = document.getElementById('hockey-participants');
         list.innerHTML = '';
         state.players.forEach((p, i) => {
@@ -234,12 +277,21 @@ async function pollHockeyState() {
 function startHockeyPolling() {
     if (hockeyInterval) clearInterval(hockeyInterval);
     pollHockeyState();
-    hockeyInterval = setInterval(pollHockeyState, 100);
+    hockeyInterval = setInterval(pollHockeyState, 150);
+
+    // Запускаем плавную анимацию, если она еще не запущена
+    if (!ballAnimationId) {
+        animateBallSmooth();
+    }
 }
 
 function stopHockeyPolling() {
     if (hockeyInterval) clearInterval(hockeyInterval);
     hockeyInterval = null;
+    if (ballAnimationId) {
+        cancelAnimationFrame(ballAnimationId);
+        ballAnimationId = null;
+    }
 }
 
 function closeWinnerModal() {
