@@ -235,6 +235,8 @@ function getBet(game) {
 
 // МИНЫ
 let minesActive = false, minesCoef = 1.0, minesSafeOpened = 0;
+let selectedMines = 1; // По умолчанию 1 мина
+
 const board = document.getElementById('mines-board');
 for (let i = 0; i < 16; i++) {
     const cell = document.createElement('div');
@@ -243,8 +245,12 @@ for (let i = 0; i < 16; i++) {
     board.appendChild(cell);
 }
 
-function updateMinesLabel() {
-    document.getElementById('mines-count-label').innerText = document.getElementById('mines-count').value;
+function selectMines(count, element) {
+    if (minesActive) return;
+    selectedMines = count;
+    document.querySelectorAll('.mine-btn').forEach(btn => btn.classList.remove('active'));
+    element.classList.add('active');
+    if (tg.HapticFeedback) tg.HapticFeedback.impactOccurred('soft');
 }
 
 function minesAction() {
@@ -264,9 +270,8 @@ function minesAction() {
     document.getElementById('mines-current-coef').innerText = 'x1.00';
     document.getElementById('mines-cashout-amount').innerText = '0';
 
-    const minesCount = parseInt(document.getElementById('mines-count').value);
     window.mineIndices = [];
-    while(window.mineIndices.length < minesCount) {
+    while(window.mineIndices.length < selectedMines) {
         let r = Math.floor(Math.random() * 16);
         if(window.mineIndices.indexOf(r) === -1) window.mineIndices.push(r);
     }
@@ -295,10 +300,16 @@ function clickMineCell(cell) {
         } else {
             cell.classList.add('good'); cell.innerText = '💎';
             minesSafeOpened++;
-            const minesCount = parseInt(document.getElementById('mines-count').value);
-            const step = 1.0 + (minesCount * 0.08);
+
+            // Математика кэфа: 1 мина = шаг 1.20, 2 мины = 1.40, 3 мины = 1.60
+            let step = 1.0;
+            if (selectedMines === 1) step = 1.20;
+            if (selectedMines === 2) step = 1.40;
+            if (selectedMines === 3) step = 1.60;
+
             minesCoef = Math.pow(step, minesSafeOpened);
             const cashout = Math.floor(currentBet * minesCoef);
+
             document.getElementById('mines-current-coef').innerText = `x${minesCoef.toFixed(2)}`;
             document.getElementById('mines-cashout-amount').innerText = cashout;
             document.getElementById('mines-btn').innerText = `Забрать (${cashout} 🪙)`;

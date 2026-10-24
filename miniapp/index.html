@@ -25,7 +25,6 @@
             <div class="banner"><div class="banner-title">AURA GAME</div><div class="banner-sub">Твой путь к миллионам</div></div>
             <div class="games-grid">
                 <div class="game-card" onclick="openGame('mines')"><div class="game-icon">💣</div><div class="game-info"><h3>Мины</h3><p>Разминируй поле</p></div></div>
-                <!-- Краш теперь ведет на экран Soon -->
                 <div class="game-card" onclick="openGame('crash')"><div class="game-icon">🚀</div><div class="game-info"><h3>Краш</h3><p>Скоро...</p></div></div>
             </div>
         </section>
@@ -98,16 +97,20 @@
                     <button onclick="addBet('mines', 500)">+500</button>
                 </div>
             </div>
-            <div class="mines-selector">
-                <span>Мин: <b id="mines-count-label">3</b></span>
-                <input type="range" id="mines-count" min="1" max="15" value="3" oninput="updateMinesLabel()">
+
+            <!-- Выбор мин -->
+            <div class="mines-selector-buttons">
+                <button class="mine-btn active" onclick="selectMines(1, this)">1 💣</button>
+                <button class="mine-btn" onclick="selectMines(2, this)">2 💣</button>
+                <button class="mine-btn" onclick="selectMines(3, this)">3 💣</button>
             </div>
+
             <div class="mines-grid" id="mines-board"></div>
             <div class="game-info-bar" id="mines-info"><span>Кэф: <b id="mines-current-coef">x1.00</b></span><span>Забрать: <b id="mines-cashout-amount">0</b> 🪙</span></div>
             <button class="action-btn" id="mines-btn" onclick="minesAction()">Сделать ставку</button>
         </section>
 
-        <!-- ЗАГЛУШКА КРАША (SOON) -->
+        <!-- КРАШ (SOON) -->
         <section id="screen-crash" class="game-screen">
             <button class="back-btn" onclick="closeGame()">← Назад</button>
             <div class="soon-container">

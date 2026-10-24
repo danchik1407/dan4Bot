@@ -38,10 +38,11 @@ main { padding: 0 16px; }
 .bet-buttons button { flex: 1; background: #2a2a2a; border: 1px solid #444; color: white; padding: 10px; border-radius: 10px; font-weight: 700; cursor: pointer; }
 .bet-buttons button:active { background: #444; }
 
-.mines-selector { width: 100%; max-width: 350px; background: var(--card); padding: 15px; border-radius: 12px; margin-bottom: 15px; display: flex; justify-content: space-between; align-items: center; border: 1px solid #333; }
-.mines-selector span { font-size: 16px; font-weight: 700; }
-.mines-selector span b { color: #ff3b30; }
-.mines-selector input[type=range] { flex: 1; margin-left: 15px; accent-color: var(--accent); }
+/* Выбор мин */
+.mines-selector-buttons { display: flex; gap: 10px; width: 100%; max-width: 350px; margin-bottom: 15px; }
+.mine-btn { flex: 1; background: var(--card); border: 1px solid #444; color: var(--text-muted); padding: 15px 0; border-radius: 12px; font-size: 18px; font-weight: 800; cursor: pointer; transition: 0.2s; }
+.mine-btn.active { background: #ff3b30; border-color: #ff3b30; color: white; box-shadow: 0 0 15px rgba(255, 59, 48, 0.5); }
+.mine-btn:active { transform: scale(0.95); }
 
 .chest-container { display: flex; flex-direction: column; gap: 15px; }
 .chest-card { background: var(--card); padding: 20px; border-radius: 16px; text-align: center; border: 1px solid #333; }
@@ -91,35 +92,11 @@ main { padding: 0 16px; }
 .cell:active { transform: scale(0.95); }
 .cell.flipped:active { transform: rotateY(180deg) scale(0.95); }
 
-/* Стили для экрана Soon */
-.soon-container {
-    display: flex;
-    flex-direction: column;
-    justify-content: center;
-    align-items: center;
-    height: 70vh;
-    width: 100%;
-    background: radial-gradient(circle, #1c1c1c 0%, #0f0f0f 100%);
-    border-radius: 20px;
-    border: 1px solid #333;
-}
-.soon-icon {
-    font-size: 80px;
-    margin-bottom: 20px;
-    filter: grayscale(1) opacity(0.5);
-}
-.soon-text {
-    font-size: 32px;
-    font-weight: 900;
-    color: #555;
-    letter-spacing: 2px;
-    text-transform: uppercase;
-}
-.soon-sub {
-    color: var(--text-muted);
-    font-size: 14px;
-    margin-top: 10px;
-}
+/* Soon экран */
+.soon-container { display: flex; flex-direction: column; justify-content: center; align-items: center; height: 70vh; width: 100%; background: radial-gradient(circle, #1c1c1c 0%, #0f0f0f 100%); border-radius: 20px; border: 1px solid #333; }
+.soon-icon { font-size: 80px; margin-bottom: 20px; filter: grayscale(1) opacity(0.5); }
+.soon-text { font-size: 32px; font-weight: 900; color: #555; letter-spacing: 2px; text-transform: uppercase; }
+.soon-sub { color: var(--text-muted); font-size: 14px; margin-top: 10px; }
 
 .action-btn { background: var(--accent); color: white; border: none; border-radius: 15px; padding: 15px; font-size: 18px; font-weight: 800; cursor: pointer; margin-bottom: 20px; width: 100%; max-width: 350px; transition: 0.2s; }
 .action-btn:active { transform: scale(0.98); opacity: 0.8; }
@@ -145,7 +122,6 @@ main { padding: 0 16px; }
 .chest-win-icon { font-size: 80px; margin-bottom: 20px; filter: drop-shadow(0 0 20px #ffcc00); }
 .chest-win-content h2 { font-size: 24px; margin-bottom: 25px; color: white; }
 
-/* Фикс зависшего окна */
 .win-popup { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); z-index: 999; pointer-events: none; display: none; }
 .win-popup.show { display: block; animation: popWin 1.5s ease-out; }
 .win-text { font-size: 32px; font-weight: 900; color: #34c759; text-shadow: 0 0 10px rgba(0,0,0,0.8); }
