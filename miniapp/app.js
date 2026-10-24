@@ -18,7 +18,7 @@ let hockeyInterval = null;
 let animationFrameId = null;
 let localBallState = { x: 50, y: 50, vx: 0, vy: 0 };
 let hasBetThisRound = false;
-let hasShownWinner = false; // Флаг от спама модалки
+let hasShownWinner = false;
 
 // ==================== ХОККЕЙ ====================
 async function placeHockeyBet() {
@@ -48,7 +48,6 @@ async function placeHockeyBet() {
     isProcessing = false;
 }
 
-// Вспышка на углах
 function flashCorner(cornerId) {
     const el = document.getElementById(cornerId);
     if (el) {
@@ -57,7 +56,6 @@ function flashCorner(cornerId) {
     }
 }
 
-// Плавная анимация с зумом
 function animateBall(arenaWidth, arenaHeight) {
     if (localBallState.vx === 0 && localBallState.vy === 0) return;
 
@@ -73,7 +71,7 @@ function animateBall(arenaWidth, arenaHeight) {
     if (localBallState.y < 0) { localBallState.y = 0; localBallState.vy *= -1; }
     if (localBallState.y > 100) { localBallState.y = 100; localBallState.vy *= -1; }
 
-    // Проверка на углы (в радиусе 10%)
+    // Проверка на углы
     if ((localBallState.x < 10 && localBallState.y < 10) && !(prevX < 10 && prevY < 10)) flashCorner('corner-tl');
     if ((localBallState.x > 90 && localBallState.y < 10) && !(prevX > 90 && prevY < 10)) flashCorner('corner-tr');
     if ((localBallState.x < 10 && localBallState.y > 90) && !(prevX < 10 && prevY > 90)) flashCorner('corner-bl');
@@ -90,11 +88,15 @@ function animateBall(arenaWidth, arenaHeight) {
         ball.style.left = localBallState.x + '%';
         ball.style.top = localBallState.y + '%';
 
-        // Зум при замедлении (скорость меньше 2)
+        // ЗУМ СЛЕДУЕТ ЗА ШАРОМ
         const speed = Math.sqrt(localBallState.vx**2 + localBallState.vy**2);
-        if (speed < 2 && !arena.classList.contains('zoomed')) {
+        if (speed < 2) {
+            // Если зум еще не применен - применяем
+            if (!arena.classList.contains('zoomed')) {
+                arena.classList.add('zoomed');
+            }
+            // Обновляем точку фокуса на каждом кадре, чтобы камера следила за шаром
             arena.style.transformOrigin = `${localBallState.x}% ${localBallState.y}%`;
-            arena.classList.add('zoomed');
         }
     }
 
@@ -124,8 +126,11 @@ async function pollHockeyState() {
             if(ball) { ball.style.left = '50%'; ball.style.top = '50%'; }
 
             hasBetThisRound = false;
-            hasShownWinner = false; // Сброс
-            arena.classList.remove('zoomed'); // Убираем зум
+            hasShownWinner = false;
+
+            // СБРОС ЗУМА
+            arena.classList.remove('zoomed');
+            arena.style.transformOrigin = 'center center'; // Возвращаем в центр
             document.getElementById('winner-modal').classList.remove('active');
 
         } else if (state.status === 'rolling') {
@@ -143,11 +148,10 @@ async function pollHockeyState() {
             statusEl.style.color = '#ff3b30';
             cancelAnimationFrame(animationFrameId);
 
-            // Зум возвращаем в исходное
             arena.classList.remove('zoomed');
+            arena.style.transformOrigin = 'center center';
 
             const modal = document.getElementById('winner-modal');
-            // ПОКАЗЫВАЕМ МОДАЛКУ ТОЛЬКО 1 РАЗ
             if (state.winner && !hasShownWinner) {
                 hasShownWinner = true;
                 document.getElementById('winner-modal-name').innerText = state.winner.name;

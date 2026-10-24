@@ -59,21 +59,27 @@ async def get_hockey_state():
     time_left = 20 - (now - game_state["last_update"])
 
     if game_state["status"] == "waiting":
-        if time_left <= 5 and len(game_state["players"]) < 4:
+        # Боты заходят за 5 секунд до конца, если их меньше 5
+        if time_left <= 5 and len(game_state["players"]) < 20:
             current_bots = sum(1 for p in game_state["players"] if p["is_bot"])
+
             if current_bots < 5:
-                num_bots = random.randint(1, 5 - current_bots)
+                # Генерируем случайное количество ботов от 1 до 5
+                num_bots = random.randint(1, 5)
+
                 for _ in range(num_bots):
                     if len(game_state["players"]) >= 20: break
+                    if sum(1 for p in game_state["players"] if p["is_bot"]) >= 5: break
+
                     bot_bet = random.randint(10, 100)
                     bot_name = random.choice(BOT_NAMES) + str(random.randint(1, 99))
                     bot_color = random.choice(BOT_COLORS)
-                    bot_shape = random.choice(["circle", "square", "oval", "triangle"])
 
-                    # Проверка на уникальность цвета
+                    # Уникальный цвет
                     while any(p["color"] == bot_color for p in game_state["players"]):
                         bot_color = random.choice(BOT_COLORS)
 
+                    bot_shape = random.choice(["circle", "square", "oval", "triangle"])
                     game_state["players"].append({
                         "id": random.randint(10000, 99999), "name": bot_name, "avatar": "", "bet": bot_bet,
                         "color": bot_color, "shape": bot_shape, "is_bot": True
@@ -148,7 +154,7 @@ async def place_bet(data: PlaceBet):
     else:
         if len(game_state["players"]) >= 20: raise HTTPException(status_code=400, detail="Комната заполнена")
 
-        # Генерируем уникальный цвет для игрока
+        # Уникальный цвет для игрока
         player_color = "#007aff"
         while any(p["color"] == player_color for p in game_state["players"]):
             player_color = f"hsl({random.randint(0, 360)}, 80%, 50%)"
