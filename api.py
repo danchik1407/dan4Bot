@@ -9,6 +9,7 @@ from dotenv import load_dotenv
 from supabase import create_client, Client
 import json
 import time
+import random
 import uvicorn
 
 load_dotenv()
@@ -22,6 +23,15 @@ SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+# --- Глобальное состояние для Краша ---
+crash_state = {
+    "status": "waiting",  # waiting (ставки), flying (полет), crashed (краш)
+    "start_time": 0,
+    "current_coef": 1.0,
+    "crash_point": 0.0,
+    "last_round": 0
+}
 
 
 def verify_telegram_data(init_data: str):
@@ -59,6 +69,36 @@ class BuyItem(BaseModel):
     price: int
 
 
+@app.get("/api/crash_state")
+async def get_crash_state():
+    global crash_state
+    now = time.time()
+
+    if crash_state["status"] == "waiting":
+        if now - crash_state["last_round"] > 10:  # 10 секунд на ставки
+            crash_state["status"] = "flying"
+            crash_state["start_time"] = now
+            crash_state["current_coef"] = 1.0
+            crash_state["crash_point"] = round(1.0 + (random.random() ** 2) * 20, 2)
+
+    elif crash_state["status"] == "flying":
+        elapsed = now - crash_state["start_time"]
+        current = 1.0 + (elapsed * 0.15)  # Скорость роста
+        if current >= crash_state["crash_point"]:
+            crash_state["status"] = "crashed"
+            crash_state["current_coef"] = crash_state["crash_point"]
+            crash_state["last_round"] = now
+        else:
+            crash_state["current_coef"] = round(current, 2)
+
+    elif crash_state["status"] == "crashed":
+        if now - crash_state["last_round"] > 3:  # 3 секунды после краша
+            crash_state["status"] = "waiting"
+            crash_state["last_round"] = now
+
+    return crash_state
+
+
 @app.post("/api/user")
 async def get_user(auth: UserAuth):
     user = verify_telegram_data(auth.initData)
@@ -75,11 +115,10 @@ async def get_user(auth: UserAuth):
         return {"coins": 0, "keys": 0, "inventory": [], "last_chest": 0}
 
     db_user = res.data[0]
-    inventory = json.loads(db_user.get("inventory") or "[]")
     return {
         "coins": db_user.get("coins", 0),
         "keys": db_user.get("keys", 0),
-        "inventory": inventory,
+        "inventory": json.loads(db_user.get("inventory") or "[]"),
         "last_chest": db_user.get("last_chest", 0)
     }
 

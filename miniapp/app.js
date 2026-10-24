@@ -18,9 +18,6 @@ let keys = 0;
 let currentBet = 10;
 let inventory = [];
 let lastChestTime = 0;
-
-// История для красоты
-let minesHistory = [];
 let crashHistory = [1.25, 2.10, 1.05, 5.40, 1.80];
 
 async function loadUserData() {
@@ -34,12 +31,9 @@ async function loadUserData() {
         keys = data.keys || 0;
         inventory = data.inventory || [];
         lastChestTime = data.last_chest || 0;
-
         updateUI();
         checkChestCooldown();
-    } catch (e) {
-        document.getElementById('user-balance').innerText = "Ошибка";
-    }
+    } catch (e) { document.getElementById('user-balance').innerText = "Ошибка"; }
 }
 
 async function changeBalance(amount) {
@@ -68,7 +62,6 @@ function updateUI() {
     document.getElementById('profile-keys').innerText = keys;
 
     const inv = document.getElementById('inventory');
-    // Считаем капсулы
     let capCount = 0;
     let uniqCount = 0;
     inventory.forEach(item => {
@@ -90,91 +83,83 @@ function checkChestCooldown() {
     const now = Math.floor(Date.now() / 1000);
     const diff = now - lastChestTime;
     const btn = document.getElementById('normal-chest-btn');
-
     if (diff < 18000) {
         btn.disabled = true;
-        let hours = Math.floor((18000 - diff) / 3600);
-        let mins = Math.floor(((18000 - diff) % 3600) / 60);
-        btn.innerText = `КД: ${hours}ч ${mins}м`;
+        btn.innerText = `КД: ${Math.floor((18000 - diff) / 3600)}ч ${Math.floor(((18000 - diff) % 3600) / 60)}м`;
         setTimeout(checkChestCooldown, 60000);
     } else {
-        btn.disabled = false;
-        btn.innerText = 'Открыть (Бесплатно)';
+        btn.disabled = false; btn.innerText = 'Открыть (Бесплатно)';
     }
 }
+
+let pendingChestReward = 0, pendingChestIsKey = false, pendingChestIsGold = false;
 
 async function openChest(type) {
     const isGold = type === 'gold';
     if (isGold && keys <= 0) return tg.showAlert("У вас нет ключей!");
-
     const res = await fetch(`${API_URL}/api/open_chest`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ initData: tg.initData })
     });
-
     if (!isGold && !res.ok) return tg.showAlert("Сундук перезаряжается!");
 
     document.getElementById('chest-buttons').style.display = 'none';
     const roulette = document.getElementById('roulette-container');
     roulette.style.display = 'block';
-
     const track = document.getElementById('roulette-track');
     track.style.transform = 'translateX(0)';
     track.innerHTML = '';
 
-    let winIndex = 30;
-    let finalAmount = 0;
-    let isKey = false;
-
-    for (let i = 0; i < 40; i++) {
+    let winIndex = 50, finalAmount = 0, isKey = false;
+    for (let i = 0; i < 100; i++) {
         let val, icon;
-        if (isGold) {
-            val = Math.floor(Math.random() * 90) + 10;
-            icon = '💎';
-        } else {
+        if (isGold) { val = Math.floor(Math.random() * 90) + 10; icon = '💎'; }
+        else {
             if (Math.random() < 0.2) { val = 0; icon = '🔑'; }
             else { val = Math.floor(Math.random() * 10) + 1; icon = '💎'; }
         }
-
         if (i === winIndex) {
-            if (isGold) {
-                finalAmount = Math.floor(Math.random() * 90) + 10;
-                icon = '💎'; val = finalAmount;
-            } else {
+            if (isGold) { finalAmount = Math.floor(Math.random() * 90) + 10; icon = '💎'; val = finalAmount; }
+            else {
                 if (Math.random() < 0.01) { isKey = true; icon = '🔑'; val = 0; }
                 else { finalAmount = Math.floor(Math.random() * 10) + 1; icon = '💎'; val = finalAmount; }
             }
         }
-
         const div = document.createElement('div');
         div.className = 'roulette-item';
         div.innerHTML = `${icon}<span>${val > 0 ? val : 'Ключ'}</span>`;
         if (i === winIndex) div.classList.add('win');
         track.appendChild(div);
     }
-
     setTimeout(() => {
-        const itemWidth = 81;
-        const windowWidth = 350;
+        const itemWidth = 81, windowWidth = 350;
         const centerOffset = (windowWidth / 2) - (itemWidth / 2);
         const moveX = -((winIndex * itemWidth) - centerOffset);
         track.style.transform = `translateX(${moveX}px)`;
     }, 100);
 
-    setTimeout(async () => {
-        if (isGold) {
-            await changeKeys(-1);
-            await changeBalance(finalAmount);
-            showWin(finalAmount);
-        } else {
-            if (isKey) { await changeKeys(1); showWin("КЛЮЧ!"); }
-            else { await changeBalance(finalAmount); showWin(finalAmount); }
-            lastChestTime = Math.floor(Date.now() / 1000);
-        }
-        roulette.style.display = 'none';
-        document.getElementById('chest-buttons').style.display = 'flex';
-        checkChestCooldown();
-    }, 4200);
+    setTimeout(() => {
+        pendingChestReward = finalAmount;
+        pendingChestIsKey = isKey;
+        pendingChestIsGold = isGold;
+        const modal = document.getElementById('chest-win-modal');
+        document.getElementById('chest-win-icon').innerText = isKey ? '🔑' : '💎';
+        document.getElementById('chest-win-text').innerText = isKey ? 'ЗОЛОТОЙ КЛЮЧ!' : `Вы получили ${finalAmount} 🪙`;
+        modal.classList.add('active');
+        if (tg.HapticFeedback) tg.HapticFeedback.notificationOccurred('success');
+    }, 10200);
+}
+
+async function claimChestReward() {
+    document.getElementById('chest-win-modal').classList.remove('active');
+    if (pendingChestIsGold) await changeKeys(-1);
+    if (pendingChestIsKey) await changeKeys(1);
+    else if (pendingChestReward > 0) await changeBalance(pendingChestReward);
+    if (!pendingChestIsGold) lastChestTime = Math.floor(Date.now() / 1000);
+    document.getElementById('roulette-container').style.display = 'none';
+    document.getElementById('chest-buttons').style.display = 'flex';
+    checkChestCooldown();
+    pendingChestReward = 0; pendingChestIsKey = false; pendingChestIsGold = false;
 }
 
 async function buyItem(itemId, price) {
@@ -189,12 +174,7 @@ async function buyItem(itemId, price) {
         balance = data.new_balance;
         inventory = data.inventory;
         updateUI();
-
-        const popup = document.getElementById('win-popup');
-        popup.querySelector('.win-text').innerText = "✅ Успешно куплено!";
-        popup.classList.add('show');
-        setTimeout(() => popup.classList.remove('show'), 2000);
-        if (tg.HapticFeedback) tg.HapticFeedback.notificationOccurred('success');
+        showWin("✅ Успешно куплено!");
     } catch(e) { tg.showAlert("Ошибка соединения"); }
 }
 
@@ -227,10 +207,7 @@ function openGame(game) {
     document.getElementById('main-nav').style.display = 'none';
     document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
     document.getElementById('screen-' + game).classList.add('active');
-
     if (game === 'crash') updateCrashHistoryUI();
-    if (game === 'mines') updateMinesHistoryUI();
-
     if (tg.HapticFeedback) tg.HapticFeedback.impactOccurred('soft');
 }
 
@@ -262,16 +239,6 @@ for (let i = 0; i < 16; i++) {
 
 function updateMinesLabel() {
     document.getElementById('mines-count-label').innerText = document.getElementById('mines-count').value;
-}
-updateMinesLabel();
-
-function updateMinesHistoryUI() {
-    const list = document.getElementById('mines-history');
-    list.innerHTML = '';
-    minesHistory.forEach(item => {
-        list.innerHTML += `<li><span>${item.name}</span> <span style="color:#34c759;">+${item.amount} 🪙</b></span></li>`;
-    });
-    if(minesHistory.length === 0) list.innerHTML = `<li>Пока нет выигрышей</li>`;
 }
 
 function minesAction() {
@@ -313,9 +280,7 @@ function clickMineCell(cell) {
             document.querySelectorAll('.cell').forEach(c => c.style.pointerEvents = 'none');
             window.mineIndices.forEach(i => {
                 const c = board.children[i];
-                if(!c.classList.contains('flipped')) {
-                    c.classList.add('flipped', 'bad'); c.innerText = '💣';
-                }
+                if(!c.classList.contains('flipped')) { c.classList.add('flipped', 'bad'); c.innerText = '💣'; }
             });
             document.body.classList.add('shake');
             setTimeout(() => document.body.classList.remove('shake'), 500);
@@ -324,13 +289,9 @@ function clickMineCell(cell) {
         } else {
             cell.classList.add('good'); cell.innerText = '💎';
             minesSafeOpened++;
-
-            // Расчет кэфа в зависимости от количества мин
             const minesCount = parseInt(document.getElementById('mines-count').value);
-            // Чем больше мин, тем быстрее растет кэф
-            const step = 1.0 + (minesCount * 0.03);
+            const step = 1.0 + (minesCount * 0.04);
             minesCoef = Math.pow(step, minesSafeOpened);
-
             const cashout = Math.floor(currentBet * minesCoef);
             document.getElementById('mines-current-coef').innerText = `x${minesCoef.toFixed(2)}`;
             document.getElementById('mines-cashout-amount').innerText = cashout;
@@ -348,92 +309,111 @@ function cashoutMines() {
     document.getElementById('mines-btn').style.background = '#007aff';
     document.querySelectorAll('.cell').forEach(c => c.style.pointerEvents = 'none');
     showWin(cashout);
-
-    // Добавляем в историю
-    minesHistory.unshift({ name: user.first_name || "Игрок", amount: cashout });
-    if (minesHistory.length > 5) minesHistory.pop();
-    updateMinesHistoryUI();
 }
 
-// ==================== КРАШ ====================
-let crashActive = false, crashInterval, currentCoef = 1.0;
+// ==================== КРАШ (ОНЛАЙН) ====================
+let crashActive = false;
+let crashBetPlaced = false;
 
 function updateCrashHistoryUI() {
     const list = document.getElementById('crash-history');
     list.innerHTML = '';
     crashHistory.forEach(c => {
         const isCrash = c < 1.0;
-        list.innerHTML += `<span class="coef-badge ${isCrash ? 'crash' : ''}">x${c.toFixed(2)}</span>`;
+        list.innerHTML += `<span class="coef-badge-strip ${isCrash ? 'crash' : ''}">x${c.toFixed(2)}</span>`;
     });
 }
 
+async function pollCrashState() {
+    try {
+        const res = await fetch(`${API_URL}/api/crash_state`);
+        const state = await res.json();
+
+        const box = document.getElementById('space-box');
+        const rocket = document.getElementById('rocket-wrapper');
+        const coefText = document.getElementById('crash-coef');
+        const btn = document.getElementById('crash-btn');
+
+        if (state.status === "waiting") {
+            coefText.innerText = "Ожидание...";
+            btn.innerText = "Ждем раунд...";
+            btn.disabled = true;
+            btn.style.background = '#555';
+            rocket.style.opacity = '0';
+            box.classList.remove('crashed');
+            crashActive = false;
+            crashBetPlaced = false;
+        }
+        else if (state.status === "flying") {
+            crashActive = true;
+            box.classList.remove('crashed');
+            rocket.style.opacity = '1';
+            coefText.innerText = `x${state.current_coef.toFixed(2)}`;
+
+            const moveX = -50 + (state.current_coef * 4);
+            const moveY = -(state.current_coef * 8);
+            rocket.style.transform = `translate(${moveX}%, ${moveY}px) rotate(45deg) scale(1)`;
+
+            if (crashBetPlaced) {
+                const winAmount = Math.floor(currentBet * state.current_coef);
+                btn.innerText = `Забрать (${winAmount} 🪙)`;
+                btn.disabled = false;
+                btn.style.background = '#34c759';
+            } else {
+                btn.innerText = `Сделать ставку (x${state.current_coef.toFixed(2)})`;
+                btn.disabled = false;
+                btn.style.background = '#007aff';
+            }
+        }
+        else if (state.status === "crashed") {
+            coefText.innerText = `x${state.crash_point.toFixed(2)}`;
+            box.classList.add('crashed');
+            rocket.style.opacity = '0';
+            btn.innerText = "Крашнуло!";
+            btn.disabled = true;
+            btn.style.background = '#ff3b30';
+
+            if (crashBetPlaced) {
+                crashBetPlaced = false;
+                document.body.classList.add('shake');
+                setTimeout(() => document.body.classList.remove('shake'), 500);
+                if (tg.HapticFeedback) tg.HapticFeedback.notificationOccurred('error');
+            }
+            crashActive = false;
+        }
+    } catch (e) { console.error("Ошибка синхронизации Краша", e); }
+}
+
+setInterval(pollCrashState, 200);
+
 function crashAction() {
-    if (crashActive) { cashedOut(); return; }
-    currentBet = getBet('crash');
-    if (balance < currentBet) return tg.showAlert("Недостаточно средств!");
+    const coefText = document.getElementById('crash-coef').innerText;
+    if (crashActive && !crashBetPlaced) {
+        currentBet = getBet('crash');
+        if (balance < currentBet) return tg.showAlert("Недостаточно средств!");
 
-    changeBalance(-currentBet);
-    crashActive = true; currentCoef = 1.0;
-
-    const box = document.querySelector('.rocket-container');
-    const rocket = document.getElementById('crash-rocket');
-    const coefText = document.getElementById('crash-coef');
-    const btn = document.getElementById('crash-btn');
-
-    box.classList.remove('crashed', 'cashed');
-    rocket.style.transform = `translateX(-50%)`;
-    btn.style.background = '#34c759';
-    coefText.innerText = 'x1.00';
-
-    // Ракета летит по диагонали
-    crashInterval = setInterval(() => {
-        // Медленный рост, чтобы было интереснее
-        currentCoef += 0.01 + (currentCoef / 500);
-        coefText.innerText = `x${currentCoef.toFixed(2)}`;
+        changeBalance(-currentBet);
+        crashBetPlaced = true;
+        if (tg.HapticFeedback) tg.HapticFeedback.impactOccurred('medium');
+    }
+    else if (crashActive && crashBetPlaced) {
+        crashBetPlaced = false;
+        const currentCoef = parseFloat(coefText.replace('x', ''));
         const winAmount = Math.floor(currentBet * currentCoef);
-        btn.innerText = `Забрать (${winAmount} 🪙)`;
 
-        // Плавное движение ракеты
-        const moveX = -50 + (currentCoef * 5);
-        const moveY = -(currentCoef * 10);
-        rocket.style.transform = `translate(${moveX}%, ${moveY}px) rotate(45deg)`;
+        changeBalance(winAmount);
+        showWin(winAmount);
 
-        // Сложность: шанс краша растет с каждым тиком
-        if (Math.random() < (0.005 + currentCoef / 400)) { crashed(); }
-    }, 100); // Ускорил тик для плавности полета
-}
+        const btn = document.getElementById('crash-btn');
+        btn.innerText = "Вы забрали!";
+        btn.disabled = true;
+        btn.style.background = '#555';
+        if (tg.HapticFeedback) tg.HapticFeedback.notificationOccurred('success');
 
-function cashedOut() {
-    if (!crashActive) return;
-    clearInterval(crashInterval); crashActive = false;
-    const winAmount = Math.floor(currentBet * currentCoef);
-    changeBalance(winAmount);
-    document.querySelector('.rocket-container').classList.add('cashed');
-    document.getElementById('crash-btn').innerText = `Играть снова`;
-    document.getElementById('crash-btn').style.background = '#007aff';
-    showWin(winAmount);
-
-    // Добавляем в историю
-    crashHistory.unshift(currentCoef);
-    if (crashHistory.length > 10) crashHistory.pop();
-    updateCrashHistoryUI();
-}
-
-function crashed() {
-    if (!crashActive) return;
-    clearInterval(crashInterval); crashActive = false;
-    const box = document.querySelector('.rocket-container');
-    box.classList.add('crashed');
-    document.getElementById('crash-rocket').innerText = '💥'; // Взрыв
-    document.getElementById('crash-btn').innerText = `Играть снова`;
-    document.getElementById('crash-btn').style.background = '#007aff';
-    document.body.classList.add('shake');
-    setTimeout(() => document.body.classList.remove('shake'), 500);
-
-    // Добавляем 0 в историю
-    crashHistory.unshift(0);
-    if (crashHistory.length > 10) crashHistory.pop();
-    updateCrashHistoryUI();
+        crashHistory.unshift(currentCoef);
+        if (crashHistory.length > 10) crashHistory.pop();
+        updateCrashHistoryUI();
+    }
 }
 
 loadUserData();
