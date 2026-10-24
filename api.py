@@ -95,8 +95,8 @@ async def open_chest(auth: UserAuth):
     if not res.data: raise HTTPException(status_code=404, detail="User not found")
 
     last_chest = res.data[0].get("last_chest", 0) or 0
-    # ТЕСТОВОЕ КД 10 СЕКУНД (в реальности 5 часов = 18000)
-    if (now - last_chest) < 10:
+    # КД 5 часов (18000 секунд), как в чате
+    if (now - last_chest) < 18000:
         raise HTTPException(status_code=400, detail="Cooldown")
 
     supabase.table("users").update({"last_chest": now}).eq("user_id", user_id).execute()

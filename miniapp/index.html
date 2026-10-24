@@ -36,7 +36,13 @@
                     <div class="chest-icon" id="normal-chest-icon">📦</div>
                     <h3>Обычный сундук</h3>
                     <p>Шанс 1% на Золотой ключ!</p>
-                    <button class="action-btn" id="normal-chest-btn" onclick="openNormalChest()">Открыть (Бесплатно)</button>
+                    <button class="action-btn" id="normal-chest-btn" onclick="openChest('normal')">Открыть (Бесплатно)</button>
+                </div>
+                <div class="chest-card">
+                    <div class="chest-icon" id="gold-chest-icon">🎁</div>
+                    <h3>Золотой сундук</h3>
+                    <p>Нужен 🔑 Ключ</p>
+                    <button class="action-btn" id="gold-chest-btn" onclick="openChest('gold')" style="background: #ffcc00; color: #000;">Открыть (Нужен ключ)</button>
                 </div>
             </div>
         </section>
@@ -73,29 +79,43 @@
             </div>
         </section>
 
+        <!-- ИГРА: МИНЫ -->
         <section id="screen-mines" class="game-screen">
             <button class="back-btn" onclick="closeGame()">← Назад</button>
             <h2 class="game-title">💣 Мины</h2>
-            <div class="bet-selector" id="mines-bet-selector">
-                <button class="bet-btn active" onclick="setBet('mines', 10)">10</button>
-                <button class="bet-btn" onclick="setBet('mines', 50)">50</button>
-                <button class="bet-btn" onclick="setBet('mines', 100)">100</button>
+
+            <!-- Поле ввода ставки -->
+            <div class="bet-input-container">
+                <input type="number" id="mines-bet" class="bet-input" value="10" min="10" max="10000">
+                <div class="bet-buttons">
+                    <button onclick="addBet('mines', 10)">+10</button>
+                    <button onclick="addBet('mines', 100)">+100</button>
+                    <button onclick="addBet('mines', 500)">+500</button>
+                </div>
             </div>
+
             <div class="mines-grid" id="mines-board"></div>
             <div class="game-info-bar" id="mines-info"><span>Кэф: <b id="mines-current-coef">x1.00</b></span><span>Забрать: <b id="mines-cashout-amount">0</b> 🪙</span></div>
-            <button class="action-btn" id="mines-btn" onclick="minesAction()">Сделать ставку (10 🪙)</button>
+            <button class="action-btn" id="mines-btn" onclick="minesAction()">Сделать ставку</button>
         </section>
 
+        <!-- ИГРА: КРАШ -->
         <section id="screen-crash" class="game-screen">
             <button class="back-btn" onclick="closeGame()">← Назад</button>
             <h2 class="game-title">🚀 Краш</h2>
-            <div class="bet-selector" id="crash-bet-selector">
-                <button class="bet-btn active" onclick="setBet('crash', 10)">10</button>
-                <button class="bet-btn" onclick="setBet('crash', 50)">50</button>
-                <button class="bet-btn" onclick="setBet('crash', 100)">100</button>
+
+            <!-- Поле ввода ставки -->
+            <div class="bet-input-container">
+                <input type="number" id="crash-bet" class="bet-input" value="10" min="10" max="10000">
+                <div class="bet-buttons">
+                    <button onclick="addBet('crash', 10)">+10</button>
+                    <button onclick="addBet('crash', 100)">+100</button>
+                    <button onclick="addBet('crash', 500)">+500</button>
+                </div>
             </div>
+
             <div class="rocket-box" id="rocket-box"><div class="rocket-coef" id="crash-coef">x1.00</div><div class="rocket-emoji" id="crash-rocket">🚀</div></div>
-            <button class="action-btn" id="crash-btn" onclick="crashAction()">Сделать ставку (10 🪙)</button>
+            <button class="action-btn" id="crash-btn" onclick="crashAction()">Сделать ставку</button>
         </section>
     </main>
 

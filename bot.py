@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 import os
+import json
 import random
 import time
 import asyncio
@@ -168,9 +169,26 @@ async def cmd_shop(message: Message):
 async def cmd_pocket(message: Message):
     target = message.reply_to_message.from_user if message.reply_to_message else message.from_user
     user = await get_user(target.id, target.username)
-    name = f"@{safe_text(target.username)}" if target.username else f"id{target.id}"
-    await message.answer(f"💰 <b>Карман {name}</b>\n\n{user['coins']} 🪙", parse_mode="HTML")
 
+    # Получаем капсулы
+    inv = json.loads(user.get("inventory") or "[]")
+
+    name = f"@{safe_text(target.username)}" if target.username else f"id{target.id}"
+
+    text = f"💰 <b>Карман {name}</b>\n\n"
+    text += f"💎 Баланс: <b>{user['coins']}</b> 🪙\n"
+
+    if user.get("keys", 0) > 0:
+        text += f"🔑 Ключи: <b>{user['keys']}</b>\n"
+
+    if inv:
+        text += "\n🎒 <b>Инвентарь:</b>\n"
+        if 'capsule' in inv: text += f"💊 Капсула: {inv.count('capsule')} шт.\n"
+        if 'uniq_capsule' in inv: text += f"⚱️ Уник. Капсула: {inv.count('uniq_capsule')} шт.\n"
+    else:
+        text += "\n🎒 <b>Инвентарь:</b> Пусто\n"
+
+    await message.answer(text, parse_mode="HTML")
 
 @dp.message(F.text & F.text.regexp(r'(?i)^[/!]?(топ)\s*$'))
 async def cmd_top(message: Message):
