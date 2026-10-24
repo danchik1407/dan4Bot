@@ -32,13 +32,13 @@ if not SUPABASE_URL or not SUPABASE_KEY:
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-COOLDOWN_SECONDS = 5 * 60 * 60  # 5 часов
+COOLDOWN_SECONDS = 5 * 60 * 60
 CHALLENGE_TIMEOUT = 60
-COIN_DROP_CHANCE = 0.05  # 5%
-COIN_DROP_MIN = 1
-COIN_DROP_MAX = 20
+COIN_DROP_CHANCE = 0.03
+COIN_DROP_MIN = 2
+COIN_DROP_MAX = 10
 DROP_IMAGE = "drop.jpg"
-MIN_BET = 10  # Минимальная ставка для игр
+MIN_BET = 10
 
 active_summons: dict[int, bool] = {}
 active_challenges: dict[str, dict] = {}
@@ -46,7 +46,7 @@ active_mines_games: dict[str, dict] = {}
 
 
 # ================= БАЗА ДАННЫХ =================
-async def get_user(user_id: int, username: str = None):
+async def get_user(user_id: int, username: str = None, chat_id: int = None):
     def _fetch():
         response = supabase.table("users").select("*").eq("user_id", user_id).execute()
         return response.data[0] if response.data else None
@@ -56,15 +56,20 @@ async def get_user(user_id: int, username: str = None):
     if not user:
         new_user = {
             "user_id": user_id, "coins": 0, "username": username or f"id{user_id}",
-            "last_chest": 0, "last_call": 0, "call_sign": None
+            "last_chest": 0, "last_call": 0, "call_sign": None, "chat_id": chat_id
         }
         await asyncio.to_thread(lambda: supabase.table("users").insert(new_user).execute())
         return new_user
 
-    if username and user.get("username") != username:
-        user["username"] = username
-        await asyncio.to_thread(
-            lambda: supabase.table("users").update({"username": username}).eq("user_id", user_id).execute())
+    # Обновляем данные, если они изменились (добавили chat_id)
+    updates = {}
+    if username and user.get("username") != username: updates["username"] = username
+    if chat_id and user.get("chat_id") != chat_id: updates["chat_id"] = chat_id
+
+    if updates:
+        for k, v in updates.items(): user[k] = v
+        await asyncio.to_thread(lambda: supabase.table("users").update(updates).eq("user_id", user_id).execute())
+
     return user
 
 
@@ -72,8 +77,8 @@ async def update_user(user_id: int, **kwargs):
     await asyncio.to_thread(lambda: supabase.table("users").update(kwargs).eq("user_id", user_id).execute())
 
 
-async def get_all_users():
-    def _fetch(): return supabase.table("users").select("*").execute().data
+async def get_users_from_chat(chat_id: int):
+    def _fetch(): return supabase.table("users").select("*").eq("chat_id", chat_id).execute().data
 
     return await asyncio.to_thread(_fetch)
 
@@ -120,15 +125,19 @@ def safe_text(text) -> str:
     return html_module.escape(str(text))
 
 
-# ================= 🎁 ДРОП =================
+# ================= 🎁 ДРОП (ОБНОВЛЕНО) =================
 async def process_random_coin_drop(message: Message):
     if not message.from_user or message.from_user.is_bot: return
     text = message.text or ""
     if text.startswith("!") or text.startswith("/"): return
+
+    # Сохраняем chat_id при любом сообщении (чтобы !all знал, кто здесь)
+    chat_id = message.chat.id if message.chat.type in ("group", "supergroup") else None
+    user = await get_user(message.from_user.id, message.from_user.username, chat_id)
+
     if random.random() > COIN_DROP_CHANCE: return
 
     amount = random.randint(COIN_DROP_MIN, COIN_DROP_MAX)
-    user = await get_user(message.from_user.id, message.from_user.username)
     await update_user(message.from_user.id, coins=user["coins"] + amount)
 
     caption = f"🎉 <b>Поздравляю!</b>\n\n🎁 Ты выиграл(а) <b>{amount} 🪙</b>\n\n💬 Пиши сообщения в чате и получай коины!"
@@ -159,7 +168,9 @@ async def cmd_pocket(message: Message):
 
 @dp.message(F.text & F.text.regexp(r'(?i)^[/!]?(топ)\s*$'))
 async def cmd_top(message: Message):
-    users = await get_all_users()
+    users = await get_users_from_chat(message.chat.id) if message.chat.type in ("group",
+                                                                                "supergroup") else await get_users_from_chat(
+        None)
     users.sort(key=lambda x: x.get("coins", 0), reverse=True)
     msg = "💰 <b>ТОП-10 ПО КОИНАМ</b>\n━━━━━━━━━━━━━━━━━━━━\n\n"
     medals = ["🥇", "🥈", "🥉"]
@@ -171,16 +182,15 @@ async def cmd_top(message: Message):
 
 @dp.message(F.text & F.text.regexp(r'(?i)^[/!]?открыть\s*$'))
 async def cmd_open(message: Message):
-    user = await get_user(message.from_user.id, message.from_user.username)
+    user = await get_user(message.from_user.id, message.from_user.username, message.chat.id)
     now = time.time()
     last_chest = float(user.get("last_chest") or 0)
     rem = COOLDOWN_SECONDS - (now - last_chest)
 
-    if rem > 0:
-        return await message.answer(f"⏳ Открытие доступно через {format_time(rem)}")
+    if rem > 0: return await message.answer(f"⏳ Открытие доступно через {format_time(rem)}")
 
-    is_gold = random.random() > 0.85  # 15% шанс
-    reward = random.randint(50, 150) if is_gold else random.randint(5, 25)
+    is_gold = random.random() < 0.05
+    reward = random.randint(10, 100) if is_gold else random.randint(5, 25)
 
     await update_user(message.from_user.id, coins=user["coins"] + reward, last_chest=now)
 
@@ -205,7 +215,7 @@ async def cmd_transfer(message: Message):
             return await message.answer("❌ Сумма должна быть числом.")
     else:
         if len(parts) < 3: return await message.answer("❌ Формат: <code>!перевод @user 50</code>", parse_mode="HTML")
-        target = find_user_in_list(await get_all_users(), parts[1])
+        target = find_user_in_list(await get_users_from_chat(message.chat.id), parts[1])
         if not target: return await message.answer("❌ Пользователь не найден в базе.")
         try:
             amount = int(parts[2])
@@ -239,7 +249,7 @@ async def cmd_dice(message: Message):
     else:
         if len(parts) < 3: return await message.answer("🎲 Формат: <code>!кубы @username ставка</code>",
                                                        parse_mode="HTML")
-        target = find_user_in_list(await get_all_users(), parts[1])
+        target = find_user_in_list(await get_users_from_chat(message.chat.id), parts[1])
         if not target: return await message.answer("❌ Пользователь не найден.")
         try:
             amount = int(parts[2])
@@ -291,14 +301,11 @@ async def cb_dice_accept(callback: CallbackQuery):
         return await callback.message.edit_text("❌ У кого-то не хватает коинов. Вызов отменён.")
 
     await callback.message.edit_reply_markup(reply_markup=None)
-
     dice_msg1 = await callback.message.answer_dice(emoji="🎲")
     dice_msg2 = await callback.message.answer_dice(emoji="🎲")
 
     await asyncio.sleep(3.5)
-
-    r1 = dice_msg1.dice.value
-    r2 = dice_msg2.dice.value
+    r1, r2 = dice_msg1.dice.value, dice_msg2.dice.value
 
     try:
         await dice_msg1.delete()
@@ -334,16 +341,14 @@ async def cb_dice_decline(callback: CallbackQuery):
 
 
 # ================= 💣 МИНЫ =================
-# Было: {1: 1.20, 2: 1.35, 3: 1.65}
-# Стало (кэфы поменьше):
 MINES_STEP_COEFS = {1: 1.10, 2: 1.15, 3: 1.25}
 
 
 def get_mines_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="1 💣 (x1.20)", callback_data="mines_start_1"),
-         InlineKeyboardButton(text="2 💣 (x1.35)", callback_data="mines_start_2"),
-         InlineKeyboardButton(text="3 💣 (x1.65)", callback_data="mines_start_3")],
+        [InlineKeyboardButton(text="1 💣 (x1.10)", callback_data="mines_start_1"),
+         InlineKeyboardButton(text="2 💣 (x1.15)", callback_data="mines_start_2"),
+         InlineKeyboardButton(text="3 💣 (x1.25)", callback_data="mines_start_3")],
         [InlineKeyboardButton(text="❌ Отмена", callback_data="mines_cancel")]
     ])
 
@@ -351,7 +356,7 @@ def get_mines_kb():
 @dp.message(F.text & F.text.regexp(r'(?i)^[/!]?мины\s+(\d+)$'))
 async def cmd_mines_bet(message: Message):
     amount = int(message.text.split()[1])
-    user = await get_user(message.from_user.id, message.from_user.username)
+    user = await get_user(message.from_user.id, message.from_user.username, message.chat.id)
 
     if amount < MIN_BET: return await message.answer(f"❌ Минимальная ставка: {MIN_BET} 🪙")
     if user["coins"] < amount: return await message.answer(f"❌ Мало коинов! У тебя {user['coins']} 🪙")
@@ -369,7 +374,9 @@ async def cb_mines_start(callback: CallbackQuery):
     game_id = next(
         (gid for gid, g in active_mines_games.items() if g["user_id"] == callback.from_user.id and not g["active"]),
         None)
-    if not game_id: return await callback.answer("❌ Напиши !мины <ставка> в чат", show_alert=True)
+
+    if not game_id: return await callback.message.edit_text(
+        "❌ Игра сброшена из-за перезагрузки бота. Напиши !мины <ставка> заново.")
 
     game = active_mines_games[game_id]
     game["active"], game["mines_count"] = True, mines_count
@@ -382,7 +389,6 @@ async def cb_mines_start(callback: CallbackQuery):
         kb.inline_keyboard.append(
             [InlineKeyboardButton(text="⬜", callback_data=f"mines_open_{r * 4 + c}") for c in range(4)])
 
-    # На кнопке забора сразу пишем ставку (кэф 1.0)
     kb.inline_keyboard.append(
         [InlineKeyboardButton(text=f"💰 Забрать ({game['amount']} 🪙) | Кэф: x1.0", callback_data="mines_cashout")])
 
@@ -397,12 +403,13 @@ async def cb_mines_open(callback: CallbackQuery):
     idx = int(callback.data.split("_")[2])
     game_id = next(
         (gid for gid, g in active_mines_games.items() if g["user_id"] == callback.from_user.id and g["active"]), None)
-    if not game_id: return await callback.answer("❌ Игра не найдена.", show_alert=True)
+
+    if not game_id: return await callback.message.edit_text(
+        "❌ Игра сброшена из-за перезагрузки бота. Напиши !мины <ставка> заново.")
 
     game = active_mines_games[game_id]
     if game["opened"][idx]: return await callback.answer("Уже открыто!", show_alert=True)
 
-    # Если попал на мину
     if game["board"][idx]:
         game["active"] = False
         active_mines_games.pop(game_id, None)
@@ -418,21 +425,13 @@ async def cb_mines_open(callback: CallbackQuery):
                                          parse_mode="HTML")
         return await callback.answer("💥 БУМ!")
 
-    # Если открыл безопасную
     game["opened"][idx] = True
-
-    # Считаем, сколько безопасных клеток уже открыто
     safe_opened = sum(1 for i in range(16) if game["opened"][i] and not game["board"][i])
 
-    # Считаем кэф: базовый шаг в степени количества открытых клеток
-    # Например, при 1 мине: 1.20 ^ 1 = 1.20, ^ 2 = 1.44, ^ 3 = 1.72 и т.д.
     step_coef = MINES_STEP_COEFS[game["mines_count"]]
     current_coef = round(step_coef ** safe_opened, 2)
-
-    # Сумма, которую можно забрать
     win_amount = round(game["amount"] * current_coef)
 
-    # Обновляем кнопки поля
     kb = InlineKeyboardMarkup(inline_keyboard=[])
     for r in range(4):
         kb.inline_keyboard.append([InlineKeyboardButton(text="✅" if game["opened"][r * 4 + c] else "⬜",
@@ -440,17 +439,12 @@ async def cb_mines_open(callback: CallbackQuery):
                                                             r * 4 + c] else f"mines_open_{r * 4 + c}") for c in
                                    range(4)])
 
-    # Добавляем кнопку забора с актуальной суммой
     kb.inline_keyboard.append([InlineKeyboardButton(text=f"💰 Забрать ({win_amount} 🪙) | Кэф: x{current_coef}",
                                                     callback_data="mines_cashout")])
 
     await callback.message.edit_text(
-        f"💣 <b>Мины: {game['mines_count']}</b>\n"
-        f"Ставка: <b>{game['amount']}</b> 🪙\n"
-        f"Текущий кэф: <b>x{current_coef}</b>\n"
-        f"Открыто: {safe_opened}/16",
-        reply_markup=kb,
-        parse_mode="HTML"
+        f"💣 <b>Мины: {game['mines_count']}</b>\nСтавка: <b>{game['amount']}</b> 🪙\nТекущий кэф: <b>x{current_coef}</b>\nОткрыто: {safe_opened}/16",
+        reply_markup=kb, parse_mode="HTML"
     )
     await callback.answer()
 
@@ -459,7 +453,9 @@ async def cb_mines_open(callback: CallbackQuery):
 async def cb_mines_cashout(callback: CallbackQuery):
     game_id = next(
         (gid for gid, g in active_mines_games.items() if g["user_id"] == callback.from_user.id and g["active"]), None)
-    if not game_id: return await callback.answer("❌ Игра не найдена.", show_alert=True)
+
+    if not game_id: return await callback.message.edit_text(
+        "❌ Игра сброшена из-за перезагрузки бота. Напиши !мины <ставка> заново.")
 
     game = active_mines_games[game_id]
     game["active"] = False
@@ -485,13 +481,8 @@ async def cb_mines_cashout(callback: CallbackQuery):
              range(4)])
 
     await callback.message.edit_text(
-        f"💰 <b>Забрано!</b>\n"
-        f"Кэф: <b>x{coef}</b>\n"
-        f"Выигрыш: <b>{win_amount}</b> 🪙\n"
-        f"Прибыль: <b>{profit}</b> 🪙",
-        reply_markup=kb,
-        parse_mode="HTML"
-    )
+        f"💰 <b>Забрано!</b>\nКэф: <b>x{coef}</b>\nВыигрыш: <b>{win_amount}</b> 🪙\nПрибыль: <b>{profit}</b> 🪙",
+        reply_markup=kb, parse_mode="HTML")
     await callback.answer("💰 Забрано!")
 
 
@@ -508,17 +499,47 @@ async def cb_mines_cancel(callback: CallbackQuery):
 @dp.callback_query(F.data == "ignore")
 async def cb_ignore(callback: CallbackQuery):
     await callback.answer()
-# ================= 📢 СОЗЫВЫ =================
+
+
+# ================= 📛 ПОЗЫВНЫЕ =================
+@dp.message(F.text & F.text.regexp(r'(?i)^[/!]?(me|позывной)\s*$'))
+async def cmd_me(message: Message):
+    user = await get_user(message.from_user.id, message.from_user.username)
+    if user.get("call_sign"):
+        await message.answer(f"📛 Твой позывной: {user['call_sign']}\n👤 Имя: {safe_text(message.from_user.full_name)}")
+    else:
+        await message.answer(
+            f"👤 Имя: {safe_text(message.from_user.full_name)}\n💡 Установи позывной: <code>!setme 🔥</code>",
+            parse_mode="HTML")
+
+
+@dp.message(F.text & F.text.regexp(r'(?i)^[/!]?setme\s+(.+)$'))
+async def cmd_setme(message: Message):
+    emoji = message.text.split(maxsplit=1)[1].strip()
+    if len(emoji) > 8: return await message.answer("❌ Слишком длинный позывной.")
+    await update_user(message.from_user.id, call_sign=emoji)
+    await message.answer(f"✅ Новый позывной: {emoji}")
+
+
+@dp.message(F.text & F.text.regexp(r'(?i)^[/!]?changeme\s*$'))
+async def cmd_changeme(message: Message):
+    emoji = random.choice(["🔥", "⚡", "🐺", "🦊", "🦁", "🐯", "🐲", "👻", "🤖", "👽", "💀", "👑", "🎭", "🦅", "🐍"])
+    await update_user(message.from_user.id, call_sign=emoji)
+    await message.answer(f"✅ Новый случайный позывной: {emoji}")
+
+
+# ================= 📢 СОЗЫВЫ (ОБНОВЛЕНО) =================
 async def summon_all_members(chat_id: int, call_text: str, starter_id: int):
     active_summons[chat_id] = True
     try:
-        users = await get_all_users()
+        # Берем только тех, кто писал в этот чат
+        users = await get_users_from_chat(chat_id)
         users_to_tag = [u["user_id"] for u in users if u["user_id"] != starter_id]
         random.shuffle(users_to_tag)
 
         if not users_to_tag:
             active_summons[chat_id] = False
-            return await bot.send_message(chat_id, "❌ В базе нет пользователей для созыва. Напишите что-нибудь в чат!")
+            return await bot.send_message(chat_id, "❌ В этом чате пока нет людей в базе. Напишите что-нибудь!")
 
         for i in range(0, len(users_to_tag), 25):
             if not active_summons.get(chat_id, False): break
@@ -592,7 +613,7 @@ async def cmd_admin_add(message: Message):
     else:
         if len(parts) < 4: return await message.answer("❌ Формат: <code>+пополнить карман @user 500</code>",
                                                        parse_mode="HTML")
-        target = find_user_in_list(await get_all_users(), parts[2])
+        target = find_user_in_list(await get_users_from_chat(message.chat.id), parts[2])
         if not target: return await message.answer("❌ Пользователь не найден (пусть напишет в чат).")
         amount_idx = 3
 
@@ -624,7 +645,7 @@ async def cmd_admin_withdraw(message: Message):
         target, amount_idx = message.reply_to_message.from_user, 1
     else:
         if len(parts) < 3: return await message.answer("❌ Формат: <code>!забрать @user 100</code>", parse_mode="HTML")
-        target = find_user_in_list(await get_all_users(), parts[1])
+        target = find_user_in_list(await get_users_from_chat(message.chat.id), parts[1])
         if not target: return await message.answer("❌ Пользователь не найден.")
         amount_idx = 2
 
@@ -649,7 +670,7 @@ async def cmd_help(message: Message):
         "📖 <b>СПИСОК КОМАНД БОТА</b>\n"
         "━━━━━━━━━━━━━━━━━━━━\n\n"
         "🎁 <b>Случайные коины:</b>\n"
-        "• Просто пиши в чате — с шансом 5% получишь 1-20 🪙\n\n"
+        "• Просто пиши в чате — с шансом 3% получишь 2-10 🪙\n\n"
         "📦 <b>Сундуки:</b>\n"
         "• <code>!открыть</code> — открыть сундук (КД 5 часов)\n\n"
         "💰 <b>Экономика:</b>\n"
