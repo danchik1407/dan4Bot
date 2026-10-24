@@ -27,7 +27,7 @@ game_state = {
     "winner": None,
     "last_update": time.time(),
     "last_bot_added": 0,
-    "target_bots": 0  # Сколько ботов должно быть в этом раунде
+    "target_bots": 0
 }
 
 
@@ -61,15 +61,14 @@ async def get_hockey_state():
     time_left = 20 - (now - game_state["last_update"])
 
     if game_state["status"] == "waiting":
-        # Если прошло 12 секунд (осталось 8), выбираем сколько ботов будет
+        # Боты начинают заходить с 8-й секунды
         if time_left <= 8 and game_state["target_bots"] == 0:
             game_state["target_bots"] = random.randint(1, 5)
 
-        # Добавляем ботов по одному
         if time_left <= 8 and game_state["target_bots"] > 0:
             current_bots = sum(1 for p in game_state["players"] if p["is_bot"])
 
-            # Если еще не всех добавили и прошло 1.2 сек
+            # Заходят по одному раз в 1.2 секунды
             if current_bots < game_state["target_bots"] and (now - game_state["last_bot_added"]) > 1.2:
                 bot_bet = random.randint(10, 100)
                 bot_name = random.choice(BOT_NAMES) + str(random.randint(1, 99))
@@ -117,6 +116,22 @@ async def get_hockey_state():
 
     elif game_state["status"] == "finished":
         if now - game_state["last_update"] > 4:
+            # НАЧИСЛЕНИЕ МОНЕТ ПОБЕДИТЕЛЮ
+            if game_state["winner"]:
+                winner_id = game_state["winner"]["id"]
+                bank_amount = game_state["bank"]
+
+                try:
+                    res = supabase.table("users").select("coins").eq("user_id", winner_id).execute()
+                    if res.data:
+                        current_coins = int(res.data[0].get("coins", 0))
+                        new_coins = current_coins + bank_amount
+                        supabase.table("users").update({"coins": new_coins}).eq("user_id", winner_id).execute()
+                        print(
+                            f"🏆 Выигрыш начислен! Юзер {winner_id} получил {bank_amount} монет. Новый баланс: {new_coins}")
+                except Exception as e:
+                    print(f"❌ Ошибка при начислении выигрыша: {e}")
+
             game_state = {
                 "status": "waiting", "timer": 20, "bank": 0, "players": [],
                 "ball": {"x": 50, "y": 50, "vx": 0, "vy": 0},

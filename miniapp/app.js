@@ -20,17 +20,15 @@ let localBallState = { x: 50, y: 50, vx: 0, vy: 0 };
 let hasBetThisRound = false;
 let hasShownWinner = false;
 
-// ==================== ЗВУКИ (УЛУЧШЕННЫЕ) ====================
+// ==================== ЗВУКИ ====================
 const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
 
 function playSound(type) {
     if (audioCtx.state === 'suspended') audioCtx.resume();
-
     const osc = audioCtx.createOscillator();
     const gain = audioCtx.createGain();
     osc.connect(gain);
     gain.connect(audioCtx.destination);
-
     const now = audioCtx.currentTime;
 
     if (type === 'click') {
@@ -40,38 +38,31 @@ function playSound(type) {
         gain.gain.setValueAtTime(0.1, now);
         gain.gain.exponentialRampToValueAtTime(0.01, now + 0.05);
         osc.start(now); osc.stop(now + 0.05);
-    }
-    else if (type === 'win') {
+    } else if (type === 'win') {
         osc.type = 'triangle';
-        osc.frequency.setValueAtTime(523.25, now); // C5
-        osc.frequency.setValueAtTime(659.25, now + 0.1); // E5
-        osc.frequency.setValueAtTime(783.99, now + 0.2); // G5
+        osc.frequency.setValueAtTime(523.25, now);
+        osc.frequency.setValueAtTime(659.25, now + 0.1);
+        osc.frequency.setValueAtTime(783.99, now + 0.2);
         gain.gain.setValueAtTime(0.15, now);
         gain.gain.exponentialRampToValueAtTime(0.01, now + 0.4);
         osc.start(now); osc.stop(now + 0.4);
-    }
-    else if (type === 'lose') {
+    } else if (type === 'lose') {
         osc.type = 'sawtooth';
         osc.frequency.setValueAtTime(300, now);
         osc.frequency.exponentialRampToValueAtTime(100, now + 0.4);
         gain.gain.setValueAtTime(0.15, now);
         gain.gain.exponentialRampToValueAtTime(0.01, now + 0.4);
         osc.start(now); osc.stop(now + 0.4);
-    }
-    else if (type === 'boom') {
-        // Используем белый шум для взрыва
+    } else if (type === 'boom') {
         const bufferSize = audioCtx.sampleRate * 0.5;
         const buffer = audioCtx.createBuffer(1, bufferSize, audioCtx.sampleRate);
         const data = buffer.getChannelData(0);
         for (let i = 0; i < bufferSize; i++) data[i] = Math.random() * 2 - 1;
-
         const noise = audioCtx.createBufferSource();
         noise.buffer = buffer;
-
         const noiseGain = audioCtx.createGain();
         noiseGain.gain.setValueAtTime(0.2, now);
         noiseGain.gain.exponentialRampToValueAtTime(0.01, now + 0.5);
-
         noise.connect(noiseGain);
         noiseGain.connect(audioCtx.destination);
         noise.start(now);
@@ -213,7 +204,10 @@ async function pollHockeyState() {
                 if (state.winner.id === user.id) {
                     playSound('win');
                     if (tg.HapticFeedback) tg.HapticFeedback.notificationOccurred('success');
-                    await loadUserData();
+                    // Ждем начисления на сервере, затем обновляем баланс
+                    setTimeout(async () => {
+                        await loadUserData();
+                    }, 1000);
                 } else {
                     playSound('lose');
                     if (tg.HapticFeedback) tg.HapticFeedback.notificationOccurred('error');
