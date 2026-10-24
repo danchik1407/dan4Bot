@@ -712,6 +712,56 @@ async def cmd_admin_add(message: Message):
         parse_mode="HTML")
 
 
+@dp.message(F.text & F.text.regexp(r'(?i)^[/!]?забрать\s+всё(?:\s|$)'))
+async def cmd_admin_wipe_all(message: Message):
+    try:
+        await message.delete()
+    except:
+        pass
+
+    if not is_admin(message.from_user.id):
+        return await message.answer("❌ Только для админов бота.")
+    if message.chat.type in ("group", "supergroup") and not await is_chat_admin(message.from_user.id, message.chat.id):
+        return await message.answer("❌ Только для админов чата.")
+
+    parts = message.text.strip().split()
+    target = None
+
+    if message.reply_to_message and message.reply_to_message.from_user:
+        target = message.reply_to_message.from_user
+    elif len(parts) >= 3:
+        target = find_user_in_list(await get_users_from_chat(message.chat.id), parts[2])
+        if not target:
+            return await message.answer("❌ Пользователь не найден (пусть напишет в чат).")
+    else:
+        return await message.answer("❌ Формат: <code>!забрать всё @user</code> или ответом на сообщение",
+                                    parse_mode="HTML")
+
+    user = await get_user(target.id, target.username)
+
+    old_coins = user.get("coins", 0)
+    old_keys = user.get("keys", 0)
+    inv = json.loads(user.get("inventory") or "[]")
+    old_capsules = len(inv)
+
+    if old_coins == 0 and old_keys == 0 and not inv:
+        return await message.answer("❌ У пользователя и так всё пусто.")
+
+    # Обнуляем всё
+    await update_user(target.id, coins=0, keys=0, inventory="[]")
+
+    target_name = f"@{safe_text(target.username)}" if getattr(target, "username", None) else f"id{target.id}"
+
+    await message.answer(
+        f"🧹 <b>Полная зачистка!</b>\n\n"
+        f"👤 Кому: {target_name}\n"
+        f"➖ Снято коинов: <b>{old_coins}</b> 🪙\n"
+        f"➖ Удалено ключей: <b>{old_keys}</b> 🔑\n"
+        f"➖ Удалено капсул: <b>{old_capsules}</b> 💊\n"
+        f"📊 Новый баланс: <b>0</b> 🪙",
+        parse_mode="HTML"
+    )
+
 @dp.message(F.text & F.text.regexp(r'(?i)^[/!]?забрать(?:\s|$)'))
 async def cmd_admin_withdraw(message: Message):
     try:
