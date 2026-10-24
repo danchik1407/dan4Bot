@@ -5,22 +5,28 @@ let balance = 0;
 let keys = 0;
 let currentBet = 10;
 
-// ВСТАВЬ СЮДА ССЫЛКУ НА ТВОЙ API НА RENDER
+// ВСТАВЬ СЮДА СВОЮ ССЫЛКУ С RENDER (например: https://aura-api-xxxx.onrender.com)
 const API_URL = "https://dan4bot-1.onrender.com";
 
+// Загрузка данных с повторной попыткой
 async function loadUserData() {
+    document.getElementById('user-balance').innerText = "...";
     try {
         const response = await fetch(`${API_URL}/api/user`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ initData: tg.initData })
         });
+        if (!response.ok) throw new Error("API Error");
+
         const data = await response.json();
         balance = data.coins;
+        keys = data.keys || 0;
         updateUI();
     } catch (e) {
-        console.error("Ошибка загрузки", e);
-        document.getElementById('user-balance').innerText = "Error";
+        console.error("Ошибка загрузки, пробуем снова...", e);
+        document.getElementById('user-balance').innerText = "Соединение...";
+        setTimeout(loadUserData, 3000); // Пробуем каждые 3 секунды, пока не проснется
     }
 }
 
@@ -39,6 +45,21 @@ async function changeBalance(amount) {
     }
 }
 
+async function changeKeys(amount) {
+    try {
+        const response = await fetch(`${API_URL}/api/update_keys`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ initData: tg.initData, amount: amount })
+        });
+        const data = await response.json();
+        keys = data.new_keys;
+        updateUI();
+    } catch (e) {
+        console.error("Ошибка обновления ключей", e);
+    }
+}
+
 function updateUI() {
     document.getElementById('user-balance').innerText = balance;
     document.getElementById('user-keys').innerText = keys;
@@ -47,14 +68,20 @@ function updateUI() {
         : `<div class="inv-item">📦<br><span>Пусто</span></div>`;
 }
 
+// Запускаем загрузку при старте
 loadUserData();
 
+// --- НАВИГАЦИЯ (ДОБАВЛЕНА ЗАЩИТА ОТ ОШИБОК) ---
 function switchTab(tabId, element) {
-    document.querySelectorAll('.tab').forEach(tab => tab.classList.remove('active'));
-    document.getElementById('tab-' + tabId).classList.add('active');
-    document.querySelectorAll('.nav-item').forEach(nav => nav.classList.remove('active'));
-    element.classList.add('active');
-    if (tg.HapticFeedback) tg.HapticFeedback.impactOccurred('light');
+    try {
+        document.querySelectorAll('.tab').forEach(tab => tab.classList.remove('active'));
+        document.getElementById('tab-' + tabId).classList.add('active');
+        document.querySelectorAll('.nav-item').forEach(nav => nav.classList.remove('active'));
+        element.classList.add('active');
+        if (tg.HapticFeedback) tg.HapticFeedback.impactOccurred('light');
+    } catch (e) {
+        console.error("Ошибка вкладок", e);
+    }
 }
 
 function openGame(game) {
@@ -73,7 +100,7 @@ function closeGame() {
     if (tg.HapticFeedback) tg.HapticFeedback.impactOccurred('light');
 }
 
-// ==================== ЕЖЕДНЕВНЫЙ КЕЙС ====================
+// ==================== КЕЙС ====================
 let caseClaimed = false;
 function claimDailyCase() {
     if (caseClaimed) return tg.showAlert("Вы уже забирали кейс сегодня!");
@@ -87,7 +114,7 @@ function claimDailyCase() {
     if (tg.HapticFeedback) tg.HapticFeedback.notificationOccurred('success');
 
     setTimeout(() => {
-        changeBalance(50); // Начисляем 50
+        changeBalance(50);
         icon.innerText = '💎';
         text.innerText = 'Забрано!';
         text.style.color = '#34c759';
@@ -109,8 +136,8 @@ function openNormalChest() {
     if (tg.HapticFeedback) tg.HapticFeedback.impactOccurred('heavy');
 
     setTimeout(() => {
-        if (Math.random() < 0.01) {
-            keys++; updateUI();
+        if (Math.random() < 0.01) { // 1% шанс на ключ
+            changeKeys(1);
             icon.innerText = '🔑';
             showWin("ЗОЛОТОЙ КЛЮЧ!");
             if (tg.HapticFeedback) tg.HapticFeedback.notificationOccurred('success');
@@ -122,7 +149,7 @@ function openNormalChest() {
             else if (rand > 0.4) amount = 5;
             else amount = Math.floor(Math.random() * 3) + 1;
 
-            changeBalance(amount); // Отправляем в БД
+            changeBalance(amount);
             icon.innerText = '💎';
             showWin(amount);
         }
@@ -149,9 +176,9 @@ function openGoldChest() {
     if (tg.HapticFeedback) tg.HapticFeedback.impactOccurred('heavy');
 
     setTimeout(() => {
-        keys--; updateUI();
+        changeKeys(-1); // Тратим ключ
         let amount = Math.floor(Math.random() * (100 - 10 + 1)) + 10;
-        changeBalance(amount); // Отправляем в БД
+        changeBalance(amount);
         icon.innerText = '💎';
         showWin(amount);
         setTimeout(() => icon.innerText = '🎁', 2000);
@@ -195,7 +222,7 @@ function minesAction() {
     if (minesActive) { cashoutMines(); return; }
     if (balance < currentBet) return tg.showAlert("Недостаточно средств!");
 
-    changeBalance(-currentBet); // Снимаем ставку
+    changeBalance(-currentBet);
     minesActive = true;
     minesCoef = 1.0;
     minesSafeOpened = 0;
@@ -258,7 +285,7 @@ function cashoutMines() {
     if (!minesActive) return;
     minesActive = false;
     const cashout = Math.floor(currentBet * minesCoef);
-    changeBalance(cashout); // Начисляем выигрыш
+    changeBalance(cashout);
     document.getElementById('mines-btn').innerText = `Играть снова (${currentBet} 🪙)`;
     document.getElementById('mines-btn').style.background = '#007aff';
     document.querySelectorAll('.cell').forEach(c => c.style.pointerEvents = 'none');
@@ -276,7 +303,7 @@ function crashAction() {
     if (crashActive) { cashedOut(); return; }
     if (balance < currentBet) return tg.showAlert("Недостаточно средств!");
 
-    changeBalance(-currentBet); // Снимаем ставку
+    changeBalance(-currentBet);
     crashActive = true;
     currentCoef = 1.0;
 
@@ -308,7 +335,7 @@ function cashedOut() {
     crashActive = false;
 
     const winAmount = Math.floor(currentBet * currentCoef);
-    changeBalance(winAmount); // Начисляем
+    changeBalance(winAmount);
     document.getElementById('rocket-box').classList.add('cashed');
     document.getElementById('crash-btn').innerText = `Играть снова (${currentBet} 🪙)`;
     document.getElementById('crash-btn').style.background = '#007aff';

@@ -1,5 +1,4 @@
-# api.py
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import os
@@ -14,7 +13,6 @@ load_dotenv()
 
 app = FastAPI()
 
-# Разрешаем запросы с любых доменов (для Mini App)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -30,7 +28,6 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 
-# Функция проверки подписи Telegram (чтобы никто не подделал user_id)
 def verify_telegram_data(init_data: str):
     try:
         parsed_data = dict(parse_qsl(init_data))
@@ -56,7 +53,11 @@ class UserAuth(BaseModel):
     initData: str
 
 
-# 1. Получение баланса
+class UpdateBalance(BaseModel):
+    initData: str
+    amount: int
+
+
 @app.post("/api/user")
 async def get_user(auth: UserAuth):
     user = verify_telegram_data(auth.initData)
@@ -68,23 +69,15 @@ async def get_user(auth: UserAuth):
 
     res = supabase.table("users").select("*").eq("user_id", user_id).execute()
     if not res.data:
-        # Создаем нового юзера, если его нет
         new_user = {
-            "user_id": user_id, "coins": 0, "username": username,
+            "user_id": user_id, "coins": 0, "keys": 0, "username": username,
             "last_chest": 0, "last_call": 0, "call_sign": None, "chat_id": 0
         }
         supabase.table("users").insert(new_user).execute()
         return {"coins": 0, "keys": 0}
 
     db_user = res.data[0]
-    # Ключи мы пока храним локально на фронте, но потом можно добавить в БД
-    return {"coins": db_user["coins"], "keys": 0}
-
-
-# 2. Обновление баланса (ставки/выигрыши)
-class UpdateBalance(BaseModel):
-    initData: str
-    amount: int
+    return {"coins": db_user.get("coins", 0), "keys": db_user.get("keys", 0)}
 
 
 @app.post("/api/update_balance")
@@ -102,9 +95,32 @@ async def update_balance(data: UpdateBalance):
     current_coins = res.data[0]["coins"]
     new_coins = current_coins + data.amount
 
-    # Защита от минусового баланса
     if new_coins < 0:
         new_coins = 0
 
     supabase.table("users").update({"coins": new_coins}).eq("user_id", user_id).execute()
     return {"success": True, "new_balance": new_coins}
+
+
+# Эндпоинт для обновления ключей (для сундуков)
+class UpdateKeys(BaseModel):
+    initData: str
+    amount: int
+
+
+@app.post("/api/update_keys")
+async def update_keys(data: UpdateKeys):
+    user = verify_telegram_data(data.initData)
+    if not user: raise HTTPException(status_code=401, detail="Invalid auth data")
+
+    user_id = user["id"]
+    res = supabase.table("users").select("keys").eq("user_id", user_id).execute()
+    if not res.data: raise HTTPException(status_code=404, detail="User not found")
+
+    current_keys = res.data[0].get("keys", 0)
+    new_keys = current_keys + data.amount
+
+    if new_keys < 0: new_keys = 0
+
+    supabase.table("users").update({"keys": new_keys}).eq("user_id", user_id).execute()
+    return {"success": True, "new_keys": new_keys}
