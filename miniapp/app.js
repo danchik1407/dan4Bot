@@ -18,11 +18,12 @@ let hockeyInterval = null;
 let animationFrameId = null;
 let localBallState = { x: 50, y: 50, vx: 0, vy: 0 };
 let hasBetThisRound = false;
+let hasShownWinner = false; // Флаг от спама модалки
 
 // ==================== ХОККЕЙ ====================
 async function placeHockeyBet() {
     if (isProcessing) return;
-    if (hasBetThisRound) return tg.showAlert("Вы уже сделали ставку в этом раунде!"); // Блокировка
+    if (hasBetThisRound) return tg.showAlert("Вы уже сделали ставку в этом раунде!");
 
     const bet = parseInt(document.getElementById('hockey-bet').value) || 10;
     if (balance < bet) return tg.showAlert("Недостаточно коинов!");
@@ -47,22 +48,54 @@ async function placeHockeyBet() {
     isProcessing = false;
 }
 
+// Вспышка на углах
+function flashCorner(cornerId) {
+    const el = document.getElementById(cornerId);
+    if (el) {
+        el.classList.add('flash');
+        setTimeout(() => el.classList.remove('flash'), 300);
+    }
+}
+
+// Плавная анимация с зумом
 function animateBall(arenaWidth, arenaHeight) {
     if (localBallState.vx === 0 && localBallState.vy === 0) return;
+
+    const prevX = localBallState.x;
+    const prevY = localBallState.y;
 
     localBallState.x += localBallState.vx;
     localBallState.y += localBallState.vy;
 
-    if (localBallState.x < 0 || localBallState.x > 100) localBallState.vx *= -1;
-    if (localBallState.y < 0 || localBallState.y > 100) localBallState.vy *= -1;
+    // Отскок от стен
+    if (localBallState.x < 0) { localBallState.x = 0; localBallState.vx *= -1; }
+    if (localBallState.x > 100) { localBallState.x = 100; localBallState.vx *= -1; }
+    if (localBallState.y < 0) { localBallState.y = 0; localBallState.vy *= -1; }
+    if (localBallState.y > 100) { localBallState.y = 100; localBallState.vy *= -1; }
 
+    // Проверка на углы (в радиусе 10%)
+    if ((localBallState.x < 10 && localBallState.y < 10) && !(prevX < 10 && prevY < 10)) flashCorner('corner-tl');
+    if ((localBallState.x > 90 && localBallState.y < 10) && !(prevX > 90 && prevY < 10)) flashCorner('corner-tr');
+    if ((localBallState.x < 10 && localBallState.y > 90) && !(prevX < 10 && prevY > 90)) flashCorner('corner-bl');
+    if ((localBallState.x > 90 && localBallState.y > 90) && !(prevX > 90 && prevY > 90)) flashCorner('corner-br');
+
+    // Торможение
     localBallState.vx *= 0.985;
     localBallState.vy *= 0.985;
 
     const ball = document.getElementById('hockey-ball');
-    if (ball) {
+    const arena = document.getElementById('hockey-arena');
+
+    if (ball && arena) {
         ball.style.left = localBallState.x + '%';
         ball.style.top = localBallState.y + '%';
+
+        // Зум при замедлении (скорость меньше 2)
+        const speed = Math.sqrt(localBallState.vx**2 + localBallState.vy**2);
+        if (speed < 2 && !arena.classList.contains('zoomed')) {
+            arena.style.transformOrigin = `${localBallState.x}% ${localBallState.y}%`;
+            arena.classList.add('zoomed');
+        }
     }
 
     if (Math.abs(localBallState.vx) > 0.1 || Math.abs(localBallState.vy) > 0.1) {
@@ -78,6 +111,7 @@ async function pollHockeyState() {
 
         const statusEl = document.getElementById('hockey-status');
         const bankEl = document.getElementById('hockey-bank');
+        const arena = document.getElementById('hockey-arena');
 
         if (state.status === 'waiting') {
             statusEl.innerText = `Ставки: ${state.timer} сек`;
@@ -90,7 +124,9 @@ async function pollHockeyState() {
             if(ball) { ball.style.left = '50%'; ball.style.top = '50%'; }
 
             hasBetThisRound = false;
-            document.getElementById('winner-modal').classList.remove('active'); // Закрываем модалку при новом раунде
+            hasShownWinner = false; // Сброс
+            arena.classList.remove('zoomed'); // Убираем зум
+            document.getElementById('winner-modal').classList.remove('active');
 
         } else if (state.status === 'rolling') {
             statusEl.innerText = 'Идёт бросок...';
@@ -107,9 +143,13 @@ async function pollHockeyState() {
             statusEl.style.color = '#ff3b30';
             cancelAnimationFrame(animationFrameId);
 
+            // Зум возвращаем в исходное
+            arena.classList.remove('zoomed');
+
             const modal = document.getElementById('winner-modal');
-            // Показываем модалку ТОЛЬКО если она еще не открыта
-            if (state.winner && !modal.classList.contains('active')) {
+            // ПОКАЗЫВАЕМ МОДАЛКУ ТОЛЬКО 1 РАЗ
+            if (state.winner && !hasShownWinner) {
+                hasShownWinner = true;
                 document.getElementById('winner-modal-name').innerText = state.winner.name;
                 document.getElementById('winner-modal-amount').innerText = `+${state.bank} 🪙`;
                 modal.classList.add('active');
@@ -125,7 +165,6 @@ async function pollHockeyState() {
 
         bankEl.innerText = `Банк: ${state.bank} 🪙`;
 
-        const arena = document.getElementById('hockey-arena');
         arena.querySelectorAll('.hockey-sector').forEach(el => el.remove());
 
         state.players.forEach(p => {
@@ -159,7 +198,6 @@ async function pollHockeyState() {
                 shapeWrap.appendChild(shape);
                 sector.appendChild(shapeWrap);
             }
-
             arena.appendChild(sector);
         });
 
