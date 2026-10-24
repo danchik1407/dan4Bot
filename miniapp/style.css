@@ -106,17 +106,37 @@ main { padding: 0 16px; }
 }
 @keyframes space-move { from { background-position: 0 0; } to { background-position: -200px 200px; } }
 .rocket-coef { font-size: 36px; font-weight: 900; color: #34c759; position: absolute; top: 20px; left: 20px; z-index: 10; text-shadow: 0 0 15px rgba(52, 199, 89, 0.6); }
-.rocket-wrapper { position: absolute; bottom: 20px; left: 50%; transform: translateX(-50%) rotate(45deg); width: 40px; height: 80px; z-index: 5; transition: transform 0.1s linear; }
 .space-container.crashed { animation: shake 0.5s; background: #ff3b30; }
 .space-container.crashed .rocket-wrapper { display: none; }
 .space-container.crashed .rocket-coef { color: white; }
-.rocket-body { width: 100%; height: 100%; background: linear-gradient(135deg, #ff9a9e 0%, #fecfef 50%, #fecfef 100%); border-radius: 50% 50% 40% 40%; position: relative; box-shadow: 0 0 20px rgba(255, 154, 158, 0.6), inset -5px -5px 15px rgba(0,0,0,0.3); }
-.rocket-window { width: 15px; height: 15px; background: linear-gradient(135deg, #00d2ff, #3a7bd5); border-radius: 50%; position: absolute; top: 20px; left: 50%; transform: translateX(-50%); border: 2px solid #333; box-shadow: inset 0 0 10px #000, 0 0 10px #00d2ff; }
-.rocket-fin { width: 15px; height: 30px; background: linear-gradient(135deg, #ff3b30, #a81812); position: absolute; bottom: 0; }
-.rocket-fin.left { left: -10px; border-radius: 10px 0 0 10px; }
-.rocket-fin.right { right: -10px; border-radius: 0 10px 10px 0; }
-.rocket-fire { width: 20px; height: 30px; background: linear-gradient(to bottom, #ffcc00, #ff3b30, transparent); position: absolute; bottom: -25px; left: 50%; transform: translateX(-50%); border-radius: 50% 50% 20% 20%; animation: fire-burn 0.1s infinite alternate; filter: blur(2px); }
-@keyframes fire-burn { from { height: 30px; opacity: 0.8; } to { height: 40px; opacity: 1; } }
+
+/* Красивая ракета-эмодзи */
+.rocket-wrapper {
+    position: absolute;
+    bottom: 20px;
+    left: 50%;
+    transform: translateX(-50%) rotate(-45deg); /* Поворачиваем по диагонали */
+    z-index: 5;
+    transition: transform 0.1s linear;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+}
+.rocket-emoji { font-size: 70px; filter: drop-shadow(0 0 15px rgba(255,255,255,0.6)); }
+.rocket-fire {
+    position: absolute;
+    bottom: -20px;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 30px;
+    height: 40px;
+    background: radial-gradient(ellipse at top, #ffcc00, #ff3b30, transparent);
+    border-radius: 50%;
+    animation: fire-burn 0.1s infinite alternate;
+    filter: blur(3px);
+    z-index: -1;
+}
+@keyframes fire-burn { from { height: 30px; opacity: 0.8; } to { height: 50px; opacity: 1; } }
 @keyframes shake { 0%, 100% { transform: translateX(0); } 25% { transform: translateX(-5px); } 50% { transform: translateX(5px); } 75% { transform: translateX(-5px); } }
 
 .crash-history-strip { display: flex; gap: 8px; overflow-x: auto; width: 100%; max-width: 350px; margin-bottom: 15px; padding-bottom: 5px; }

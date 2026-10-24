@@ -74,9 +74,7 @@
         <section id="tab-profile" class="tab">
             <div class="page-header"><h2>👤 Профиль</h2></div>
             <div class="profile-card-pro">
-                <div class="profile-avatar-large">
-                    <img id="profile-avatar-large" src="https://via.placeholder.com/100" alt="Avatar">
-                </div>
+                <div class="profile-avatar-large"><img id="profile-avatar-large" src="https://via.placeholder.com/100" alt="Avatar"></div>
                 <h2 class="profile-name" id="profile-name">Загрузка...</h2>
                 <div class="stats-row">
                     <div class="stat-box"><span class="stat-icon">💎</span><span class="stat-value" id="profile-coins">0</span><span class="stat-label">Баланс</span></div>
@@ -99,12 +97,10 @@
                     <button onclick="addBet('mines', 500)">+500</button>
                 </div>
             </div>
-
             <div class="mines-selector">
                 <span>Мин: <b id="mines-count-label">3</b></span>
                 <input type="range" id="mines-count" min="1" max="15" value="3" oninput="updateMinesLabel()">
             </div>
-
             <div class="mines-grid" id="mines-board"></div>
             <div class="game-info-bar" id="mines-info"><span>Кэф: <b id="mines-current-coef">x1.00</b></span><span>Забрать: <b id="mines-cashout-amount">0</b> 🪙</span></div>
             <button class="action-btn" id="mines-btn" onclick="minesAction()">Сделать ставку</button>
@@ -113,7 +109,19 @@
         <!-- КРАШ -->
         <section id="screen-crash" class="game-screen">
             <button class="back-btn" onclick="closeGame()">← Назад</button>
-            <h2 class="game-title">🚀 Краш</h2>
+
+            <div class="crash-history-strip" id="crash-history"></div>
+
+            <div class="space-container" id="space-box">
+                <div class="stars"></div>
+                <div class="rocket-coef" id="crash-coef">x1.00</div>
+
+                <!-- Новая красивая ракета -->
+                <div class="rocket-wrapper" id="rocket-wrapper">
+                    <div class="rocket-emoji">🚀</div>
+                    <div class="rocket-fire"></div>
+                </div>
+            </div>
 
             <div class="bet-input-container" id="crash-bet-box">
                 <input type="number" id="crash-bet" class="bet-input" value="10" min="10" max="10000">
@@ -124,23 +132,7 @@
                 </div>
             </div>
 
-            <div class="space-container" id="space-box">
-                <div class="stars"></div>
-                <div class="rocket-coef" id="crash-coef">x1.00</div>
-
-                <div class="rocket-wrapper" id="rocket-wrapper">
-                    <div class="rocket-body">
-                        <div class="rocket-window"></div>
-                        <div class="rocket-fin left"></div>
-                        <div class="rocket-fin right"></div>
-                    </div>
-                    <div class="rocket-fire"></div>
-                </div>
-            </div>
-
-            <div class="crash-history-strip" id="crash-history"></div>
-
-            <button class="action-btn" id="crash-btn" onclick="crashAction()">Сделать ставку</button>
+            <button class="action-btn" id="crash-btn" onclick="crashAction()">Ждем раунд...</button>
         </section>
     </main>
 

@@ -227,7 +227,7 @@ function getBet(game) {
     return val;
 }
 
-// ==================== МИНЫ ====================
+// МИНЫ
 let minesActive = false, minesCoef = 1.0, minesSafeOpened = 0;
 const board = document.getElementById('mines-board');
 for (let i = 0; i < 16; i++) {
@@ -311,9 +311,10 @@ function cashoutMines() {
     showWin(cashout);
 }
 
-// ==================== КРАШ (ОНЛАЙН) ====================
+// КРАШ (ИСПРАВЛЕННЫЙ)
 let crashActive = false;
 let crashBetPlaced = false;
+let crashBetAmount = 0;
 
 function updateCrashHistoryUI() {
     const list = document.getElementById('crash-history');
@@ -333,12 +334,14 @@ async function pollCrashState() {
         const rocket = document.getElementById('rocket-wrapper');
         const coefText = document.getElementById('crash-coef');
         const btn = document.getElementById('crash-btn');
+        const betBox = document.getElementById('crash-bet-box');
 
         if (state.status === "waiting") {
             coefText.innerText = "Ожидание...";
-            btn.innerText = "Ждем раунд...";
-            btn.disabled = true;
-            btn.style.background = '#555';
+            btn.innerText = "Сделать ставку";
+            btn.disabled = false;
+            btn.style.background = '#007aff';
+            betBox.style.display = 'block';
             rocket.style.opacity = '0';
             box.classList.remove('crashed');
             crashActive = false;
@@ -350,19 +353,24 @@ async function pollCrashState() {
             rocket.style.opacity = '1';
             coefText.innerText = `x${state.current_coef.toFixed(2)}`;
 
-            const moveX = -50 + (state.current_coef * 4);
+            // Анимация полета (по диагонали)
+            const moveX = -50 + (state.current_coef * 5);
             const moveY = -(state.current_coef * 8);
-            rocket.style.transform = `translate(${moveX}%, ${moveY}px) rotate(45deg) scale(1)`;
+            rocket.style.transform = `translate(${moveX}%, ${moveY}px) rotate(-45deg) scale(1)`;
 
             if (crashBetPlaced) {
-                const winAmount = Math.floor(currentBet * state.current_coef);
+                // Если мы уже поставили, показываем кнопку "Забрать"
+                const winAmount = Math.floor(crashBetAmount * state.current_coef);
                 btn.innerText = `Забрать (${winAmount} 🪙)`;
                 btn.disabled = false;
                 btn.style.background = '#34c759';
+                betBox.style.display = 'none'; // Скрываем ввод ставки
             } else {
-                btn.innerText = `Сделать ставку (x${state.current_coef.toFixed(2)})`;
-                btn.disabled = false;
-                btn.style.background = '#007aff';
+                // Если не поставили, кнопка неактивна (уже поздно)
+                btn.innerText = "Ставки закрыты!";
+                btn.disabled = true;
+                btn.style.background = '#555';
+                betBox.style.display = 'none';
             }
         }
         else if (state.status === "crashed") {
@@ -372,6 +380,7 @@ async function pollCrashState() {
             btn.innerText = "Крашнуло!";
             btn.disabled = true;
             btn.style.background = '#ff3b30';
+            betBox.style.display = 'none';
 
             if (crashBetPlaced) {
                 crashBetPlaced = false;
@@ -387,19 +396,16 @@ async function pollCrashState() {
 setInterval(pollCrashState, 200);
 
 function crashAction() {
-    const coefText = document.getElementById('crash-coef').innerText;
     if (crashActive && !crashBetPlaced) {
-        currentBet = getBet('crash');
-        if (balance < currentBet) return tg.showAlert("Недостаточно средств!");
-
-        changeBalance(-currentBet);
-        crashBetPlaced = true;
-        if (tg.HapticFeedback) tg.HapticFeedback.impactOccurred('medium');
+        // Если раунд летит, а мы не ставили - ставить нельзя
+        return tg.showAlert("Ставки принимаются только в фазе Ожидания!");
     }
     else if (crashActive && crashBetPlaced) {
+        // Забираем выигрыш
         crashBetPlaced = false;
+        const coefText = document.getElementById('crash-coef').innerText;
         const currentCoef = parseFloat(coefText.replace('x', ''));
-        const winAmount = Math.floor(currentBet * currentCoef);
+        const winAmount = Math.floor(crashBetAmount * currentCoef);
 
         changeBalance(winAmount);
         showWin(winAmount);
@@ -413,6 +419,21 @@ function crashAction() {
         crashHistory.unshift(currentCoef);
         if (crashHistory.length > 10) crashHistory.pop();
         updateCrashHistoryUI();
+    }
+    else if (!crashActive && !crashBetPlaced) {
+        // Делаем ставку в фазе ожидания
+        const betAmount = getBet('crash');
+        if (balance < betAmount) return tg.showAlert("Недостаточно средств!");
+
+        changeBalance(-betAmount);
+        crashBetAmount = betAmount;
+        crashBetPlaced = true;
+
+        const btn = document.getElementById('crash-btn');
+        btn.innerText = "Ставка принята!";
+        btn.disabled = true;
+        btn.style.background = '#555';
+        if (tg.HapticFeedback) tg.HapticFeedback.impactOccurred('medium');
     }
 }
 
