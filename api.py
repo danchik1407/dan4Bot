@@ -8,11 +8,13 @@ from urllib.parse import parse_qsl
 from dotenv import load_dotenv
 from supabase import create_client, Client
 import json
+import uvicorn
 
 load_dotenv()
 
 app = FastAPI()
 
+# Разрешаем запросы с любых доменов (для Telegram Mini App)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -54,6 +56,11 @@ class UserAuth(BaseModel):
 
 
 class UpdateBalance(BaseModel):
+    initData: str
+    amount: int
+
+
+class UpdateKeys(BaseModel):
     initData: str
     amount: int
 
@@ -102,25 +109,29 @@ async def update_balance(data: UpdateBalance):
     return {"success": True, "new_balance": new_coins}
 
 
-# Эндпоинт для обновления ключей (для сундуков)
-class UpdateKeys(BaseModel):
-    initData: str
-    amount: int
-
-
 @app.post("/api/update_keys")
 async def update_keys(data: UpdateKeys):
     user = verify_telegram_data(data.initData)
-    if not user: raise HTTPException(status_code=401, detail="Invalid auth data")
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid auth data")
 
     user_id = user["id"]
-    res = supabase.table("users").select("keys").eq("user_id", user_id).execute()
-    if not res.data: raise HTTPException(status_code=404, detail="User not found")
 
-    current_keys = res.data[0].get("keys", 0)
+    res = supabase.table("users").select("keys").eq("user_id", user_id).execute()
+    if not res.data:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    current_keys = res.data[0].get("keys", 0) or 0
     new_keys = current_keys + data.amount
 
-    if new_keys < 0: new_keys = 0
+    if new_keys < 0:
+        new_keys = 0
 
     supabase.table("users").update({"keys": new_keys}).eq("user_id", user_id).execute()
     return {"success": True, "new_keys": new_keys}
+
+
+# Этот блок нужен, чтобы FastAPI работал на Render
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run(app, host="0.0.0.0", port=port)
