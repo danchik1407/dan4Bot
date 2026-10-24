@@ -6,7 +6,7 @@ let keys = 0;
 let currentBet = 10;
 
 // ВСТАВЬ СЮДА СВОЮ ССЫЛКУ С RENDER (например: https://aura-api-xxxx.onrender.com)
-const API_URL = "https://dan4bot-1.onrender.com";
+const API_URL = "https://aura-api-mptt.onrender.com/docs";
 
 // Загрузка данных с повторной попыткой
 async function loadUserData() {
