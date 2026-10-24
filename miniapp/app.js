@@ -1,12 +1,10 @@
 const tg = window.Telegram.WebApp;
 tg.expand();
 
-// --- ЗАГРУЗКА АВАТАРКИ И НИКА ИЗ TELEGRAM ---
 const user = tg.initDataUnsafe?.user;
 if (user) {
     document.getElementById('user-name').innerText = user.first_name;
     document.getElementById('profile-name').innerText = user.first_name;
-
     if (user.photo_url) {
         document.getElementById('user-avatar').src = user.photo_url;
         document.getElementById('profile-avatar-large').src = user.photo_url;
@@ -20,6 +18,10 @@ let keys = 0;
 let currentBet = 10;
 let inventory = [];
 let lastChestTime = 0;
+
+// История для красоты
+let minesHistory = [];
+let crashHistory = [1.25, 2.10, 1.05, 5.40, 1.80];
 
 async function loadUserData() {
     try {
@@ -66,15 +68,20 @@ function updateUI() {
     document.getElementById('profile-keys').innerText = keys;
 
     const inv = document.getElementById('inventory');
-    if (inventory.length === 0 && keys === 0) {
+    // Считаем капсулы
+    let capCount = 0;
+    let uniqCount = 0;
+    inventory.forEach(item => {
+        if (item === 'capsule') capCount++;
+        if (item === 'uniq_capsule') uniqCount++;
+    });
+
+    if (capCount === 0 && uniqCount === 0) {
         inv.innerHTML = `<div class="inv-item">📦<br><span>Пусто</span></div>`;
     } else {
         let html = '';
-        if (keys > 0) html += `<div class="inv-item">🔑<br><span>Ключ (${keys})</span></div>`;
-        inventory.forEach(item => {
-            if (item === 'capsule') html += `<div class="inv-item" onclick="tg.showAlert('Скоро...')">💊<br><span>Капсула</span></div>`;
-            if (item === 'uniq_capsule') html += `<div class="inv-item" onclick="tg.showAlert('Скоро...')">⚱️<br><span>Уник. Капсула</span></div>`;
-        });
+        if (capCount > 0) html += `<div class="inv-item" onclick="tg.showAlert('Скоро...')">💊<br><span>Капсула x${capCount}</span></div>`;
+        if (uniqCount > 0) html += `<div class="inv-item" onclick="tg.showAlert('Скоро...')">⚱️<br><span>Уник. Капсула x${uniqCount}</span></div>`;
         inv.innerHTML = html;
     }
 }
@@ -220,6 +227,10 @@ function openGame(game) {
     document.getElementById('main-nav').style.display = 'none';
     document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
     document.getElementById('screen-' + game).classList.add('active');
+
+    if (game === 'crash') updateCrashHistoryUI();
+    if (game === 'mines') updateMinesHistoryUI();
+
     if (tg.HapticFeedback) tg.HapticFeedback.impactOccurred('soft');
 }
 
@@ -239,7 +250,7 @@ function getBet(game) {
     return val;
 }
 
-// --- МИНЫ ---
+// ==================== МИНЫ ====================
 let minesActive = false, minesCoef = 1.0, minesSafeOpened = 0;
 const board = document.getElementById('mines-board');
 for (let i = 0; i < 16; i++) {
@@ -247,6 +258,20 @@ for (let i = 0; i < 16; i++) {
     cell.className = 'cell'; cell.dataset.index = i;
     cell.onclick = () => clickMineCell(cell);
     board.appendChild(cell);
+}
+
+function updateMinesLabel() {
+    document.getElementById('mines-count-label').innerText = document.getElementById('mines-count').value;
+}
+updateMinesLabel();
+
+function updateMinesHistoryUI() {
+    const list = document.getElementById('mines-history');
+    list.innerHTML = '';
+    minesHistory.forEach(item => {
+        list.innerHTML += `<li><span>${item.name}</span> <span style="color:#34c759;">+${item.amount} 🪙</b></span></li>`;
+    });
+    if(minesHistory.length === 0) list.innerHTML = `<li>Пока нет выигрышей</li>`;
 }
 
 function minesAction() {
@@ -266,8 +291,9 @@ function minesAction() {
     document.getElementById('mines-current-coef').innerText = 'x1.00';
     document.getElementById('mines-cashout-amount').innerText = '0';
 
+    const minesCount = parseInt(document.getElementById('mines-count').value);
     window.mineIndices = [];
-    while(window.mineIndices.length < 3) {
+    while(window.mineIndices.length < minesCount) {
         let r = Math.floor(Math.random() * 16);
         if(window.mineIndices.indexOf(r) === -1) window.mineIndices.push(r);
     }
@@ -298,7 +324,13 @@ function clickMineCell(cell) {
         } else {
             cell.classList.add('good'); cell.innerText = '💎';
             minesSafeOpened++;
-            minesCoef = 1.0 + (minesSafeOpened * 0.15);
+
+            // Расчет кэфа в зависимости от количества мин
+            const minesCount = parseInt(document.getElementById('mines-count').value);
+            // Чем больше мин, тем быстрее растет кэф
+            const step = 1.0 + (minesCount * 0.03);
+            minesCoef = Math.pow(step, minesSafeOpened);
+
             const cashout = Math.floor(currentBet * minesCoef);
             document.getElementById('mines-current-coef').innerText = `x${minesCoef.toFixed(2)}`;
             document.getElementById('mines-cashout-amount').innerText = cashout;
@@ -316,10 +348,24 @@ function cashoutMines() {
     document.getElementById('mines-btn').style.background = '#007aff';
     document.querySelectorAll('.cell').forEach(c => c.style.pointerEvents = 'none');
     showWin(cashout);
+
+    // Добавляем в историю
+    minesHistory.unshift({ name: user.first_name || "Игрок", amount: cashout });
+    if (minesHistory.length > 5) minesHistory.pop();
+    updateMinesHistoryUI();
 }
 
-// --- КРАШ ---
+// ==================== КРАШ ====================
 let crashActive = false, crashInterval, currentCoef = 1.0;
+
+function updateCrashHistoryUI() {
+    const list = document.getElementById('crash-history');
+    list.innerHTML = '';
+    crashHistory.forEach(c => {
+        const isCrash = c < 1.0;
+        list.innerHTML += `<span class="coef-badge ${isCrash ? 'crash' : ''}">x${c.toFixed(2)}</span>`;
+    });
+}
 
 function crashAction() {
     if (crashActive) { cashedOut(); return; }
@@ -329,24 +375,32 @@ function crashAction() {
     changeBalance(-currentBet);
     crashActive = true; currentCoef = 1.0;
 
-    const box = document.getElementById('rocket-box');
+    const box = document.querySelector('.rocket-container');
     const rocket = document.getElementById('crash-rocket');
     const coefText = document.getElementById('crash-coef');
     const btn = document.getElementById('crash-btn');
 
     box.classList.remove('crashed', 'cashed');
-    rocket.className = 'rocket-emoji';
+    rocket.style.transform = `translateX(-50%)`;
     btn.style.background = '#34c759';
     coefText.innerText = 'x1.00';
 
+    // Ракета летит по диагонали
     crashInterval = setInterval(() => {
-        currentCoef += 0.02 + (currentCoef / 300);
+        // Медленный рост, чтобы было интереснее
+        currentCoef += 0.01 + (currentCoef / 500);
         coefText.innerText = `x${currentCoef.toFixed(2)}`;
         const winAmount = Math.floor(currentBet * currentCoef);
         btn.innerText = `Забрать (${winAmount} 🪙)`;
-        rocket.style.transform = `translate(${Math.random() * 10}px, -${currentCoef * 3}px)`;
-        if (Math.random() < (0.005 + currentCoef / 300)) { crashed(); }
-    }, 200);
+
+        // Плавное движение ракеты
+        const moveX = -50 + (currentCoef * 5);
+        const moveY = -(currentCoef * 10);
+        rocket.style.transform = `translate(${moveX}%, ${moveY}px) rotate(45deg)`;
+
+        // Сложность: шанс краша растет с каждым тиком
+        if (Math.random() < (0.005 + currentCoef / 400)) { crashed(); }
+    }, 100); // Ускорил тик для плавности полета
 }
 
 function cashedOut() {
@@ -354,22 +408,32 @@ function cashedOut() {
     clearInterval(crashInterval); crashActive = false;
     const winAmount = Math.floor(currentBet * currentCoef);
     changeBalance(winAmount);
-    document.getElementById('rocket-box').classList.add('cashed');
+    document.querySelector('.rocket-container').classList.add('cashed');
     document.getElementById('crash-btn').innerText = `Играть снова`;
     document.getElementById('crash-btn').style.background = '#007aff';
     showWin(winAmount);
+
+    // Добавляем в историю
+    crashHistory.unshift(currentCoef);
+    if (crashHistory.length > 10) crashHistory.pop();
+    updateCrashHistoryUI();
 }
 
 function crashed() {
     if (!crashActive) return;
     clearInterval(crashInterval); crashActive = false;
-    const box = document.getElementById('rocket-box');
+    const box = document.querySelector('.rocket-container');
     box.classList.add('crashed');
-    box.querySelector('.rocket-emoji').className = 'rocket-emoji crashed';
+    document.getElementById('crash-rocket').innerText = '💥'; // Взрыв
     document.getElementById('crash-btn').innerText = `Играть снова`;
     document.getElementById('crash-btn').style.background = '#007aff';
     document.body.classList.add('shake');
     setTimeout(() => document.body.classList.remove('shake'), 500);
+
+    // Добавляем 0 в историю
+    crashHistory.unshift(0);
+    if (crashHistory.length > 10) crashHistory.pop();
+    updateCrashHistoryUI();
 }
 
 loadUserData();

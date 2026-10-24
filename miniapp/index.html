@@ -87,9 +87,11 @@
             </div>
         </section>
 
+        <!-- ИГРА: МИНЫ -->
         <section id="screen-mines" class="game-screen">
             <button class="back-btn" onclick="closeGame()">← Назад</button>
             <h2 class="game-title">💣 Мины</h2>
+
             <div class="bet-input-container">
                 <input type="number" id="mines-bet" class="bet-input" value="10" min="10" max="10000">
                 <div class="bet-buttons">
@@ -98,14 +100,30 @@
                     <button onclick="addBet('mines', 500)">+500</button>
                 </div>
             </div>
+
+            <!-- Выбор количества мин -->
+            <div class="mines-selector">
+                <span>Мин: <b id="mines-count-label">3</b></span>
+                <input type="range" id="mines-count" min="1" max="15" value="3" oninput="updateMinesLabel()">
+            </div>
+
             <div class="mines-grid" id="mines-board"></div>
+
             <div class="game-info-bar" id="mines-info"><span>Кэф: <b id="mines-current-coef">x1.00</b></span><span>Забрать: <b id="mines-cashout-amount">0</b> 🪙</span></div>
             <button class="action-btn" id="mines-btn" onclick="minesAction()">Сделать ставку</button>
+
+            <!-- История выигрышей -->
+            <div class="history-box">
+                <h4>Последние выигрыши:</h4>
+                <ul class="history-list" id="mines-history"></ul>
+            </div>
         </section>
 
+        <!-- ИГРА: КРАШ -->
         <section id="screen-crash" class="game-screen">
             <button class="back-btn" onclick="closeGame()">← Назад</button>
             <h2 class="game-title">🚀 Краш</h2>
+
             <div class="bet-input-container">
                 <input type="number" id="crash-bet" class="bet-input" value="10" min="10" max="10000">
                 <div class="bet-buttons">
@@ -114,8 +132,23 @@
                     <button onclick="addBet('crash', 500)">+500</button>
                 </div>
             </div>
-            <div class="rocket-box" id="rocket-box"><div class="rocket-coef" id="crash-coef">x1.00</div><div class="rocket-emoji" id="crash-rocket">🚀</div></div>
+
+            <div class="rocket-container">
+                <div class="rocket-bg">
+                    <div class="rocket-coef" id="crash-coef">x1.00</div>
+                    <div class="rocket-path">
+                        <div class="rocket-emoji" id="crash-rocket">🚀</div>
+                    </div>
+                </div>
+            </div>
+
             <button class="action-btn" id="crash-btn" onclick="crashAction()">Сделать ставку</button>
+
+            <!-- История иксов -->
+            <div class="history-box">
+                <h4>Последние иксы:</h4>
+                <div class="coef-list" id="crash-history"></div>
+            </div>
         </section>
     </main>
 

@@ -38,6 +38,12 @@ main { padding: 0 16px; }
 .bet-buttons button { flex: 1; background: #2a2a2a; border: 1px solid #444; color: white; padding: 10px; border-radius: 10px; font-weight: 700; cursor: pointer; }
 .bet-buttons button:active { background: #444; }
 
+/* Стили для выбора мин */
+.mines-selector { width: 100%; max-width: 350px; background: var(--card); padding: 15px; border-radius: 12px; margin-bottom: 15px; display: flex; justify-content: space-between; align-items: center; border: 1px solid #333; }
+.mines-selector span { font-size: 16px; font-weight: 700; }
+.mines-selector span b { color: #ff3b30; }
+.mines-selector input[type=range] { flex: 1; margin-left: 15px; accent-color: var(--accent); }
+
 .chest-container { display: flex; flex-direction: column; gap: 15px; }
 .chest-card { background: var(--card); padding: 20px; border-radius: 16px; text-align: center; border: 1px solid #333; }
 .chest-icon { font-size: 50px; margin-bottom: 10px; transition: 0.3s; }
@@ -86,13 +92,26 @@ main { padding: 0 16px; }
 .cell:active { transform: scale(0.95); }
 .cell.flipped:active { transform: rotateY(180deg) scale(0.95); }
 
-.rocket-box { background: var(--card); border-radius: 20px; width: 100%; max-width: 350px; height: 200px; display: flex; flex-direction: column; justify-content: center; align-items: center; margin-bottom: 20px; border: 1px solid #333; position: relative; overflow: hidden; transition: background 0.3s; }
-.rocket-box.crashed { background: #ff3b30; border-color: #ff3b30; }
-.rocket-box.cashed { background: #34c759; border-color: #34c759; }
-.rocket-coef { font-size: 32px; font-weight: 900; color: #34c759; position: absolute; top: 15px; left: 15px; z-index: 2; }
-.rocket-box.crashed .rocket-coef { color: white; }
-.rocket-emoji { font-size: 80px; transition: transform 0.5s ease-in; }
-.rocket-emoji.crashed { transform: scale(1.5) rotate(45deg); filter: grayscale(1); }
+/* Новый дизайн ракеты */
+.rocket-container { width: 100%; max-width: 350px; height: 250px; margin-bottom: 20px; background: radial-gradient(circle at center, #1a2b4c 0%, var(--card) 100%); border-radius: 20px; border: 1px solid #333; position: relative; overflow: hidden; box-shadow: inset 0 0 50px rgba(0,0,0,0.8); }
+.rocket-bg { width: 100%; height: 100%; position: relative; display: flex; justify-content: center; align-items: center; }
+.rocket-coef { font-size: 36px; font-weight: 900; color: #34c759; position: absolute; top: 20px; left: 20px; z-index: 2; text-shadow: 0 0 10px rgba(52, 199, 89, 0.5); }
+.rocket-path { position: absolute; width: 100%; height: 100%; }
+.rocket-emoji { font-size: 80px; position: absolute; bottom: 20px; left: 50%; transform: translateX(-50%); transition: transform 0.2s linear; filter: drop-shadow(0 0 15px rgba(0, 122, 255, 0.8)); }
+.rocket-container.crashed { background: #ff3b30; }
+.rocket-container.crashed .rocket-coef { color: white; }
+.rocket-container.cashed { background: #34c759; }
+.rocket-container.cashed .rocket-coef { color: white; }
+
+/* История */
+.history-box { background: var(--card); border-radius: 16px; padding: 15px; margin-bottom: 15px; border: 1px solid #333; width: 100%; max-width: 350px; }
+.history-box h4 { margin-bottom: 10px; color: var(--text-muted); font-size: 14px; }
+.history-list { list-style: none; }
+.history-list li { padding: 5px 0; border-bottom: 1px solid #333; font-size: 14px; display: flex; justify-content: space-between; }
+.history-list li:last-child { border-bottom: none; }
+.coef-list { display: flex; flex-wrap: wrap; gap: 8px; }
+.coef-badge { background: #1a2b4c; color: #3b82f6; padding: 5px 10px; border-radius: 8px; font-weight: 700; font-size: 12px; }
+.coef-badge.crash { background: #4c1a1a; color: #ef4444; }
 
 .action-btn { background: var(--accent); color: white; border: none; border-radius: 15px; padding: 15px; font-size: 18px; font-weight: 800; cursor: pointer; margin-bottom: 20px; width: 100%; max-width: 350px; transition: 0.2s; }
 .action-btn:active { transform: scale(0.98); opacity: 0.8; }
@@ -106,6 +125,7 @@ main { padding: 0 16px; }
 .win-popup.show { display: block; animation: popWin 1.5s ease-out; }
 .win-text { font-size: 32px; font-weight: 900; color: #34c759; text-shadow: 0 0 10px rgba(0,0,0,0.8); }
 
+/* Рулетка */
 .roulette-container { width: 100%; max-width: 350px; margin: 0 auto 20px auto; position: relative; background: var(--card); border: 2px solid var(--accent); border-radius: 15px; padding: 10px 0; overflow: hidden; box-shadow: 0 0 15px rgba(0, 122, 255, 0.5); }
 .roulette-pointer { text-align: center; color: var(--accent); font-size: 24px; position: absolute; top: -5px; left: 50%; transform: translateX(-50%); z-index: 10; text-shadow: 0 0 5px #000; }
 .roulette-window { height: 80px; overflow: hidden; display: flex; align-items: center; position: relative; }
