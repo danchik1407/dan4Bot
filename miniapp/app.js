@@ -17,10 +17,13 @@ let balance = 0, keys = 0, currentBet = 10, inventory = [], lastChestTime = 0, i
 let hockeyInterval = null;
 let animationFrameId = null;
 let localBallState = { x: 50, y: 50, vx: 0, vy: 0 };
+let hasBetThisRound = false; // Флаг, чтобы ставить только 1 раз
 
 // ==================== ХОККЕЙ ====================
 async function placeHockeyBet() {
     if (isProcessing) return;
+    if (hasBetThisRound) return tg.showAlert("Вы уже сделали ставку в этом раунде!");
+
     const bet = parseInt(document.getElementById('hockey-bet').value) || 10;
     if (balance < bet) return tg.showAlert("Недостаточно коинов!");
 
@@ -38,6 +41,7 @@ async function placeHockeyBet() {
         const data = await res.json();
         balance = data.new_balance;
         updateUI();
+        hasBetThisRound = true; // Ставка сделана
         document.getElementById('hockey-controls').style.display = 'none';
     } catch(e) { tg.showAlert("Ошибка соединения"); }
     isProcessing = false;
@@ -85,6 +89,8 @@ async function pollHockeyState() {
             const ball = document.getElementById('hockey-ball');
             if(ball) { ball.style.left = '50%'; ball.style.top = '50%'; }
 
+            hasBetThisRound = false; // Сброс ставки на новый раунд
+
         } else if (state.status === 'rolling') {
             statusEl.innerText = 'Идёт бросок...';
             statusEl.style.color = '#007aff';
@@ -99,6 +105,21 @@ async function pollHockeyState() {
             statusEl.innerText = 'Раунд окончен!';
             statusEl.style.color = '#ff3b30';
             cancelAnimationFrame(animationFrameId);
+
+            // Показываем модалку
+            if (state.winner && !document.getElementById('winner-modal').classList.contains('active')) {
+                const modal = document.getElementById('winner-modal');
+                document.getElementById('winner-modal-name').innerText = state.winner.name;
+                document.getElementById('winner-modal-amount').innerText = `+${state.bank} 🪙`;
+                modal.classList.add('active');
+
+                if (state.winner.id === user.id) {
+                    if (tg.HapticFeedback) tg.HapticFeedback.notificationOccurred('success');
+                    await loadUserData();
+                } else {
+                    if (tg.HapticFeedback) tg.HapticFeedback.notificationOccurred('error');
+                }
+            }
         }
 
         bankEl.innerText = `Банк: ${state.bank} 🪙`;
@@ -111,25 +132,23 @@ async function pollHockeyState() {
             sector.className = 'hockey-sector';
             const width = p.percent || (p.bet / state.bank * 100);
             sector.style.width = width + '%';
-            sector.style.background = p.color; // Заливка цветом
+            sector.style.background = p.color;
 
             if (width > 6) {
                 const shapeWrap = document.createElement('div');
                 shapeWrap.className = 'player-shape-wrapper';
 
                 const shape = document.createElement('div');
-                shape.className = `player-shape shape-circle`; // Всегда круглая для аватарки
+                shape.className = `player-shape shape-circle`;
                 const size = Math.min(60, Math.max(25, p.bet));
                 shape.style.width = size + 'px';
                 shape.style.height = size + 'px';
 
-                // Если есть аватарка - показываем её, иначе букву
                 if (!p.is_bot && p.avatar) {
                     shape.innerHTML = `<img src="${p.avatar}" style="width:100%; height:100%; object-fit:cover; border-radius: 50%;">`;
                     shape.style.background = 'transparent';
                     shape.style.border = '2px solid #fff';
                 } else {
-                    // Буква
                     const letter = p.name ? p.name[0].toUpperCase() : '?';
                     shape.innerHTML = `<span style="color:white; font-weight:900; font-size:${size/2}px; text-shadow: 0 2px 4px rgba(0,0,0,0.5);">${letter}</span>`;
                     shape.style.backgroundColor = '#2a2a2a';
@@ -157,7 +176,6 @@ async function pollHockeyState() {
             div.className = 'part-item';
             const width = p.percent || (p.bet / state.bank * 100);
 
-            // Иконка в списке
             let iconHtml = '';
             if (!p.is_bot && p.avatar) {
                 iconHtml = `<img src="${p.avatar}" style="width:20px; height:20px; border-radius:50%; margin-right:5px; vertical-align:middle;">`;
@@ -179,14 +197,6 @@ async function pollHockeyState() {
             list.appendChild(div);
         });
 
-        if (state.status === 'finished' && state.winner) {
-            if (state.winner.id === user.id) {
-                showToastWin(`Вы выиграли ${state.bank} 🪙!`);
-                await loadUserData();
-            } else {
-                showToastLose(`${state.winner.name} выиграл. Вы проиграли.`);
-            }
-        }
     } catch (e) { console.error(e); }
 }
 
@@ -202,20 +212,8 @@ function stopHockeyPolling() {
     cancelAnimationFrame(animationFrameId);
 }
 
-function showToastWin(text) {
-    const toast = document.getElementById('toast-win');
-    document.getElementById('toast-win-text').innerText = text;
-    toast.classList.add('show');
-    setTimeout(() => toast.classList.remove('show'), 4000);
-    if (tg.HapticFeedback) tg.HapticFeedback.notificationOccurred('success');
-}
-
-function showToastLose(text) {
-    const toast = document.getElementById('toast-lose');
-    document.getElementById('toast-lose-text').innerText = text;
-    toast.classList.add('show');
-    setTimeout(() => toast.classList.remove('show'), 4000);
-    if (tg.HapticFeedback) tg.HapticFeedback.notificationOccurred('error');
+function closeWinnerModal() {
+    document.getElementById('winner-modal').classList.remove('active');
 }
 
 // ==================== ОБЩИЕ ФУНКЦИИ ====================
