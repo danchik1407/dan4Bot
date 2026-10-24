@@ -23,10 +23,9 @@ game_state = {
     "timer": 20,
     "bank": 0,
     "players": [],
-    "ball": {"x": 50, "y": 50, "vx": 0, "vy": 0},
+    "ball": {"x": 50, "y": 50, "vx": 0, "vy": 0},  # Только начальные данные
     "winner": None,
-    "last_update": time.time(),
-    "last_ball_update": time.time()
+    "last_update": time.time()
 }
 
 
@@ -79,7 +78,6 @@ async def get_hockey_state():
         if time_left <= 0:
             game_state["status"] = "rolling"
             game_state["last_update"] = now
-            game_state["last_ball_update"] = now
 
             total_bank = game_state["bank"]
             if total_bank > 0:
@@ -89,6 +87,7 @@ async def get_hockey_state():
                 for p in game_state["players"]:
                     p["percent"] = 0
 
+            # Выбор победителя
             rand_val = random.uniform(0, 100)
             current_val = 0
             for p in game_state["players"]:
@@ -97,33 +96,23 @@ async def get_hockey_state():
                     game_state["winner"] = p
                     break
 
+            # Начальное направление
             angle = random.uniform(0, 2 * math.pi)
-            game_state["ball"]["vx"] = math.cos(angle) * 8
-            game_state["ball"]["vy"] = math.sin(angle) * 8
+            game_state["ball"]["vx"] = math.cos(angle) * 10  # Скорость для клиента
+            game_state["ball"]["vy"] = math.sin(angle) * 10
 
     elif game_state["status"] == "rolling":
-        if now - game_state["last_ball_update"] > 0.03:
-            ball = game_state["ball"]
-            ball["vx"] *= 0.98
-            ball["vy"] *= 0.98
-            ball["x"] += ball["vx"]
-            ball["y"] += ball["vy"]
-
-            if ball["x"] < 0 or ball["x"] > 100: ball["vx"] *= -1
-            if ball["y"] < 0 or ball["y"] > 100: ball["vy"] *= -1
-
-            game_state["last_ball_update"] = now
-
-            if abs(ball["vx"]) < 0.1 and abs(ball["vy"]) < 0.1:
-                game_state["status"] = "finished"
-                game_state["last_update"] = now
+        # Сервер просто ждет 7 секунд, пока клиент делает анимацию
+        if now - game_state["last_update"] > 7:
+            game_state["status"] = "finished"
+            game_state["last_update"] = now
 
     elif game_state["status"] == "finished":
         if now - game_state["last_update"] > 4:
             game_state = {
                 "status": "waiting", "timer": 20, "bank": 0, "players": [],
                 "ball": {"x": 50, "y": 50, "vx": 0, "vy": 0},
-                "winner": None, "last_update": now, "last_ball_update": now
+                "winner": None, "last_update": now
             }
 
     game_state["timer"] = max(0, int(time_left) if game_state["status"] == "waiting" else 0)
