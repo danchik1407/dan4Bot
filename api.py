@@ -19,9 +19,14 @@ BOT_NAMES = ["Shark_V", "LuckyFox", "NeonWolf", "GhostByte", "PixelKing", "Cyber
 BOT_COLORS = ["#ff3b30", "#ff9500", "#ffcc00", "#34c759", "#007aff", "#5856d6", "#af52de", "#ff2d55"]
 
 game_state = {
-    "status": "waiting", "timer": 5, "bank": 0, "players": [],
+    "status": "waiting",
+    "timer": 20,
+    "bank": 0,
+    "players": [],
     "ball": {"x": 50, "y": 50, "vx": 0, "vy": 0},
-    "winner": None, "last_update": time.time()
+    "winner": None,
+    "last_update": time.time(),
+    "last_ball_update": time.time()
 }
 
 
@@ -52,11 +57,29 @@ class PlaceBet(BaseModel): initData: str; amount: int
 async def get_hockey_state():
     global game_state
     now = time.time()
+    time_left = 20 - (now - game_state["last_update"])
 
     if game_state["status"] == "waiting":
-        if now - game_state["last_update"] > 5:
+        if time_left <= 5 and len(game_state["players"]) < 4:
+            current_bots = sum(1 for p in game_state["players"] if p["is_bot"])
+            if current_bots < 5:
+                num_bots = random.randint(1, 5 - current_bots)
+                for _ in range(num_bots):
+                    if len(game_state["players"]) >= 20: break
+                    bot_bet = random.randint(10, 100)
+                    bot_name = random.choice(BOT_NAMES) + str(random.randint(1, 99))
+                    bot_color = random.choice(BOT_COLORS)
+                    bot_shape = random.choice(["circle", "square", "oval", "triangle"])
+                    game_state["players"].append({
+                        "id": random.randint(10000, 99999), "name": bot_name, "avatar": "", "bet": bot_bet,
+                        "color": bot_color, "shape": bot_shape, "is_bot": True
+                    })
+                    game_state["bank"] += bot_bet
+
+        if time_left <= 0:
             game_state["status"] = "rolling"
             game_state["last_update"] = now
+            game_state["last_ball_update"] = now
 
             total_bank = game_state["bank"]
             if total_bank > 0:
@@ -75,32 +98,35 @@ async def get_hockey_state():
                     break
 
             angle = random.uniform(0, 2 * math.pi)
-            game_state["ball"]["vx"] = math.cos(angle) * 5
-            game_state["ball"]["vy"] = math.sin(angle) * 5
+            game_state["ball"]["vx"] = math.cos(angle) * 8
+            game_state["ball"]["vy"] = math.sin(angle) * 8
 
     elif game_state["status"] == "rolling":
-        ball = game_state["ball"]
-        ball["vx"] *= 0.97
-        ball["vy"] *= 0.97
-        ball["x"] += ball["vx"]
-        ball["y"] += ball["vy"]
+        if now - game_state["last_ball_update"] > 0.03:
+            ball = game_state["ball"]
+            ball["vx"] *= 0.98
+            ball["vy"] *= 0.98
+            ball["x"] += ball["vx"]
+            ball["y"] += ball["vy"]
 
-        if ball["x"] < 0 or ball["x"] > 100: ball["vx"] *= -1
-        if ball["y"] < 0 or ball["y"] > 100: ball["vy"] *= -1
+            if ball["x"] < 0 or ball["x"] > 100: ball["vx"] *= -1
+            if ball["y"] < 0 or ball["y"] > 100: ball["vy"] *= -1
 
-        if abs(ball["vx"]) < 0.3 and abs(ball["vy"]) < 0.3:
-            game_state["status"] = "finished"
-            game_state["last_update"] = now
+            game_state["last_ball_update"] = now
+
+            if abs(ball["vx"]) < 0.1 and abs(ball["vy"]) < 0.1:
+                game_state["status"] = "finished"
+                game_state["last_update"] = now
 
     elif game_state["status"] == "finished":
         if now - game_state["last_update"] > 4:
             game_state = {
-                "status": "waiting", "timer": 5, "bank": 0, "players": [],
+                "status": "waiting", "timer": 20, "bank": 0, "players": [],
                 "ball": {"x": 50, "y": 50, "vx": 0, "vy": 0},
-                "winner": None, "last_update": now
+                "winner": None, "last_update": now, "last_ball_update": now
             }
 
-    game_state["timer"] = max(0, 5 - int(now - game_state["last_update"]))
+    game_state["timer"] = max(0, int(time_left) if game_state["status"] == "waiting" else 0)
     return game_state
 
 
@@ -122,28 +148,13 @@ async def place_bet(data: PlaceBet):
     name = user.get("username", user.get("first_name", f"id{user_id}"))
     avatar = user.get("photo_url", "")
 
+    if len(game_state["players"]) >= 20: raise HTTPException(status_code=400, detail="Комната заполнена")
+
     game_state["players"].append({
         "id": user_id, "name": name, "avatar": avatar, "bet": data.amount,
         "color": "#007aff", "shape": "square", "is_bot": False
     })
     game_state["bank"] += data.amount
-
-    num_bots = random.randint(1, 5 - len(game_state["players"]))
-    if num_bots < 0: num_bots = 0
-    while len(game_state["players"]) + num_bots < 3:
-        num_bots += 1
-
-    for _ in range(num_bots):
-        bot_bet = random.randint(10, 100)
-        bot_name = random.choice(BOT_NAMES)
-        bot_color = random.choice(BOT_COLORS)
-        bot_shape = random.choice(["circle", "square", "oval", "triangle"])
-
-        game_state["players"].append({
-            "id": random.randint(10000, 99999), "name": bot_name, "avatar": "", "bet": bot_bet,
-            "color": bot_color, "shape": bot_shape, "is_bot": True
-        })
-        game_state["bank"] += bot_bet
 
     return {"success": True, "new_balance": new_coins}
 

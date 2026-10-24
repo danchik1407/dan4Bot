@@ -16,6 +16,7 @@ const API_URL = "https://aura-api-mptt.onrender.com";
 let balance = 0, keys = 0, currentBet = 10, inventory = [], lastChestTime = 0, isProcessing = false;
 let hockeyInterval = null;
 
+// ==================== ХОККЕЙ ====================
 async function placeHockeyBet() {
     if (isProcessing) return;
     const bet = parseInt(document.getElementById('hockey-bet').value) || 10;
@@ -27,7 +28,11 @@ async function placeHockeyBet() {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ initData: tg.initData, amount: bet })
         });
-        if (!res.ok) { isProcessing = false; return tg.showAlert("Ставки закрыты!"); }
+        if (!res.ok) {
+            const err = await res.json();
+            isProcessing = false;
+            return tg.showAlert(err.detail || "Ставки закрыты!");
+        }
         const data = await res.json();
         balance = data.new_balance;
         updateUI();
@@ -70,13 +75,13 @@ async function pollHockeyState() {
             sector.style.width = width + '%';
             sector.style.background = p.color;
 
-            if (width > 8) {
+            if (width > 6) {
                 const shapeWrap = document.createElement('div');
                 shapeWrap.className = 'player-shape-wrapper';
 
                 const shape = document.createElement('div');
                 shape.className = `player-shape shape-${p.shape || 'square'}`;
-                const size = Math.min(60, Math.max(20, p.bet));
+                const size = Math.min(60, Math.max(25, p.bet));
                 shape.style.width = size + 'px';
                 shape.style.height = size + 'px';
                 shape.style.backgroundColor = p.color;
@@ -84,7 +89,7 @@ async function pollHockeyState() {
                 if (!p.is_bot && p.avatar) {
                     shape.innerHTML = `<img src="${p.avatar}" style="width:100%; height:100%; object-fit:cover; border-radius: inherit;">`;
                 } else {
-                    shape.innerHTML = `<div class="inner-dot" style="background-color: rgba(255,255,255,0.7);"></div>`;
+                    shape.innerHTML = `<div class="inner-dot"></div>`;
                 }
 
                 shapeWrap.appendChild(shape);
@@ -95,6 +100,7 @@ async function pollHockeyState() {
         });
 
         const ball = document.getElementById('hockey-ball');
+        ball.style.transition = 'left 0.05s linear, top 0.05s linear';
         ball.style.left = state.ball.x + '%';
         ball.style.top = state.ball.y + '%';
 
@@ -154,6 +160,7 @@ function showToastLose(text) {
     if (tg.HapticFeedback) tg.HapticFeedback.notificationOccurred('error');
 }
 
+// ==================== ОБЩИЕ ФУНКЦИИ ====================
 async function loadUserData() {
     try {
         const response = await fetch(`${API_URL}/api/user`, {
@@ -396,6 +403,7 @@ function getBet(game) {
     return val;
 }
 
+// ==================== МИНЫ ====================
 let minesActive = false, minesCoef = 1.0, minesSafeOpened = 0, selectedMines = 1;
 const board = document.getElementById('mines-board');
 for (let i = 0; i < 16; i++) {
