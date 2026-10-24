@@ -34,9 +34,9 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 COOLDOWN_SECONDS = 5 * 60 * 60
 CHALLENGE_TIMEOUT = 60
-COIN_DROP_CHANCE = 0.03
-COIN_DROP_MIN = 2
-COIN_DROP_MAX = 10
+COIN_DROP_CHANCE = 0.005  # 0.5% шанс
+COIN_DROP_MIN = 1
+COIN_DROP_MAX = 5
 DROP_IMAGE = "drop.jpg"
 MIN_BET = 10
 
@@ -136,8 +136,10 @@ async def process_random_coin_drop(message: Message):
     chat_id = message.chat.id if message.chat.type in ("group", "supergroup") else None
     user = await get_user(message.from_user.id, message.from_user.username, chat_id)
 
+    # Проверка шанса (0.5%)
     if random.random() > COIN_DROP_CHANCE: return
 
+    # Награда от 1 до 5
     amount = random.randint(COIN_DROP_MIN, COIN_DROP_MAX)
     await update_user(message.from_user.id, coins=user["coins"] + amount)
 
