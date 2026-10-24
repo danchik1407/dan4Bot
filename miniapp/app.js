@@ -17,13 +17,16 @@ let balance = 0, keys = 0, currentBet = 10, inventory = [], lastChestTime = 0, i
 let hockeyInterval = null;
 let hasBetThisRound = false;
 let hasShownWinner = false;
-let animationFrameId = null;
 
-// Локальные координаты для анимации
-let ballPos = { x: 50, y: 50 };
-let ballVelocity = { vx: 0, vy: 0 };
-let ballTargetX = 50;
-let isRolling = false;
+// Состояние шарика
+let ballState = {
+    isFlying: false,
+    x: 50,
+    y: 50,
+    vx: 0,
+    vy: 0,
+    animationId: null
+};
 
 // ==================== ЗВУКИ ====================
 const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
@@ -73,55 +76,69 @@ function playSound(type) {
     }
 }
 
-// ==================== АНИМАЦИЯ ШАРИКА ====================
-function animateBall() {
-    if (!isRolling) return;
+// ==================== АНИМАЦИЯ ШАРИКА (ОДИН РАЗ) ====================
+function startBallAnimation(targetX) {
+    // Защита от повторного запуска
+    if (ballState.isFlying) return;
+    ballState.isFlying = true;
 
-    const ballEl = document.getElementById('hockey-ball');
+    // Сброс позиции
+    ballState.x = 50;
+    ballState.y = 50;
+    ballState.vx = (targetX - 50) / 100 + (Math.random() - 0.5) * 0.2;
+    ballState.vy = 0.15 + Math.random() * 0.1;
+
     const arena = document.getElementById('hockey-arena');
+    const ballEl = document.getElementById('hockey-ball');
 
-    // Двигаем шарик
-    ballPos.x += ballVelocity.vx;
-    ballPos.y += ballVelocity.vy;
+    // Один цикл анимации
+    const animate = () => {
+        if (!ballState.isFlying) return;
 
-    // Отскоки от стен
-    if (ballPos.x <= 0 || ballPos.x >= 100) {
-        ballVelocity.vx *= -1;
-        ballPos.x = Math.max(0, Math.min(100, ballPos.x));
-        playSound('click'); // Звук отскока
-    }
-    if (ballPos.y <= 0 || ballPos.y >= 100) {
-        ballVelocity.vy *= -1;
-        ballPos.y = Math.max(0, Math.min(100, ballPos.y));
-        playSound('click');
-    }
+        // Двигаем
+        ballState.x += ballState.vx;
+        ballState.y += ballState.vy;
 
-    // Замедление
-    ballVelocity.vx *= 0.99;
-    ballVelocity.vy *= 0.99;
-
-    // Отрисовка
-    if (ballEl) {
-        ballEl.style.left = ballPos.x + '%';
-        ballEl.style.top = ballPos.y + '%';
-    }
-
-    // Зум при замедлении
-    const speed = Math.sqrt(ballVelocity.vx**2 + ballVelocity.vy**2);
-    if (speed < 1.5 && arena) {
-        if (!arena.classList.contains('zoomed')) {
-            arena.classList.add('zoomed');
+        // Отскоки
+        if (ballState.x <= 0 || ballState.x >= 100) {
+            ballState.vx *= -1;
+            ballState.x = Math.max(0, Math.min(100, ballState.x));
+            playSound('click');
         }
-        arena.style.transformOrigin = `${ballPos.x}% ${ballPos.y}%`;
-    }
+        if (ballState.y <= 0 || ballState.y >= 100) {
+            ballState.vy *= -1;
+            ballState.y = Math.max(0, Math.min(100, ballState.y));
+            playSound('click');
+        }
 
-    // Продолжаем, пока есть скорость
-    if (Math.abs(ballVelocity.vx) > 0.1 || Math.abs(ballVelocity.vy) > 0.1) {
-        animationFrameId = requestAnimationFrame(animateBall);
-    } else {
-        // Остановились
-        isRolling = false;
-    }
+        // Замедление
+        ballState.vx *= 0.985;
+        ballState.vy *= 0.985;
+
+        // Отрисовка
+        if (ballEl) {
+            ballEl.style.left = ballState.x + '%';
+            ballEl.style.top = ballState.y + '%';
+        }
+
+        // Зум
+        const speed = Math.sqrt(ballState.vx**2 + ballState.vy**2);
+        if (speed < 1.5 && arena) {
+            if (!arena.classList.contains('zoomed')) {
+                arena.classList.add('zoomed');
+            }
+            arena.style.transformOrigin = `${ballState.x}% ${ballState.y}%`;
+        }
+
+        // Продолжаем или останавливаемся
+        if (Math.abs(ballState.vx) > 0.05 || Math.abs(ballState.vy) > 0.05) {
+            ballState.animationId = requestAnimationFrame(animate);
+        } else {
+            ballState.isFlying = false;
+        }
+    };
+
+    animate();
 }
 
 // ==================== ХОККЕЙ ====================
@@ -170,17 +187,17 @@ async function pollHockeyState() {
 
             hasBetThisRound = false;
             hasShownWinner = false;
-            isRolling = false;
 
-            // Сброс шарика
-            ballPos = { x: 50, y: 50 };
-            ballVelocity = { vx: 0, vy: 0 };
-            const ballEl = document.getElementById('hockey-ball');
-            if (ballEl) { ballEl.style.left = '50%'; ballEl.style.top = '50%'; }
-
-            if (arena) {
-                arena.classList.remove('zoomed');
-                arena.style.transformOrigin = 'center center';
+            // Сброс шарика (только если не летит)
+            if (!ballState.isFlying) {
+                ballState.x = 50;
+                ballState.y = 50;
+                const ballEl = document.getElementById('hockey-ball');
+                if (ballEl) { ballEl.style.left = '50%'; ballEl.style.top = '50%'; }
+                if (arena) {
+                    arena.classList.remove('zoomed');
+                    arena.style.transformOrigin = 'center center';
+                }
             }
             document.getElementById('winner-modal').classList.remove('active');
 
@@ -189,43 +206,21 @@ async function pollHockeyState() {
             statusEl.style.color = '#007aff';
             document.getElementById('hockey-controls').style.display = 'none';
 
-            // Если только начали катить
-            if (!isRolling) {
-                isRolling = true;
-                // Берем параметры с сервера
-                const startX = state.ball.start_x || 50;
-                const startY = state.ball.start_y || 50;
-                const angle = state.ball.angle || 0;
-
-                ballPos = { x: startX, y: startY };
-                // Задаем скорость, чтобы долететь до победителя
-                const targetX = state.ball.target_x || 50;
-                // Направляем шарик в сторону победителя
-                const dx = targetX - startX;
-                const dy = 100 - startY;
-
-                // Вычисляем скорость с учетом затухания
-                // Примерно 7 секунд полета
-                ballVelocity = {
-                    vx: (dx / 7) * 0.1,
-                    vy: (dy / 7) * 0.1
-                };
-
-                animateBall();
+            // Запускаем анимацию ТОЛЬКО ОДИН РАЗ
+            if (!ballState.isFlying && state.ball && state.ball.target_x) {
+                startBallAnimation(state.ball.target_x);
             }
 
         } else if (state.status === 'finished') {
             statusEl.innerText = 'Раунд окончен!';
             statusEl.style.color = '#ff3b30';
 
-            isRolling = false;
-            if (animationFrameId) cancelAnimationFrame(animationFrameId);
-
             if (arena) {
                 arena.classList.remove('zoomed');
                 arena.style.transformOrigin = 'center center';
             }
 
+            // Показываем модалку только один раз
             const modal = document.getElementById('winner-modal');
             if (state.winner && !hasShownWinner) {
                 hasShownWinner = true;
@@ -326,13 +321,12 @@ async function pollHockeyState() {
 function startHockeyPolling() {
     if (hockeyInterval) clearInterval(hockeyInterval);
     pollHockeyState();
-    hockeyInterval = setInterval(pollHockeyState, 150);
+    hockeyInterval = setInterval(pollHockeyState, 200);
 }
 
 function stopHockeyPolling() {
     if (hockeyInterval) clearInterval(hockeyInterval);
     hockeyInterval = null;
-    if (animationFrameId) cancelAnimationFrame(animationFrameId);
 }
 
 function closeWinnerModal() {
@@ -548,6 +542,8 @@ function switchTab(tabId, element) {
 
 function closeGame() {
     stopHockeyPolling();
+    if (ballState.animationId) cancelAnimationFrame(ballState.animationId);
+    ballState.isFlying = false;
     const popup = document.getElementById('win-popup');
     if (popup) popup.classList.remove('show');
     document.querySelectorAll('.game-screen').forEach(s => s.classList.remove('active'));
