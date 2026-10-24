@@ -91,82 +91,35 @@ main { padding: 0 16px; }
 .cell:active { transform: scale(0.95); }
 .cell.flipped:active { transform: rotateY(180deg) scale(0.95); }
 
-/* ================= КРАШ (КОСМОС) ================= */
-.space-container {
-    width: 100%; max-width: 350px; height: 250px; margin-bottom: 15px;
-    background: radial-gradient(circle at bottom left, #1a2b4c 0%, #050505 100%);
-    border-radius: 20px; border: 1px solid #333; position: relative; overflow: hidden;
-    box-shadow: inset 0 0 50px rgba(0,0,0,0.8);
+/* Стили для экрана Soon */
+.soon-container {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    height: 70vh;
+    width: 100%;
+    background: radial-gradient(circle, #1c1c1c 0%, #0f0f0f 100%);
+    border-radius: 20px;
+    border: 1px solid #333;
 }
-.stars {
-    position: absolute; top: 0; left: 0; width: 100%; height: 100%;
-    background-image: radial-gradient(1px 1px at 20px 30px, #fff, rgba(0,0,0,0)), radial-gradient(1px 1px at 40px 70px, #fff, rgba(0,0,0,0)), radial-gradient(2px 2px at 90px 40px, #fff, rgba(0,0,0,0)), radial-gradient(1px 1px at 160px 120px, #fff, rgba(0,0,0,0));
-    background-repeat: repeat; background-size: 200px 200px; opacity: 0.3;
-    animation: space-move 10s linear infinite;
+.soon-icon {
+    font-size: 80px;
+    margin-bottom: 20px;
+    filter: grayscale(1) opacity(0.5);
 }
-@keyframes space-move { from { background-position: 0 0; } to { background-position: -200px 200px; } }
-.rocket-coef { font-size: 36px; font-weight: 900; color: #34c759; position: absolute; top: 20px; left: 20px; z-index: 10; text-shadow: 0 0 15px rgba(52, 199, 89, 0.6); }
-.space-container.crashed { animation: shake 0.5s; background: #ff3b30; }
-.space-container.crashed .rocket-wrapper { display: none; }
-.space-container.crashed .rocket-coef { color: white; }
-
-/* НОВАЯ 3D РАКЕТА */
-.rocket-wrapper {
-    position: absolute;
-    bottom: 20px;
-    left: 50%;
-    transform: translateX(-50%) rotate(-45deg);
-    z-index: 5;
-    transition: transform 0.1s linear;
-    width: 40px;
-    height: 80px;
+.soon-text {
+    font-size: 32px;
+    font-weight: 900;
+    color: #555;
+    letter-spacing: 2px;
+    text-transform: uppercase;
 }
-
-.rocket-body {
-    position: absolute;
-    top: 0; left: 0; width: 100%; height: 100%;
-    background: linear-gradient(90deg, #ddd 0%, #fff 50%, #aaa 100%);
-    border-radius: 50% 50% 10% 10%;
-    box-shadow: 0 0 10px rgba(255,255,255,0.5);
+.soon-sub {
+    color: var(--text-muted);
+    font-size: 14px;
+    margin-top: 10px;
 }
-
-.rocket-window {
-    position: absolute;
-    top: 15px; left: 50%; transform: translateX(-50%);
-    width: 14px; height: 14px;
-    background: #007aff;
-    border: 2px solid #333;
-    border-radius: 50%;
-    box-shadow: inset 0 0 5px #000;
-}
-
-.rocket-fin {
-    position: absolute;
-    bottom: 0;
-    width: 12px; height: 25px;
-    background: #ff3b30;
-    border-radius: 5px;
-}
-.rocket-fin.left { left: -8px; transform: skewX(20deg); }
-.rocket-fin.right { right: -8px; transform: skewX(-20deg); }
-
-.rocket-fire {
-    position: absolute;
-    bottom: -30px; left: 50%; transform: translateX(-50%);
-    width: 20px; height: 40px;
-    background: radial-gradient(ellipse at top, #ffcc00 0%, #ff3b30 50%, transparent 100%);
-    border-radius: 50%;
-    animation: fire-burn 0.1s infinite alternate;
-    filter: blur(2px);
-    z-index: -1;
-}
-@keyframes fire-burn { from { height: 30px; opacity: 0.8; } to { height: 50px; opacity: 1; } }
-@keyframes shake { 0%, 100% { transform: translateX(0); } 25% { transform: translateX(-5px); } 50% { transform: translateX(5px); } 75% { transform: translateX(-5px); } }
-
-.crash-history-strip { display: flex; gap: 8px; overflow-x: auto; width: 100%; max-width: 350px; margin-bottom: 15px; padding-bottom: 5px; }
-.crash-history-strip::-webkit-scrollbar { display: none; }
-.coef-badge-strip { background: #34c759; color: white; padding: 5px 12px; border-radius: 8px; font-weight: 800; font-size: 14px; white-space: nowrap; }
-.coef-badge-strip.crash { background: #ff3b30; }
 
 .action-btn { background: var(--accent); color: white; border: none; border-radius: 15px; padding: 15px; font-size: 18px; font-weight: 800; cursor: pointer; margin-bottom: 20px; width: 100%; max-width: 350px; transition: 0.2s; }
 .action-btn:active { transform: scale(0.98); opacity: 0.8; }

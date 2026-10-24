@@ -25,7 +25,8 @@
             <div class="banner"><div class="banner-title">AURA GAME</div><div class="banner-sub">Твой путь к миллионам</div></div>
             <div class="games-grid">
                 <div class="game-card" onclick="openGame('mines')"><div class="game-icon">💣</div><div class="game-info"><h3>Мины</h3><p>Разминируй поле</p></div></div>
-                <div class="game-card" onclick="openGame('crash')"><div class="game-icon">🚀</div><div class="game-info"><h3>Краш</h3><p>Поставь — забери</p></div></div>
+                <!-- Краш теперь ведет на экран Soon -->
+                <div class="game-card" onclick="openGame('crash')"><div class="game-icon">🚀</div><div class="game-info"><h3>Краш</h3><p>Скоро...</p></div></div>
             </div>
         </section>
 
@@ -106,36 +107,14 @@
             <button class="action-btn" id="mines-btn" onclick="minesAction()">Сделать ставку</button>
         </section>
 
-        <!-- КРАШ -->
+        <!-- ЗАГЛУШКА КРАША (SOON) -->
         <section id="screen-crash" class="game-screen">
             <button class="back-btn" onclick="closeGame()">← Назад</button>
-
-            <div class="crash-history-strip" id="crash-history"></div>
-
-            <div class="space-container" id="space-box">
-                <div class="stars"></div>
-                <div class="rocket-coef" id="crash-coef">x1.00</div>
-
-                <!-- Новая красивая ракета на CSS -->
-                <div class="rocket-wrapper" id="rocket-wrapper">
-                    <div class="rocket-body"></div>
-                    <div class="rocket-window"></div>
-                    <div class="rocket-fin left"></div>
-                    <div class="rocket-fin right"></div>
-                    <div class="rocket-fire"></div>
-                </div>
+            <div class="soon-container">
+                <div class="soon-icon">🚀</div>
+                <h2 class="soon-text">Скоро...</h2>
+                <p class="soon-sub">Мы работаем над этой игрой</p>
             </div>
-
-            <div class="bet-input-container" id="crash-bet-box">
-                <input type="number" id="crash-bet" class="bet-input" value="10" min="10" max="10000">
-                <div class="bet-buttons">
-                    <button onclick="addBet('crash', 10)">+10</button>
-                    <button onclick="addBet('crash', 100)">+100</button>
-                    <button onclick="addBet('crash', 500)">+500</button>
-                </div>
-            </div>
-
-            <button class="action-btn" id="crash-btn" onclick="crashAction()">Ждем раунд...</button>
         </section>
     </main>
 
