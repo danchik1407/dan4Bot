@@ -361,7 +361,8 @@ async def cmd_mines_bet(message: Message):
     if amount < MIN_BET: return await message.answer(f"❌ Минимальная ставка: {MIN_BET} 🪙")
     if user["coins"] < amount: return await message.answer(f"❌ Мало коинов! У тебя {user['coins']} 🪙")
 
-    game_id = f"{message.from_user.id}_{int(time.time())}"
+    # Делаем ID игры уникальным для каждого вызова
+    game_id = f"{message.from_user.id}_{message.message_id}"
     active_mines_games[game_id] = {
         "user_id": message.from_user.id,
         "amount": amount,
@@ -382,8 +383,11 @@ async def cb_mines_start(callback: CallbackQuery):
     game_id = parts[1]
 
     game = active_mines_games.get(game_id)
-    if not game or game["user_id"] != callback.from_user.id:
-        return await callback.answer("❌ Это не твоя игра или она уже неактивна!", show_alert=True)
+    # Если игры нет — значит это старая кнопка
+    if not game:
+        return await callback.answer("❌ Игра уже неактивна. Напиши !мины заново.", show_alert=True)
+    if game["user_id"] != callback.from_user.id:
+        return await callback.answer("❌ Это не твоя игра!", show_alert=True)
 
     if game["active"]:
         return await callback.answer("❌ Игра уже начата!", show_alert=True)
@@ -425,7 +429,9 @@ async def cb_mines_open(callback: CallbackQuery):
     game_id = parts[1]
 
     game = active_mines_games.get(game_id)
-    if not game or game["user_id"] != callback.from_user.id:
+    if not game:
+        return await callback.answer("❌ Игра устарела или сброшена.", show_alert=True)
+    if game["user_id"] != callback.from_user.id:
         return await callback.answer("❌ Это не твоя игра!", show_alert=True)
 
     if game["opened"][idx]:
@@ -490,7 +496,9 @@ async def cb_mines_cashout(callback: CallbackQuery):
     game_id = parts[1]
 
     game = active_mines_games.get(game_id)
-    if not game or game["user_id"] != callback.from_user.id:
+    if not game:
+        return await callback.answer("❌ Эта игра уже завершена.", show_alert=True)
+    if game["user_id"] != callback.from_user.id:
         return await callback.answer("❌ Это не твоя игра!", show_alert=True)
 
     game["active"] = False
@@ -532,16 +540,13 @@ async def cb_mines_cancel(callback: CallbackQuery):
     game_id = callback.data.split("|")[1]
 
     game = active_mines_games.get(game_id)
-    if not game or game["user_id"] != callback.from_user.id:
+    if not game:
+        return await callback.answer("❌ Игра уже неактивна.", show_alert=True)
+    if game["user_id"] != callback.from_user.id:
         return await callback.answer("❌ Это не твоя игра!", show_alert=True)
 
     active_mines_games.pop(game_id, None)
     await callback.message.edit_text("❌ Игра отменена.")
-    await callback.answer()
-
-
-@dp.callback_query(F.data == "ignore")
-async def cb_ignore(callback: CallbackQuery):
     await callback.answer()
 
 
