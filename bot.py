@@ -8,7 +8,8 @@ import json
 from types import SimpleNamespace
 from dotenv import load_dotenv
 from aiogram import Bot, Dispatcher, F
-from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, FSInputFile, Dice, WebAppInfo, MenuButtonWebApp
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, FSInputFile, Dice, \
+    WebAppInfo
 from aiogram.enums import ChatMemberStatus
 from aiohttp import web
 from supabase import create_client, Client
@@ -33,9 +34,9 @@ if not SUPABASE_URL or not SUPABASE_KEY:
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-COOLDOWN_SECONDS = 5 * 60 * 60  # 5 часов
+COOLDOWN_SECONDS = 5 * 60 * 60
 CHALLENGE_TIMEOUT = 60
-COIN_DROP_CHANCE = 0.005  # 0.5% шанс дропа
+COIN_DROP_CHANCE = 0.005
 COIN_DROP_MIN = 1
 COIN_DROP_MAX = 5
 DROP_IMAGE = "drop.jpg"
@@ -561,7 +562,6 @@ async def cb_mines_cashout(callback: CallbackQuery):
         reply_markup=kb, parse_mode="HTML")
     await callback.answer("💰 Забрано!")
 
-    # Автоудаление сообщения с результатом через 2 минуты
     await asyncio.sleep(120)
     try:
         await callback.message.delete()
@@ -750,7 +750,6 @@ async def cmd_admin_withdraw(message: Message):
 
 @dp.message(F.text & F.text.regexp(r'(?i)^[/!]?выдать\s+ключ(?:\s|$)'))
 async def cmd_admin_give_key(message: Message):
-    # Удаляем сообщение с командой
     try:
         await message.delete()
     except:
@@ -763,7 +762,6 @@ async def cmd_admin_give_key(message: Message):
 
     parts = message.text.strip().split()
 
-    # Если ответом на сообщение
     if message.reply_to_message:
         target = message.reply_to_message.from_user
         if len(parts) < 3:
@@ -774,7 +772,6 @@ async def cmd_admin_give_key(message: Message):
             except:
                 return await message.answer("❌ Укажи число ключей (например: !выдать ключ 5).")
     else:
-        # Если через @username
         if len(parts) < 4:
             return await message.answer("❌ Формат: <code>!выдать ключ @user 5</code>", parse_mode="HTML")
 
@@ -873,8 +870,10 @@ async def main():
     if not me.can_read_all_group_messages:
         logger.warning("⚠️ Privacy Mode ВКЛЮЧЕН! Бот не видит '!команды'. Отключи в BotFather.")
 
-    # Установка кнопки меню для Mini App в ЛС
-    web_app_url = "https://dan4bot-1.onrender.com"  # УКАЖИ СВОЮ ССЫЛКУ НА MINI APP
+    # Кнопка меню НЕ устанавливается автоматически.
+    # Если нужно будет включить, раскомментируй код ниже:
+    """
+    web_app_url = "https://dan4bot-1.onrender.com"
     try:
         await bot.set_chat_menu_button(
             menu_button=MenuButtonWebApp(
@@ -882,9 +881,10 @@ async def main():
                 web_app=WebAppInfo(url=web_app_url)
             )
         )
-        logger.info("Кнопка Mini App успешно установлена!")
+        logger.info("Кнопка Mini App установлена!")
     except Exception as e:
-        logger.error(f"Не удалось установить кнопку меню: {e}")
+        logger.error(f"Не удалось установить кнопку: {e}")
+    """
 
     await dp.start_polling(bot)
 

@@ -11,7 +11,7 @@
     <header class="top-bar" id="main-header">
         <div class="profile-badge">
             <img id="user-avatar" src="https://via.placeholder.com/40" alt="Avatar">
-            <span id="user-name">Dan4ik</span>
+            <span id="user-name">Загрузка...</span>
         </div>
         <div class="balance-badge">
             <span class="coin-icon">💎</span>
@@ -31,7 +31,13 @@
 
         <section id="tab-chests" class="tab">
             <div class="page-header"><h2>📦 Сундуки</h2></div>
-            <div class="chest-container">
+            <div id="roulette-container" class="roulette-container" style="display: none;">
+                <div class="roulette-pointer">▼</div>
+                <div class="roulette-window">
+                    <div class="roulette-track" id="roulette-track"></div>
+                </div>
+            </div>
+            <div class="chest-container" id="chest-buttons">
                 <div class="chest-card">
                     <div class="chest-icon" id="normal-chest-icon">📦</div>
                     <h3>Обычный сундук</h3>
@@ -68,8 +74,10 @@
         <section id="tab-profile" class="tab">
             <div class="page-header"><h2>👤 Профиль</h2></div>
             <div class="profile-card-pro">
-                <div class="profile-avatar-large"><img src="https://via.placeholder.com/100" alt="Avatar"></div>
-                <h2 class="profile-name">Dan4ik</h2>
+                <div class="profile-avatar-large">
+                    <img id="profile-avatar-large" src="https://via.placeholder.com/100" alt="Avatar">
+                </div>
+                <h2 class="profile-name" id="profile-name">Загрузка...</h2>
                 <div class="stats-row">
                     <div class="stat-box"><span class="stat-icon">💎</span><span class="stat-value" id="profile-coins">0</span><span class="stat-label">Баланс</span></div>
                     <div class="stat-box"><span class="stat-icon">🔑</span><span class="stat-value" id="profile-keys">0</span><span class="stat-label">Ключи</span></div>
@@ -79,12 +87,9 @@
             </div>
         </section>
 
-        <!-- ИГРА: МИНЫ -->
         <section id="screen-mines" class="game-screen">
             <button class="back-btn" onclick="closeGame()">← Назад</button>
             <h2 class="game-title">💣 Мины</h2>
-
-            <!-- Поле ввода ставки -->
             <div class="bet-input-container">
                 <input type="number" id="mines-bet" class="bet-input" value="10" min="10" max="10000">
                 <div class="bet-buttons">
@@ -93,18 +98,14 @@
                     <button onclick="addBet('mines', 500)">+500</button>
                 </div>
             </div>
-
             <div class="mines-grid" id="mines-board"></div>
             <div class="game-info-bar" id="mines-info"><span>Кэф: <b id="mines-current-coef">x1.00</b></span><span>Забрать: <b id="mines-cashout-amount">0</b> 🪙</span></div>
             <button class="action-btn" id="mines-btn" onclick="minesAction()">Сделать ставку</button>
         </section>
 
-        <!-- ИГРА: КРАШ -->
         <section id="screen-crash" class="game-screen">
             <button class="back-btn" onclick="closeGame()">← Назад</button>
             <h2 class="game-title">🚀 Краш</h2>
-
-            <!-- Поле ввода ставки -->
             <div class="bet-input-container">
                 <input type="number" id="crash-bet" class="bet-input" value="10" min="10" max="10000">
                 <div class="bet-buttons">
@@ -113,7 +114,6 @@
                     <button onclick="addBet('crash', 500)">+500</button>
                 </div>
             </div>
-
             <div class="rocket-box" id="rocket-box"><div class="rocket-coef" id="crash-coef">x1.00</div><div class="rocket-emoji" id="crash-rocket">🚀</div></div>
             <button class="action-btn" id="crash-btn" onclick="crashAction()">Сделать ставку</button>
         </section>

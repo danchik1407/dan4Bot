@@ -1,6 +1,18 @@
 const tg = window.Telegram.WebApp;
 tg.expand();
 
+// --- ЗАГРУЗКА АВАТАРКИ И НИКА ИЗ TELEGRAM ---
+const user = tg.initDataUnsafe?.user;
+if (user) {
+    document.getElementById('user-name').innerText = user.first_name;
+    document.getElementById('profile-name').innerText = user.first_name;
+
+    if (user.photo_url) {
+        document.getElementById('user-avatar').src = user.photo_url;
+        document.getElementById('profile-avatar-large').src = user.photo_url;
+    }
+}
+
 const API_URL = "https://aura-api-mptt.onrender.com";
 
 let balance = 0;
@@ -95,29 +107,67 @@ async function openChest(type) {
 
     if (!isGold && !res.ok) return tg.showAlert("Сундук перезаряжается!");
 
-    const btn = document.getElementById(isGold ? 'gold-chest-btn' : 'normal-chest-btn');
-    btn.disabled = true;
-    btn.innerText = 'Открываем... 🎰';
+    document.getElementById('chest-buttons').style.display = 'none';
+    const roulette = document.getElementById('roulette-container');
+    roulette.style.display = 'block';
+
+    const track = document.getElementById('roulette-track');
+    track.style.transform = 'translateX(0)';
+    track.innerHTML = '';
+
+    let winIndex = 30;
+    let finalAmount = 0;
+    let isKey = false;
+
+    for (let i = 0; i < 40; i++) {
+        let val, icon;
+        if (isGold) {
+            val = Math.floor(Math.random() * 90) + 10;
+            icon = '💎';
+        } else {
+            if (Math.random() < 0.2) { val = 0; icon = '🔑'; }
+            else { val = Math.floor(Math.random() * 10) + 1; icon = '💎'; }
+        }
+
+        if (i === winIndex) {
+            if (isGold) {
+                finalAmount = Math.floor(Math.random() * 90) + 10;
+                icon = '💎'; val = finalAmount;
+            } else {
+                if (Math.random() < 0.01) { isKey = true; icon = '🔑'; val = 0; }
+                else { finalAmount = Math.floor(Math.random() * 10) + 1; icon = '💎'; val = finalAmount; }
+            }
+        }
+
+        const div = document.createElement('div');
+        div.className = 'roulette-item';
+        div.innerHTML = `${icon}<span>${val > 0 ? val : 'Ключ'}</span>`;
+        if (i === winIndex) div.classList.add('win');
+        track.appendChild(div);
+    }
+
+    setTimeout(() => {
+        const itemWidth = 81;
+        const windowWidth = 350;
+        const centerOffset = (windowWidth / 2) - (itemWidth / 2);
+        const moveX = -((winIndex * itemWidth) - centerOffset);
+        track.style.transform = `translateX(${moveX}px)`;
+    }, 100);
 
     setTimeout(async () => {
         if (isGold) {
             await changeKeys(-1);
-            let amount = Math.floor(Math.random() * 90) + 10;
-            await changeBalance(amount);
-            showWin(amount);
+            await changeBalance(finalAmount);
+            showWin(finalAmount);
         } else {
-            if (Math.random() < 0.01) {
-                await changeKeys(1); showWin("КЛЮЧ!");
-            } else {
-                let amount = Math.floor(Math.random() * 10) + 1;
-                await changeBalance(amount); showWin(amount);
-            }
+            if (isKey) { await changeKeys(1); showWin("КЛЮЧ!"); }
+            else { await changeBalance(finalAmount); showWin(finalAmount); }
             lastChestTime = Math.floor(Date.now() / 1000);
         }
-        btn.innerText = isGold ? 'Открыть (Нужен ключ)' : 'Открыть (Бесплатно)';
-        btn.disabled = false;
+        roulette.style.display = 'none';
+        document.getElementById('chest-buttons').style.display = 'flex';
         checkChestCooldown();
-    }, 2000);
+    }, 4200);
 }
 
 async function buyItem(itemId, price) {
@@ -133,7 +183,6 @@ async function buyItem(itemId, price) {
         inventory = data.inventory;
         updateUI();
 
-        // Всплывающее окно вместо alert
         const popup = document.getElementById('win-popup');
         popup.querySelector('.win-text').innerText = "✅ Успешно куплено!";
         popup.classList.add('show');
@@ -150,7 +199,6 @@ function showWin(text) {
     if (tg.HapticFeedback) tg.HapticFeedback.notificationOccurred('success');
 }
 
-// --- НАВИГАЦИЯ ---
 function switchTab(tabId, element) {
     document.querySelectorAll('.tab').forEach(tab => tab.classList.remove('active'));
     document.getElementById('tab-' + tabId).classList.add('active');
@@ -170,7 +218,7 @@ function closeGame() {
 function openGame(game) {
     document.getElementById('main-header').style.display = 'none';
     document.getElementById('main-nav').style.display = 'none';
-    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active')); // Исправлено
+    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
     document.getElementById('screen-' + game).classList.add('active');
     if (tg.HapticFeedback) tg.HapticFeedback.impactOccurred('soft');
 }
