@@ -40,6 +40,7 @@ COIN_DROP_MAX = 10
 DROP_IMAGE = "drop.jpg"
 MIN_BET = 10
 
+active_summons: dict[int, bool] = {}
 active_challenges: dict[str, dict] = {}
 active_mines_games: dict[str, dict] = {}
 
@@ -355,13 +356,17 @@ def get_mines_kb(game_id: str):
 
 @dp.message(F.text & F.text.regexp(r'(?i)^[/!]?мины\s+(\d+)$'))
 async def cmd_mines_bet(message: Message):
+    try:
+        await message.delete()
+    except:
+        pass
+
     amount = int(message.text.split()[1])
     user = await get_user(message.from_user.id, message.from_user.username, message.chat.id)
 
     if amount < MIN_BET: return await message.answer(f"❌ Минимальная ставка: {MIN_BET} 🪙")
     if user["coins"] < amount: return await message.answer(f"❌ Мало коинов! У тебя {user['coins']} 🪙")
 
-    # Делаем ID игры уникальным для каждого вызова
     game_id = f"{message.from_user.id}_{message.message_id}"
     active_mines_games[game_id] = {
         "user_id": message.from_user.id,
@@ -383,9 +388,8 @@ async def cb_mines_start(callback: CallbackQuery):
     game_id = parts[1]
 
     game = active_mines_games.get(game_id)
-    # Если игры нет — значит это старая кнопка
     if not game:
-        return await callback.answer("❌ Игра уже неактивна. Напиши !мины заново.", show_alert=True)
+        return await callback.answer("❌ Игра устарела. Напиши !мины заново.", show_alert=True)
     if game["user_id"] != callback.from_user.id:
         return await callback.answer("❌ Это не твоя игра!", show_alert=True)
 
@@ -534,6 +538,13 @@ async def cb_mines_cashout(callback: CallbackQuery):
     )
     await callback.answer("💰 Забрано!")
 
+    # Автоудаление сообщения с результатом через 2 минуты
+    await asyncio.sleep(120)
+    try:
+        await callback.message.delete()
+    except Exception as e:
+        logger.warning(f"Не удалось удалить сообщение: {e}")
+
 
 @dp.callback_query(F.data.startswith("mines_cancel|"))
 async def cb_mines_cancel(callback: CallbackQuery):
@@ -547,6 +558,11 @@ async def cb_mines_cancel(callback: CallbackQuery):
 
     active_mines_games.pop(game_id, None)
     await callback.message.edit_text("❌ Игра отменена.")
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "ignore")
+async def cb_ignore(callback: CallbackQuery):
     await callback.answer()
 
 
@@ -575,6 +591,72 @@ async def cmd_changeme(message: Message):
     emoji = random.choice(["🔥", "⚡", "🐺", "🦊", "🦁", "🐯", "🐲", "👻", "🤖", "👽", "💀", "👑", "🎭", "🦅", "🐍"])
     await update_user(message.from_user.id, call_sign=emoji)
     await message.answer(f"✅ Новый случайный позывной: {emoji}")
+
+
+# ================= 📢 СОЗЫВЫ (скрыто из помощи) =================
+async def summon_all_members(chat_id: int, call_text: str, starter_id: int):
+    active_summons[chat_id] = True
+    try:
+        users = await get_users_from_chat(chat_id)
+        users_to_tag = [u["user_id"] for u in users if u["user_id"] != starter_id]
+        random.shuffle(users_to_tag)
+
+        if not users_to_tag:
+            active_summons[chat_id] = False
+            return await bot.send_message(chat_id, "❌ В этом чате пока нет людей в базе.")
+
+        for i in range(0, len(users_to_tag), 25):
+            if not active_summons.get(chat_id, False): break
+            batch = users_to_tag[i:i + 25]
+            mentions = [f'<a href="tg://user?id={uid}">Пользователь</a>' for uid in batch]
+            await bot.send_message(chat_id, f"📢 {call_text}\n\n" + "\n".join(mentions), parse_mode="HTML")
+            await asyncio.sleep(2.0)
+    except Exception as e:
+        logger.error(f"Ошибка при созыве: {e}")
+    finally:
+        active_summons.pop(chat_id, None)
+
+
+@dp.message(F.text & F.text.regexp(r'(?i)^[/!]?all(?:\s|$)'))
+async def cmd_all(message: Message):
+    if message.chat.type not in ("group", "supergroup"): return await message.answer("❌ Только для групп!")
+    if not is_admin(message.from_user.id) and not await is_chat_admin(message.from_user.id, message.chat.id):
+        return await message.answer("❌ Только для админов.")
+
+    if active_summons.get(message.chat.id):
+        return await message.answer("⚠️ Созыв уже идёт!")
+
+    parts = message.text.strip().split(maxsplit=1)
+    call_text = parts[1] if len(parts) > 1 else "📢 Общий сбор!"
+    await message.answer(f"🔄 Начинаю созыв...", parse_mode="HTML")
+    asyncio.create_task(summon_all_members(message.chat.id, call_text, message.from_user.id))
+
+
+@dp.message(F.text & F.text.regexp(r'(?i)^[/!]?(stop|стоп)\s*$'))
+async def cmd_stop(message: Message):
+    if message.chat.type in ("group", "supergroup"):
+        if not is_admin(message.from_user.id) and not await is_chat_admin(message.from_user.id, message.chat.id):
+            return await message.answer("❌ Только для админов.")
+    if active_summons.get(message.chat.id):
+        active_summons[message.chat.id] = False
+        await message.answer("⏹️ Созыв прекращён.")
+    else:
+        await message.answer("❌ Активных созывов нет.")
+
+
+@dp.message(F.text & F.text.regexp(r'(?i)^[/!]?(admins|админы)(?:\s|$)'))
+async def cmd_admins(message: Message):
+    if message.chat.type not in ("group", "supergroup"): return await message.answer("❌ Только для групп!")
+    parts = message.text.strip().split(maxsplit=1)
+    call_text = parts[1] if len(parts) > 1 else "📢 Сбор администраторов!"
+    try:
+        members = await bot.get_chat_administrators(chat_id=message.chat.id)
+        admins = [m.user for m in members if not m.user.is_bot]
+        if not admins: return await message.answer("❌ Администраторы не найдены.")
+        mentions = [f'<a href="tg://user?id={u.id}">{safe_text(u.full_name[:20])}</a>' for u in admins]
+        await message.answer(f"📢 {safe_text(call_text)}\n\n" + ", ".join(mentions), parse_mode="HTML")
+    except Exception as e:
+        await message.answer(f"❌ Ошибка: {e}")
 
 
 # ================= 🔧 АДМИН-КОМАНДЫ =================
