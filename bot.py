@@ -748,6 +748,63 @@ async def cmd_admin_withdraw(message: Message):
         parse_mode="HTML")
 
 
+@dp.message(F.text & F.text.regexp(r'(?i)^[/!]?выдать\s+ключ(?:\s|$)'))
+async def cmd_admin_give_key(message: Message):
+    # Удаляем сообщение с командой
+    try:
+        await message.delete()
+    except:
+        pass
+
+    if not is_admin(message.from_user.id):
+        return await message.answer("❌ Только для админов бота.")
+    if message.chat.type in ("group", "supergroup") and not await is_chat_admin(message.from_user.id, message.chat.id):
+        return await message.answer("❌ Только для админов чата.")
+
+    parts = message.text.strip().split()
+
+    # Если ответом на сообщение
+    if message.reply_to_message:
+        target = message.reply_to_message.from_user
+        if len(parts) < 3:
+            amount = 1
+        else:
+            try:
+                amount = int(parts[2])
+            except:
+                return await message.answer("❌ Укажи число ключей (например: !выдать ключ 5).")
+    else:
+        # Если через @username
+        if len(parts) < 4:
+            return await message.answer("❌ Формат: <code>!выдать ключ @user 5</code>", parse_mode="HTML")
+
+        target = find_user_in_list(await get_users_from_chat(message.chat.id), parts[2])
+        if not target:
+            return await message.answer("❌ Пользователь не найден (пусть напишет в чат).")
+
+        try:
+            amount = int(parts[3])
+        except:
+            return await message.answer("❌ Укажи число ключей (например: !выдать ключ @user 5).")
+
+    if amount <= 0:
+        return await message.answer("❌ Количество должно быть больше 0.")
+
+    user = await get_user(target.id, target.username)
+    new_keys = user.get("keys", 0) + amount
+    await update_user(target.id, keys=new_keys)
+
+    target_name = f"@{safe_text(target.username)}" if getattr(target, "username", None) else f"id{target.id}"
+
+    await message.answer(
+        f"🔑 <b>Ключи выданы!</b>\n\n"
+        f"👤 Кому: {target_name}\n"
+        f"➕ Выдано: <b>{amount}</b> шт.\n"
+        f"📊 Всего ключей: <b>{new_keys}</b>",
+        parse_mode="HTML"
+    )
+
+
 # ================= 🔧 ПОМОЩЬ =================
 @dp.message(F.text & F.text.regexp(r'(?i)^[/!]?(помощь|help)\s*$'))
 async def cmd_help(message: Message):
