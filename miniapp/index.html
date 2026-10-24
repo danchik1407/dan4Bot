@@ -25,25 +25,20 @@
             <div class="banner"><div class="banner-title">AURA GAME</div><div class="banner-sub">Твой путь к миллионам</div></div>
             <div class="games-grid">
                 <div class="game-card" onclick="openGame('mines')"><div class="game-icon">💣</div><div class="game-info"><h3>Мины</h3><p>Разминируй поле</p></div></div>
-                <div class="game-card" onclick="openGame('crash')"><div class="game-icon">🚀</div><div class="game-info"><h3>Краш</h3><p>Скоро...</p></div></div>
+                <div class="game-card" onclick="openGame('hockey')"><div class="game-icon">🏒</div><div class="game-info"><h3>Хоккей</h3><p>Онлайн-рулетка</p></div></div>
             </div>
         </section>
 
-        <!-- ГЛОБАЛЬНЫЙ ТОП -->
         <section id="tab-top" class="tab">
             <div class="page-header"><h2>🏆 Топ игроков</h2><p>Глобальный рейтинг</p></div>
-            <div class="leaderboard" id="global-top-list">
-                <p style="text-align: center; color: #888;">Загрузка...</p>
-            </div>
+            <div class="leaderboard" id="global-top-list"><p style="text-align: center; color: #888;">Загрузка...</p></div>
         </section>
 
         <section id="tab-chests" class="tab">
             <div class="page-header"><h2>📦 Сундуки</h2></div>
             <div id="roulette-container" class="roulette-container" style="display: none;">
                 <div class="roulette-pointer">▼</div>
-                <div class="roulette-window">
-                    <div class="roulette-track" id="roulette-track"></div>
-                </div>
+                <div class="roulette-window"><div class="roulette-track" id="roulette-track"></div></div>
             </div>
             <div class="chest-container" id="chest-buttons">
                 <div class="chest-card">
@@ -93,6 +88,7 @@
             </div>
         </section>
 
+        <!-- МИНЫ -->
         <section id="screen-mines" class="game-screen">
             <button class="back-btn" onclick="closeGame()">← Назад</button>
             <h2 class="game-title">💣 Мины</h2>
@@ -104,27 +100,47 @@
                     <button onclick="addBet('mines', 500)">+500</button>
                 </div>
             </div>
-
             <div class="mines-selector-buttons">
                 <button class="mine-btn active" onclick="selectMines(1, this)">1 💣</button>
                 <button class="mine-btn" onclick="selectMines(2, this)">2 💣</button>
                 <button class="mine-btn" onclick="selectMines(3, this)">3 💣</button>
             </div>
-
             <div class="mines-grid" id="mines-board"></div>
             <div class="game-info-bar" id="mines-info"><span>Кэф: <b id="mines-current-coef">x1.00</b></span><span>Забрать: <b id="mines-cashout-amount">0</b> 🪙</span></div>
             <button class="action-btn" id="mines-btn" onclick="minesAction()">Сделать ставку</button>
         </section>
 
-        <section id="screen-crash" class="game-screen">
+        <!-- ХОККЕЙ -->
+        <section id="screen-hockey" class="game-screen" style="padding: 10px;">
             <button class="back-btn" onclick="closeGame()">← Назад</button>
-            <div class="soon-container">
-                <div class="soon-icon">🚀</div>
-                <h2 class="soon-text">Скоро...</h2>
-                <p class="soon-sub">Мы работаем над этой игрой</p>
+            <div class="hockey-header">
+                <div id="hockey-status" style="color: #34c759; font-weight: bold;">Ожидание...</div>
+                <div id="hockey-bank" style="font-size: 20px; font-weight: 900;">Банк: 0 🪙</div>
+            </div>
+            <div class="hockey-arena" id="hockey-arena">
+                <div class="hockey-ball" id="hockey-ball"></div>
+            </div>
+            <div class="hockey-controls" id="hockey-controls">
+                <div class="bet-input-container">
+                    <input type="number" id="hockey-bet" class="bet-input" value="10" min="10" max="1000">
+                    <div class="bet-buttons">
+                        <button onclick="addBet('hockey', 10)">+10</button>
+                        <button onclick="addBet('hockey', 100)">+100</button>
+                    </div>
+                </div>
+                <button class="action-btn" id="hockey-btn" onclick="placeHockeyBet()">Поставить ставку</button>
             </div>
         </section>
     </main>
+
+    <div id="toast-win" class="toast toast-win">
+        <div class="toast-icon">🏆</div>
+        <div id="toast-win-text">Вы выиграли 100 🪙</div>
+    </div>
+    <div id="toast-lose" class="toast toast-lose">
+        <div class="toast-icon">💀</div>
+        <div id="toast-lose-text">Азиз выиграл. Вы проиграли 10 🪙</div>
+    </div>
 
     <div id="chest-win-modal" class="chest-win-modal">
         <div class="chest-win-content">

@@ -13,13 +13,113 @@ if (user) {
 
 const API_URL = "https://aura-api-mptt.onrender.com";
 
-let balance = 0;
-let keys = 0;
-let currentBet = 10;
-let inventory = [];
-let lastChestTime = 0;
-let isProcessing = false;
+let balance = 0, keys = 0, currentBet = 10, inventory = [], lastChestTime = 0, isProcessing = false;
+let hockeyInterval = null;
 
+// ХОККЕЙ
+async function placeHockeyBet() {
+    if (isProcessing) return;
+    const bet = parseInt(document.getElementById('hockey-bet').value) || 10;
+    if (balance < bet) return tg.showAlert("Недостаточно коинов!");
+
+    isProcessing = true;
+    try {
+        const res = await fetch(`${API_URL}/api/place_bet`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ initData: tg.initData, amount: bet })
+        });
+        if (!res.ok) { isProcessing = false; return tg.showAlert("Ставки закрыты!"); }
+        const data = await res.json();
+        balance = data.new_balance;
+        updateUI();
+        document.getElementById('hockey-controls').style.display = 'none';
+    } catch(e) { tg.showAlert("Ошибка соединения"); }
+    isProcessing = false;
+}
+
+async function pollHockeyState() {
+    if (!document.getElementById('screen-hockey').classList.contains('active')) return;
+    try {
+        const res = await fetch(`${API_URL}/api/hockey_state`);
+        const state = await res.json();
+
+        const statusEl = document.getElementById('hockey-status');
+        const bankEl = document.getElementById('hockey-bank');
+
+        if (state.status === 'waiting') {
+            statusEl.innerText = `Ставки: ${state.timer} сек`;
+            statusEl.style.color = '#ffcc00';
+            document.getElementById('hockey-controls').style.display = 'block';
+        } else if (state.status === 'rolling') {
+            statusEl.innerText = 'Идёт бросок...';
+            statusEl.style.color = '#007aff';
+            document.getElementById('hockey-controls').style.display = 'none';
+        } else if (state.status === 'finished') {
+            statusEl.innerText = 'Раунд окончен!';
+            statusEl.style.color = '#ff3b30';
+        }
+
+        bankEl.innerText = `Банк: ${state.bank} 🪙`;
+        const arena = document.getElementById('hockey-arena');
+        arena.querySelectorAll('.hockey-player').forEach(el => el.remove());
+
+        state.players.forEach(p => {
+            const div = document.createElement('div');
+            div.className = 'hockey-player';
+            div.style.left = p.x + '%'; div.style.top = p.y + '%';
+            const size = Math.min(80, Math.max(40, p.bet / 2));
+            div.style.width = size + 'px'; div.style.height = size + 'px';
+            div.style.background = p.color;
+            if (p.avatar) { div.innerHTML = `<img src="${p.avatar}">`; }
+            else { div.innerText = p.name[0]; }
+            const label = document.createElement('div');
+            label.className = 'bet-amount'; label.innerText = p.bet + ' 🪙';
+            div.appendChild(label);
+            arena.appendChild(div);
+        });
+
+        const ball = document.getElementById('hockey-ball');
+        ball.style.left = state.ball.x + '%'; ball.style.top = state.ball.y + '%';
+
+        if (state.status === 'finished' && state.winner) {
+            if (state.winner.id === user.id) {
+                showToastWin(`Вы выиграли ${state.bank} 🪙!`);
+                await loadUserData();
+            } else {
+                showToastLose(`${state.winner.name} выиграл. Вы проиграли.`);
+            }
+        }
+    } catch (e) { console.error(e); }
+}
+
+function startHockeyPolling() {
+    if (hockeyInterval) clearInterval(hockeyInterval);
+    pollHockeyState();
+    hockeyInterval = setInterval(pollHockeyState, 500);
+}
+
+function stopHockeyPolling() {
+    if (hockeyInterval) clearInterval(hockeyInterval);
+    hockeyInterval = null;
+}
+
+function showToastWin(text) {
+    const toast = document.getElementById('toast-win');
+    document.getElementById('toast-win-text').innerText = text;
+    toast.classList.add('show');
+    setTimeout(() => toast.classList.remove('show'), 4000);
+    if (tg.HapticFeedback) tg.HapticFeedback.notificationOccurred('success');
+}
+
+function showToastLose(text) {
+    const toast = document.getElementById('toast-lose');
+    document.getElementById('toast-lose-text').innerText = text;
+    toast.classList.add('show');
+    setTimeout(() => toast.classList.remove('show'), 4000);
+    if (tg.HapticFeedback) tg.HapticFeedback.notificationOccurred('error');
+}
+
+// ОСТАЛЬНЫЕ ФУНКЦИИ
 async function loadUserData() {
     try {
         const response = await fetch(`${API_URL}/api/user`, {
@@ -56,36 +156,22 @@ async function changeKeys(amount) {
     updateUI();
 }
 
-// ЗАГРУЗКА ГЛОБАЛЬНОГО ТОПА
 async function loadGlobalTop() {
     const list = document.getElementById('global-top-list');
     list.innerHTML = '<p style="text-align: center; color: #888;">Загрузка...</p>';
     try {
         const res = await fetch(`${API_URL}/api/global_top`);
         const users = await res.json();
-
-        if (!users || users.length === 0) {
-            list.innerHTML = '<p style="text-align: center; color: #888;">Топ пока пуст</p>';
-            return;
-        }
-
+        if (!users || users.length === 0) { list.innerHTML = '<p style="text-align: center; color: #888;">Топ пока пуст</p>'; return; }
         list.innerHTML = '';
         const medals = ["🥇", "🥈", "🥉"];
-
         users.forEach((u, i) => {
             const prefix = i < 3 ? medals[i] : `<span class="rank">${i+1}</span>`;
             const div = document.createElement('div');
-            div.innerHTML = `
-                <div style="display: flex; align-items: center; gap: 10px;">
-                    ${prefix} <span>${u.username || 'Игрок'}</span>
-                </div>
-                <span>${u.coins} 💎</span>
-            `;
+            div.innerHTML = `<div style="display: flex; align-items: center; gap: 10px;">${prefix} <span>${u.username || 'Игрок'}</span></div><span>${u.coins} 💎</span>`;
             list.appendChild(div);
         });
-    } catch (e) {
-        list.innerHTML = '<p style="text-align: center; color: #888;">Ошибка загрузки</p>';
-    }
+    } catch (e) { list.innerHTML = '<p style="text-align: center; color: #888;">Ошибка загрузки</p>'; }
 }
 
 function updateUI() {
@@ -94,12 +180,8 @@ function updateUI() {
     document.getElementById('profile-keys').innerText = keys;
 
     const inv = document.getElementById('inventory');
-    let capCount = 0;
-    let uniqCount = 0;
-    inventory.forEach(item => {
-        if (item === 'capsule') capCount++;
-        if (item === 'uniq_capsule') uniqCount++;
-    });
+    let capCount = 0, uniqCount = 0;
+    inventory.forEach(item => { if (item === 'capsule') capCount++; if (item === 'uniq_capsule') uniqCount++; });
 
     if (capCount === 0 && uniqCount === 0) {
         inv.innerHTML = `<div class="inv-item">📦<br><span>Пусто</span></div>`;
@@ -143,12 +225,10 @@ async function openChest(type) {
     document.getElementById('chest-buttons').style.display = 'none';
     const roulette = document.getElementById('roulette-container');
     roulette.style.display = 'block';
-
     const track = document.getElementById('roulette-track');
     track.style.transition = 'none';
     track.style.transform = 'translateX(0)';
     track.innerHTML = '';
-
     void track.offsetWidth;
 
     let winIndex = 50, finalAmount = 0, isKey = false;
@@ -182,9 +262,7 @@ async function openChest(type) {
     }, 100);
 
     setTimeout(() => {
-        pendingChestReward = finalAmount;
-        pendingChestIsKey = isKey;
-        pendingChestIsGold = isGold;
+        pendingChestReward = finalAmount; pendingChestIsKey = isKey; pendingChestIsGold = isGold;
         const modal = document.getElementById('chest-win-modal');
         document.getElementById('chest-win-icon').innerText = isKey ? '🔑' : '💎';
         document.getElementById('chest-win-text').innerText = isKey ? 'ЗОЛОТОЙ КЛЮЧ!' : `Вы получили ${finalAmount} 🪙`;
@@ -196,12 +274,10 @@ async function openChest(type) {
 async function claimChestReward() {
     if (isProcessing) return;
     isProcessing = true;
-
     document.getElementById('chest-win-modal').classList.remove('active');
     if (pendingChestIsGold) await changeKeys(-1);
     if (pendingChestIsKey) await changeKeys(1);
     else if (pendingChestReward > 0) await changeBalance(pendingChestReward);
-
     if (!pendingChestIsGold) lastChestTime = Math.floor(Date.now() / 1000);
     document.getElementById('roulette-container').style.display = 'none';
     document.getElementById('chest-buttons').style.display = 'flex';
@@ -240,21 +316,18 @@ function showWin(text) {
 function switchTab(tabId, element) {
     const popup = document.getElementById('win-popup');
     if (popup) popup.classList.remove('show');
-
     document.querySelectorAll('.tab').forEach(tab => tab.classList.remove('active'));
     document.getElementById('tab-' + tabId).classList.add('active');
     document.querySelectorAll('.nav-item').forEach(nav => nav.classList.remove('active'));
     if (element) element.classList.add('active');
-
-    if (tabId === 'top') loadGlobalTop(); // Загружаем топ при переходе
-
+    if (tabId === 'top') loadGlobalTop();
     if (tg.HapticFeedback) tg.HapticFeedback.impactOccurred('soft');
 }
 
 function closeGame() {
+    stopHockeyPolling();
     const popup = document.getElementById('win-popup');
     if (popup) popup.classList.remove('show');
-
     document.querySelectorAll('.game-screen').forEach(s => s.classList.remove('active'));
     document.getElementById('main-header').style.display = 'flex';
     document.getElementById('main-nav').style.display = 'flex';
@@ -267,6 +340,7 @@ function openGame(game) {
     document.getElementById('main-nav').style.display = 'none';
     document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
     document.getElementById('screen-' + game).classList.add('active');
+    if (game === 'hockey') startHockeyPolling();
     if (tg.HapticFeedback) tg.HapticFeedback.impactOccurred('soft');
 }
 
@@ -288,9 +362,8 @@ function getBet(game) {
     return val;
 }
 
-let minesActive = false, minesCoef = 1.0, minesSafeOpened = 0;
-let selectedMines = 1;
-
+// МИНЫ
+let minesActive = false, minesCoef = 1.0, minesSafeOpened = 0, selectedMines = 1;
 const board = document.getElementById('mines-board');
 for (let i = 0; i < 16; i++) {
     const cell = document.createElement('div');
@@ -309,43 +382,24 @@ function selectMines(count, element) {
 
 async function minesAction() {
     if (isProcessing) return;
-
     if (minesActive) {
-        isProcessing = true;
-        minesActive = false;
+        isProcessing = true; minesActive = false;
         const cashout = Math.floor(currentBet * minesCoef);
-
         const btn = document.getElementById('mines-btn');
-        btn.disabled = true;
-        btn.innerText = 'Забрано!';
-        btn.style.background = '#555';
-
-        await changeBalance(cashout);
-        showWin(cashout);
-
+        btn.disabled = true; btn.innerText = 'Забрано!'; btn.style.background = '#555';
+        await changeBalance(cashout); showWin(cashout);
         document.querySelectorAll('.cell').forEach(c => c.style.pointerEvents = 'none');
-        isProcessing = false;
-        return;
+        isProcessing = false; return;
     }
-
     currentBet = getBet('mines');
     if (balance < currentBet) return tg.showAlert("Недостаточно средств!");
-
-    isProcessing = true;
-    await changeBalance(-currentBet);
-    isProcessing = false;
-
+    isProcessing = true; await changeBalance(-currentBet); isProcessing = false;
     minesActive = true; minesCoef = 1.0; minesSafeOpened = 0;
-
-    document.querySelectorAll('.cell').forEach(c => {
-        c.className = 'cell'; c.innerText = ''; c.style.pointerEvents = 'auto';
-    });
-
+    document.querySelectorAll('.cell').forEach(c => { c.className = 'cell'; c.innerText = ''; c.style.pointerEvents = 'auto'; });
     document.getElementById('mines-btn').innerText = 'Забрать (0 🪙)';
     document.getElementById('mines-btn').style.background = '#34c759';
     document.getElementById('mines-current-coef').innerText = 'x1.00';
     document.getElementById('mines-cashout-amount').innerText = '0';
-
     window.mineIndices = [];
     while(window.mineIndices.length < selectedMines) {
         let r = Math.floor(Math.random() * 16);
@@ -357,40 +411,24 @@ function clickMineCell(cell) {
     if (!minesActive || isProcessing) return;
     const idx = parseInt(cell.dataset.index);
     if (cell.classList.contains('flipped')) return;
-
-    isProcessing = true;
-    cell.classList.add('flipped');
+    isProcessing = true; cell.classList.add('flipped');
     if (tg.HapticFeedback) tg.HapticFeedback.impactOccurred('soft');
-
     setTimeout(() => {
         if (window.mineIndices.includes(idx)) {
             cell.classList.add('bad'); cell.innerText = '💥';
             minesActive = false;
             document.querySelectorAll('.cell').forEach(c => c.style.pointerEvents = 'none');
-            window.mineIndices.forEach(i => {
-                const c = board.children[i];
-                if(!c.classList.contains('flipped')) { c.classList.add('flipped', 'bad'); c.innerText = '💣'; }
-            });
-            document.body.classList.add('shake');
-            setTimeout(() => document.body.classList.remove('shake'), 500);
-
+            window.mineIndices.forEach(i => { const c = board.children[i]; if(!c.classList.contains('flipped')) { c.classList.add('flipped', 'bad'); c.innerText = '💣'; } });
+            document.body.classList.add('shake'); setTimeout(() => document.body.classList.remove('shake'), 500);
             const btn = document.getElementById('mines-btn');
-            btn.innerText = `Играть снова`;
-            btn.style.background = '#007aff';
+            btn.innerText = `Играть снова`; btn.style.background = '#007aff';
         } else {
             cell.classList.add('good'); cell.innerText = '💎';
             minesSafeOpened++;
-
-            let base = 1.0;
-            if (selectedMines === 1) base = 1.05;
-            if (selectedMines === 2) base = 1.15;
-            if (selectedMines === 3) base = 1.30;
-
+            let base = 1.0; if (selectedMines === 1) base = 1.05; if (selectedMines === 2) base = 1.15; if (selectedMines === 3) base = 1.30;
             let multiplier = 1 + (Math.log2(minesSafeOpened) * 0.3);
             minesCoef = base * multiplier;
-
             const cashout = Math.floor(currentBet * minesCoef);
-
             document.getElementById('mines-current-coef').innerText = `x${minesCoef.toFixed(2)}`;
             document.getElementById('mines-cashout-amount').innerText = cashout;
             document.getElementById('mines-btn').innerText = `Забрать (${cashout} 🪙)`;

@@ -32,19 +32,7 @@ main { padding: 0 16px; }
 .page-header { text-align: center; margin-bottom: 24px; }
 .page-header h2 { font-size: 22px; font-weight: 800; margin-bottom: 4px; }
 
-/* Глобальный топ */
-.leaderboard > div {
-    background: var(--card);
-    padding: 16px;
-    border-radius: 16px;
-    margin-bottom: 10px;
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    border: 1px solid #222;
-    font-weight: 600;
-    font-size: 14px;
-}
+.leaderboard > div { background: var(--card); padding: 16px; border-radius: 16px; margin-bottom: 10px; display: flex; justify-content: space-between; align-items: center; border: 1px solid #222; font-weight: 600; font-size: 14px; }
 .leaderboard span:last-child { color: #34c759; font-weight: 800; }
 .leaderboard .rank { font-size: 18px; width: 30px; text-align: center; }
 
@@ -107,15 +95,23 @@ main { padding: 0 16px; }
 .cell:active { transform: scale(0.95); }
 .cell.flipped:active { transform: rotateY(180deg) scale(0.95); }
 
-.soon-container { display: flex; flex-direction: column; justify-content: center; align-items: center; height: 70vh; width: 100%; background: radial-gradient(circle, #1c1c1c 0%, #0f0f0f 100%); border-radius: 20px; border: 1px solid #333; }
-.soon-icon { font-size: 80px; margin-bottom: 20px; filter: grayscale(1) opacity(0.5); }
-.soon-text { font-size: 32px; font-weight: 900; color: #555; letter-spacing: 2px; text-transform: uppercase; }
-.soon-sub { color: var(--text-muted); font-size: 14px; margin-top: 10px; }
+/* ХОККЕЙ */
+.hockey-header { display: flex; justify-content: space-between; align-items: center; width: 100%; max-width: 350px; margin-bottom: 10px; padding: 15px; background: var(--card); border-radius: 16px; border: 1px solid #333; box-shadow: 0 0 15px rgba(0, 0, 0, 0.5); }
+.hockey-arena { width: 100%; max-width: 350px; height: 350px; background: linear-gradient(135deg, #0f172a 0%, #020617 100%); border: 3px solid #1e3a8a; border-radius: 20px; position: relative; overflow: hidden; margin-bottom: 15px; box-shadow: inset 0 0 50px rgba(0, 0, 0, 0.9), 0 0 20px rgba(30, 58, 138, 0.5); }
+.hockey-arena::before { content: ''; position: absolute; top: 0; left: 0; width: 100%; height: 100%; background-image: linear-gradient(rgba(30, 58, 138, 0.2) 1px, transparent 1px), linear-gradient(90deg, rgba(30, 58, 138, 0.2) 1px, transparent 1px); background-size: 20px 20px; pointer-events: none; }
+.hockey-ball { width: 24px; height: 24px; background: radial-gradient(circle, #fff 0%, #a0a0a0 100%); border-radius: 50%; position: absolute; box-shadow: 0 0 20px #fff, 0 0 40px rgba(255, 255, 255, 0.5); transform: translate(-50%, -50%); transition: left 0.1s linear, top 0.1s linear; z-index: 10; }
+.hockey-player { position: absolute; border-radius: 15px; display: flex; justify-content: center; align-items: center; font-weight: 900; color: white; transform: translate(-50%, -50%); box-shadow: 0 0 15px rgba(0,0,0,0.8); overflow: hidden; border: 2px solid rgba(255,255,255,0.3); z-index: 5; transition: all 0.3s ease; }
+.hockey-player img { width: 100%; height: 100%; object-fit: cover; }
+.hockey-player .bet-amount { position: absolute; bottom: -25px; font-size: 12px; background: rgba(0,0,0,0.8); padding: 2px 8px; border-radius: 10px; border: 1px solid #444; color: #fff; white-space: nowrap; }
 
-.action-btn { background: var(--accent); color: white; border: none; border-radius: 15px; padding: 15px; font-size: 18px; font-weight: 800; cursor: pointer; margin-bottom: 20px; width: 100%; max-width: 350px; transition: 0.2s; }
-.action-btn:active { transform: scale(0.98); opacity: 0.8; }
-.action-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+/* Тосты */
+.toast { position: fixed; top: -100px; left: 50%; transform: translateX(-50%); padding: 15px 25px; border-radius: 15px; display: flex; align-items: center; gap: 15px; color: white; font-weight: bold; z-index: 1000; transition: top 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275); box-shadow: 0 10px 30px rgba(0,0,0,0.5); width: 90%; max-width: 350px; }
+.toast.show { top: 20px; }
+.toast-win { background: linear-gradient(45deg, #059669, #34d399); border: 1px solid #10b981; }
+.toast-lose { background: linear-gradient(45deg, #991b1b, #ef4444); border: 1px solid #ef4444; }
+.toast-icon { font-size: 28px; }
 
+/* Остальные стили (рулетка, модалка) */
 .roulette-container { width: 100%; max-width: 350px; margin: 0 auto 20px auto; position: relative; background: var(--card); border: 2px solid var(--accent); border-radius: 15px; padding: 10px 0; overflow: hidden; box-shadow: 0 0 15px rgba(0, 122, 255, 0.5); }
 .roulette-pointer { text-align: center; color: var(--accent); font-size: 24px; position: absolute; top: -5px; left: 50%; transform: translateX(-50%); z-index: 10; text-shadow: 0 0 5px #000; }
 .roulette-window { height: 80px; overflow: hidden; display: flex; align-items: center; position: relative; }
@@ -127,14 +123,12 @@ main { padding: 0 16px; }
 .roulette-item span { font-size: 12px; margin-top: 5px; color: var(--text-muted); }
 .roulette-item.win { color: #34c759; text-shadow: 0 0 15px rgba(52, 199, 89, 0.8); }
 .roulette-item.win span { color: #34c759; font-weight: 900; }
-
 .chest-win-modal { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0, 0, 0, 0.85); backdrop-filter: blur(5px); z-index: 1000; display: none; justify-content: center; align-items: center; }
 .chest-win-modal.active { display: flex; }
 .chest-win-content { background: var(--card); padding: 40px 30px; border-radius: 25px; text-align: center; border: 2px solid var(--accent); box-shadow: 0 0 30px rgba(0, 122, 255, 0.5); animation: popIn 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275); }
 @keyframes popIn { 0% { transform: scale(0.5); opacity: 0; } 100% { transform: scale(1); opacity: 1; } }
 .chest-win-icon { font-size: 80px; margin-bottom: 20px; filter: drop-shadow(0 0 20px #ffcc00); }
 .chest-win-content h2 { font-size: 24px; margin-bottom: 25px; color: white; }
-
 .win-popup { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); z-index: 999; pointer-events: none; display: none; }
 .win-popup.show { display: block; animation: popWin 1.5s ease-out; }
 .win-text { font-size: 32px; font-weight: 900; color: #34c759; text-shadow: 0 0 10px rgba(0,0,0,0.8); }
