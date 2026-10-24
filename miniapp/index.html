@@ -8,6 +8,7 @@
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
 </head>
 <body>
+    <!-- Шапка -->
     <header class="top-bar" id="main-header">
         <div class="profile-badge">
             <img id="user-avatar" src="https://via.placeholder.com/40" alt="Avatar">
@@ -21,7 +22,7 @@
     </header>
 
     <main>
-        <!-- ВКЛАДКА ИГРАТЬ -->
+        <!-- ИГРАТЬ -->
         <section id="tab-play" class="tab active">
             <div class="banner">
                 <div class="banner-title">AURA GAME</div>
@@ -39,12 +40,11 @@
             </div>
         </section>
 
-        <!-- ВКЛАДКА СУНДУКИ -->
+        <!-- СУНДУКИ -->
         <section id="tab-chests" class="tab">
             <div class="page-header"><h2>📦 Сундуки</h2><p>Испытай удачу!</p></div>
 
             <div class="chest-container">
-                <!-- Обычный сундук -->
                 <div class="chest-card">
                     <div class="chest-icon" id="normal-chest-icon">📦</div>
                     <h3>Обычный сундук</h3>
@@ -52,7 +52,6 @@
                     <button class="action-btn" id="normal-chest-btn" onclick="openNormalChest()">Открыть (Бесплатно)</button>
                 </div>
 
-                <!-- Золотой сундук -->
                 <div class="chest-card">
                     <div class="chest-icon" id="gold-chest-icon">🎁</div>
                     <h3>Золотой сундук</h3>
@@ -62,16 +61,7 @@
             </div>
         </section>
 
-        <!-- ВКЛАДКА БОНУСЫ -->
-        <section id="tab-bonus" class="tab">
-            <div class="page-header"><h2>🎁 Бонусы</h2></div>
-            <div class="daily-case" onclick="claimDailyCase()">
-                <div class="case-text"><h3>Ежедневный кейс</h3><p id="case-status">Доступен!</p></div>
-                <div class="case-icon" id="case-icon">🎁</div>
-            </div>
-        </section>
-
-        <!-- ВКЛАДКА МАГАЗИН -->
+        <!-- МАГАЗИН -->
         <section id="tab-shop" class="tab">
             <div class="page-header"><h2>🛒 Магазин</h2></div>
             <div class="daily-case">
@@ -80,25 +70,38 @@
             </div>
         </section>
 
-        <!-- ВКЛАДКА ПРОФИЛЬ -->
+        <!-- ПРОФИЛЬ (Обновленный) -->
         <section id="tab-profile" class="tab">
             <div class="page-header"><h2>👤 Профиль</h2></div>
 
-            <div class="profile-card">
-                <div class="profile-stats">
-                    <p>ID: <span id="profile-id">...</span></p>
-                    <p>Валюта: <span style="color: #34c759; font-weight: bold;">Коины</span></p>
-                    <p>Золотые ключи: <span id="user-keys" style="color: #ffcc00; font-weight: bold;">0</span> 🔑</p>
+            <div class="profile-card-pro">
+                <div class="profile-avatar-large">
+                    <img id="profile-avatar-large" src="https://via.placeholder.com/100" alt="Avatar">
+                </div>
+                <h2 id="profile-username" class="profile-name">Dan4ik</h2>
+                <p class="profile-id">ID: <span id="profile-id">...</span></p>
+
+                <div class="stats-row">
+                    <div class="stat-box">
+                        <span class="stat-icon">💎</span>
+                        <span class="stat-value" id="profile-coins">0</span>
+                        <span class="stat-label">Баланс</span>
+                    </div>
+                    <div class="stat-box">
+                        <span class="stat-icon">🔑</span>
+                        <span class="stat-value" id="profile-keys">0</span>
+                        <span class="stat-label">Ключи</span>
+                    </div>
                 </div>
 
-                <h3 style="margin-top: 20px; margin-bottom: 10px;">🎒 Инвентарь</h3>
+                <h3 style="margin-top: 25px; margin-bottom: 10px; text-align: left; font-size: 16px;">🎒 Инвентарь</h3>
                 <div class="inventory-grid" id="inventory">
                     <div class="inv-item">📦<br><span>Пусто</span></div>
                 </div>
             </div>
         </section>
 
-        <!-- ==================== ИГРА: МИНЫ ==================== -->
+        <!-- ИГРА: МИНЫ -->
         <section id="screen-mines" class="game-screen">
             <button class="back-btn" onclick="closeGame()">← Назад</button>
             <h2 class="game-title">💣 Мины</h2>
@@ -118,17 +121,9 @@
             </div>
 
             <button class="action-btn" id="mines-btn" onclick="minesAction()">Сделать ставку (10 🪙)</button>
-
-            <div class="history-box">
-                <h4>Последние 10 выигрышей:</h4>
-                <ul class="history-list">
-                    <li>Dan4ik выиграл <b>500</b> 🪙</li>
-                    <li>Вася выиграл <b>120</b> 🪙</li>
-                </ul>
-            </div>
         </section>
 
-        <!-- ==================== ИГРА: КРАШ ==================== -->
+        <!-- ИГРА: КРАШ -->
         <section id="screen-crash" class="game-screen">
             <button class="back-btn" onclick="closeGame()">← Назад</button>
             <h2 class="game-title">🚀 Краш</h2>
@@ -146,25 +141,16 @@
             </div>
 
             <button class="action-btn" id="crash-btn" onclick="crashAction()">Сделать ставку (10 🪙)</button>
-
-            <div class="history-box">
-                <h4>История коэффициентов:</h4>
-                <div class="coef-list">
-                    <span class="coef-badge">x2.50</span>
-                    <span class="coef-badge">x1.25</span>
-                    <span class="coef-badge crash">x0.00</span>
-                </div>
-            </div>
         </section>
     </main>
 
+    <!-- Всплывающее окно выигрыша -->
     <div id="win-popup" class="win-popup"><div class="win-text">+ 0 🪙</div></div>
 
-    <!-- Навигация -->
+    <!-- Навигация (4 вкладки) -->
     <nav class="bottom-nav" id="main-nav">
         <div class="nav-item active" onclick="switchTab('play', this)"><span class="nav-icon">🎮</span> Играть</div>
         <div class="nav-item" onclick="switchTab('chests', this)"><span class="nav-icon">📦</span> Сундуки</div>
-        <div class="nav-item" onclick="switchTab('bonus', this)"><span class="nav-icon">🎁</span> Бонусы</div>
         <div class="nav-item" onclick="switchTab('shop', this)"><span class="nav-icon">🛒</span> Магазин</div>
         <div class="nav-item" onclick="switchTab('profile', this)"><span class="nav-icon">👤</span> Профиль</div>
     </nav>

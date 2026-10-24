@@ -1,15 +1,12 @@
 const tg = window.Telegram.WebApp;
 tg.expand();
 
-// ССЫЛКА НА ТВОЙ API
 const API_URL = "https://aura-api-mptt.onrender.com";
 
 let balance = 0;
 let keys = 0;
 let currentBet = 10;
-let caseReady = false;
 let normalChestAvailable = true;
-let caseClaimed = false;
 
 async function loadUserData() {
     const balanceEl = document.getElementById('user-balance');
@@ -22,14 +19,8 @@ async function loadUserData() {
         const data = await response.json();
         balance = data.coins;
         keys = data.keys || 0;
-        caseReady = data.case_ready;
 
         updateUI();
-
-        if (!caseReady) {
-            document.getElementById('case-status').innerText = 'Ждите 24 часа!';
-            document.getElementById('case-status').style.color = '#ff3b30';
-        }
     } catch (e) {
         balanceEl.innerText = "Ошибка";
         balanceEl.onclick = () => loadUserData();
@@ -37,43 +28,59 @@ async function loadUserData() {
 }
 
 async function changeBalance(amount) {
-    const response = await fetch(`${API_URL}/api/update_balance`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ initData: tg.initData, amount: amount })
-    });
-    const data = await response.json();
-    balance = data.new_balance;
-    updateUI();
+    try {
+        const response = await fetch(`${API_URL}/api/update_balance`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ initData: tg.initData, amount: amount })
+        });
+        const data = await response.json();
+        balance = data.new_balance;
+        updateUI();
+    } catch(e) { console.error(e); }
 }
 
 async function changeKeys(amount) {
-    const response = await fetch(`${API_URL}/api/update_keys`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ initData: tg.initData, amount: amount })
-    });
-    const data = await response.json();
-    keys = data.new_keys;
-    updateUI();
+    try {
+        const response = await fetch(`${API_URL}/api/update_keys`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ initData: tg.initData, amount: amount })
+        });
+        const data = await response.json();
+        keys = data.new_keys;
+        updateUI();
+    } catch(e) { console.error(e); }
 }
 
 function updateUI() {
     document.getElementById('user-balance').innerText = balance;
-    document.getElementById('user-keys').innerText = keys;
-    document.getElementById('inventory').innerHTML = keys > 0
-        ? `<div class="inv-item">🔑<br><span>Золотой ключ (${keys})</span></div>`
-        : `<div class="inv-item">📦<br><span>Пусто</span></div>`;
+
+    // Обновляем инвентарь в профиле
+    const inv = document.getElementById('inventory');
+    if (inv) {
+        inv.innerHTML = keys > 0
+            ? `<div class="inv-item">🔑<br><span>Золотой ключ (${keys})</span></div>`
+            : `<div class="inv-item">📦<br><span>Пусто</span></div>`;
+    }
 }
 
 loadUserData();
 
+// --- НАВИГАЦИЯ (Защищено от ошибок) ---
 function switchTab(tabId, element) {
-    document.querySelectorAll('.tab').forEach(tab => tab.classList.remove('active'));
-    document.getElementById('tab-' + tabId).classList.add('active');
-    document.querySelectorAll('.nav-item').forEach(nav => nav.classList.remove('active'));
-    element.classList.add('active');
-    if (tg.HapticFeedback) tg.HapticFeedback.impactOccurred('light');
+    try {
+        document.querySelectorAll('.tab').forEach(tab => tab.classList.remove('active'));
+        document.getElementById('tab-' + tabId).classList.add('active');
+
+        document.querySelectorAll('.nav-item').forEach(nav => nav.classList.remove('active'));
+        element.classList.add('active');
+
+        // Мягкая вибрация
+        if (tg.HapticFeedback) tg.HapticFeedback.impactOccurred('soft');
+    } catch (e) {
+        console.error("Ошибка переключения", e);
+    }
 }
 
 function openGame(game) {
@@ -81,7 +88,8 @@ function openGame(game) {
     document.getElementById('main-nav').style.display = 'none';
     document.querySelectorAll('.tab').forEach(t => t.style.display = 'none');
     document.getElementById('screen-' + game).classList.add('active');
-    if (tg.HapticFeedback) tg.HapticFeedback.impactOccurred('medium');
+    // Мягкая вибрация
+    if (tg.HapticFeedback) tg.HapticFeedback.impactOccurred('soft');
 }
 
 function closeGame() {
@@ -89,37 +97,10 @@ function closeGame() {
     document.getElementById('main-header').style.display = 'flex';
     document.getElementById('main-nav').style.display = 'flex';
     document.getElementById('tab-play').style.display = 'block';
-    if (tg.HapticFeedback) tg.HapticFeedback.impactOccurred('light');
+    if (tg.HapticFeedback) tg.HapticFeedback.impactOccurred('soft');
 }
 
-function claimDailyCase() {
-    if (!caseReady || caseClaimed) return tg.showAlert("Кейс пока недоступен!");
-    const icon = document.getElementById('case-icon');
-    const text = document.getElementById('case-status');
-
-    icon.style.transform = 'scale(1.2) rotate(10deg)';
-    setTimeout(() => icon.style.transform = 'scale(1.2) rotate(-10deg)', 100);
-    setTimeout(() => icon.style.transform = 'scale(1.2) rotate(10deg)', 200);
-    setTimeout(() => icon.style.transform = 'scale(1) rotate(0)', 300);
-
-    setTimeout(async () => {
-        await fetch(`${API_URL}/api/claim_case`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ initData: tg.initData })
-        });
-
-        changeBalance(50);
-        icon.innerText = '💎';
-        text.innerText = 'Забрано!';
-        text.style.color = '#34c759';
-        caseClaimed = true;
-        caseReady = false;
-        if (tg.HapticFeedback) tg.HapticFeedback.notificationOccurred('success');
-        showWin(50);
-    }, 500);
-}
-
+// ==================== СУНДУКИ ====================
 function openNormalChest() {
     if (!normalChestAvailable) return tg.showAlert("Сундук перезаряжается!");
     const icon = document.getElementById('normal-chest-icon');
@@ -127,21 +108,22 @@ function openNormalChest() {
 
     icon.style.transform = 'scale(1.2) rotate(10deg)';
     setTimeout(() => icon.style.transform = 'scale(1) rotate(0)', 300);
+    if (tg.HapticFeedback) tg.HapticFeedback.impactOccurred('soft');
 
     setTimeout(() => {
-        if (Math.random() < 0.01) {
+        if (Math.random() < 0.01) { // 1% шанс
             changeKeys(1);
             icon.innerText = '🔑';
             showWin("ЗОЛОТОЙ КЛЮЧ!");
         } else {
-            let amount = Math.floor(Math.random() * 10) + 1;
+            let amount = Math.floor(Math.random() * 10) + 1; // 1-10
             changeBalance(amount);
             icon.innerText = '💎';
             showWin(amount);
         }
 
         btn.disabled = true;
-        btn.innerText = 'Перезарядка...';
+        btn.innerText = 'Перезарядка (10с)...';
         normalChestAvailable = false;
 
         setTimeout(() => {
@@ -150,7 +132,7 @@ function openNormalChest() {
             btn.innerText = 'Открыть (Бесплатно)';
             icon.innerText = '📦';
             icon.style.transform = 'scale(1)';
-        }, 10000);
+        }, 10000); // 10 сек для теста
     }, 400);
 }
 
@@ -159,10 +141,11 @@ function openGoldChest() {
     const icon = document.getElementById('gold-chest-icon');
     icon.style.transform = 'scale(1.2) rotate(10deg)';
     setTimeout(() => icon.style.transform = 'scale(1) rotate(0)', 300);
+    if (tg.HapticFeedback) tg.HapticFeedback.impactOccurred('soft');
 
     setTimeout(() => {
         changeKeys(-1);
-        let amount = Math.floor(Math.random() * 90) + 10;
+        let amount = Math.floor(Math.random() * 90) + 10; // 10-100
         changeBalance(amount);
         icon.innerText = '💎';
         showWin(amount);
@@ -227,6 +210,7 @@ function clickMineCell(cell) {
     const idx = parseInt(cell.dataset.index);
     if (cell.classList.contains('flipped')) return;
     cell.classList.add('flipped');
+    if (tg.HapticFeedback) tg.HapticFeedback.impactOccurred('soft');
 
     setTimeout(() => {
         if (window.mineIndices.includes(idx)) {
@@ -266,7 +250,7 @@ function cashoutMines() {
     showWin(cashout);
 }
 
-// ==================== КРАШ (ЗАМЕДЛЕН) ====================
+// ==================== КРАШ ====================
 let crashActive = false, crashInterval, currentCoef = 1.0;
 document.getElementById('crash-btn').innerText = `Сделать ставку (${currentBet} 🪙)`;
 
@@ -287,7 +271,6 @@ function crashAction() {
     btn.style.background = '#34c759';
     coefText.innerText = 'x1.00';
 
-    // Медленный рост
     crashInterval = setInterval(() => {
         currentCoef += 0.02 + (currentCoef / 300);
         coefText.innerText = `x${currentCoef.toFixed(2)}`;
