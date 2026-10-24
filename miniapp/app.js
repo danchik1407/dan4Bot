@@ -301,13 +301,18 @@ function clickMineCell(cell) {
             cell.classList.add('good'); cell.innerText = '💎';
             minesSafeOpened++;
 
-            // СБАЛАНСИРОВАННЫЕ КОЭФФИЦИЕНТЫ
-            let step = 1.0;
-            if (selectedMines === 1) step = 1.10; // Шаг +10%
-            if (selectedMines === 2) step = 1.25; // Шаг +25%
-            if (selectedMines === 3) step = 1.45; // Шаг +45%
+            // НОВАЯ ЖЕСТКАЯ МАТЕМАТИКА (Логарифмический рост)
+            // Чем больше открыто, тем меньше прибавка
+            let base = 1.0;
+            if (selectedMines === 1) base = 1.10;
+            if (selectedMines === 2) base = 1.25;
+            if (selectedMines === 3) base = 1.45;
 
-            minesCoef = Math.pow(step, minesSafeOpened);
+            // Формула: базовый кэф * (1 + логарифм от открытых клеток)
+            // Это не дает кэфу улететь в космос
+            let multiplier = 1 + (Math.log2(minesSafeOpened) * 0.5);
+            minesCoef = base * multiplier;
+
             const cashout = Math.floor(currentBet * minesCoef);
 
             document.getElementById('mines-current-coef').innerText = `x${minesCoef.toFixed(2)}`;
@@ -316,7 +321,6 @@ function clickMineCell(cell) {
         }
     }, 200);
 }
-
 function cashoutMines() {
     if (!minesActive) return;
     minesActive = false;
