@@ -26,7 +26,8 @@ game_state = {
     "ball": {"x": 50, "y": 50, "vx": 0, "vy": 0},
     "winner": None,
     "last_update": time.time(),
-    "last_bot_added": 0
+    "last_bot_added": 0,
+    "target_bots": 0  # Сколько ботов должно быть в этом раунде
 }
 
 
@@ -60,14 +61,16 @@ async def get_hockey_state():
     time_left = 20 - (now - game_state["last_update"])
 
     if game_state["status"] == "waiting":
-        # ЛОГИКА ПЛАВНОГО ДОБАВЛЕНИЯ БОТОВ
-        # Если до конца осталось меньше 6 секунд, и ботов меньше 5
-        if time_left <= 6 and len(game_state["players"]) < 20:
+        # Если прошло 12 секунд (осталось 8), выбираем сколько ботов будет
+        if time_left <= 8 and game_state["target_bots"] == 0:
+            game_state["target_bots"] = random.randint(1, 5)
+
+        # Добавляем ботов по одному
+        if time_left <= 8 and game_state["target_bots"] > 0:
             current_bots = sum(1 for p in game_state["players"] if p["is_bot"])
 
-            # Если прошло больше 1 секунды с момента последнего добавления бота
-            if current_bots < 5 and (now - game_state["last_bot_added"]) > 1.0:
-                # Добавляем ОДНОГО бота
+            # Если еще не всех добавили и прошло 1.2 сек
+            if current_bots < game_state["target_bots"] and (now - game_state["last_bot_added"]) > 1.2:
                 bot_bet = random.randint(10, 100)
                 bot_name = random.choice(BOT_NAMES) + str(random.randint(1, 99))
                 bot_color = random.choice(BOT_COLORS)
@@ -118,7 +121,7 @@ async def get_hockey_state():
                 "status": "waiting", "timer": 20, "bank": 0, "players": [],
                 "ball": {"x": 50, "y": 50, "vx": 0, "vy": 0},
                 "winner": None, "last_update": now,
-                "last_bot_added": 0
+                "last_bot_added": 0, "target_bots": 0
             }
 
     game_state["timer"] = max(0, int(time_left) if game_state["status"] == "waiting" else 0)
