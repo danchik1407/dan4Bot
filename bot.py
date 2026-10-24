@@ -161,9 +161,63 @@ async def process_random_coin_drop(message: Message):
 # ================= 🛍️ МАГАЗИН =================
 @dp.message(F.text & F.text.regexp(r'(?i)^[/!]?магазин\s*$'))
 async def cmd_shop(message: Message):
-    await message.answer("🛍️ <b>Магазин AURA:</b>\n\n❌ Предметов для покупки пока нет", parse_mode="HTML")
+    text = (
+        "🛍️ <b>Магазин AURA</b>\n\n"
+        "💊 <b>Капсула</b> — 100 🪙\n"
+        "⚱️ <b>Уник. Капсула</b> — 500 🪙\n\n"
+        "Нажми на кнопку ниже, чтобы купить предмет. Он появится в твоем инвентаре (в команде <code>!карман</code>)."
+    )
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💊 Купить Капсулу (100 🪙)", callback_data="buy_capsule")],
+        [InlineKeyboardButton(text="⚱️ Купить Уник. Капсулу (500 🪙)", callback_data="buy_uniq_capsule")]
+    ])
+    await message.answer(text, parse_mode="HTML", reply_markup=kb)
 
 
+@dp.callback_query(F.data == "buy_capsule")
+async def cb_buy_capsule(callback: CallbackQuery):
+    user = await get_user(callback.from_user.id, callback.from_user.username)
+    price = 100
+
+    if user["coins"] < price:
+        return await callback.answer("❌ Недостаточно коинов!", show_alert=True)
+
+    # Списываем коины
+    new_coins = user["coins"] - price
+    # Добавляем предмет в инвентарь
+    inv = json.loads(user.get("inventory") or "[]")
+    inv.append("capsule")
+
+    # Обновляем в базе
+    await update_user(callback.from_user.id, coins=new_coins, inventory=json.dumps(inv))
+
+    await callback.answer("✅ Ты купил Капсулу!", show_alert=True)
+    await callback.message.edit_text(
+        f"✅ <b>Успешно!</b>\nТы купил 💊 Капсулу за {price} 🪙.\n\nПроверь свой инвентарь: <code>!карман</code>",
+        parse_mode="HTML")
+
+
+@dp.callback_query(F.data == "buy_uniq_capsule")
+async def cb_buy_uniq_capsule(callback: CallbackQuery):
+    user = await get_user(callback.from_user.id, callback.from_user.username)
+    price = 500
+
+    if user["coins"] < price:
+        return await callback.answer("❌ Недостаточно коинов!", show_alert=True)
+
+    # Списываем коины
+    new_coins = user["coins"] - price
+    # Добавляем предмет в инвентарь
+    inv = json.loads(user.get("inventory") or "[]")
+    inv.append("uniq_capsule")
+
+    # Обновляем в базе
+    await update_user(callback.from_user.id, coins=new_coins, inventory=json.dumps(inv))
+
+    await callback.answer("✅ Ты купил Уник. Капсулу!", show_alert=True)
+    await callback.message.edit_text(
+        f"✅ <b>Успешно!</b>\nТы купил ⚱️ Уник. Капсулу за {price} 🪙.\n\nПроверь свой инвентарь: <code>!карман</code>",
+        parse_mode="HTML")
 # ================= 💰 ЭКОНОМИКА =================
 @dp.message(F.text & F.text.regexp(r'(?i)^[/!]?(карман|баланс)\s*$'))
 async def cmd_pocket(message: Message):

@@ -9,6 +9,7 @@ let currentBet = 10;
 let inventory = [];
 let lastChestTime = 0;
 
+// Загрузка данных
 async function loadUserData() {
     try {
         const response = await fetch(`${API_URL}/api/user`, {
@@ -77,14 +78,12 @@ function checkChestCooldown() {
         let hours = Math.floor((18000 - diff) / 3600);
         let mins = Math.floor(((18000 - diff) % 3600) / 60);
         btn.innerText = `КД: ${hours}ч ${mins}м`;
-        setTimeout(checkChestCooldown, 60000);
     } else {
         btn.disabled = false;
         btn.innerText = 'Открыть (Бесплатно)';
     }
 }
 
-// Рулетка (анимация)
 async function openChest(type) {
     const isGold = type === 'gold';
     if (isGold && keys <= 0) return tg.showAlert("У вас нет ключей!");
@@ -96,7 +95,6 @@ async function openChest(type) {
 
     if (!isGold && !res.ok) return tg.showAlert("Сундук перезаряжается!");
 
-    // Показываем рулетку (заглушка на 2 секунды)
     const btn = document.getElementById(isGold ? 'gold-chest-btn' : 'normal-chest-btn');
     btn.disabled = true;
     btn.innerText = 'Открываем... 🎰';
@@ -146,32 +144,12 @@ function showWin(text) {
     if (tg.HapticFeedback) tg.HapticFeedback.notificationOccurred('success');
 }
 
-// --- ИСПРАВЛЕННЫЕ ВКЛАДКИ ---
+// --- НАВИГАЦИЯ ---
 function switchTab(tabId, element) {
     document.querySelectorAll('.tab').forEach(tab => tab.classList.remove('active'));
     document.getElementById('tab-' + tabId).classList.add('active');
     document.querySelectorAll('.nav-item').forEach(nav => nav.classList.remove('active'));
-    if (element) element.classList.add('active');
-    if (tg.HapticFeedback) tg.HapticFeedback.impactOccurred('soft');
-}
-
-// --- ИСПРАВЛЕННЫЙ ВЫХОД ИЗ ИГРЫ ---
-function closeGame() {
-    // Скрываем все экраны игр
-    document.querySelectorAll('.game-screen').forEach(s => s.classList.remove('active'));
-    // Показываем шапку и меню
-    document.getElementById('main-header').style.display = 'flex';
-    document.getElementById('main-nav').style.display = 'flex';
-    // Принудительно открываем вкладку "Играть" и сбрасываем остальные
-    document.querySelectorAll('.tab').forEach(t => t.style.display = 'none');
-    const playTab = document.getElementById('tab-play');
-    playTab.style.display = 'block';
-    playTab.classList.add('active');
-
-    // Сбрасываем активную кнопку в меню на "Играть"
-    document.querySelectorAll('.nav-item').forEach(nav => nav.classList.remove('active'));
-    document.querySelectorAll('.nav-item')[0].classList.add('active');
-
+    element.classList.add('active');
     if (tg.HapticFeedback) tg.HapticFeedback.impactOccurred('soft');
 }
 
@@ -180,6 +158,17 @@ function openGame(game) {
     document.getElementById('main-nav').style.display = 'none';
     document.querySelectorAll('.tab').forEach(t => t.style.display = 'none');
     document.getElementById('screen-' + game).classList.add('active');
+    if (tg.HapticFeedback) tg.HapticFeedback.impactOccurred('soft');
+}
+
+function closeGame() {
+    document.querySelectorAll('.game-screen').forEach(s => s.classList.remove('active'));
+    document.getElementById('main-header').style.display = 'flex';
+    document.getElementById('main-nav').style.display = 'flex';
+    document.querySelectorAll('.tab').forEach(t => t.style.display = 'none');
+    document.getElementById('tab-play').style.display = 'block';
+    document.querySelectorAll('.nav-item').forEach(nav => nav.classList.remove('active'));
+    document.querySelectorAll('.nav-item')[0].classList.add('active');
     if (tg.HapticFeedback) tg.HapticFeedback.impactOccurred('soft');
 }
 
