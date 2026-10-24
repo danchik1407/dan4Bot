@@ -17,11 +17,13 @@ let balance = 0, keys = 0, currentBet = 10, inventory = [], lastChestTime = 0, i
 let hockeyInterval = null;
 let hasBetThisRound = false;
 let hasShownWinner = false;
+let animationFrameId = null;
 
-// Для плавности шарика
-let serverBall = { x: 50, y: 50, vx: 0, vy: 0 };
-let renderBall = { x: 50, y: 50 };
-let ballAnimationId = null;
+// Локальные координаты для анимации
+let ballPos = { x: 50, y: 50 };
+let ballVelocity = { vx: 0, vy: 0 };
+let ballTargetX = 50;
+let isRolling = false;
 
 // ==================== ЗВУКИ ====================
 const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
@@ -71,33 +73,55 @@ function playSound(type) {
     }
 }
 
-// ==================== ПЛАВНЫЙ ШАРИК И ЗУМ ====================
-function animateBallSmooth() {
+// ==================== АНИМАЦИЯ ШАРИКА ====================
+function animateBall() {
+    if (!isRolling) return;
+
     const ballEl = document.getElementById('hockey-ball');
     const arena = document.getElementById('hockey-arena');
 
-    if (ballEl) {
-        // Линейная интерполяция (LERP) для плавности
-        renderBall.x += (serverBall.x - renderBall.x) * 0.15;
-        renderBall.y += (serverBall.y - renderBall.y) * 0.15;
+    // Двигаем шарик
+    ballPos.x += ballVelocity.vx;
+    ballPos.y += ballVelocity.vy;
 
-        ballEl.style.left = renderBall.x + '%';
-        ballEl.style.top = renderBall.y + '%';
-
-        // Логика зума
-        const speed = Math.sqrt(serverBall.vx**2 + serverBall.vy**2);
-
-        // Если шарик замедляется (меньше 2) и игра идет
-        if (speed < 2 && speed > 0 && !hasShownWinner) {
-            if (!arena.classList.contains('zoomed')) {
-                arena.classList.add('zoomed');
-            }
-            // Камера следует за шариком
-            arena.style.transformOrigin = `${renderBall.x}% ${renderBall.y}%`;
-        }
+    // Отскоки от стен
+    if (ballPos.x <= 0 || ballPos.x >= 100) {
+        ballVelocity.vx *= -1;
+        ballPos.x = Math.max(0, Math.min(100, ballPos.x));
+        playSound('click'); // Звук отскока
+    }
+    if (ballPos.y <= 0 || ballPos.y >= 100) {
+        ballVelocity.vy *= -1;
+        ballPos.y = Math.max(0, Math.min(100, ballPos.y));
+        playSound('click');
     }
 
-    ballAnimationId = requestAnimationFrame(animateBallSmooth);
+    // Замедление
+    ballVelocity.vx *= 0.99;
+    ballVelocity.vy *= 0.99;
+
+    // Отрисовка
+    if (ballEl) {
+        ballEl.style.left = ballPos.x + '%';
+        ballEl.style.top = ballPos.y + '%';
+    }
+
+    // Зум при замедлении
+    const speed = Math.sqrt(ballVelocity.vx**2 + ballVelocity.vy**2);
+    if (speed < 1.5 && arena) {
+        if (!arena.classList.contains('zoomed')) {
+            arena.classList.add('zoomed');
+        }
+        arena.style.transformOrigin = `${ballPos.x}% ${ballPos.y}%`;
+    }
+
+    // Продолжаем, пока есть скорость
+    if (Math.abs(ballVelocity.vx) > 0.1 || Math.abs(ballVelocity.vy) > 0.1) {
+        animationFrameId = requestAnimationFrame(animateBall);
+    } else {
+        // Остановились
+        isRolling = false;
+    }
 }
 
 // ==================== ХОККЕЙ ====================
@@ -139,11 +163,6 @@ async function pollHockeyState() {
         const bankEl = document.getElementById('hockey-bank');
         const arena = document.getElementById('hockey-arena');
 
-        // Обновляем координаты шарика с сервера
-        if (state.ball) {
-            serverBall = state.ball;
-        }
-
         if (state.status === 'waiting') {
             statusEl.innerText = `Ставки: ${state.timer} сек`;
             statusEl.style.color = '#ffcc00';
@@ -151,10 +170,13 @@ async function pollHockeyState() {
 
             hasBetThisRound = false;
             hasShownWinner = false;
+            isRolling = false;
 
-            // Сброс шарика и зума
-            serverBall = { x: 50, y: 50, vx: 0, vy: 0 };
-            renderBall = { x: 50, y: 50 };
+            // Сброс шарика
+            ballPos = { x: 50, y: 50 };
+            ballVelocity = { vx: 0, vy: 0 };
+            const ballEl = document.getElementById('hockey-ball');
+            if (ballEl) { ballEl.style.left = '50%'; ballEl.style.top = '50%'; }
 
             if (arena) {
                 arena.classList.remove('zoomed');
@@ -167,11 +189,38 @@ async function pollHockeyState() {
             statusEl.style.color = '#007aff';
             document.getElementById('hockey-controls').style.display = 'none';
 
+            // Если только начали катить
+            if (!isRolling) {
+                isRolling = true;
+                // Берем параметры с сервера
+                const startX = state.ball.start_x || 50;
+                const startY = state.ball.start_y || 50;
+                const angle = state.ball.angle || 0;
+
+                ballPos = { x: startX, y: startY };
+                // Задаем скорость, чтобы долететь до победителя
+                const targetX = state.ball.target_x || 50;
+                // Направляем шарик в сторону победителя
+                const dx = targetX - startX;
+                const dy = 100 - startY;
+
+                // Вычисляем скорость с учетом затухания
+                // Примерно 7 секунд полета
+                ballVelocity = {
+                    vx: (dx / 7) * 0.1,
+                    vy: (dy / 7) * 0.1
+                };
+
+                animateBall();
+            }
+
         } else if (state.status === 'finished') {
             statusEl.innerText = 'Раунд окончен!';
             statusEl.style.color = '#ff3b30';
 
-            // Убираем зум только при завершении, чтобы увидеть общую картину
+            isRolling = false;
+            if (animationFrameId) cancelAnimationFrame(animationFrameId);
+
             if (arena) {
                 arena.classList.remove('zoomed');
                 arena.style.transformOrigin = 'center center';
@@ -278,20 +327,12 @@ function startHockeyPolling() {
     if (hockeyInterval) clearInterval(hockeyInterval);
     pollHockeyState();
     hockeyInterval = setInterval(pollHockeyState, 150);
-
-    // Запускаем плавную анимацию, если она еще не запущена
-    if (!ballAnimationId) {
-        animateBallSmooth();
-    }
 }
 
 function stopHockeyPolling() {
     if (hockeyInterval) clearInterval(hockeyInterval);
     hockeyInterval = null;
-    if (ballAnimationId) {
-        cancelAnimationFrame(ballAnimationId);
-        ballAnimationId = null;
-    }
+    if (animationFrameId) cancelAnimationFrame(animationFrameId);
 }
 
 function closeWinnerModal() {

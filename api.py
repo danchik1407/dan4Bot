@@ -23,7 +23,7 @@ game_state = {
     "timer": 20,
     "bank": 0,
     "players": [],
-    "ball": {"x": 50, "y": 50, "vx": 0, "vy": 0},
+    "ball": {"x": 50, "y": 50, "vx": 0, "vy": 0},  # 0 - это заглушка
     "winner": None,
     "last_update": time.time(),
     "last_bot_added": 0,
@@ -94,7 +94,7 @@ async def get_hockey_state():
                 for p in game_state["players"]:
                     p["percent"] = 0
 
-            # Выбор победителя
+            # ВЫБОР ПОБЕДИТЕЛЯ
             rand_val = random.uniform(0, 100)
             current_val = 0
             for p in game_state["players"]:
@@ -103,32 +103,33 @@ async def get_hockey_state():
                     game_state["winner"] = p
                     break
 
-            # Шарик летит В СТОРОНУ ПОБЕДИТЕЛЯ
+            # Задаем координаты финиша и угол старта
+            # (Клиент будет сам анимировать полет к этой точке)
             if game_state["winner"]:
-                # Начальная позиция (центр)
-                start_x, start_y = 50, 50
-                # Позиция победителя (берем центр его сектора по X и произвольный Y)
-                # Но так как зоны вертикальные, просто летим в сторону победителя по X
-                target_x = 50 + (random.random() - 0.5) * 10  # Чуть в сторону
+                # Выбираем случайную точку внутри зоны победителя
+                # Так как зоны у нас вертикальные, мы просто берем X победителя + случайный разброс
+                winner_index = game_state["players"].index(game_state["winner"])
 
-                angle = math.atan2(target_x - start_x, 100 - start_y)
-                game_state["ball"]["vx"] = math.cos(angle) * 10
-                game_state["ball"]["vy"] = math.sin(angle) * 10
+                # Вычисляем центр зоны победителя по X (в процентах)
+                total_percent = 0
+                target_x = 0
+                for i, p in enumerate(game_state["players"]):
+                    if i == winner_index:
+                        target_x = total_percent + (p["percent"] / 2)
+                        break
+                    total_percent += p["percent"]
+
+                # Угол старта (для отскоков)
+                angle = random.uniform(0, 2 * math.pi)
+                game_state["ball"] = {
+                    "target_x": target_x,
+                    "start_x": 50,
+                    "start_y": 50,
+                    "angle": angle
+                }
 
     elif game_state["status"] == "rolling":
-        # Обновляем шарик на сервере (физика)
-        ball = game_state["ball"]
-        ball["vx"] *= 0.985
-        ball["vy"] *= 0.985
-        ball["x"] += ball["vx"]
-        ball["y"] += ball["vy"]
-
-        # Отскоки
-        if ball["x"] < 0 or ball["x"] > 100: ball["vx"] *= -1
-        if ball["y"] < 0 or ball["y"] > 100: ball["vy"] *= -1
-
-        # Если шарик остановился или прошло 7 секунд
-        if (abs(ball["vx"]) < 0.3 and abs(ball["vy"]) < 0.3) or (now - game_state["last_update"] > 7):
+        if now - game_state["last_update"] > 7:  # 7 секунд на анимацию
             game_state["status"] = "finished"
             game_state["last_update"] = now
 
