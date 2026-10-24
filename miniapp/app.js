@@ -1,32 +1,48 @@
 const tg = window.Telegram.WebApp;
 tg.expand();
 
+// Ссылка на твой API (убедись, что БЕЗ слэша в конце)
+const API_URL = "https://aura-api-mptt.onrender.com";
+
 let balance = 0;
 let keys = 0;
 let currentBet = 10;
+let caseClaimed = false; // Флаг, что кейс забран
+let normalChestAvailable = true;
 
-// ВСТАВЬ СЮДА СВОЮ ССЫЛКУ С RENDER (например: https://aura-api-xxxx.onrender.com)
-const API_URL = "https://aura-api-mptt.onrender.com/docs";
-
-// Загрузка данных с повторной попыткой
+// Загрузка данных
 async function loadUserData() {
-    document.getElementById('user-balance').innerText = "...";
+    const balanceEl = document.getElementById('user-balance');
+    balanceEl.innerText = "...";
+
     try {
         const response = await fetch(`${API_URL}/api/user`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ initData: tg.initData })
         });
+
         if (!response.ok) throw new Error("API Error");
 
         const data = await response.json();
         balance = data.coins;
         keys = data.keys || 0;
+        caseClaimed = data.case_claimed || false; // Если сервер вернул флаг
+
         updateUI();
+
+        // Восстанавливаем состояние кейса
+        const text = document.getElementById('case-status');
+        const icon = document.getElementById('case-icon');
+        if (caseClaimed) {
+            text.innerText = 'Забрано!';
+            text.style.color = '#34c759';
+            icon.innerText = '💎';
+        }
     } catch (e) {
-        console.error("Ошибка загрузки, пробуем снова...", e);
-        document.getElementById('user-balance').innerText = "Соединение...";
-        setTimeout(loadUserData, 3000); // Пробуем каждые 3 секунды, пока не проснется
+        console.error("Ошибка загрузки", e);
+        balanceEl.innerText = "Ошибка";
+        balanceEl.onclick = () => loadUserData(); // Если нажать на ошибку - перезагрузка
     }
 }
 
@@ -40,9 +56,7 @@ async function changeBalance(amount) {
         const data = await response.json();
         balance = data.new_balance;
         updateUI();
-    } catch (e) {
-        console.error("Ошибка обновления", e);
-    }
+    } catch (e) { console.error("Ошибка обновления", e); }
 }
 
 async function changeKeys(amount) {
@@ -55,9 +69,7 @@ async function changeKeys(amount) {
         const data = await response.json();
         keys = data.new_keys;
         updateUI();
-    } catch (e) {
-        console.error("Ошибка обновления ключей", e);
-    }
+    } catch (e) { console.error("Ошибка обновления ключей", e); }
 }
 
 function updateUI() {
@@ -68,20 +80,15 @@ function updateUI() {
         : `<div class="inv-item">📦<br><span>Пусто</span></div>`;
 }
 
-// Запускаем загрузку при старте
 loadUserData();
 
-// --- НАВИГАЦИЯ (ДОБАВЛЕНА ЗАЩИТА ОТ ОШИБОК) ---
+// --- НАВИГАЦИЯ ---
 function switchTab(tabId, element) {
-    try {
-        document.querySelectorAll('.tab').forEach(tab => tab.classList.remove('active'));
-        document.getElementById('tab-' + tabId).classList.add('active');
-        document.querySelectorAll('.nav-item').forEach(nav => nav.classList.remove('active'));
-        element.classList.add('active');
-        if (tg.HapticFeedback) tg.HapticFeedback.impactOccurred('light');
-    } catch (e) {
-        console.error("Ошибка вкладок", e);
-    }
+    document.querySelectorAll('.tab').forEach(tab => tab.classList.remove('active'));
+    document.getElementById('tab-' + tabId).classList.add('active');
+    document.querySelectorAll('.nav-item').forEach(nav => nav.classList.remove('active'));
+    element.classList.add('active');
+    if (tg.HapticFeedback) tg.HapticFeedback.impactOccurred('light');
 }
 
 function openGame(game) {
@@ -101,7 +108,6 @@ function closeGame() {
 }
 
 // ==================== КЕЙС ====================
-let caseClaimed = false;
 function claimDailyCase() {
     if (caseClaimed) return tg.showAlert("Вы уже забирали кейс сегодня!");
     const icon = document.getElementById('case-icon');
@@ -124,8 +130,6 @@ function claimDailyCase() {
 }
 
 // ==================== СУНДУКИ ====================
-let normalChestAvailable = true;
-
 function openNormalChest() {
     if (!normalChestAvailable) return tg.showAlert("Сундук перезаряжается!");
     const icon = document.getElementById('normal-chest-icon');
@@ -176,7 +180,7 @@ function openGoldChest() {
     if (tg.HapticFeedback) tg.HapticFeedback.impactOccurred('heavy');
 
     setTimeout(() => {
-        changeKeys(-1); // Тратим ключ
+        changeKeys(-1);
         let amount = Math.floor(Math.random() * (100 - 10 + 1)) + 10;
         changeBalance(amount);
         icon.innerText = '💎';
