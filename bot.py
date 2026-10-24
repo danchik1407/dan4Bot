@@ -236,6 +236,7 @@ async def cmd_top(message: Message):
                                                                                 "supergroup") else await get_users_from_chat(
         None)
     users.sort(key=lambda x: x.get("coins", 0), reverse=True)
+
     msg = "💰 <b>ТОП-10 ПО КОИНАМ</b>\n━━━━━━━━━━━━━━━━━━━━\n\n"
     medals = ["🥇", "🥈", "🥉"]
 
@@ -244,6 +245,7 @@ async def cmd_top(message: Message):
         user_id = u.get("user_id")
         username = u.get("username", f"id{user_id}")
 
+        # Делаем кликабельную ссылку без @
         if user_id:
             name_str = f'<a href="tg://user?id={user_id}">{safe_text(username)}</a>'
         else:
