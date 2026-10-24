@@ -414,7 +414,7 @@ async def cb_dice_decline(callback: CallbackQuery):
 
 
 # ================= 💣 МИНЫ =================
-MINES_STEP_COEFS = {1: 1.05, 2: 1.10, 3: 1.18}
+MINES_STEP_COEFS = {1: 1.03, 2: 1.08, 3: 1.15}
 
 def get_mines_kb(game_id: str):
     return InlineKeyboardMarkup(inline_keyboard=[

@@ -13,6 +13,14 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, 
 supabase: Client = create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_KEY"))
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
+crash_state = {
+    "status": "waiting",
+    "start_time": 0,
+    "current_coef": 1.0,
+    "crash_point": 0.0,
+    "last_round": 0
+}
+
 def verify_telegram_data(init_data: str):
     try:
         parsed_data = dict(parse_qsl(init_data))
@@ -29,6 +37,10 @@ class UserAuth(BaseModel): initData: str
 class UpdateBalance(BaseModel): initData: str; amount: int
 class UpdateKeys(BaseModel): initData: str; amount: int
 class BuyItem(BaseModel): initData: str; item_id: str; price: int
+
+@app.get("/api/crash_state")
+async def get_crash_state():
+    return {"status": "waiting", "current_coef": 1.0, "crash_point": 0.0}
 
 @app.post("/api/user")
 async def get_user(auth: UserAuth):

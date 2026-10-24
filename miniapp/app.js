@@ -233,9 +233,9 @@ function getBet(game) {
     return val;
 }
 
-// МИНЫ
+// МИНЫ (ХАРДКОР)
 let minesActive = false, minesCoef = 1.0, minesSafeOpened = 0;
-let selectedMines = 1; // По умолчанию 1 мина
+let selectedMines = 1;
 
 const board = document.getElementById('mines-board');
 for (let i = 0; i < 16; i++) {
@@ -301,16 +301,15 @@ function clickMineCell(cell) {
             cell.classList.add('good'); cell.innerText = '💎';
             minesSafeOpened++;
 
-            // НОВАЯ ЖЕСТКАЯ МАТЕМАТИКА (Логарифмический рост)
-            // Чем больше открыто, тем меньше прибавка
+            // ЖЕСТКАЯ МАТЕМАТИКА
+            // Кэф растет очень медленно. Логарифмическая шкала.
             let base = 1.0;
-            if (selectedMines === 1) base = 1.10;
-            if (selectedMines === 2) base = 1.25;
-            if (selectedMines === 3) base = 1.45;
+            if (selectedMines === 1) base = 1.05; // Очень мало за шаг
+            if (selectedMines === 2) base = 1.15;
+            if (selectedMines === 3) base = 1.30;
 
-            // Формула: базовый кэф * (1 + логарифм от открытых клеток)
-            // Это не дает кэфу улететь в космос
-            let multiplier = 1 + (Math.log2(minesSafeOpened) * 0.5);
+            // Формула: 1 + (логарифм от открытых * 0.3)
+            let multiplier = 1 + (Math.log2(minesSafeOpened) * 0.3);
             minesCoef = base * multiplier;
 
             const cashout = Math.floor(currentBet * minesCoef);
@@ -321,6 +320,7 @@ function clickMineCell(cell) {
         }
     }, 200);
 }
+
 function cashoutMines() {
     if (!minesActive) return;
     minesActive = false;
