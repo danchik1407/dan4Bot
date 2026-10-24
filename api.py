@@ -55,15 +55,16 @@ async def get_crash_state():
     now = time.time()
 
     if crash_state["status"] == "waiting":
-        if now - crash_state["last_round"] > 10:  # 10 секунд на ставки
+        if now - crash_state["last_round"] > 10:  # 10 секунд ожидания
             crash_state["status"] = "flying"
             crash_state["start_time"] = now
             crash_state["current_coef"] = 1.0
-            crash_state["crash_point"] = round(1.0 + (random.random() ** 2) * 20, 2)
+            crash_state["crash_point"] = round(1.0 + (random.random() ** 1.5) * 25, 2)
 
     elif crash_state["status"] == "flying":
         elapsed = now - crash_state["start_time"]
-        current = 1.0 + (elapsed * 0.15)
+        # Экспоненциальный рост для ощущения скорости
+        current = 1.0 + (elapsed ** 1.8) * 0.2
         if current >= crash_state["crash_point"]:
             crash_state["status"] = "crashed"
             crash_state["current_coef"] = crash_state["crash_point"]
@@ -72,7 +73,7 @@ async def get_crash_state():
             crash_state["current_coef"] = round(current, 2)
 
     elif crash_state["status"] == "crashed":
-        if now - crash_state["last_round"] > 3:  # 3 секунды после краша
+        if now - crash_state["last_round"] > 4:  # 4 секунды после краша
             crash_state["status"] = "waiting"
             crash_state["last_round"] = now
 
@@ -84,14 +85,12 @@ async def get_user(auth: UserAuth):
     user = verify_telegram_data(auth.initData)
     if not user: raise HTTPException(status_code=401, detail="Invalid auth data")
     user_id = user["id"]
-
     res = supabase.table("users").select("*").eq("user_id", user_id).execute()
     if not res.data:
         new_user = {"user_id": user_id, "coins": 0, "keys": 0, "username": user.get("username", f"id{user_id}"),
                     "last_chest": 0, "chat_id": 0, "inventory": "[]"}
         supabase.table("users").insert(new_user).execute()
         return {"coins": 0, "keys": 0, "inventory": [], "last_chest": 0}
-
     db_user = res.data[0]
     return {"coins": db_user.get("coins", 0), "keys": db_user.get("keys", 0),
             "inventory": json.loads(db_user.get("inventory") or "[]"), "last_chest": db_user.get("last_chest", 0)}

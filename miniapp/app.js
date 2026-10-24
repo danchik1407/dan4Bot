@@ -187,18 +187,26 @@ function showWin(text) {
 }
 
 function switchTab(tabId, element) {
+    const popup = document.getElementById('win-popup');
+    if (popup) popup.classList.remove('show');
+
     document.querySelectorAll('.tab').forEach(tab => tab.classList.remove('active'));
     document.getElementById('tab-' + tabId).classList.add('active');
     document.querySelectorAll('.nav-item').forEach(nav => nav.classList.remove('active'));
     if (element) element.classList.add('active');
+
     if (tg.HapticFeedback) tg.HapticFeedback.impactOccurred('soft');
 }
 
 function closeGame() {
+    const popup = document.getElementById('win-popup');
+    if (popup) popup.classList.remove('show');
+
     document.querySelectorAll('.game-screen').forEach(s => s.classList.remove('active'));
     document.getElementById('main-header').style.display = 'flex';
     document.getElementById('main-nav').style.display = 'flex';
     switchTab('play', document.querySelectorAll('.nav-item')[0]);
+
     if (tg.HapticFeedback) tg.HapticFeedback.impactOccurred('soft');
 }
 
@@ -227,7 +235,7 @@ function getBet(game) {
     return val;
 }
 
-// МИНЫ
+// МИНЫ (Более адекватный кэф)
 let minesActive = false, minesCoef = 1.0, minesSafeOpened = 0;
 const board = document.getElementById('mines-board');
 for (let i = 0; i < 16; i++) {
@@ -289,9 +297,12 @@ function clickMineCell(cell) {
         } else {
             cell.classList.add('good'); cell.innerText = '💎';
             minesSafeOpened++;
+
             const minesCount = parseInt(document.getElementById('mines-count').value);
-            const step = 1.0 + (minesCount * 0.04);
+            // Более адекватный рост кэфа для 10 мин
+            const step = 1.0 + (minesCount * 0.08);
             minesCoef = Math.pow(step, minesSafeOpened);
+
             const cashout = Math.floor(currentBet * minesCoef);
             document.getElementById('mines-current-coef').innerText = `x${minesCoef.toFixed(2)}`;
             document.getElementById('mines-cashout-amount').innerText = cashout;
@@ -353,20 +364,17 @@ async function pollCrashState() {
             rocket.style.opacity = '1';
             coefText.innerText = `x${state.current_coef.toFixed(2)}`;
 
-            // Анимация полета (по диагонали)
             const moveX = -50 + (state.current_coef * 5);
             const moveY = -(state.current_coef * 8);
             rocket.style.transform = `translate(${moveX}%, ${moveY}px) rotate(-45deg) scale(1)`;
 
             if (crashBetPlaced) {
-                // Если мы уже поставили, показываем кнопку "Забрать"
                 const winAmount = Math.floor(crashBetAmount * state.current_coef);
                 btn.innerText = `Забрать (${winAmount} 🪙)`;
                 btn.disabled = false;
                 btn.style.background = '#34c759';
-                betBox.style.display = 'none'; // Скрываем ввод ставки
+                betBox.style.display = 'none';
             } else {
-                // Если не поставили, кнопка неактивна (уже поздно)
                 btn.innerText = "Ставки закрыты!";
                 btn.disabled = true;
                 btn.style.background = '#555';
@@ -397,11 +405,9 @@ setInterval(pollCrashState, 200);
 
 function crashAction() {
     if (crashActive && !crashBetPlaced) {
-        // Если раунд летит, а мы не ставили - ставить нельзя
         return tg.showAlert("Ставки принимаются только в фазе Ожидания!");
     }
     else if (crashActive && crashBetPlaced) {
-        // Забираем выигрыш
         crashBetPlaced = false;
         const coefText = document.getElementById('crash-coef').innerText;
         const currentCoef = parseFloat(coefText.replace('x', ''));
@@ -421,7 +427,6 @@ function crashAction() {
         updateCrashHistoryUI();
     }
     else if (!crashActive && !crashBetPlaced) {
-        // Делаем ставку в фазе ожидания
         const betAmount = getBet('crash');
         if (balance < betAmount) return tg.showAlert("Недостаточно средств!");
 

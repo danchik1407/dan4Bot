@@ -110,30 +110,54 @@ main { padding: 0 16px; }
 .space-container.crashed .rocket-wrapper { display: none; }
 .space-container.crashed .rocket-coef { color: white; }
 
-/* Красивая ракета-эмодзи */
+/* НОВАЯ 3D РАКЕТА */
 .rocket-wrapper {
     position: absolute;
     bottom: 20px;
     left: 50%;
-    transform: translateX(-50%) rotate(-45deg); /* Поворачиваем по диагонали */
+    transform: translateX(-50%) rotate(-45deg);
     z-index: 5;
     transition: transform 0.1s linear;
-    display: flex;
-    justify-content: center;
-    align-items: center;
+    width: 40px;
+    height: 80px;
 }
-.rocket-emoji { font-size: 70px; filter: drop-shadow(0 0 15px rgba(255,255,255,0.6)); }
+
+.rocket-body {
+    position: absolute;
+    top: 0; left: 0; width: 100%; height: 100%;
+    background: linear-gradient(90deg, #ddd 0%, #fff 50%, #aaa 100%);
+    border-radius: 50% 50% 10% 10%;
+    box-shadow: 0 0 10px rgba(255,255,255,0.5);
+}
+
+.rocket-window {
+    position: absolute;
+    top: 15px; left: 50%; transform: translateX(-50%);
+    width: 14px; height: 14px;
+    background: #007aff;
+    border: 2px solid #333;
+    border-radius: 50%;
+    box-shadow: inset 0 0 5px #000;
+}
+
+.rocket-fin {
+    position: absolute;
+    bottom: 0;
+    width: 12px; height: 25px;
+    background: #ff3b30;
+    border-radius: 5px;
+}
+.rocket-fin.left { left: -8px; transform: skewX(20deg); }
+.rocket-fin.right { right: -8px; transform: skewX(-20deg); }
+
 .rocket-fire {
     position: absolute;
-    bottom: -20px;
-    left: 50%;
-    transform: translateX(-50%);
-    width: 30px;
-    height: 40px;
-    background: radial-gradient(ellipse at top, #ffcc00, #ff3b30, transparent);
+    bottom: -30px; left: 50%; transform: translateX(-50%);
+    width: 20px; height: 40px;
+    background: radial-gradient(ellipse at top, #ffcc00 0%, #ff3b30 50%, transparent 100%);
     border-radius: 50%;
     animation: fire-burn 0.1s infinite alternate;
-    filter: blur(3px);
+    filter: blur(2px);
     z-index: -1;
 }
 @keyframes fire-burn { from { height: 30px; opacity: 0.8; } to { height: 50px; opacity: 1; } }
@@ -167,3 +191,9 @@ main { padding: 0 16px; }
 @keyframes popIn { 0% { transform: scale(0.5); opacity: 0; } 100% { transform: scale(1); opacity: 1; } }
 .chest-win-icon { font-size: 80px; margin-bottom: 20px; filter: drop-shadow(0 0 20px #ffcc00); }
 .chest-win-content h2 { font-size: 24px; margin-bottom: 25px; color: white; }
+
+/* Фикс зависшего окна */
+.win-popup { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); z-index: 999; pointer-events: none; display: none; }
+.win-popup.show { display: block; animation: popWin 1.5s ease-out; }
+.win-text { font-size: 32px; font-weight: 900; color: #34c759; text-shadow: 0 0 10px rgba(0,0,0,0.8); }
+@keyframes popWin { 0% { opacity: 0; transform: scale(0.5); } 50% { opacity: 1; transform: scale(1.2); } 100% { opacity: 0; transform: scale(1); } }
