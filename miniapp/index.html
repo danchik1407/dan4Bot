@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>AURA GAME</title>
+    <link rel="stylesheet" href="style.css">
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+</head>
+<body>
+    <!-- Шапка (GiftBoom style) -->
+    <header class="top-bar">
+        <div class="profile-badge">
+            <img id="user-avatar" src="https://via.placeholder.com/40" alt="Avatar">
+            <span id="user-name">Dan4ik</span>
+        </div>
+        <div class="balance-badge">
+            <span class="coin-icon">💎</span>
+            <span id="user-balance">0.00</span>
+            <button class="plus-btn">+</button>
+        </div>
+    </header>
+
+    <main>
+        <!-- Вкладка "Играть" -->
+        <section id="tab-play" class="tab active">
+            <!-- Баннер -->
+            <div class="banner">
+                <div class="banner-title">AURA GAME</div>
+                <div class="banner-sub">Твой путь к миллионам</div>
+            </div>
+
+            <!-- Сетка игр -->
+            <div class="games-grid">
+                <div class="game-card" onclick="tg.showAlert('Мины скоро!')">
+                    <div class="game-icon">💣</div>
+                    <div class="game-info">
+                        <h3>Мины</h3>
+                        <p>Разминируй поле</p>
+                    </div>
+                </div>
+                <div class="game-card" onclick="tg.showAlert('Краш скоро!')">
+                    <div class="game-icon">🚀</div>
+                    <div class="game-info">
+                        <h3>Краш</h3>
+                        <p>Поставь — забери</p>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Вкладка "Топ" -->
+        <section id="tab-top" class="tab">
+            <div class="page-header">
+                <h2>🏆 Топ игроков</h2>
+                <p>По общему балансу</p>
+            </div>
+            <div id="leaderboard-list" class="leaderboard"></div>
+        </section>
+
+        <!-- Вкладка "Бонусы" -->
+        <section id="tab-bonus" class="tab">
+            <div class="page-header">
+                <h2>🎁 Бонусы</h2>
+            </div>
+
+            <!-- Ежедневный кейс -->
+            <div class="daily-case" onclick="tg.showAlert('Кейс скоро!')">
+                <div class="case-text">
+                    <h3>Ежедневный кейс</h3>
+                    <p>Забирай каждый день!</p>
+                </div>
+                <div class="case-icon">🎁</div>
+            </div>
+        </section>
+
+        <!-- Вкладка "Профиль" -->
+        <section id="tab-profile" class="tab">
+            <div class="page-header">
+                <h2>👤 Профиль</h2>
+            </div>
+            <div class="profile-card">
+                <p>ID: <span id="profile-id">...</span></p>
+            </div>
+        </section>
+    </main>
+
+    <!-- Навигация (GiftBoom style) -->
+    <nav class="bottom-nav">
+        <div class="nav-item active" onclick="switchTab('play', this)">
+            <span class="nav-icon">🎮</span> Играть
+        </div>
+        <div class="nav-item" onclick="switchTab('top', this)">
+            <span class="nav-icon">🏆</span> Топ
+        </div>
+        <div class="nav-item" onclick="switchTab('bonus', this)">
+            <span class="nav-icon">🎁</span> Бонусы
+        </div>
+        <div class="nav-item" onclick="switchTab('profile', this)">
+            <span class="nav-icon">👤</span> Профиль
+        </div>
+    </nav>
+    <script src="app.js"></script>
+</body>
+</html>

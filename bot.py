@@ -130,10 +130,14 @@ def safe_text(text) -> str:
 # ================= 🎁 ДРОП =================
 async def process_random_coin_drop(message: Message):
     if not message.from_user or message.from_user.is_bot: return
+
+    # Добавляем проверку: если это не группа, выходим
+    if message.chat.type not in ("group", "supergroup"): return
+
     text = message.text or ""
     if text.startswith("!") or text.startswith("/"): return
 
-    chat_id = message.chat.id if message.chat.type in ("group", "supergroup") else None
+    chat_id = message.chat.id
     user = await get_user(message.from_user.id, message.from_user.username, chat_id)
 
     # Проверка шанса (0.5%)
@@ -152,7 +156,6 @@ async def process_random_coin_drop(message: Message):
             await message.answer(caption, parse_mode="HTML", reply_to_message_id=message.message_id)
     except Exception:
         pass
-
 
 # ================= 🛍️ МАГАЗИН =================
 @dp.message(F.text & F.text.regexp(r'(?i)^[/!]?магазин\s*$'))
