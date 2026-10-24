@@ -32,6 +32,22 @@ main { padding: 0 16px; }
 .page-header { text-align: center; margin-bottom: 24px; }
 .page-header h2 { font-size: 22px; font-weight: 800; margin-bottom: 4px; }
 
+/* Глобальный топ */
+.leaderboard > div {
+    background: var(--card);
+    padding: 16px;
+    border-radius: 16px;
+    margin-bottom: 10px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    border: 1px solid #222;
+    font-weight: 600;
+    font-size: 14px;
+}
+.leaderboard span:last-child { color: #34c759; font-weight: 800; }
+.leaderboard .rank { font-size: 18px; width: 30px; text-align: center; }
+
 .bet-input-container { width: 100%; max-width: 350px; margin-bottom: 20px; }
 .bet-input { width: 100%; background: var(--card); border: 1px solid #444; color: white; padding: 12px; border-radius: 12px; font-size: 20px; font-weight: 800; text-align: center; margin-bottom: 10px; outline: none; }
 .bet-buttons { display: flex; gap: 10px; }

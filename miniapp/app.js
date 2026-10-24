@@ -18,8 +18,6 @@ let keys = 0;
 let currentBet = 10;
 let inventory = [];
 let lastChestTime = 0;
-
-// Глобальный флаг для защиты от двойных кликов (фарма)
 let isProcessing = false;
 
 async function loadUserData() {
@@ -56,6 +54,38 @@ async function changeKeys(amount) {
     const data = await response.json();
     keys = data.new_keys;
     updateUI();
+}
+
+// ЗАГРУЗКА ГЛОБАЛЬНОГО ТОПА
+async function loadGlobalTop() {
+    const list = document.getElementById('global-top-list');
+    list.innerHTML = '<p style="text-align: center; color: #888;">Загрузка...</p>';
+    try {
+        const res = await fetch(`${API_URL}/api/global_top`);
+        const users = await res.json();
+
+        if (!users || users.length === 0) {
+            list.innerHTML = '<p style="text-align: center; color: #888;">Топ пока пуст</p>';
+            return;
+        }
+
+        list.innerHTML = '';
+        const medals = ["🥇", "🥈", "🥉"];
+
+        users.forEach((u, i) => {
+            const prefix = i < 3 ? medals[i] : `<span class="rank">${i+1}</span>`;
+            const div = document.createElement('div');
+            div.innerHTML = `
+                <div style="display: flex; align-items: center; gap: 10px;">
+                    ${prefix} <span>${u.username || 'Игрок'}</span>
+                </div>
+                <span>${u.coins} 💎</span>
+            `;
+            list.appendChild(div);
+        });
+    } catch (e) {
+        list.innerHTML = '<p style="text-align: center; color: #888;">Ошибка загрузки</p>';
+    }
 }
 
 function updateUI() {
@@ -115,11 +145,11 @@ async function openChest(type) {
     roulette.style.display = 'block';
 
     const track = document.getElementById('roulette-track');
-    track.style.transition = 'none'; // Сброс старой анимации
+    track.style.transition = 'none';
     track.style.transform = 'translateX(0)';
     track.innerHTML = '';
 
-    void track.offsetWidth; // Принудительная перерисовка
+    void track.offsetWidth;
 
     let winIndex = 50, finalAmount = 0, isKey = false;
     for (let i = 0; i < 100; i++) {
@@ -144,7 +174,7 @@ async function openChest(type) {
     }
 
     setTimeout(() => {
-        track.style.transition = 'transform 8s cubic-bezier(0.15, 0.9, 0.1, 1)'; // Резкое замедление
+        track.style.transition = 'transform 8s cubic-bezier(0.15, 0.9, 0.1, 1)';
         const itemWidth = 81, windowWidth = 350;
         const centerOffset = (windowWidth / 2) - (itemWidth / 2);
         const moveX = -((winIndex * itemWidth) - centerOffset);
@@ -215,6 +245,9 @@ function switchTab(tabId, element) {
     document.getElementById('tab-' + tabId).classList.add('active');
     document.querySelectorAll('.nav-item').forEach(nav => nav.classList.remove('active'));
     if (element) element.classList.add('active');
+
+    if (tabId === 'top') loadGlobalTop(); // Загружаем топ при переходе
+
     if (tg.HapticFeedback) tg.HapticFeedback.impactOccurred('soft');
 }
 
@@ -255,7 +288,6 @@ function getBet(game) {
     return val;
 }
 
-// МИНЫ (Жесткая математика и защита от фарма)
 let minesActive = false, minesCoef = 1.0, minesSafeOpened = 0;
 let selectedMines = 1;
 

@@ -29,6 +29,14 @@
             </div>
         </section>
 
+        <!-- ГЛОБАЛЬНЫЙ ТОП -->
+        <section id="tab-top" class="tab">
+            <div class="page-header"><h2>🏆 Топ игроков</h2><p>Глобальный рейтинг</p></div>
+            <div class="leaderboard" id="global-top-list">
+                <p style="text-align: center; color: #888;">Загрузка...</p>
+            </div>
+        </section>
+
         <section id="tab-chests" class="tab">
             <div class="page-header"><h2>📦 Сундуки</h2></div>
             <div id="roulette-container" class="roulette-container" style="display: none;">
@@ -130,6 +138,7 @@
 
     <nav class="bottom-nav" id="main-nav">
         <div class="nav-item active" onclick="switchTab('play', this)"><span class="nav-icon">🎮</span> Играть</div>
+        <div class="nav-item" onclick="switchTab('top', this)"><span class="nav-icon">🏆</span> Топ</div>
         <div class="nav-item" onclick="switchTab('chests', this)"><span class="nav-icon">📦</span> Сундуки</div>
         <div class="nav-item" onclick="switchTab('shop', this)"><span class="nav-icon">🛒</span> Магазин</div>
         <div class="nav-item" onclick="switchTab('profile', this)"><span class="nav-icon">👤</span> Профиль</div>
