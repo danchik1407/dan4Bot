@@ -789,6 +789,31 @@ async def start_fake_website():
     await site.start()
 
 
+@dp.message(F.text & F.text.regexp(r'(?i)^[/!]?инвентарь\s*$'))
+async def cmd_inventory(message: Message):
+    user = await get_user(message.from_user.id, message.from_user.username)
+    inv = json.loads(user.get("inventory") or "[]")
+
+    text = "🎒 <b>Твой инвентарь:</b>\n\n"
+    has_items = False
+
+    if user.get("keys", 0) > 0:
+        text += f"🔑 Золотые ключи: <b>{user['keys']}</b>\n"
+        has_items = True
+
+    for item in inv:
+        if item == 'capsule':
+            text += "💊 Капсула (Скоро)\n"
+            has_items = True
+        if item == 'uniq_capsule':
+            text += "⚱️ Уник. Капсула (Скоро)\n"
+            has_items = True
+
+    if not has_items:
+        text += "❌ Пусто"
+
+    await message.answer(text, parse_mode="HTML")
+
 async def main():
     await start_fake_website()
     me = await bot.get_me()

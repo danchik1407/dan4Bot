@@ -14,19 +14,13 @@ import uvicorn
 load_dotenv()
 
 app = FastAPI()
-
 app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"]
 )
 
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 
@@ -59,70 +53,86 @@ class UpdateKeys(BaseModel):
     amount: int
 
 
-class ClaimCase(BaseModel):
+class BuyItem(BaseModel):
     initData: str
+    item_id: str
+    price: int
 
 
 @app.post("/api/user")
 async def get_user(auth: UserAuth):
     user = verify_telegram_data(auth.initData)
     if not user: raise HTTPException(status_code=401, detail="Invalid auth data")
-
     user_id = user["id"]
-    username = user.get("username", f"id{user_id}")
 
     res = supabase.table("users").select("*").eq("user_id", user_id).execute()
     if not res.data:
         new_user = {
-            "user_id": user_id, "coins": 0, "keys": 0, "username": username,
-            "last_chest": 0, "last_call": 0, "last_daily_case": 0, "call_sign": None, "chat_id": 0
+            "user_id": user_id, "coins": 0, "keys": 0, "username": user.get("username", f"id{user_id}"),
+            "last_chest": 0, "last_call": 0, "last_daily_case": 0, "call_sign": None, "chat_id": 0, "inventory": "[]"
         }
         supabase.table("users").insert(new_user).execute()
-        return {"coins": 0, "keys": 0, "case_ready": True}
+        return {"coins": 0, "keys": 0, "inventory": [], "last_chest": 0}
 
     db_user = res.data[0]
-    now = int(time.time())
-    last_case = db_user.get("last_daily_case", 0) or 0
-    case_ready = (now - last_case) > 86400
-
+    inventory = json.loads(db_user.get("inventory") or "[]")
     return {
         "coins": db_user.get("coins", 0),
         "keys": db_user.get("keys", 0),
-        "case_ready": case_ready
+        "inventory": inventory,
+        "last_chest": db_user.get("last_chest", 0)
     }
 
 
-@app.post("/api/claim_case")
-async def claim_case(data: ClaimCase):
-    user = verify_telegram_data(data.initData)
+@app.post("/api/open_chest")
+async def open_chest(auth: UserAuth):
+    user = verify_telegram_data(auth.initData)
     if not user: raise HTTPException(status_code=401, detail="Invalid auth data")
-
     user_id = user["id"]
     now = int(time.time())
 
-    res = supabase.table("users").select("last_daily_case").eq("user_id", user_id).execute()
+    res = supabase.table("users").select("last_chest").eq("user_id", user_id).execute()
     if not res.data: raise HTTPException(status_code=404, detail="User not found")
 
-    last_case = res.data[0].get("last_daily_case", 0) or 0
-    if (now - last_case) <= 86400:
-        raise HTTPException(status_code=400, detail="Case not ready yet")
+    last_chest = res.data[0].get("last_chest", 0) or 0
+    # ТЕСТОВОЕ КД 10 СЕКУНД (в реальности 5 часов = 18000)
+    if (now - last_chest) < 10:
+        raise HTTPException(status_code=400, detail="Cooldown")
 
-    supabase.table("users").update({"last_daily_case": now}).eq("user_id", user_id).execute()
+    supabase.table("users").update({"last_chest": now}).eq("user_id", user_id).execute()
     return {"success": True}
+
+
+@app.post("/api/buy_item")
+async def buy_item(data: BuyItem):
+    user = verify_telegram_data(data.initData)
+    if not user: raise HTTPException(status_code=401, detail="Invalid auth data")
+    user_id = user["id"]
+
+    res = supabase.table("users").select("coins, inventory").eq("user_id", user_id).execute()
+    if not res.data: raise HTTPException(status_code=404, detail="User not found")
+
+    current_coins = res.data[0]["coins"]
+    inventory = json.loads(res.data[0].get("inventory") or "[]")
+
+    if current_coins < data.price:
+        raise HTTPException(status_code=400, detail="Not enough coins")
+
+    inventory.append(data.item_id)
+    supabase.table("users").update({
+        "coins": current_coins - data.price,
+        "inventory": json.dumps(inventory)
+    }).eq("user_id", user_id).execute()
+    return {"success": True, "new_balance": current_coins - data.price, "inventory": inventory}
 
 
 @app.post("/api/update_balance")
 async def update_balance(data: UpdateBalance):
     user = verify_telegram_data(data.initData)
     if not user: raise HTTPException(status_code=401, detail="Invalid auth data")
-
     user_id = user["id"]
     res = supabase.table("users").select("coins").eq("user_id", user_id).execute()
-    if not res.data: raise HTTPException(status_code=404, detail="User not found")
-
-    new_coins = res.data[0]["coins"] + data.amount
-    if new_coins < 0: new_coins = 0
-
+    new_coins = max(0, res.data[0]["coins"] + data.amount)
     supabase.table("users").update({"coins": new_coins}).eq("user_id", user_id).execute()
     return {"success": True, "new_balance": new_coins}
 
@@ -131,14 +141,9 @@ async def update_balance(data: UpdateBalance):
 async def update_keys(data: UpdateKeys):
     user = verify_telegram_data(data.initData)
     if not user: raise HTTPException(status_code=401, detail="Invalid auth data")
-
     user_id = user["id"]
     res = supabase.table("users").select("keys").eq("user_id", user_id).execute()
-    if not res.data: raise HTTPException(status_code=404, detail="User not found")
-
-    new_keys = (res.data[0].get("keys", 0) or 0) + data.amount
-    if new_keys < 0: new_keys = 0
-
+    new_keys = max(0, (res.data[0].get("keys", 0) or 0) + data.amount)
     supabase.table("users").update({"keys": new_keys}).eq("user_id", user_id).execute()
     return {"success": True, "new_keys": new_keys}
 

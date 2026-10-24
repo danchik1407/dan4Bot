@@ -6,81 +6,140 @@ const API_URL = "https://aura-api-mptt.onrender.com";
 let balance = 0;
 let keys = 0;
 let currentBet = 10;
-let normalChestAvailable = true;
+let inventory = [];
+let lastChestTime = 0;
 
 async function loadUserData() {
-    const balanceEl = document.getElementById('user-balance');
     try {
         const response = await fetch(`${API_URL}/api/user`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ initData: tg.initData })
         });
         const data = await response.json();
         balance = data.coins;
         keys = data.keys || 0;
+        inventory = data.inventory || [];
+        lastChestTime = data.last_chest || 0;
 
         updateUI();
+        checkChestCooldown();
     } catch (e) {
-        balanceEl.innerText = "Ошибка";
-        balanceEl.onclick = () => loadUserData();
+        document.getElementById('user-balance').innerText = "Ошибка";
     }
 }
 
 async function changeBalance(amount) {
-    try {
-        const response = await fetch(`${API_URL}/api/update_balance`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ initData: tg.initData, amount: amount })
-        });
-        const data = await response.json();
-        balance = data.new_balance;
-        updateUI();
-    } catch(e) { console.error(e); }
+    const response = await fetch(`${API_URL}/api/update_balance`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ initData: tg.initData, amount: amount })
+    });
+    const data = await response.json();
+    balance = data.new_balance;
+    updateUI();
 }
 
 async function changeKeys(amount) {
-    try {
-        const response = await fetch(`${API_URL}/api/update_keys`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ initData: tg.initData, amount: amount })
-        });
-        const data = await response.json();
-        keys = data.new_keys;
-        updateUI();
-    } catch(e) { console.error(e); }
+    const response = await fetch(`${API_URL}/api/update_keys`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ initData: tg.initData, amount: amount })
+    });
+    const data = await response.json();
+    keys = data.new_keys;
+    updateUI();
 }
 
 function updateUI() {
     document.getElementById('user-balance').innerText = balance;
+    document.getElementById('profile-coins').innerText = balance;
+    document.getElementById('profile-keys').innerText = keys;
 
-    // Обновляем инвентарь в профиле
     const inv = document.getElementById('inventory');
-    if (inv) {
-        inv.innerHTML = keys > 0
-            ? `<div class="inv-item">🔑<br><span>Золотой ключ (${keys})</span></div>`
-            : `<div class="inv-item">📦<br><span>Пусто</span></div>`;
+    if (inventory.length === 0 && keys === 0) {
+        inv.innerHTML = `<div class="inv-item">📦<br><span>Пусто</span></div>`;
+    } else {
+        let html = '';
+        if (keys > 0) html += `<div class="inv-item">🔑<br><span>Ключ (${keys})</span></div>`;
+        inventory.forEach(item => {
+            if (item === 'capsule') html += `<div class="inv-item" onclick="tg.showAlert('Скоро...')">💊<br><span>Капсула</span></div>`;
+            if (item === 'uniq_capsule') html += `<div class="inv-item" onclick="tg.showAlert('Скоро...')">⚱️<br><span>Уник. Капсула</span></div>`;
+        });
+        inv.innerHTML = html;
     }
 }
 
-loadUserData();
+function checkChestCooldown() {
+    const now = Math.floor(Date.now() / 1000);
+    const diff = now - lastChestTime;
+    const btn = document.getElementById('normal-chest-btn');
 
-// --- НАВИГАЦИЯ (Защищено от ошибок) ---
-function switchTab(tabId, element) {
-    try {
-        document.querySelectorAll('.tab').forEach(tab => tab.classList.remove('active'));
-        document.getElementById('tab-' + tabId).classList.add('active');
-
-        document.querySelectorAll('.nav-item').forEach(nav => nav.classList.remove('active'));
-        element.classList.add('active');
-
-        // Мягкая вибрация
-        if (tg.HapticFeedback) tg.HapticFeedback.impactOccurred('soft');
-    } catch (e) {
-        console.error("Ошибка переключения", e);
+    if (diff < 10) {
+        btn.disabled = true;
+        btn.innerText = `КД: ${10 - diff} сек`;
+        setTimeout(checkChestCooldown, 1000);
+    } else {
+        btn.disabled = false;
+        btn.innerText = 'Открыть (Бесплатно)';
     }
+}
+
+async function openNormalChest() {
+    try {
+        const res = await fetch(`${API_URL}/api/open_chest`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ initData: tg.initData })
+        });
+        if (!res.ok) return tg.showAlert("Сундук перезаряжается!");
+
+        const icon = document.getElementById('normal-chest-icon');
+        icon.style.transform = 'scale(1.2) rotate(10deg)';
+        setTimeout(() => icon.style.transform = 'scale(1) rotate(0)', 300);
+
+        setTimeout(async () => {
+            if (Math.random() < 0.01) {
+                await changeKeys(1);
+                icon.innerText = '🔑'; showWin("КЛЮЧ!");
+            } else {
+                let amount = Math.floor(Math.random() * 10) + 1;
+                await changeBalance(amount);
+                icon.innerText = '💎'; showWin(amount);
+            }
+            lastChestTime = Math.floor(Date.now() / 1000);
+            checkChestCooldown();
+            setTimeout(() => icon.innerText = '📦', 2000);
+        }, 400);
+    } catch(e) { tg.showAlert("Ошибка соединения"); }
+}
+
+async function buyItem(itemId, price) {
+    if (balance < price) return tg.showAlert("Недостаточно коинов!");
+    try {
+        const res = await fetch(`${API_URL}/api/buy_item`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ initData: tg.initData, item_id: itemId, price: price })
+        });
+        if (!res.ok) return tg.showAlert("Ошибка покупки");
+        const data = await res.json();
+        balance = data.new_balance;
+        inventory = data.inventory;
+        updateUI();
+        tg.showAlert("Успешно куплено!");
+    } catch(e) { tg.showAlert("Ошибка соединения"); }
+}
+
+function showWin(text) {
+    const popup = document.getElementById('win-popup');
+    popup.querySelector('.win-text').innerText = text;
+    popup.classList.add('show');
+    setTimeout(() => popup.classList.remove('show'), 1500);
+    if (tg.HapticFeedback) tg.HapticFeedback.notificationOccurred('success');
+}
+
+function switchTab(tabId, element) {
+    document.querySelectorAll('.tab').forEach(tab => tab.classList.remove('active'));
+    document.getElementById('tab-' + tabId).classList.add('active');
+    document.querySelectorAll('.nav-item').forEach(nav => nav.classList.remove('active'));
+    element.classList.add('active');
+    if (tg.HapticFeedback) tg.HapticFeedback.impactOccurred('soft');
 }
 
 function openGame(game) {
@@ -88,7 +147,6 @@ function openGame(game) {
     document.getElementById('main-nav').style.display = 'none';
     document.querySelectorAll('.tab').forEach(t => t.style.display = 'none');
     document.getElementById('screen-' + game).classList.add('active');
-    // Мягкая вибрация
     if (tg.HapticFeedback) tg.HapticFeedback.impactOccurred('soft');
 }
 
@@ -100,67 +158,6 @@ function closeGame() {
     if (tg.HapticFeedback) tg.HapticFeedback.impactOccurred('soft');
 }
 
-// ==================== СУНДУКИ ====================
-function openNormalChest() {
-    if (!normalChestAvailable) return tg.showAlert("Сундук перезаряжается!");
-    const icon = document.getElementById('normal-chest-icon');
-    const btn = document.getElementById('normal-chest-btn');
-
-    icon.style.transform = 'scale(1.2) rotate(10deg)';
-    setTimeout(() => icon.style.transform = 'scale(1) rotate(0)', 300);
-    if (tg.HapticFeedback) tg.HapticFeedback.impactOccurred('soft');
-
-    setTimeout(() => {
-        if (Math.random() < 0.01) { // 1% шанс
-            changeKeys(1);
-            icon.innerText = '🔑';
-            showWin("ЗОЛОТОЙ КЛЮЧ!");
-        } else {
-            let amount = Math.floor(Math.random() * 10) + 1; // 1-10
-            changeBalance(amount);
-            icon.innerText = '💎';
-            showWin(amount);
-        }
-
-        btn.disabled = true;
-        btn.innerText = 'Перезарядка (10с)...';
-        normalChestAvailable = false;
-
-        setTimeout(() => {
-            normalChestAvailable = true;
-            btn.disabled = false;
-            btn.innerText = 'Открыть (Бесплатно)';
-            icon.innerText = '📦';
-            icon.style.transform = 'scale(1)';
-        }, 10000); // 10 сек для теста
-    }, 400);
-}
-
-function openGoldChest() {
-    if (keys <= 0) return tg.showAlert("У вас нет золотых ключей!");
-    const icon = document.getElementById('gold-chest-icon');
-    icon.style.transform = 'scale(1.2) rotate(10deg)';
-    setTimeout(() => icon.style.transform = 'scale(1) rotate(0)', 300);
-    if (tg.HapticFeedback) tg.HapticFeedback.impactOccurred('soft');
-
-    setTimeout(() => {
-        changeKeys(-1);
-        let amount = Math.floor(Math.random() * 90) + 10; // 10-100
-        changeBalance(amount);
-        icon.innerText = '💎';
-        showWin(amount);
-        setTimeout(() => icon.innerText = '🎁', 2000);
-    }, 400);
-}
-
-function showWin(text) {
-    const popup = document.getElementById('win-popup');
-    popup.querySelector('.win-text').innerText = text;
-    popup.classList.add('show');
-    setTimeout(() => popup.classList.remove('show'), 1500);
-    if (tg.HapticFeedback) tg.HapticFeedback.notificationOccurred('success');
-}
-
 function setBet(game, amount) {
     currentBet = amount;
     const container = document.getElementById(game + '-bet-selector');
@@ -170,13 +167,11 @@ function setBet(game, amount) {
     if (game === 'crash' && !crashActive) document.getElementById('crash-btn').innerText = `Сделать ставку (${amount} 🪙)`;
 }
 
-// ==================== МИНЫ ====================
 let minesActive = false, minesCoef = 1.0, minesSafeOpened = 0;
 const board = document.getElementById('mines-board');
 for (let i = 0; i < 16; i++) {
     const cell = document.createElement('div');
-    cell.className = 'cell';
-    cell.dataset.index = i;
+    cell.className = 'cell'; cell.dataset.index = i;
     cell.onclick = () => clickMineCell(cell);
     board.appendChild(cell);
 }
@@ -250,7 +245,6 @@ function cashoutMines() {
     showWin(cashout);
 }
 
-// ==================== КРАШ ====================
 let crashActive = false, crashInterval, currentCoef = 1.0;
 document.getElementById('crash-btn').innerText = `Сделать ставку (${currentBet} 🪙)`;
 
@@ -303,3 +297,5 @@ function crashed() {
     document.body.classList.add('shake');
     setTimeout(() => document.body.classList.remove('shake'), 500);
 }
+
+loadUserData();

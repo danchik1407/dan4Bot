@@ -8,7 +8,6 @@
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
 </head>
 <body>
-    <!-- Шапка -->
     <header class="top-bar" id="main-header">
         <div class="profile-badge">
             <img id="user-avatar" src="https://via.placeholder.com/40" alt="Avatar">
@@ -16,34 +15,22 @@
         </div>
         <div class="balance-badge">
             <span class="coin-icon">💎</span>
-            <span id="user-balance">1 000</span>
+            <span id="user-balance">0</span>
             <button class="plus-btn" onclick="tg.showAlert('Пополнение скоро!')">+</button>
         </div>
     </header>
 
     <main>
-        <!-- ИГРАТЬ -->
         <section id="tab-play" class="tab active">
-            <div class="banner">
-                <div class="banner-title">AURA GAME</div>
-                <div class="banner-sub">Твой путь к миллионам</div>
-            </div>
+            <div class="banner"><div class="banner-title">AURA GAME</div><div class="banner-sub">Твой путь к миллионам</div></div>
             <div class="games-grid">
-                <div class="game-card" onclick="openGame('mines')">
-                    <div class="game-icon">💣</div>
-                    <div class="game-info"><h3>Мины</h3><p>Разминируй поле</p></div>
-                </div>
-                <div class="game-card" onclick="openGame('crash')">
-                    <div class="game-icon">🚀</div>
-                    <div class="game-info"><h3>Краш</h3><p>Поставь — забери</p></div>
-                </div>
+                <div class="game-card" onclick="openGame('mines')"><div class="game-icon">💣</div><div class="game-info"><h3>Мины</h3><p>Разминируй поле</p></div></div>
+                <div class="game-card" onclick="openGame('crash')"><div class="game-icon">🚀</div><div class="game-info"><h3>Краш</h3><p>Поставь — забери</p></div></div>
             </div>
         </section>
 
-        <!-- СУНДУКИ -->
         <section id="tab-chests" class="tab">
-            <div class="page-header"><h2>📦 Сундуки</h2><p>Испытай удачу!</p></div>
-
+            <div class="page-header"><h2>📦 Сундуки</h2></div>
             <div class="chest-container">
                 <div class="chest-card">
                     <div class="chest-icon" id="normal-chest-icon">📦</div>
@@ -51,103 +38,69 @@
                     <p>Шанс 1% на Золотой ключ!</p>
                     <button class="action-btn" id="normal-chest-btn" onclick="openNormalChest()">Открыть (Бесплатно)</button>
                 </div>
-
-                <div class="chest-card">
-                    <div class="chest-icon" id="gold-chest-icon">🎁</div>
-                    <h3>Золотой сундук</h3>
-                    <p>Нужен 🔑 Ключ</p>
-                    <button class="action-btn" id="gold-chest-btn" onclick="openGoldChest()" style="background: #ffcc00; color: #000;">Открыть (Нужен ключ)</button>
-                </div>
             </div>
         </section>
 
-        <!-- МАГАЗИН -->
         <section id="tab-shop" class="tab">
             <div class="page-header"><h2>🛒 Магазин</h2></div>
-            <div class="daily-case">
-                <div class="case-text"><h3>Скоро...</h3><p>Предметы уже в разработке</p></div>
-                <div class="case-icon">🚧</div>
+            <div class="shop-grid">
+                <div class="shop-item">
+                    <div class="item-icon">💊</div>
+                    <h3>Капсула</h3>
+                    <p>100 🪙</p>
+                    <button class="buy-btn" onclick="buyItem('capsule', 100)">➕ Купить</button>
+                </div>
+                <div class="shop-item">
+                    <div class="item-icon">⚱️</div>
+                    <h3>Уник. Капсула</h3>
+                    <p>500 🪙</p>
+                    <button class="buy-btn" onclick="buyItem('uniq_capsule', 500)">➕ Купить</button>
+                </div>
             </div>
         </section>
 
-        <!-- ПРОФИЛЬ (Обновленный) -->
         <section id="tab-profile" class="tab">
             <div class="page-header"><h2>👤 Профиль</h2></div>
-
             <div class="profile-card-pro">
-                <div class="profile-avatar-large">
-                    <img id="profile-avatar-large" src="https://via.placeholder.com/100" alt="Avatar">
-                </div>
-                <h2 id="profile-username" class="profile-name">Dan4ik</h2>
-                <p class="profile-id">ID: <span id="profile-id">...</span></p>
-
+                <div class="profile-avatar-large"><img src="https://via.placeholder.com/100" alt="Avatar"></div>
+                <h2 class="profile-name">Dan4ik</h2>
                 <div class="stats-row">
-                    <div class="stat-box">
-                        <span class="stat-icon">💎</span>
-                        <span class="stat-value" id="profile-coins">0</span>
-                        <span class="stat-label">Баланс</span>
-                    </div>
-                    <div class="stat-box">
-                        <span class="stat-icon">🔑</span>
-                        <span class="stat-value" id="profile-keys">0</span>
-                        <span class="stat-label">Ключи</span>
-                    </div>
+                    <div class="stat-box"><span class="stat-icon">💎</span><span class="stat-value" id="profile-coins">0</span><span class="stat-label">Баланс</span></div>
+                    <div class="stat-box"><span class="stat-icon">🔑</span><span class="stat-value" id="profile-keys">0</span><span class="stat-label">Ключи</span></div>
                 </div>
-
-                <h3 style="margin-top: 25px; margin-bottom: 10px; text-align: left; font-size: 16px;">🎒 Инвентарь</h3>
-                <div class="inventory-grid" id="inventory">
-                    <div class="inv-item">📦<br><span>Пусто</span></div>
-                </div>
+                <h3 style="margin-top: 25px; margin-bottom: 10px; text-align: left;">🎒 Инвентарь</h3>
+                <div class="inventory-grid" id="inventory"></div>
             </div>
         </section>
 
-        <!-- ИГРА: МИНЫ -->
         <section id="screen-mines" class="game-screen">
             <button class="back-btn" onclick="closeGame()">← Назад</button>
             <h2 class="game-title">💣 Мины</h2>
-
             <div class="bet-selector" id="mines-bet-selector">
                 <button class="bet-btn active" onclick="setBet('mines', 10)">10</button>
                 <button class="bet-btn" onclick="setBet('mines', 50)">50</button>
                 <button class="bet-btn" onclick="setBet('mines', 100)">100</button>
-                <button class="bet-btn" onclick="setBet('mines', 500)">500</button>
             </div>
-
             <div class="mines-grid" id="mines-board"></div>
-
-            <div class="game-info-bar" id="mines-info">
-                <span>Кэф: <b id="mines-current-coef">x1.00</b></span>
-                <span>Забрать: <b id="mines-cashout-amount">0</b> 🪙</span>
-            </div>
-
+            <div class="game-info-bar" id="mines-info"><span>Кэф: <b id="mines-current-coef">x1.00</b></span><span>Забрать: <b id="mines-cashout-amount">0</b> 🪙</span></div>
             <button class="action-btn" id="mines-btn" onclick="minesAction()">Сделать ставку (10 🪙)</button>
         </section>
 
-        <!-- ИГРА: КРАШ -->
         <section id="screen-crash" class="game-screen">
             <button class="back-btn" onclick="closeGame()">← Назад</button>
             <h2 class="game-title">🚀 Краш</h2>
-
             <div class="bet-selector" id="crash-bet-selector">
                 <button class="bet-btn active" onclick="setBet('crash', 10)">10</button>
                 <button class="bet-btn" onclick="setBet('crash', 50)">50</button>
                 <button class="bet-btn" onclick="setBet('crash', 100)">100</button>
-                <button class="bet-btn" onclick="setBet('crash', 500)">500</button>
             </div>
-
-            <div class="rocket-box" id="rocket-box">
-                <div class="rocket-coef" id="crash-coef">x1.00</div>
-                <div class="rocket-emoji" id="crash-rocket">🚀</div>
-            </div>
-
+            <div class="rocket-box" id="rocket-box"><div class="rocket-coef" id="crash-coef">x1.00</div><div class="rocket-emoji" id="crash-rocket">🚀</div></div>
             <button class="action-btn" id="crash-btn" onclick="crashAction()">Сделать ставку (10 🪙)</button>
         </section>
     </main>
 
-    <!-- Всплывающее окно выигрыша -->
     <div id="win-popup" class="win-popup"><div class="win-text">+ 0 🪙</div></div>
 
-    <!-- Навигация (4 вкладки) -->
     <nav class="bottom-nav" id="main-nav">
         <div class="nav-item active" onclick="switchTab('play', this)"><span class="nav-icon">🎮</span> Играть</div>
         <div class="nav-item" onclick="switchTab('chests', this)"><span class="nav-icon">📦</span> Сундуки</div>
