@@ -23,7 +23,6 @@ game_state = {
     "timer": 20,
     "bank": 0,
     "players": [],
-    "ball": {"x": 50, "y": 50, "vx": 0, "vy": 0},  # 0 - это заглушка
     "winner": None,
     "last_update": time.time(),
     "last_bot_added": 0,
@@ -54,6 +53,9 @@ class UpdateBalance(BaseModel): initData: str; amount: int
 class PlaceBet(BaseModel): initData: str; amount: int
 
 
+class FinishHockey(BaseModel): initData: str; x: float; y: float
+
+
 @app.get("/api/hockey_state")
 async def get_hockey_state():
     global game_state
@@ -61,7 +63,6 @@ async def get_hockey_state():
     time_left = 20 - (now - game_state["last_update"])
 
     if game_state["status"] == "waiting":
-        # Боты с 8 секунды, по 1 раз в 1.2 сек
         if time_left <= 8 and game_state["target_bots"] == 0:
             game_state["target_bots"] = random.randint(1, 5)
 
@@ -73,11 +74,10 @@ async def get_hockey_state():
                 bot_color = random.choice(BOT_COLORS)
                 while any(p["color"] == bot_color for p in game_state["players"]):
                     bot_color = random.choice(BOT_COLORS)
-                bot_shape = random.choice(["circle", "square", "oval", "triangle"])
 
                 game_state["players"].append({
                     "id": random.randint(10000, 99999), "name": bot_name, "avatar": "", "bet": bot_bet,
-                    "color": bot_color, "shape": bot_shape, "is_bot": True
+                    "color": bot_color, "shape": "circle", "is_bot": True
                 })
                 game_state["bank"] += bot_bet
                 game_state["last_bot_added"] = now
@@ -86,6 +86,7 @@ async def get_hockey_state():
             game_state["status"] = "rolling"
             game_state["last_update"] = now
 
+            # Распределяем проценты
             total_bank = game_state["bank"]
             if total_bank > 0:
                 for p in game_state["players"]:
@@ -94,42 +95,9 @@ async def get_hockey_state():
                 for p in game_state["players"]:
                     p["percent"] = 0
 
-            # ВЫБОР ПОБЕДИТЕЛЯ
-            rand_val = random.uniform(0, 100)
-            current_val = 0
-            for p in game_state["players"]:
-                current_val += p["percent"]
-                if rand_val <= current_val:
-                    game_state["winner"] = p
-                    break
-
-            # Задаем координаты финиша и угол старта
-            # (Клиент будет сам анимировать полет к этой точке)
-            if game_state["winner"]:
-                # Выбираем случайную точку внутри зоны победителя
-                # Так как зоны у нас вертикальные, мы просто берем X победителя + случайный разброс
-                winner_index = game_state["players"].index(game_state["winner"])
-
-                # Вычисляем центр зоны победителя по X (в процентах)
-                total_percent = 0
-                target_x = 0
-                for i, p in enumerate(game_state["players"]):
-                    if i == winner_index:
-                        target_x = total_percent + (p["percent"] / 2)
-                        break
-                    total_percent += p["percent"]
-
-                # Угол старта (для отскоков)
-                angle = random.uniform(0, 2 * math.pi)
-                game_state["ball"] = {
-                    "target_x": target_x,
-                    "start_x": 50,
-                    "start_y": 50,
-                    "angle": angle
-                }
-
     elif game_state["status"] == "rolling":
-        if now - game_state["last_update"] > 7:  # 7 секунд на анимацию
+        # Ждем, пока клиент пришлет координаты остановки (максимум 10 секунд)
+        if now - game_state["last_update"] > 10:
             game_state["status"] = "finished"
             game_state["last_update"] = now
 
@@ -150,13 +118,45 @@ async def get_hockey_state():
 
             game_state = {
                 "status": "waiting", "timer": 20, "bank": 0, "players": [],
-                "ball": {"x": 50, "y": 50, "vx": 0, "vy": 0},
                 "winner": None, "last_update": now,
                 "last_bot_added": 0, "target_bots": 0
             }
 
     game_state["timer"] = max(0, int(time_left) if game_state["status"] == "waiting" else 0)
     return game_state
+
+
+# НОВЫЙ ЭНДПОИНТ: Клиент говорит, где остановился шарик
+@app.post("/api/finish_hockey")
+async def finish_hockey(data: FinishHockey):
+    global game_state
+    if game_state["status"] != "rolling":
+        return {"success": False, "message": "Раунд не активен"}
+
+    # Определяем, в чью зону попал шарик
+    # У нас зоны вертикальные, поэтому смотрим только на X (координату)
+    total_p = 0
+    winner = None
+
+    for p in game_state["players"]:
+        zone_width = p["percent"]
+        if total_p <= data.x <= total_p + zone_width:
+            winner = p
+            break
+        total_p += zone_width
+
+    if winner:
+        game_state["winner"] = winner
+        game_state["status"] = "finished"
+        game_state["last_update"] = time.time()
+        return {"success": True, "winner": winner, "bank": game_state["bank"]}
+    else:
+        # Если шарик попал в пустоту (баг), берем случайного игрока
+        winner = random.choice(game_state["players"])
+        game_state["winner"] = winner
+        game_state["status"] = "finished"
+        game_state["last_update"] = time.time()
+        return {"success": True, "winner": winner, "bank": game_state["bank"]}
 
 
 @app.post("/api/place_bet")

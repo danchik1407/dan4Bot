@@ -18,13 +18,11 @@ let hockeyInterval = null;
 let hasBetThisRound = false;
 let hasShownWinner = false;
 
-// Состояние шарика
-let ballState = {
-    isFlying: false,
-    x: 50,
-    y: 50,
-    vx: 0,
-    vy: 0,
+// Физика шарика
+let ball = {
+    x: 50, y: 50,
+    vx: 0, vy: 0,
+    active: false,
     animationId: null
 };
 
@@ -76,69 +74,72 @@ function playSound(type) {
     }
 }
 
-// ==================== АНИМАЦИЯ ШАРИКА (ОДИН РАЗ) ====================
-function startBallAnimation(targetX) {
-    // Защита от повторного запуска
-    if (ballState.isFlying) return;
-    ballState.isFlying = true;
+// ==================== ФИЗИКА ШАРИКА ====================
+function startBallPhysics() {
+    if (ball.active) return;
 
-    // Сброс позиции
-    ballState.x = 50;
-    ballState.y = 50;
-    ballState.vx = (targetX - 50) / 100 + (Math.random() - 0.5) * 0.2;
-    ballState.vy = 0.15 + Math.random() * 0.1;
+    ball.x = 50; ball.y = 50;
+    // Случайное направление
+    const angle = Math.random() * Math.PI * 2;
+    ball.vx = Math.cos(angle) * 1.5;
+    ball.vy = Math.sin(angle) * 1.5;
+    ball.active = true;
 
     const arena = document.getElementById('hockey-arena');
     const ballEl = document.getElementById('hockey-ball');
 
-    // Один цикл анимации
-    const animate = () => {
-        if (!ballState.isFlying) return;
+    const step = () => {
+        if (!ball.active) return;
 
-        // Двигаем
-        ballState.x += ballState.vx;
-        ballState.y += ballState.vy;
+        ball.x += ball.vx;
+        ball.y += ball.vy;
 
         // Отскоки
-        if (ballState.x <= 0 || ballState.x >= 100) {
-            ballState.vx *= -1;
-            ballState.x = Math.max(0, Math.min(100, ballState.x));
+        if (ball.x <= 0 || ball.x >= 100) {
+            ball.vx *= -1;
+            ball.x = Math.max(0, Math.min(100, ball.x));
             playSound('click');
         }
-        if (ballState.y <= 0 || ballState.y >= 100) {
-            ballState.vy *= -1;
-            ballState.y = Math.max(0, Math.min(100, ballState.y));
+        if (ball.y <= 0 || ball.y >= 100) {
+            ball.vy *= -1;
+            ball.y = Math.max(0, Math.min(100, ball.y));
             playSound('click');
         }
 
         // Замедление
-        ballState.vx *= 0.985;
-        ballState.vy *= 0.985;
+        ball.vx *= 0.985;
+        ball.vy *= 0.985;
 
         // Отрисовка
         if (ballEl) {
-            ballEl.style.left = ballState.x + '%';
-            ballEl.style.top = ballState.y + '%';
+            ballEl.style.left = ball.x + '%';
+            ballEl.style.top = ball.y + '%';
         }
 
         // Зум
-        const speed = Math.sqrt(ballState.vx**2 + ballState.vy**2);
+        const speed = Math.sqrt(ball.vx**2 + ball.vy**2);
         if (speed < 1.5 && arena) {
             if (!arena.classList.contains('zoomed')) {
                 arena.classList.add('zoomed');
             }
-            arena.style.transformOrigin = `${ballState.x}% ${ballState.y}%`;
+            arena.style.transformOrigin = `${ball.x}% ${ball.y}%`;
         }
 
-        // Продолжаем или останавливаемся
-        if (Math.abs(ballState.vx) > 0.05 || Math.abs(ballState.vy) > 0.05) {
-            ballState.animationId = requestAnimationFrame(animate);
+        // Если остановился или летал 6 секунд
+        if (Math.abs(ball.vx) < 0.1 && Math.abs(ball.vy) < 0.1) {
+            ball.active = false;
+            // Отправляем финальную позицию
+            fetch(`${API_URL}/api/finish_hockey`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ initData: tg.initData, x: ball.x, y: ball.y })
+            });
         } else {
-            ballState.isFlying = false;
+            ball.animationId = requestAnimationFrame(step);
         }
     };
 
-    animate();
+    ball.animationId = requestAnimationFrame(step);
 }
 
 // ==================== ХОККЕЙ ====================
@@ -187,17 +188,14 @@ async function pollHockeyState() {
 
             hasBetThisRound = false;
             hasShownWinner = false;
+            ball.active = false;
+            if (ball.animationId) cancelAnimationFrame(ball.animationId);
 
-            // Сброс шарика (только если не летит)
-            if (!ballState.isFlying) {
-                ballState.x = 50;
-                ballState.y = 50;
-                const ballEl = document.getElementById('hockey-ball');
-                if (ballEl) { ballEl.style.left = '50%'; ballEl.style.top = '50%'; }
-                if (arena) {
-                    arena.classList.remove('zoomed');
-                    arena.style.transformOrigin = 'center center';
-                }
+            const ballEl = document.getElementById('hockey-ball');
+            if (ballEl) { ballEl.style.left = '50%'; ballEl.style.top = '50%'; }
+            if (arena) {
+                arena.classList.remove('zoomed');
+                arena.style.transformOrigin = 'center center';
             }
             document.getElementById('winner-modal').classList.remove('active');
 
@@ -206,21 +204,22 @@ async function pollHockeyState() {
             statusEl.style.color = '#007aff';
             document.getElementById('hockey-controls').style.display = 'none';
 
-            // Запускаем анимацию ТОЛЬКО ОДИН РАЗ
-            if (!ballState.isFlying && state.ball && state.ball.target_x) {
-                startBallAnimation(state.ball.target_x);
+            // Запуск физики
+            if (!ball.active) {
+                startBallPhysics();
             }
 
         } else if (state.status === 'finished') {
             statusEl.innerText = 'Раунд окончен!';
             statusEl.style.color = '#ff3b30';
+            ball.active = false;
+            if (ball.animationId) cancelAnimationFrame(ball.animationId);
 
             if (arena) {
                 arena.classList.remove('zoomed');
                 arena.style.transformOrigin = 'center center';
             }
 
-            // Показываем модалку только один раз
             const modal = document.getElementById('winner-modal');
             if (state.winner && !hasShownWinner) {
                 hasShownWinner = true;
@@ -241,7 +240,6 @@ async function pollHockeyState() {
 
         bankEl.innerText = `Банк: ${state.bank} 🪙`;
 
-        // Отрисовка секторов
         arena.querySelectorAll('.hockey-sector').forEach(el => el.remove());
 
         state.players.forEach(p => {
@@ -278,15 +276,13 @@ async function pollHockeyState() {
             arena.appendChild(sector);
         });
 
-        // Убедимся, что шарик есть в DOM
         if (!document.getElementById('hockey-ball')) {
-            const ball = document.createElement('div');
-            ball.className = 'hockey-ball';
-            ball.id = 'hockey-ball';
-            arena.appendChild(ball);
+            const ballEl = document.createElement('div');
+            ballEl.className = 'hockey-ball';
+            ballEl.id = 'hockey-ball';
+            arena.appendChild(ballEl);
         }
 
-        // Отрисовка списка участников
         const list = document.getElementById('hockey-participants');
         list.innerHTML = '';
         state.players.forEach((p, i) => {
@@ -327,6 +323,7 @@ function startHockeyPolling() {
 function stopHockeyPolling() {
     if (hockeyInterval) clearInterval(hockeyInterval);
     hockeyInterval = null;
+    if (ball.animationId) cancelAnimationFrame(ball.animationId);
 }
 
 function closeWinnerModal() {
@@ -542,8 +539,6 @@ function switchTab(tabId, element) {
 
 function closeGame() {
     stopHockeyPolling();
-    if (ballState.animationId) cancelAnimationFrame(ballState.animationId);
-    ballState.isFlying = false;
     const popup = document.getElementById('win-popup');
     if (popup) popup.classList.remove('show');
     document.querySelectorAll('.game-screen').forEach(s => s.classList.remove('active'));
