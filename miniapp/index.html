@@ -21,6 +21,7 @@
     </header>
 
     <main>
+        <!-- ВКЛАДКА ИГРАТЬ -->
         <section id="tab-play" class="tab active">
             <div class="banner"><div class="banner-title">AURA GAME</div><div class="banner-sub">Твой путь к миллионам</div></div>
             <div class="games-grid">
@@ -29,16 +30,22 @@
             </div>
         </section>
 
+        <!-- ВКЛАДКА ТОП -->
         <section id="tab-top" class="tab">
             <div class="page-header"><h2>🏆 Топ игроков</h2><p>Глобальный рейтинг</p></div>
-            <div class="leaderboard" id="global-top-list"><p style="text-align: center; color: #888;">Загрузка...</p></div>
+            <div class="leaderboard" id="global-top-list">
+                <p style="text-align: center; color: #888;">Загрузка...</p>
+            </div>
         </section>
 
+        <!-- ВКЛАДКА СУНДУКИ -->
         <section id="tab-chests" class="tab">
             <div class="page-header"><h2>📦 Сундуки</h2></div>
             <div id="roulette-container" class="roulette-container" style="display: none;">
                 <div class="roulette-pointer">▼</div>
-                <div class="roulette-window"><div class="roulette-track" id="roulette-track"></div></div>
+                <div class="roulette-window">
+                    <div class="roulette-track" id="roulette-track"></div>
+                </div>
             </div>
             <div class="chest-container" id="chest-buttons">
                 <div class="chest-card">
@@ -56,6 +63,7 @@
             </div>
         </section>
 
+        <!-- ВКЛАДКА МАГАЗИН -->
         <section id="tab-shop" class="tab">
             <div class="page-header"><h2>🛒 Магазин</h2></div>
             <div class="shop-grid">
@@ -74,10 +82,13 @@
             </div>
         </section>
 
+        <!-- ВКЛАДКА ПРОФИЛЬ -->
         <section id="tab-profile" class="tab">
             <div class="page-header"><h2>👤 Профиль</h2></div>
             <div class="profile-card-pro">
-                <div class="profile-avatar-large"><img id="profile-avatar-large" src="https://via.placeholder.com/100" alt="Avatar"></div>
+                <div class="profile-avatar-large">
+                    <img id="profile-avatar-large" src="https://via.placeholder.com/100" alt="Avatar">
+                </div>
                 <h2 class="profile-name" id="profile-name">Загрузка...</h2>
                 <div class="stats-row">
                     <div class="stat-box"><span class="stat-icon">💎</span><span class="stat-value" id="profile-coins">0</span><span class="stat-label">Баланс</span></div>
@@ -88,7 +99,7 @@
             </div>
         </section>
 
-        <!-- МИНЫ -->
+        <!-- ИГРА: МИНЫ -->
         <section id="screen-mines" class="game-screen">
             <button class="back-btn" onclick="closeGame()">← Назад</button>
             <h2 class="game-title">💣 Мины</h2>
@@ -110,16 +121,25 @@
             <button class="action-btn" id="mines-btn" onclick="minesAction()">Сделать ставку</button>
         </section>
 
-        <!-- ХОККЕЙ -->
+        <!-- ИГРА: ХОККЕЙ -->
         <section id="screen-hockey" class="game-screen" style="padding: 10px;">
             <button class="back-btn" onclick="closeGame()">← Назад</button>
+
             <div class="hockey-header">
                 <div id="hockey-status" style="color: #34c759; font-weight: bold;">Ожидание...</div>
                 <div id="hockey-bank" style="font-size: 20px; font-weight: 900;">Банк: 0 🪙</div>
             </div>
+
             <div class="hockey-arena" id="hockey-arena">
+                <!-- Шарик -->
                 <div class="hockey-ball" id="hockey-ball"></div>
             </div>
+
+            <!-- СПИСОК УЧАСТНИКОВ -->
+            <div class="hockey-participants" id="hockey-participants">
+                <!-- Сюда JS будет добавлять участников -->
+            </div>
+
             <div class="hockey-controls" id="hockey-controls">
                 <div class="bet-input-container">
                     <input type="number" id="hockey-bet" class="bet-input" value="10" min="10" max="1000">
@@ -133,15 +153,18 @@
         </section>
     </main>
 
+    <!-- УВЕДОМЛЕНИЯ (ТОСТЫ) -->
     <div id="toast-win" class="toast toast-win">
         <div class="toast-icon">🏆</div>
         <div id="toast-win-text">Вы выиграли 100 🪙</div>
     </div>
+
     <div id="toast-lose" class="toast toast-lose">
         <div class="toast-icon">💀</div>
         <div id="toast-lose-text">Азиз выиграл. Вы проиграли 10 🪙</div>
     </div>
 
+    <!-- МОДАЛКА СУНДУКА -->
     <div id="chest-win-modal" class="chest-win-modal">
         <div class="chest-win-content">
             <div class="chest-win-icon" id="chest-win-icon">💎</div>
@@ -150,8 +173,10 @@
         </div>
     </div>
 
+    <!-- ВСПЛЫВАЮЩЕЕ ОКНО ВЫИГРЫША -->
     <div id="win-popup" class="win-popup"><div class="win-text">+ 0 🪙</div></div>
 
+    <!-- НИЖНЯЯ НАВИГАЦИЯ -->
     <nav class="bottom-nav" id="main-nav">
         <div class="nav-item active" onclick="switchTab('play', this)"><span class="nav-icon">🎮</span> Играть</div>
         <div class="nav-item" onclick="switchTab('top', this)"><span class="nav-icon">🏆</span> Топ</div>

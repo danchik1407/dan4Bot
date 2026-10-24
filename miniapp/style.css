@@ -97,12 +97,21 @@ main { padding: 0 16px; }
 
 /* ХОККЕЙ */
 .hockey-header { display: flex; justify-content: space-between; align-items: center; width: 100%; max-width: 350px; margin-bottom: 10px; padding: 15px; background: var(--card); border-radius: 16px; border: 1px solid #333; box-shadow: 0 0 15px rgba(0, 0, 0, 0.5); }
-.hockey-arena { width: 100%; max-width: 350px; height: 350px; background: linear-gradient(135deg, #0f172a 0%, #020617 100%); border: 3px solid #1e3a8a; border-radius: 20px; position: relative; overflow: hidden; margin-bottom: 15px; box-shadow: inset 0 0 50px rgba(0, 0, 0, 0.9), 0 0 20px rgba(30, 58, 138, 0.5); }
-.hockey-arena::before { content: ''; position: absolute; top: 0; left: 0; width: 100%; height: 100%; background-image: linear-gradient(rgba(30, 58, 138, 0.2) 1px, transparent 1px), linear-gradient(90deg, rgba(30, 58, 138, 0.2) 1px, transparent 1px); background-size: 20px 20px; pointer-events: none; }
-.hockey-ball { width: 24px; height: 24px; background: radial-gradient(circle, #fff 0%, #a0a0a0 100%); border-radius: 50%; position: absolute; box-shadow: 0 0 20px #fff, 0 0 40px rgba(255, 255, 255, 0.5); transform: translate(-50%, -50%); transition: left 0.05s linear, top 0.05s linear; z-index: 10; }
-.hockey-player { position: absolute; border-radius: 15px; display: flex; justify-content: center; align-items: center; font-weight: 900; color: white; transform: translate(-50%, -50%); box-shadow: 0 0 15px rgba(0,0,0,0.8); overflow: hidden; border: 2px solid rgba(255,255,255,0.3); z-index: 5; transition: all 0.3s ease; }
-.hockey-player img { width: 100%; height: 100%; object-fit: cover; }
-.hockey-player .bet-amount { position: absolute; bottom: -25px; font-size: 12px; background: rgba(0,0,0,0.8); padding: 2px 8px; border-radius: 10px; border: 1px solid #444; color: #fff; white-space: nowrap; }
+.hockey-arena { width: 100%; max-width: 350px; height: 350px; background: #0f172a; border-radius: 20px; position: relative; overflow: hidden; margin-bottom: 10px; box-shadow: inset 0 0 20px rgba(0, 0, 0, 0.8); display: flex; }
+.hockey-sector { position: relative; border-right: 1px solid rgba(255,255,255,0.2); display: flex; flex-direction: column; justify-content: center; align-items: center; transition: all 0.3s ease; }
+.hockey-sector:last-child { border-right: none; }
+.player-shape-wrapper { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); display: flex; justify-content: center; align-items: center; pointer-events: none; }
+.player-shape { display: flex; justify-content: center; align-items: center; overflow: hidden; box-shadow: 0 0 10px rgba(0,0,0,0.3); }
+.shape-square { border-radius: 8px; }
+.shape-circle { border-radius: 50%; }
+.shape-oval { border-radius: 50%; height: 70% !important; width: 100% !important; }
+.shape-triangle { clip-path: polygon(50% 0%, 0% 100%, 100% 100%); border-radius: 0; }
+.inner-dot { width: 30%; height: 30%; border-radius: 50%; box-shadow: inset 0 0 5px rgba(0,0,0,0.5); }
+.hockey-ball { width: 20px; height: 20px; background: white; border-radius: 50%; position: absolute; box-shadow: 0 0 15px #fff; transform: translate(-50%, -50%); z-index: 10; transition: left 0.05s linear, top 0.05s linear; }
+.hockey-participants { width: 100%; max-width: 350px; display: flex; flex-direction: column; gap: 5px; margin-bottom: 15px; }
+.hockey-participants .part-item { display: flex; justify-content: space-between; align-items: center; background: var(--card); padding: 10px; border-radius: 10px; font-size: 14px; }
+.hockey-participants .part-item .name { display: flex; align-items: center; gap: 10px; font-weight: bold; }
+.hockey-participants .part-item .stats { color: var(--text-muted); font-size: 12px; }
 
 /* Тосты */
 .toast { position: fixed; top: -100px; left: 50%; transform: translateX(-50%); padding: 15px 25px; border-radius: 15px; display: flex; align-items: center; gap: 15px; color: white; font-weight: bold; z-index: 1000; transition: top 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275); box-shadow: 0 10px 30px rgba(0,0,0,0.5); width: 90%; max-width: 350px; }
@@ -116,7 +125,7 @@ main { padding: 0 16px; }
 .action-btn:active { transform: scale(0.98); opacity: 0.8; }
 .action-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
-/* Рулетка и модалки */
+/* Рулетка */
 .roulette-container { width: 100%; max-width: 350px; margin: 0 auto 20px auto; position: relative; background: var(--card); border: 2px solid var(--accent); border-radius: 15px; padding: 10px 0; overflow: hidden; box-shadow: 0 0 15px rgba(0, 122, 255, 0.5); }
 .roulette-pointer { text-align: center; color: var(--accent); font-size: 24px; position: absolute; top: -5px; left: 50%; transform: translateX(-50%); z-index: 10; text-shadow: 0 0 5px #000; }
 .roulette-window { height: 80px; overflow: hidden; display: flex; align-items: center; position: relative; }

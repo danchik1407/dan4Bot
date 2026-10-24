@@ -16,7 +16,6 @@ const API_URL = "https://aura-api-mptt.onrender.com";
 let balance = 0, keys = 0, currentBet = 10, inventory = [], lastChestTime = 0, isProcessing = false;
 let hockeyInterval = null;
 
-// ХОККЕЙ
 async function placeHockeyBet() {
     if (isProcessing) return;
     const bet = parseInt(document.getElementById('hockey-bet').value) || 10;
@@ -60,26 +59,62 @@ async function pollHockeyState() {
         }
 
         bankEl.innerText = `Банк: ${state.bank} 🪙`;
+
         const arena = document.getElementById('hockey-arena');
-        arena.querySelectorAll('.hockey-player').forEach(el => el.remove());
+        arena.querySelectorAll('.hockey-sector').forEach(el => el.remove());
 
         state.players.forEach(p => {
-            const div = document.createElement('div');
-            div.className = 'hockey-player';
-            div.style.left = p.x + '%'; div.style.top = p.y + '%';
-            const size = Math.min(80, Math.max(40, p.bet / 2));
-            div.style.width = size + 'px'; div.style.height = size + 'px';
-            div.style.background = p.color;
-            if (p.avatar) { div.innerHTML = `<img src="${p.avatar}">`; }
-            else { div.innerText = p.name[0]; }
-            const label = document.createElement('div');
-            label.className = 'bet-amount'; label.innerText = p.bet + ' 🪙';
-            div.appendChild(label);
-            arena.appendChild(div);
+            const sector = document.createElement('div');
+            sector.className = 'hockey-sector';
+            const width = p.percent || (p.bet / state.bank * 100);
+            sector.style.width = width + '%';
+            sector.style.background = p.color;
+
+            if (width > 8) {
+                const shapeWrap = document.createElement('div');
+                shapeWrap.className = 'player-shape-wrapper';
+
+                const shape = document.createElement('div');
+                shape.className = `player-shape shape-${p.shape || 'square'}`;
+                const size = Math.min(60, Math.max(20, p.bet));
+                shape.style.width = size + 'px';
+                shape.style.height = size + 'px';
+                shape.style.backgroundColor = p.color;
+
+                if (!p.is_bot && p.avatar) {
+                    shape.innerHTML = `<img src="${p.avatar}" style="width:100%; height:100%; object-fit:cover; border-radius: inherit;">`;
+                } else {
+                    shape.innerHTML = `<div class="inner-dot" style="background-color: rgba(255,255,255,0.7);"></div>`;
+                }
+
+                shapeWrap.appendChild(shape);
+                sector.appendChild(shapeWrap);
+            }
+
+            arena.appendChild(sector);
         });
 
         const ball = document.getElementById('hockey-ball');
-        ball.style.left = state.ball.x + '%'; ball.style.top = state.ball.y + '%';
+        ball.style.left = state.ball.x + '%';
+        ball.style.top = state.ball.y + '%';
+
+        const list = document.getElementById('hockey-participants');
+        list.innerHTML = '';
+        state.players.forEach((p, i) => {
+            const div = document.createElement('div');
+            div.className = 'part-item';
+            const width = p.percent || (p.bet / state.bank * 100);
+            div.innerHTML = `
+                <div class="name">
+                    <span>#${i+1}</span>
+                    <span>${p.name}</span>
+                </div>
+                <div class="stats">
+                    ${width.toFixed(1)}% | ${p.bet} 🪙
+                </div>
+            `;
+            list.appendChild(div);
+        });
 
         if (state.status === 'finished' && state.winner) {
             if (state.winner.id === user.id) {
@@ -95,7 +130,7 @@ async function pollHockeyState() {
 function startHockeyPolling() {
     if (hockeyInterval) clearInterval(hockeyInterval);
     pollHockeyState();
-    hockeyInterval = setInterval(pollHockeyState, 100); // Ускорено до 100мс
+    hockeyInterval = setInterval(pollHockeyState, 100);
 }
 
 function stopHockeyPolling() {
@@ -119,7 +154,6 @@ function showToastLose(text) {
     if (tg.HapticFeedback) tg.HapticFeedback.notificationOccurred('error');
 }
 
-// ОСТАЛЬНЫЕ ФУНКЦИИ (без изменений)
 async function loadUserData() {
     try {
         const response = await fetch(`${API_URL}/api/user`, {
@@ -362,7 +396,6 @@ function getBet(game) {
     return val;
 }
 
-// МИНЫ
 let minesActive = false, minesCoef = 1.0, minesSafeOpened = 0, selectedMines = 1;
 const board = document.getElementById('mines-board');
 for (let i = 0; i < 16; i++) {
