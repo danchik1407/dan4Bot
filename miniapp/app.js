@@ -15,7 +15,7 @@ const API_URL = "https://aura-api-mptt.onrender.com";
 let balance = 0, keys = 0, currentBet = 10, inventory = [], lastChestTime = 0, isProcessing = false;
 let hockeyInterval = null, hasBetThisRound = false, hasShownWinner = false;
 
-let ball = { x: 0, y: 50, vx: 0, vy: 0, active: false, animationId: null, hasStartedAnim: false };
+let ball = { x: 50, y: 50, vx: 0, vy: 0, active: false, animationId: null, hasStartedAnim: false };
 
 // ЗВУКИ
 const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
@@ -73,13 +73,17 @@ async function placeHockeyBet() {
     isProcessing = false;
 }
 
-// ИСПРАВЛЕННАЯ ФИЗИКА
-function startBallPhysics(targetX) {
+// ИСПРАВЛЕННАЯ ФИЗИКА: ХАОТИЧНЫЙ ПОЛЕТ И ОСТАНОВКА НА 10 СЕКУНДЕ
+function startBallPhysics() {
     if (ball.active || ball.hasStartedAnim) return;
 
     ball.hasStartedAnim = true;
-    ball.x = 0;
+    ball.x = 50; // Начинаем с центра
     ball.y = 50;
+
+    // Случайное направление
+    let directionX = Math.random() > 0.5 ? 1 : -1;
+    let speed = 2.0;
     ball.active = true;
 
     const arena = document.getElementById('hockey-arena');
@@ -90,37 +94,59 @@ function startBallPhysics(targetX) {
 
     let scale = 1;
     const maxScale = 2.5;
-    let speed = 2.0;
+
+    // Засекаем время анимации
+    const startTime = performance.now();
+    const duration = 6000; // 6 секунд полета (до 10-й секунды с учетом старта)
 
     const step = () => {
         if (!ball.active) return;
 
-        const dist = targetX - ball.x;
-        let friction = 0.985;
-        if (dist < 15) friction = 0.96;
-        speed *= friction;
+        const elapsed = performance.now() - startTime;
 
-        if (speed < 0.05 || Math.abs(dist) < 0.1) {
-            ball.x = targetX;
-            if (ballEl) ballEl.style.left = ball.x + '%';
+        // Движение по X с отскоками
+        ball.x += speed * directionX;
 
-            // ОСТАВЛЯЕМ ЗУМ, НЕ СБРАСЫВАЕМ
-            arena.style.transformOrigin = `${ball.x}% 50%`;
-            arena.style.transform = `scale(${maxScale})`;
-
-            ball.active = false;
-            return;
+        if (ball.x >= 100) {
+            ball.x = 100;
+            directionX = -1;
+            speed *= 0.9; // Потеря скорости
+            playSound('click');
+        } else if (ball.x <= 0) {
+            ball.x = 0;
+            directionX = 1;
+            speed *= 0.9;
+            playSound('click');
         }
 
-        ball.x += speed;
-        if (ballEl) ballEl.style.left = ball.x + '%';
+        // Плавное замедление к концу
+        if (elapsed > duration * 0.6) {
+            speed *= 0.95;
+        }
 
-        if (speed < 1.0) {
+        if (ballEl) {
+            ballEl.style.left = ball.x + '%';
+            ballEl.style.top = '50%';
+        }
+
+        // Зум в конце
+        if (elapsed > duration * 0.7) {
             scale += (maxScale - scale) * 0.05;
             arena.style.transform = `scale(${scale})`;
             arena.style.transformOrigin = `${ball.x}% 50%`;
         }
 
+        // ОСТАНОВКА (через 6 секунд полета)
+        if (elapsed >= duration) {
+            ball.active = false;
+
+            // Сообщаем серверу точную координату остановки
+            fetch(`${API_URL}/api/finish_hockey`, {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ initData: tg.initData, x: ball.x, y: 50 })
+            });
+            return;
+        }
         ball.animationId = requestAnimationFrame(step);
     };
     ball.animationId = requestAnimationFrame(step);
@@ -148,7 +174,7 @@ async function pollHockeyState() {
             if (ball.animationId) cancelAnimationFrame(ball.animationId);
 
             const ballEl = document.getElementById('hockey-ball');
-            if (ballEl) { ballEl.style.left = '0%'; ballEl.style.top = '50%'; }
+            if (ballEl) { ballEl.style.left = '50%'; ballEl.style.top = '50%'; }
             if (arena) {
                 arena.style.transform = 'scale(1)';
                 arena.style.transformOrigin = 'center center';
@@ -159,14 +185,12 @@ async function pollHockeyState() {
         } else if (state.status === 'rolling') {
             statusEl.innerText = 'Идёт бросок...'; statusEl.style.color = '#007aff';
             document.getElementById('hockey-controls').style.display = 'none';
-            if (!ball.hasStartedAnim) startBallPhysics(state.win_x);
+            if (!ball.hasStartedAnim) startBallPhysics();
 
         } else if (state.status === 'finished') {
             statusEl.innerText = 'Раунд окончен!'; statusEl.style.color = '#ff3b30';
             ball.active = false;
             if (ball.animationId) cancelAnimationFrame(ball.animationId);
-
-            // ЗУМ НЕ СБРАСЫВАЕМ, ЧТОБЫ НЕ БЫЛО ЭФФЕКТА "ПОЛОСОК"
 
             if (state.winner) {
                 const sectors = arena.querySelectorAll('.hockey-sector');
@@ -279,7 +303,7 @@ function stopHockeyPolling() {
 
 function closeWinnerModal() { document.getElementById('winner-modal').classList.remove('active'); }
 
-// ИСТОРИЯ (ТЕПЕРЬ РАБОТАЕТ)
+// ИСТОРИЯ
 async function openHistory() {
     const modal = document.getElementById('history-modal');
     const list = document.getElementById('history-list');
@@ -299,9 +323,7 @@ async function openHistory() {
         history.forEach(item => {
             const div = document.createElement('div');
             div.style.cssText = "background: #252525; padding: 15px; border-radius: 10px; margin-bottom: 10px; border: 1px solid #333;";
-
             let playersText = item.players.map(p => `${p.name} (${p.bet} 🪙) ${p.is_winner ? '🏆' : ''}`).join('\n');
-
             div.innerHTML = `
                 <div style="display:flex; justify-content:space-between; width:100%; align-items:center; margin-bottom: 10px;">
                     <span style="font-weight:bold; color: #ffcc00;">🏆 ${item.winner_name}</span>

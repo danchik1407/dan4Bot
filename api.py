@@ -24,7 +24,6 @@ game_state = {
     "bank": 0,
     "players": [],
     "winner": None,
-    "win_x": 50,
     "last_update": time.time(),
     "last_bot_added": 0,
     "target_bots": 0,
@@ -64,6 +63,9 @@ class BuyItem(BaseModel): initData: str; item_id: str; price: int
 class PlaceBet(BaseModel): initData: str; amount: int
 
 
+class FinishHockey(BaseModel): initData: str; x: float; y: float
+
+
 # ==================== ХОККЕЙ ====================
 @app.get("/api/hockey_state")
 async def get_hockey_state():
@@ -73,7 +75,6 @@ async def get_hockey_state():
     if game_state["status"] == "waiting":
         time_left = 15 - (now - game_state["last_update"])
 
-        # Добавляем ботов
         if time_left <= 8 and game_state["target_bots"] == 0:
             game_state["target_bots"] = random.randint(1, 5)
 
@@ -94,7 +95,6 @@ async def get_hockey_state():
                 game_state["bank"] += bot_bet
                 game_state["last_bot_added"] = now
 
-        # Старт раунда
         if time_left <= 0:
             game_state["status"] = "rolling"
             game_state["last_update"] = now
@@ -106,27 +106,13 @@ async def get_hockey_state():
                 for p in game_state["players"]:
                     p["percent"] = 0
 
-            # СРАЗУ ОПРЕДЕЛЯЕМ ПОБЕДИТЕЛЯ
-            if game_state["players"]:
-                winner = random.choice(game_state["players"])
-                game_state["winner"] = winner
-                current_x = 0
-                for p in game_state["players"]:
-                    if p["id"] == winner["id"]:
-                        game_state["win_x"] = current_x + (p["percent"] / 2)
-                        break
-                    current_x += p["percent"]
-            else:
-                game_state["win_x"] = 50
-
     elif game_state["status"] == "rolling":
-        # Анимация длится 6.5 секунд
-        if now - game_state["last_update"] > 6.5:
+        # Ждем 10 секунд, пока шарик не остановится и не пришлет координаты
+        if now - game_state["last_update"] > 10:
             game_state["status"] = "finished"
             game_state["last_update"] = now
 
             if game_state["winner"]:
-                # Сохраняем в историю
                 history.insert(0, {
                     "round_id": game_state["round_id"],
                     "winner_name": game_state["winner"]["name"],
@@ -137,7 +123,6 @@ async def get_hockey_state():
                 if len(history) > 10: history.pop()
 
     elif game_state["status"] == "finished":
-        # Ждем 4 секунды на показ модалки
         if now - game_state["last_update"] > 4:
             if game_state["winner"] and not game_state["is_paid"]:
                 game_state["is_paid"] = True
@@ -152,10 +137,9 @@ async def get_hockey_state():
                 except Exception as e:
                     print(f"❌ Ошибка выплаты: {e}")
 
-            # Новый раунд
             game_state = {
                 "status": "waiting", "timer": 15, "bank": 0, "players": [],
-                "winner": None, "win_x": 50, "last_update": now,
+                "winner": None, "last_update": now,
                 "last_bot_added": 0, "target_bots": 0, "is_paid": False,
                 "round_id": str(int(time.time()))
             }
@@ -164,6 +148,31 @@ async def get_hockey_state():
     time_left = 15 - (now - game_state["last_update"]) if game_state["status"] == "waiting" else 0
     game_state["timer"] = max(0, int(time_left))
     return game_state
+
+
+@app.post("/api/finish_hockey")
+async def finish_hockey(data: FinishHockey):
+    global game_state
+    if game_state["status"] != "rolling":
+        return {"success": False}
+
+    # Определяем победителя по координате X
+    total_p = 0
+    winner = None
+    for p in game_state["players"]:
+        zone_width = p["percent"]
+        if total_p <= data.x <= total_p + zone_width:
+            winner = p
+            break
+        total_p += zone_width
+
+    if not winner and game_state["players"]:
+        winner = min(game_state["players"], key=lambda p: abs(total_p - data.x))
+
+    game_state["winner"] = winner
+    game_state["status"] = "finished"
+    game_state["last_update"] = time.time()
+    return {"success": True, "winner": winner, "bank": game_state["bank"]}
 
 
 @app.post("/api/place_bet")
