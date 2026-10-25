@@ -15,7 +15,7 @@ const API_URL = "https://aura-api-mptt.onrender.com"; // Убедись, что 
 let balance = 0, keys = 0, currentBet = 10, inventory = [], lastChestTime = 0, isProcessing = false;
 let hockeyInterval = null, hasBetThisRound = false, hasShownWinner = false;
 
-let ball = { x: 50, y: 50, vx: 0, vy: 0, active: false, animationId: null };
+let ball = { x: 0, y: 50, vx: 0, vy: 0, active: false, animationId: null };
 
 // ЗВУКИ
 const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
@@ -73,14 +73,14 @@ async function placeHockeyBet() {
     isProcessing = false;
 }
 
-// ИСПРАВЛЕННАЯ ФИЗИКА ШАЙБЫ
+// ИСПРАВЛЕННАЯ ФИЗИКА ШАЙБЫ (Летит строго вправо)
 function startBallPhysics() {
     if (ball.active) return;
 
-    ball.x = 50; ball.y = 50;
-    const angle = Math.random() * Math.PI * 2;
-    ball.vx = Math.cos(angle) * 1.2;
-    ball.vy = Math.sin(angle) * 1.2;
+    ball.x = 0;
+    ball.y = 50;
+    ball.vx = 1.5; // Только по оси X
+    ball.vy = 0;
     ball.active = true;
 
     const arena = document.getElementById('hockey-arena');
@@ -96,39 +96,30 @@ function startBallPhysics() {
         if (!ball.active) return;
 
         ball.vx *= 0.985;
-        ball.vy *= 0.985;
 
         ball.x += ball.vx;
-        ball.y += ball.vy;
 
-        if (ball.x <= 0 || ball.x >= 100) {
-            ball.vx *= -1;
-            ball.x = Math.max(0, Math.min(100, ball.x));
-            playSound('click');
-        }
-        if (ball.y <= 0 || ball.y >= 100) {
-            ball.vy *= -1;
-            ball.y = Math.max(0, Math.min(100, ball.y));
-            playSound('click');
+        if (ball.x >= 100) {
+            ball.vx *= -0.5;
+            ball.x = 100;
         }
 
         if (ballEl) {
             ballEl.style.left = ball.x + '%';
-            ballEl.style.top = ball.y + '%';
         }
 
-        const speed = Math.sqrt(ball.vx**2 + ball.vy**2);
+        const speed = Math.abs(ball.vx);
         if (speed < 0.5) {
             scale += (maxScale - scale) * 0.05;
             arena.style.transform = `scale(${scale})`;
-            arena.style.transformOrigin = `${ball.x}% ${ball.y}%`;
+            arena.style.transformOrigin = `${ball.x}% 50%`;
         }
 
-        if (Math.abs(ball.vx) < 0.05 && Math.abs(ball.vy) < 0.05) {
+        if (speed < 0.05) {
             ball.active = false;
             fetch(`${API_URL}/api/finish_hockey`, {
                 method: 'POST', headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ initData: tg.initData, x: ball.x, y: ball.y })
+                body: JSON.stringify({ initData: tg.initData, x: ball.x, y: 50 })
             });
             return;
         }
@@ -159,7 +150,7 @@ async function pollHockeyState() {
             if (ball.animationId) cancelAnimationFrame(ball.animationId);
 
             const ballEl = document.getElementById('hockey-ball');
-            if (ballEl) { ballEl.style.left = '50%'; ballEl.style.top = '50%'; }
+            if (ballEl) { ballEl.style.left = '0%'; ballEl.style.top = '50%'; }
             if (arena) {
                 arena.style.transform = 'scale(1)';
                 arena.style.transformOrigin = 'center center';
@@ -198,29 +189,52 @@ async function pollHockeyState() {
 
         bankEl.innerText = `Банк: ${state.bank} 🪙`;
 
+        // Рендер фигур без пустот
         arena.querySelectorAll('.hockey-sector').forEach(el => el.remove());
-        state.players.forEach(p => {
+
+        let totalWidth = 0;
+        state.players.forEach((p, index) => {
             const sector = document.createElement('div');
             sector.className = 'hockey-sector';
-            const width = p.percent || (p.bet / state.bank * 100);
-            sector.style.width = width + '%'; sector.style.background = p.color;
 
-            if (width > 6) {
+            let width = p.percent;
+            if (index === state.players.length - 1) {
+                width = 100 - totalWidth;
+            } else {
+                width = parseFloat(p.percent.toFixed(2));
+                totalWidth += width;
+            }
+
+            sector.style.width = width + '%';
+            sector.style.background = p.color;
+            sector.style.borderRight = '1px solid rgba(0,0,0,0.5)';
+
+            let shapeClass = 'shape-square';
+            if (index % 4 === 0) shapeClass = 'shape-circle';
+            if (index % 4 === 1) shapeClass = 'shape-square';
+            if (index % 4 === 2) shapeClass = 'shape-trapezoid';
+            if (index % 4 === 3) shapeClass = 'shape-triangle';
+
+            if (width > 5) {
                 const shapeWrap = document.createElement('div');
                 shapeWrap.className = 'player-shape-wrapper';
                 const shape = document.createElement('div');
-                shape.className = `player-shape shape-circle`;
-                const size = Math.min(60, Math.max(25, p.bet));
-                shape.style.width = size + 'px'; shape.style.height = size + 'px';
+                shape.className = `player-shape ${shapeClass}`;
+
+                const size = Math.max(30, Math.min(60, width * 4));
+                shape.style.width = size + 'px';
+                shape.style.height = size + 'px';
+
                 if (!p.is_bot && p.avatar) {
-                    shape.innerHTML = `<img src="${p.avatar}" style="width:100%; height:100%; object-fit:cover; border-radius: 50%;">`;
+                    shape.innerHTML = `<img src="${p.avatar}" style="width:100%; height:100%; object-fit:cover;">`;
                     shape.style.background = 'transparent'; shape.style.border = '2px solid #fff';
                 } else {
                     const letter = p.name ? p.name[0].toUpperCase() : '?';
                     shape.innerHTML = `<span style="color:white; font-weight:900; font-size:${size/2}px; text-shadow: 0 2px 4px rgba(0,0,0,0.5);">${letter}</span>`;
                     shape.style.backgroundColor = '#2a2a2a'; shape.style.border = '2px solid rgba(255,255,255,0.5)';
                 }
-                shapeWrap.appendChild(shape); sector.appendChild(shapeWrap);
+                shapeWrap.appendChild(shape);
+                sector.appendChild(shapeWrap);
             }
             arena.appendChild(sector);
         });

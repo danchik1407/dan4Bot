@@ -20,7 +20,7 @@ BOT_COLORS = ["#ff3b30", "#ff9500", "#ffcc00", "#34c759", "#007aff", "#5856d6", 
 
 game_state = {
     "status": "waiting",
-    "timer": 20,
+    "timer": 15,
     "bank": 0,
     "players": [],
     "winner": None,
@@ -70,14 +70,15 @@ async def get_hockey_state():
     now = time.time()
 
     if game_state["status"] == "waiting":
-        time_left = 20 - (now - game_state["last_update"])
+        time_left = 15 - (now - game_state["last_update"])
 
+        # Генерация ботов
         if time_left <= 8 and game_state["target_bots"] == 0:
             game_state["target_bots"] = random.randint(1, 5)
 
         if time_left <= 8 and game_state["target_bots"] > 0:
             current_bots = sum(1 for p in game_state["players"] if p["is_bot"])
-            if current_bots < game_state["target_bots"] and (now - game_state["last_bot_added"]) > 1.2:
+            if current_bots < game_state["target_bots"] and (now - game_state["last_bot_added"]) > 0.8:
                 bot_bet = random.randint(10, 100)
                 bot_name = random.choice(BOT_NAMES) + str(random.randint(1, 99))
                 bot_color = random.choice(BOT_COLORS)
@@ -97,19 +98,18 @@ async def get_hockey_state():
             total_bank = game_state["bank"]
             if total_bank > 0:
                 for p in game_state["players"]:
-                    p["percent"] = round((p["bet"] / total_bank) * 100, 1)
+                    p["percent"] = (p["bet"] / total_bank) * 100
             else:
                 for p in game_state["players"]:
                     p["percent"] = 0
 
     elif game_state["status"] == "rolling":
-        # Даем 10 секунд на полную анимацию и остановку шайбы
         if now - game_state["last_update"] > 10:
             game_state["status"] = "finished"
             game_state["last_update"] = now
 
     elif game_state["status"] == "finished":
-        # Даем 5 секунд на просмотр модалки победителя
+        # Ждем 5 секунд после показа победителя
         if now - game_state["last_update"] > 5:
             if game_state["winner"] and not game_state["is_paid"]:
                 game_state["is_paid"] = True
@@ -124,14 +124,15 @@ async def get_hockey_state():
                 except Exception as e:
                     print(f"❌ Ошибка выплаты: {e}")
 
+            # Новый раунд
             game_state = {
-                "status": "waiting", "timer": 20, "bank": 0, "players": [],
+                "status": "waiting", "timer": 15, "bank": 0, "players": [],
                 "winner": None, "last_update": now,
                 "last_bot_added": 0, "target_bots": 0, "is_paid": False
             }
             return game_state
 
-    time_left = 20 - (now - game_state["last_update"]) if game_state["status"] == "waiting" else 0
+    time_left = 15 - (now - game_state["last_update"]) if game_state["status"] == "waiting" else 0
     game_state["timer"] = max(0, int(time_left))
     return game_state
 
@@ -152,7 +153,7 @@ async def finish_hockey(data: FinishHockey):
         total_p += zone_width
 
     if not winner and game_state["players"]:
-        winner = random.choice(game_state["players"])
+        winner = min(game_state["players"], key=lambda p: abs(total_p - data.x))
 
     game_state["winner"] = winner
     game_state["status"] = "finished"
