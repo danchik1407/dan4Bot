@@ -14,8 +14,8 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, 
 supabase: Client = create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_KEY"))
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
-# ВПИШИ СВОЙ ID
-ADMIN_ID = 123456789
+# !!! ТВОИ ID АДМИНОВ !!!
+ADMIN_IDS = [6338018270, 5184813347, 8890834384]
 
 BOT_NAMES = ["Shark_V", "LuckyFox", "NeonWolf", "GhostByte", "PixelKing", "CyberCat", "IronFist", "VoidWalker",
              "ShadowAce", "RogueOne"]
@@ -331,8 +331,9 @@ async def update_keys(data: UpdateKeys):
 
 @app.get("/api/global_top")
 async def get_global_top():
+    # Исключаем всех админов из топа
     res = supabase.table("users").select("user_id, username, coins").order("coins", desc=True).limit(50).execute()
-    filtered = [u for u in res.data if int(u["user_id"]) != ADMIN_ID]
+    filtered = [u for u in res.data if int(u["user_id"]) not in ADMIN_IDS]
     return filtered[:50]
 
 

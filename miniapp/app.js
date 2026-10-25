@@ -120,11 +120,10 @@ function startBallPhysics() {
             ballEl.style.top = ball.y + '%';
         }
 
-        // ЗУМ
+        // ЗУМ: плавно приближаем к шарику
         if (elapsed > zoomStartTime) {
             scale += (maxScale - scale) * 0.02;
             arena.style.transform = `scale(${scale})`;
-            // ВАЖНО: зум следует за шариком
             arena.style.transformOrigin = `${ball.x}% ${ball.y}%`;
         }
 
