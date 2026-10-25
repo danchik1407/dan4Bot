@@ -118,7 +118,6 @@ main { padding: 0 16px; }
     will-change: left, top;
 }
 
-/* Разные формы */
 .player-shape.shape-circle { border-radius: 50%; }
 .player-shape.shape-square { border-radius: 8px; }
 .player-shape.shape-trapezoid { clip-path: polygon(20% 0%, 80% 0%, 100% 100%, 0% 100%); border-radius: 0; }
@@ -212,7 +211,10 @@ main { padding: 0 16px; }
     width: 100%;
     max-width: 350px;
     height: 350px;
-    background: #0a0a0a;
+    background:
+        radial-gradient(ellipse at 20% 100%, rgba(0, 122, 255, 0.15), transparent 60%),
+        radial-gradient(ellipse at 80% 0%,   rgba(175, 82, 222, 0.10), transparent 60%),
+        #0a0a0a;
     border-radius: 20px;
     position: relative;
     overflow: hidden;
@@ -224,38 +226,92 @@ main { padding: 0 16px; }
 .crash-field::before {
     content: '';
     position: absolute;
-    top: 0; left: 0; width: 100%; height: 100%;
-    background-image: radial-gradient(white, rgba(255,255,255,.1) 2px, transparent 3px);
-    background-size: 30px 30px;
-    opacity: 0.5;
+    inset: 0;
+    background-image:
+        radial-gradient(1.5px 1.5px at 20% 30%, #fff, transparent),
+        radial-gradient(1.5px 1.5px at 80% 20%, #fff, transparent),
+        radial-gradient(1px   1px   at 50% 50%, #fff, transparent),
+        radial-gradient(1px   1px   at 30% 70%, #fff, transparent),
+        radial-gradient(1.5px 1.5px at 70% 80%, #fff, transparent),
+        radial-gradient(1px   1px   at 10% 90%, #fff, transparent),
+        radial-gradient(1px   1px   at 90% 60%, #fff, transparent);
+    background-size: 100% 100%;
+    opacity: 0.75;
+    animation: starTwinkle 3s ease-in-out infinite alternate;
+    z-index: 1;
+    pointer-events: none;
+}
+
+@keyframes starTwinkle {
+    0%   { opacity: 0.5; }
+    100% { opacity: 1;   }
 }
 
 .crash-rocket {
     position: absolute;
-    width: 60px;
-    height: 60px;
+    width: 64px;
+    height: 64px;
     display: flex;
     justify-content: center;
     align-items: center;
-    transition: transform 0.1s linear;
+    transition: transform 0.12s linear, left 0.12s linear, bottom 0.12s linear;
     z-index: 10;
-    filter: drop-shadow(0 0 10px #ff3b30);
-    font-size: 50px;
+    filter: drop-shadow(0 0 12px rgba(255, 90, 90, 0.8)) drop-shadow(0 0 24px rgba(255, 180, 80, 0.5));
+    will-change: transform, left, bottom;
+}
+
+.rocket-svg {
+    width: 100%;
+    height: 100%;
+    display: block;
+    animation: rocketFloat 1.2s ease-in-out infinite alternate;
+    transform-origin: 50% 40%;
+}
+
+@keyframes rocketFloat {
+    0%   { transform: translateY(-1px) rotate(-1deg); }
+    100% { transform: translateY(1px) rotate(1deg); }
 }
 
 .crash-flame {
     position: absolute;
-    bottom: -20px;
+    top: 100%;
     left: 50%;
-    transform: translateX(-50%);
-    width: 30px;
-    height: 30px;
-    background: radial-gradient(circle, #ffcc00, #ff3b30, transparent);
-    border-radius: 50%;
-    animation: flicker 0.1s infinite alternate;
-    opacity: 0.8;
+    transform: translate(-50%, -6px);
+    width: 26px;
+    height: 46px;
+    background:
+        radial-gradient(ellipse at 50% 0%, #fff 0%, #ffe066 25%, #ff8c1a 55%, #ff3b30 80%, transparent 100%);
+    border-radius: 50% 50% 40% 40% / 60% 60% 40% 40%;
+    filter: blur(1px) drop-shadow(0 0 10px #ff6b00);
+    animation: flameFlicker 0.08s infinite alternate;
+    opacity: 0.95;
+    z-index: -1;
 }
-@keyframes flicker { from { transform: translateX(-50%) scale(1); opacity: 0.8; } to { transform: translateX(-50%) scale(1.3); opacity: 1; } }
+
+@keyframes flameFlicker {
+    0%   { transform: translate(-50%, -6px) scale(0.9, 1);    opacity: 0.85; }
+    100% { transform: translate(-50%, -2px) scale(1.15, 1.3); opacity: 1; }
+}
+
+.crash-trail {
+    position: absolute;
+    top: 100%;
+    left: 50%;
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: rgba(255,255,255,0.35);
+    transform: translate(-50%, 0);
+    filter: blur(4px);
+    animation: trailPuff 0.5s ease-out infinite;
+    z-index: -2;
+}
+
+@keyframes trailPuff {
+    0%   { opacity: 0.6; transform: translate(-50%, 0) scale(0.6); }
+    100% { opacity: 0;   transform: translate(-50%, 30px) scale(2.2); }
+}
 
 .crash-explosion {
     position: absolute;

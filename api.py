@@ -423,7 +423,8 @@ async def crash_cashout(data: CrashCashout):
     if crash_state["status"] != "flying": raise HTTPException(status_code=400, detail="Игра не идет")
 
     player = next((p for p in crash_state["players"] if p["id"] == user_id), None)
-    if not player or player["cashout_mult"] > 0: raise HTTPException(status_code=400, detail="Вы уже забрали")
+    if not player: raise HTTPException(status_code=400, detail="Вы не участвуете в раунде")
+    if player["cashout_mult"] > 0: raise HTTPException(status_code=400, detail="Вы уже забрали")
 
     player["cashout_mult"] = crash_state["multiplier"]
     win_amount = int(player["bet"] * player["cashout_mult"])
@@ -438,7 +439,13 @@ async def crash_cashout(data: CrashCashout):
         print(f"❌ Ошибка начисления cashout: {e}")
         new_coins = 0
 
-    return {"success": True, "win_amount": win_amount, "mult": player["cashout_mult"], "new_balance": new_coins}
+    return {
+        "success": True,
+        "win_amount": win_amount,
+        "mult": player["cashout_mult"],
+        "new_balance": new_coins,
+        "status": crash_state["status"],
+    }
 
 
 @app.get("/api/crash_history")

@@ -402,6 +402,8 @@ function clearGameModals() {
 }
 function closeGame() {
     stopHockeyPolling(); stopCrashPolling(); clearGameModals();
+    crashBetActive = false;
+    currentCrashMult = 1.0;
     document.querySelectorAll('.game-screen').forEach(s => s.classList.remove('active'));
     document.getElementById('main-header').style.display = 'flex';
     document.getElementById('main-nav').style.display = 'flex';
@@ -409,6 +411,7 @@ function closeGame() {
 }
 function openGame(game) {
     clearGameModals();
+    if (game === 'crash') { crashBetActive = false; }
     document.getElementById('main-header').style.display = 'none';
     document.getElementById('main-nav').style.display = 'none';
     document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
@@ -507,8 +510,14 @@ async function crashAction() {
                 method: 'POST', headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ initData: tg.initData })
             });
-            if (!res.ok) { const e = await res.json().catch(()=>({})); isProcessing = false; return tg.showAlert(e.detail || "Ошибка"); }
-            const data = await res.json();
+            const data = await res.json().catch(()=>({}));
+            if (!res.ok) {
+                crashBetActive = false;
+                document.getElementById('crash-btn').innerText = 'Поставить ставку';
+                document.getElementById('crash-btn').style.background = '#007aff';
+                isProcessing = false;
+                return tg.showAlert(data.detail || "Не успели забрать 😢");
+            }
             balance = data.new_balance; updateUI();
             crashBetActive = false;
             showWin(`+${data.win_amount} 🪙`);
@@ -534,6 +543,9 @@ async function pollCrashState() {
         const betContainer = document.getElementById('crash-bet-container');
         const historyEl = document.getElementById('crash-history-bar');
 
+        const myId = user ? String(user.id) : '';
+        const me = (state.players || []).find(p => String(p.id) === myId);
+
         if (state.status === 'waiting') {
             statusEl.innerText = `Ставки: ${state.timer} сек`;
             statusEl.style.color = '#ffcc00';
@@ -556,7 +568,7 @@ async function pollCrashState() {
                 (state.history || []).forEach(h => {
                     const div = document.createElement('div');
                     div.className = 'crash-hist-item';
-                    const cp = typeof h.crash_point === 'number' ? h.crash_point : (h.crash_point || 0);
+                    const cp = typeof h.crash_point === 'number' ? h.crash_point : 0;
                     div.innerText = `x${Number(cp).toFixed(2)}`;
                     historyEl.appendChild(div);
                 });
@@ -568,19 +580,27 @@ async function pollCrashState() {
             multEl.innerText = `x${state.multiplier.toFixed(2)}`;
             betContainer.style.display = 'none';
 
+            if (crashBetActive && (!me || me.cashout_mult > 0)) {
+                crashBetActive = false;
+                btn.innerText = 'Поставить ставку';
+                btn.style.background = '#007aff';
+                btn.disabled = true;
+            }
+
             if (crashBetActive) {
+                btn.disabled = false;
                 btn.innerText = `Забрать (x${state.multiplier.toFixed(2)})`;
                 btn.style.background = '#34c759';
             }
 
             const field = document.getElementById('crash-field');
             const w = field.offsetWidth, h = field.offsetHeight;
-            const t = Math.min((state.multiplier - 1) / 8, 1);
-            const x = 50 + t * (w - 120);
-            const y = 50 + t * (h - 120);
+            const t = Math.min((state.multiplier - 1) / 10, 1);
+            const x = 40 + t * (w - 130);
+            const y = 40 + Math.pow(t, 1.3) * (h - 130);
             rocketEl.style.left = x + 'px';
             rocketEl.style.bottom = y + 'px';
-            rocketEl.style.transform = `rotate(${-45 + t*45}deg)`;
+            rocketEl.style.transform = `rotate(${-10 - t * 35}deg)`;
         } else if (state.status === 'crashed') {
             statusEl.innerText = 'КРАШ!'; statusEl.style.color = '#ff3b30';
             multEl.innerText = `x${(state.crash_point || 0).toFixed(2)}`;
@@ -597,7 +617,7 @@ async function pollCrashState() {
             exp.style.left = rocketEl.style.left;
             exp.style.bottom = rocketEl.style.bottom;
             playSound('boom');
-            setTimeout(() => { exp.style.display = 'none'; }, 500);
+            setTimeout(() => { exp.style.display = 'none'; }, 600);
             setTimeout(async () => { await loadUserData(); }, 1000);
         }
 
@@ -607,8 +627,11 @@ async function pollCrashState() {
             (state.players || []).forEach(p => {
                 const d = document.createElement('div');
                 d.className = 'crash-part-item';
-                const cashout = p.cashout_mult > 0 ? ` → x${Number(p.cashout_mult).toFixed(2)}` : '';
-                d.innerHTML = `<span>${p.name}</span><span>${p.bet} 🪙${cashout}</span>`;
+                const isMe = String(p.id) === myId;
+                const cashout = p.cashout_mult > 0
+                    ? ` → <b style="color:#34c759">x${Number(p.cashout_mult).toFixed(2)}</b>`
+                    : '';
+                d.innerHTML = `<span style="${isMe ? 'color:#007aff;font-weight:800' : ''}">${p.name}${isMe ? ' (вы)' : ''}</span><span>${p.bet} 🪙${cashout}</span>`;
                 pl.appendChild(d);
             });
         }
@@ -618,6 +641,5 @@ async function pollCrashState() {
 // ================= СТАРТ =================
 window.addEventListener('load', async () => {
     await loadUserData();
-    // снимаем возможные "залипшие" модалки на старте
     clearGameModals();
 });

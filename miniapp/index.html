@@ -151,8 +151,39 @@
                 <div id="crash-status" class="crash-status">Ожидание...</div>
                 <div id="crash-multiplier" class="crash-multiplier">x1.00</div>
                 <div id="crash-rocket" class="crash-rocket" style="left: 50px; bottom: 50px;">
-                    🚀
+                    <svg class="rocket-svg" viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg">
+                        <defs>
+                            <linearGradient id="bodyGrad" x1="0" y1="0" x2="0" y2="1">
+                                <stop offset="0%" stop-color="#ffffff"/>
+                                <stop offset="55%" stop-color="#d9e2ec"/>
+                                <stop offset="100%" stop-color="#9aa5b1"/>
+                            </linearGradient>
+                            <linearGradient id="noseGrad" x1="0" y1="0" x2="0" y2="1">
+                                <stop offset="0%" stop-color="#ff6b6b"/>
+                                <stop offset="100%" stop-color="#c0392b"/>
+                            </linearGradient>
+                            <linearGradient id="finGrad" x1="0" y1="0" x2="0" y2="1">
+                                <stop offset="0%" stop-color="#ff8a5c"/>
+                                <stop offset="100%" stop-color="#c0392b"/>
+                            </linearGradient>
+                            <radialGradient id="windowGrad" cx="50%" cy="50%" r="50%">
+                                <stop offset="0%" stop-color="#8fd6ff"/>
+                                <stop offset="60%" stop-color="#3aa0ff"/>
+                                <stop offset="100%" stop-color="#1e5fa8"/>
+                            </radialGradient>
+                        </defs>
+                        <path d="M20 40 L10 54 L22 50 Z" fill="url(#finGrad)" stroke="#7a1f12" stroke-width="1"/>
+                        <path d="M44 40 L54 54 L42 50 Z" fill="url(#finGrad)" stroke="#7a1f12" stroke-width="1"/>
+                        <path d="M32 4 C22 12 20 26 20 40 L44 40 C44 26 42 12 32 4 Z"
+                              fill="url(#bodyGrad)" stroke="#4a5568" stroke-width="1.2"/>
+                        <path d="M32 4 C27 8 25 12 24 16 L40 16 C39 12 37 8 32 4 Z"
+                              fill="url(#noseGrad)"/>
+                        <circle cx="32" cy="24" r="5" fill="url(#windowGrad)" stroke="#0b3a66" stroke-width="1.2"/>
+                        <circle cx="30" cy="22" r="1.6" fill="#ffffff" opacity="0.7"/>
+                        <rect x="22" y="34" width="20" height="2" fill="#c0392b" opacity="0.8"/>
+                    </svg>
                     <div id="crash-flame" class="crash-flame"></div>
+                    <div class="crash-trail"></div>
                 </div>
                 <div id="crash-explosion" class="crash-explosion"></div>
             </div>
