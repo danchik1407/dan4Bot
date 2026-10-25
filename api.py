@@ -164,7 +164,8 @@ async def get_hockey_state():
                 if len(history) > 10: history.pop()
 
     elif game_state["status"] == "finished":
-        if now - game_state["last_update"] > 5:
+        # Увеличили паузу до 8 секунд, чтобы клиент успел показать модалку и обновить баланс
+        if now - game_state["last_update"] > 8:
             if game_state["winner"] and not game_state["is_paid"]:
                 game_state["is_paid"] = True
                 winner_id = game_state["winner"]["id"]
@@ -252,50 +253,33 @@ async def get_hockey_history(): return history
 
 # ==================== РАКЕТА (CRASH) ====================
 def get_crash_point_by_chance():
-    """Генерирует crash_point с заданными шансами"""
     rv = random.random()
-
-    # 1% шанс на сотку
     if rv < 0.01:
         return 100.0
-
-    # 15% шанс на x4.0+ (но не сотка)
     elif rv < 0.16:
         return random.uniform(4.0, 99.9)
-
-    # 30% шанс на x2.0+ (но не x4.0)
     elif rv < 0.46:
         return random.uniform(2.0, 4.0)
-
-    # Остальные 54% - краш до x2.0
     else:
         return random.uniform(1.0, 2.0)
 
 
 def get_multiplier_by_time(elapsed):
-    """Сложная функция для плавного роста: 7с до x2, потом 5с до x3 и т.д."""
     if elapsed <= 7.0:
-        # Плавный рост от 1 до 2 за 7 секунд
-        # Используем ease-in-out для красоты
         t = elapsed / 7.0
-        # Плавная кривая (x = 1 + t^2)
         return 1.0 + (t ** 2)
     elif elapsed <= 12.0:
-        # От 2 до 3 за 5 секунд
         t = (elapsed - 7.0) / 5.0
         return 2.0 + t
     elif elapsed <= 16.0:
-        # От 3 до 4 за 4 секунды
         t = (elapsed - 12.0) / 4.0
         return 3.0 + t
     elif elapsed <= 19.0:
-        # От 4 до 5 за 3 секунды
         t = (elapsed - 16.0) / 3.0
         return 4.0 + t
     else:
-        # После 5 растет быстро (для сотки)
         t = elapsed - 19.0
-        return 5.0 + (t * 2)  # ускорение
+        return 5.0 + (t * 2)
 
 
 @app.get("/api/crash_state")
@@ -335,17 +319,13 @@ async def get_crash_state(initData: str = ""):
             crash_state["status_start"] = now
             crash_state["last_update"] = now
             crash_state["multiplier"] = 1.0
-
-            # Генерируем точку краша с заданными шансами
             crash_state["crash_point"] = get_crash_point_by_chance()
 
     elif crash_state["status"] == "flying":
         elapsed = now - crash_state["status_start"]
-
-        # Вычисляем множитель по нашей функции
         current_mult = get_multiplier_by_time(elapsed)
 
-        # Ограничиваем множителем краша
+        # Обновляем множитель, но НЕ дальше точки краша (но мы её скроем в ответе)
         if current_mult >= crash_state["crash_point"]:
             crash_state["multiplier"] = crash_state["crash_point"]
             crash_state["status"] = "crashed"
@@ -396,10 +376,16 @@ def _crash_response(initData: str):
         my_status, my_bet, my_cashout, my_win = "none", 0, 0, 0
 
     players_sorted = sorted(crash_state["players"], key=lambda p: p["bet"], reverse=True)
+
+    # СКРЫВАЕМ ТОЧКУ КРАША, пока летит
+    crash_point_to_send = 0
+    if crash_state["status"] == "crashed":
+        crash_point_to_send = round(crash_state["crash_point"], 2)
+
     return {
         "status": crash_state["status"], "timer": crash_state["timer"],
         "multiplier": crash_state["multiplier"],
-        "crash_point": round(crash_state["crash_point"], 2) if crash_state["status"] in ("flying", "crashed") else 0,
+        "crash_point": crash_point_to_send,  # <--- Скрываем
         "bank": crash_state["bank"], "round_id": crash_state["round_id"],
         "players": players_sorted, "history": crash_history[:10],
         "my_status": my_status, "my_bet": my_bet, "my_cashout_mult": my_cashout, "my_win": my_win,

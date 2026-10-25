@@ -20,9 +20,13 @@ let crashInterval = null;
 let lastCrashStatus = null;
 let currentCrashData = null;
 
+// Плавная интерполяция для Ракеты
 let animFrameId = null;
-let flightStartTime = 0;
 let isAnimatingFlight = false;
+let lastSentMult = 1.0;     // Последнее полученное с сервера
+let targetSentMult = 1.0;   // К чему стремимся (тоже с сервера, для обновлений)
+let displayMult = 1.0;      // То, что рисуем
+let lastServerUpdateTime = 0; // Когда последний раз обновлялись данные
 
 let lbTimerEnd = Date.now() + (30 * 24 * 3600 * 1000);
 
@@ -142,9 +146,7 @@ function addBet(game, amount) { const input = document.getElementById(game + '-b
 function getBet(game) { const input = document.getElementById(game + '-bet'); if (!input) return 10; let val = parseInt(input.value) || 10; if (val < 1) val = 1; if (val > 100000) val = 100000; return val; }
 
 // ================= ЛИДЕРБОРД =================
-function toggleLbInfo() {
-    document.getElementById('lb-info-modal').classList.toggle('active');
-}
+function toggleLbInfo() { document.getElementById('lb-info-modal').classList.toggle('active'); }
 
 async function initLbTimer() {
     try {
@@ -178,19 +180,15 @@ async function loadGlobalTop() {
         if (!users || users.length === 0) { list.innerHTML = '<p style="text-align: center; color: #888;">Топ пока пуст</p>'; return; }
         list.innerHTML = '';
         const prizes = ["NFT", "10000 💎", "5000 💎", "1000 💎", "250 💎", "250 💎", "250 💎"];
-
         users.forEach((u, i) => {
             const div = document.createElement('div');
             div.className = `lb-item top-${i + 1}`;
             if (i >= 3) div.className = 'lb-item';
-
             let rankHtml = `<span class="lb-rank">${i + 1}</span>`;
             if (i === 0) rankHtml = `<span class="lb-rank" style="font-size: 24px;">🥇</span>`;
             if (i === 1) rankHtml = `<span class="lb-rank" style="font-size: 24px;">🥈</span>`;
             if (i === 2) rankHtml = `<span class="lb-rank" style="font-size: 24px;">🥉</span>`;
-
             const prizeHtml = i < 7 ? `<span class="lb-prize">${prizes[i]}</span>` : '';
-
             div.innerHTML = `
                 <div style="display: flex; align-items: center;">
                     ${rankHtml}
@@ -397,6 +395,7 @@ async function pollHockeyState() {
         const statusEl = document.getElementById('hockey-status');
         const bankEl = document.getElementById('hockey-bank');
         const arena = document.getElementById('hockey-arena');
+
         if (state.status === 'waiting') {
             statusEl.innerText = `Ставки: ${state.timer} сек`; statusEl.style.color = '#ffcc00';
             document.getElementById('hockey-controls').style.display = 'block';
@@ -429,7 +428,8 @@ async function pollHockeyState() {
                     document.getElementById('winner-modal-name').innerText = state.winner.name;
                     document.getElementById('winner-modal-amount').innerText = `+${state.bank} 🪙`;
                     modal.classList.add('active');
-                    setTimeout(async () => { await loadUserData(); }, 500);
+                    // Делаем задержку в 1.5 секунды, чтобы баланс успел обновиться на сервере
+                    setTimeout(async () => { await loadUserData(); }, 1500);
                     if (state.winner.id === String(user.id)) { playSound('win'); } else { playSound('lose'); }
                 }, 1000);
             }
@@ -526,7 +526,7 @@ async function crashAction() {
     isProcessing = false;
 }
 
-// Локальная плавная анимация полета (60 FPS)
+// Плавная анимация (60 FPS), которая догоняет сервер
 function animateFlight() {
     if (!currentCrashData || currentCrashData.status !== 'flying') {
         isAnimatingFlight = false;
@@ -538,52 +538,39 @@ function animateFlight() {
     const rocketEl = el('crash-rocket');
     const field = el('crash-field');
 
-    // Вычисляем время полета с момента старта
-    const elapsed = (Date.now() / 1000) - flightStartTime;
-
-    // Визуально плавная формула для множителя (на клиенте)
-    let smoothMult = 1.0;
-    if (elapsed <= 7.0) {
-        const t = elapsed / 7.0;
-        smoothMult = 1.0 + (t ** 2);
-    } else if (elapsed <= 12.0) {
-        smoothMult = 2.0 + ((elapsed - 7.0) / 5.0);
-    } else if (elapsed <= 16.0) {
-        smoothMult = 3.0 + ((elapsed - 12.0) / 4.0);
-    } else if (elapsed <= 19.0) {
-        smoothMult = 4.0 + ((elapsed - 16.0) / 3.0);
+    // Плавная интерполяция (Lerp)
+    // displayMult догоняет targetSentMult
+    // Если разница большая (новый таргет с сервера), то догоняем быстрее
+    const diff = targetSentMult - displayMult;
+    if (Math.abs(diff) > 0.01) {
+        displayMult += diff * 0.15; // Скорость догона (0.15 = плавно, но не слишком медленно)
     } else {
-        smoothMult = 5.0 + ((elapsed - 19.0) * 2);
+        displayMult = targetSentMult;
     }
-
-    // Ограничиваем сверху краш-поинтом, чтобы не улетал дальше
-    const crashPoint = currentCrashData.crash_point;
-    if (smoothMult > crashPoint) smoothMult = crashPoint;
 
     // Обновляем текст
     if (multEl) {
-        multEl.innerText = `x${smoothMult.toFixed(2)}`;
-        multEl.style.color = smoothMult > 2 ? '#ffcc00' : '#fff';
+        multEl.innerText = `x${displayMult.toFixed(2)}`;
+        multEl.style.color = displayMult > 2 ? '#ffcc00' : '#fff';
     }
 
     // Обновляем кнопку "Забрать"
     const btn = el('crash-btn');
     if (btn && currentCrashData.my_status === 'bet') {
-        btn.innerText = `Забрать (x${smoothMult.toFixed(2)})`;
-        if (smoothMult > 2) btn.classList.add('pulse'); else btn.classList.remove('pulse');
+        btn.innerText = `Забрать (x${displayMult.toFixed(2)})`;
+        if (displayMult > 2) btn.classList.add('pulse'); else btn.classList.remove('pulse');
     }
 
     // Двигаем ракету по диагонали
     if (field && rocketEl) {
         const w = field.offsetWidth, h = field.offsetHeight;
-        const t = Math.min((smoothMult - 1) / 15, 1);
+        const t = Math.min((displayMult - 1) / 15, 1);
         const x = 40 + t * (w - 100);
         const y = 40 + Math.pow(t, 1.1) * (h - 100);
         rocketEl.style.left = x + 'px';
         rocketEl.style.bottom = y + 'px';
     }
 
-    // Продолжаем анимацию
     if (isAnimatingFlight) {
         animFrameId = requestAnimationFrame(animateFlight);
     }
@@ -629,16 +616,16 @@ async function pollCrashState() {
             statusEl.innerText = 'Идёт полет...'; statusEl.style.color = '#34c759';
             betContainer.style.display = 'none';
 
-            // Синхронизируем время с сервером
-            flightStartTime = state.status_start;
+            // Берем множитель с сервера, НЕ СЧИТАЕМ ЛОКАЛЬНО
+            targetSentMult = state.multiplier;
 
-            // Запускаем локальную плавную анимацию, если её ещё нет
+            // Запускаем цикл, если его нет
             if (!isAnimatingFlight) {
+                displayMult = targetSentMult; // Сбрасываем, чтобы не было скачков
                 isAnimatingFlight = true;
                 animateFlight();
             }
 
-            // Обновляем кнопку (текст в кнопке будет плавно меняться в animateFlight)
             if (state.my_status === 'bet') {
                 btn.disabled = false; btn.style.background = '#34c759';
             } else if (state.my_status === 'cashed_out') {
@@ -663,7 +650,7 @@ async function pollCrashState() {
             if (lastCrashStatus !== 'crashed') {
                 playSound('boom');
                 setTimeout(() => { exp.style.display = 'none'; }, 600);
-                setTimeout(async () => { await loadUserData(); }, 500);
+                setTimeout(async () => { await loadUserData(); }, 1000); // Задержка
             }
         }
 
