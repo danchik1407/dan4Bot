@@ -145,6 +145,7 @@ async def get_hockey_state():
                     p["percent"] = 0
 
     elif game_state["status"] == "rolling":
+        # Ждем 15.5 секунд (15 сек анимация + запас)
         if now - game_state["last_update"] > 15.5:
             game_state["status"] = "finished"
             game_state["last_update"] = now
@@ -243,25 +244,19 @@ async def finish_hockey(data: FinishHockey):
     global game_state
     if game_state["status"] != "rolling": return {"success": False}
 
-    # === ИСПРАВЛЕНИЕ БАГА С ГРАНИЦАМИ ===
-    # Считаем точные кумулятивные границы и ищем, в какой интервал попал шарик
     total_bank = game_state["bank"]
     if total_bank == 0 or not game_state["players"]:
         return {"success": False}
 
-    # Пересчитываем проценты с высокой точностью перед финишем
     current_x = 0.0
     winner = None
     for p in game_state["players"]:
-        # Точный процент без округления
         exact_percent = (p["bet"] / total_bank) * 100.0
-        # Проверяем, попадает ли точка в этот интервал (с небольшим допуском 0.0001)
         if current_x <= data.x <= current_x + exact_percent + 0.0001:
             winner = p
             break
         current_x += exact_percent
 
-    # Если из-за погрешности точка вышла за 100%, берем последнего
     if not winner and game_state["players"]:
         winner = game_state["players"][-1]
 
