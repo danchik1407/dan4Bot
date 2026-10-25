@@ -73,7 +73,7 @@ async function placeHockeyBet() {
     isProcessing = false;
 }
 
-// ИСПРАВЛЕННАЯ ФИЗИКА (не перезапускается)
+// ИСПРАВЛЕННАЯ ФИЗИКА
 function startBallPhysics(targetX) {
     if (ball.active || ball.hasStartedAnim) return;
 
@@ -96,7 +96,6 @@ function startBallPhysics(targetX) {
         if (!ball.active) return;
 
         const dist = targetX - ball.x;
-        // Плавное торможение
         let friction = 0.985;
         if (dist < 15) friction = 0.96;
         speed *= friction;
@@ -105,6 +104,7 @@ function startBallPhysics(targetX) {
             ball.x = targetX;
             if (ballEl) ballEl.style.left = ball.x + '%';
 
+            // ОСТАВЛЯЕМ ЗУМ, НЕ СБРАСЫВАЕМ
             arena.style.transformOrigin = `${ball.x}% 50%`;
             arena.style.transform = `scale(${maxScale})`;
 
@@ -143,7 +143,7 @@ async function pollHockeyState() {
             if (hasBetThisRound) hasBetThisRound = false;
             hasShownWinner = false;
             ball.active = false;
-            ball.hasStartedAnim = false; // СБРОС ФЛАГА
+            ball.hasStartedAnim = false;
 
             if (ball.animationId) cancelAnimationFrame(ball.animationId);
 
@@ -159,13 +159,14 @@ async function pollHockeyState() {
         } else if (state.status === 'rolling') {
             statusEl.innerText = 'Идёт бросок...'; statusEl.style.color = '#007aff';
             document.getElementById('hockey-controls').style.display = 'none';
-            // Запускаем ТОЛЬКО ОДИН РАЗ
             if (!ball.hasStartedAnim) startBallPhysics(state.win_x);
 
         } else if (state.status === 'finished') {
             statusEl.innerText = 'Раунд окончен!'; statusEl.style.color = '#ff3b30';
             ball.active = false;
             if (ball.animationId) cancelAnimationFrame(ball.animationId);
+
+            // ЗУМ НЕ СБРАСЫВАЕМ, ЧТОБЫ НЕ БЫЛО ЭФФЕКТА "ПОЛОСОК"
 
             if (state.winner) {
                 const sectors = arena.querySelectorAll('.hockey-sector');
@@ -176,11 +177,6 @@ async function pollHockeyState() {
                     sectors[winnerIndex].style.boxShadow = 'inset 0 0 50px #fff, 0 0 30px #fff';
                     setTimeout(() => { sectors[winnerIndex].style.boxShadow = 'none'; }, 1000);
                 }
-            }
-
-            if (arena) {
-                arena.style.transform = 'scale(1)';
-                arena.style.transformOrigin = 'center center';
             }
 
             const modal = document.getElementById('winner-modal');
@@ -283,7 +279,7 @@ function stopHockeyPolling() {
 
 function closeWinnerModal() { document.getElementById('winner-modal').classList.remove('active'); }
 
-// ИСТОРИЯ (ИСПРАВЛЕНО)
+// ИСТОРИЯ (ТЕПЕРЬ РАБОТАЕТ)
 async function openHistory() {
     const modal = document.getElementById('history-modal');
     const list = document.getElementById('history-list');
@@ -302,10 +298,8 @@ async function openHistory() {
 
         history.forEach(item => {
             const div = document.createElement('div');
-            div.className = 'history-item';
-            div.style.cssText = "background: #252525; padding: 15px; border-radius: 10px; margin-bottom: 10px; cursor: pointer; border: 1px solid #333;";
+            div.style.cssText = "background: #252525; padding: 15px; border-radius: 10px; margin-bottom: 10px; border: 1px solid #333;";
 
-            // Собираем имена всех участников
             let playersText = item.players.map(p => `${p.name} (${p.bet} 🪙) ${p.is_winner ? '🏆' : ''}`).join('\n');
 
             div.innerHTML = `
