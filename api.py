@@ -1,7 +1,7 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-import os, hashlib, hmac, json, time, random, uvicorn
+import os, hashlib, hmac, json, time, random, uvicorn, math
 from urllib.parse import parse_qsl
 from dotenv import load_dotenv
 from supabase import create_client, Client
@@ -14,22 +14,39 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, 
 supabase: Client = create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_KEY"))
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
-# !!! ТВОИ ID АДМИНОВ !!!
+# ТВОИ ID
 ADMIN_IDS = [6338018270, 5184813347, 8890834384]
 
 BOT_NAMES = ["Shark_V", "LuckyFox", "NeonWolf", "GhostByte", "PixelKing", "CyberCat", "IronFist", "VoidWalker",
-             "ShadowAce", "RogueOne"]
+             "ShadowAce", "RogueOne", "Toxic", "Viper", "Sniper", "ProGamer", "NoobMaster", "Killer", "Dragon"]
 BOT_COLORS = ["#ff3b30", "#ff9500", "#ffcc00", "#34c759", "#007aff", "#5856d6", "#af52de", "#ff2d55"]
 
 WHALE_NAMES = ["KingPin", "MrMoney", "WhaleGod", "BigBoss", "RichMan", "GoldFinger"]
 WHALE_COLORS = ["#ffd700", "#c0c0c0", "#b8860b", "#ff8c00", "#8b0000", "#daa520"]
 
+# === ХОККЕЙ ===
 game_state = {
     "status": "waiting", "timer": 15, "bank": 0, "players": [], "winner": None,
     "last_update": time.time(), "last_bot_added": 0, "target_bots": 0, "is_paid": False,
     "round_id": str(int(time.time())), "whales_added": 0, "whale_chance": random.random() < 0.07
 }
 history = []
+
+# === РАКЕТА (CRASH) ===
+crash_state = {
+    "status": "waiting",
+    "timer": 10,
+    "multiplier": 1.0,
+    "last_update": time.time(),
+    "crash_point": 0.0,
+    "players": [],
+    "bank": 0,
+    "is_paid": False,
+    "round_id": str(int(time.time())),
+    "bots_added": 0,
+    "target_bots": 0
+}
+crash_history = []
 
 
 def verify_telegram_data(init_data: str):
@@ -62,6 +79,12 @@ class PlaceBet(BaseModel): initData: str; amount: int
 
 
 class FinishHockey(BaseModel): initData: str; x: float; y: float
+
+
+class CrashBet(BaseModel): initData: str; amount: int
+
+
+class CrashCashout(BaseModel): initData: str
 
 
 # ==================== ХОККЕЙ ====================
@@ -259,6 +282,158 @@ async def finish_hockey(data: FinishHockey):
 async def get_hockey_history(): return history
 
 
+# ==================== РАКЕТА (CRASH) ====================
+@app.get("/api/crash_state")
+async def get_crash_state():
+    global crash_state, crash_history
+    now = time.time()
+
+    if crash_state["status"] == "waiting":
+        time_left = 10 - (now - crash_state["last_update"])
+
+        if time_left <= 8 and crash_state["target_bots"] == 0:
+            crash_state["target_bots"] = random.randint(1, 3)
+
+        if time_left <= 8 and crash_state["target_bots"] > 0:
+            current_bots = sum(1 for p in crash_state["players"] if p["is_bot"])
+            if current_bots < crash_state["target_bots"] and len(crash_state["players"]) < 20 and (
+                    now - crash_state["last_bot_added"]) > 1.0:
+                bot_bet = random.randint(10, 300)
+                if random.random() < 0.8:
+                    bot_bet = random.randint(10, 100)
+
+                bot_name = random.choice(BOT_NAMES) + str(random.randint(1, 99))
+                crash_state["players"].append({
+                    "id": f"bot_{random.randint(1000, 9999)}", "name": bot_name, "bet": bot_bet,
+                    "cashout_mult": 0, "is_bot": True, "avatar": "", "auto_mult": 0
+                })
+                crash_state["bank"] += bot_bet
+                crash_state["bots_added"] += 1
+
+        if time_left <= 0:
+            crash_state["status"] = "flying"
+            crash_state["last_update"] = now
+            crash_state["multiplier"] = 1.0
+
+            rand_val = random.random()
+            if rand_val < 0.5:
+                crash_state["crash_point"] = random.uniform(1.1, 2.0)
+            elif rand_val < 0.8:
+                crash_state["crash_point"] = random.uniform(2.0, 5.0)
+            elif rand_val < 0.95:
+                crash_state["crash_point"] = random.uniform(5.0, 10.0)
+            else:
+                crash_state["crash_point"] = random.uniform(10.0, 100.0)
+
+            total_user_balance = sum(p["bet"] for p in crash_state["players"] if not p["is_bot"])
+            if total_user_balance > 5000:
+                crash_state["crash_point"] *= 0.7
+
+    elif crash_state["status"] == "flying":
+        elapsed = now - crash_state["last_update"]
+        growth_speed = 0.1 + (crash_state["multiplier"] * 0.05)
+        crash_state["multiplier"] += growth_speed * 0.1
+
+        for p in crash_state["players"]:
+            if p["cashout_mult"] == 0:
+                if p["is_bot"] and random.random() < 0.05:
+                    p["cashout_mult"] = crash_state["multiplier"]
+                elif not p["is_bot"] and p["auto_mult"] > 0 and crash_state["multiplier"] >= p["auto_mult"]:
+                    p["cashout_mult"] = crash_state["multiplier"]
+
+        if crash_state["multiplier"] >= crash_state["crash_point"]:
+            crash_state["status"] = "crashed"
+            crash_state["last_update"] = now
+
+            crash_history.insert(0, {
+                "round_id": crash_state["round_id"],
+                "crash_point": round(crash_state["crash_point"], 2),
+                "players": [{"name": p["name"], "bet": p["bet"], "cashout": p["cashout_mult"]} for p in
+                            crash_state["players"]]
+            })
+            if len(crash_history) > 20: crash_history.pop()
+
+    elif crash_state["status"] == "crashed":
+        if now - crash_state["last_update"] > 5:
+            if not crash_state["is_paid"]:
+                crash_state["is_paid"] = True
+                for p in crash_state["players"]:
+                    if p["cashout_mult"] > 0 and not p["is_bot"]:
+                        win_amount = int(p["bet"] * p["cashout_mult"])
+                        try:
+                            res = supabase.table("users").select("coins").eq("user_id", int(p["id"])).execute()
+                            if res.data:
+                                current_coins = int(res.data[0].get("coins", 0))
+                                supabase.table("users").update({"coins": current_coins + win_amount}).eq("user_id", int(
+                                    p["id"])).execute()
+                        except:
+                            pass
+
+            crash_state = {
+                "status": "waiting", "timer": 10, "multiplier": 1.0, "last_update": now,
+                "crash_point": 0.0, "players": [], "bank": 0, "is_paid": False,
+                "round_id": str(int(time.time())),
+                "bots_added": 0, "target_bots": 0, "last_bot_added": 0
+            }
+            return crash_state
+
+    time_left = 10 - (now - crash_state["last_update"]) if crash_state["status"] == "waiting" else 0
+    crash_state["timer"] = max(0, int(time_left))
+    return crash_state
+
+
+@app.post("/api/crash_bet")
+async def crash_bet(data: CrashBet):
+    user = verify_telegram_data(data.initData)
+    if not user: raise HTTPException(status_code=401, detail="Invalid auth data")
+    user_id = str(user["id"])
+
+    if crash_state["status"] != "waiting": raise HTTPException(status_code=400, detail="Ставки закрыты")
+
+    existing = next((p for p in crash_state["players"] if p["id"] == user_id), None)
+    if existing: raise HTTPException(status_code=400, detail="Вы уже сделали ставку")
+
+    res = supabase.table("users").select("coins").eq("user_id", int(user_id)).execute()
+    current_coins = int(res.data[0].get("coins", 0))
+    if current_coins < data.amount: raise HTTPException(status_code=400, detail="Not enough coins")
+
+    supabase.table("users").update({"coins": current_coins - data.amount}).eq("user_id", int(user_id)).execute()
+
+    name = user.get("username", f"id{user_id}")
+    avatar = user.get("photo_url", "")
+
+    crash_state["players"].append({
+        "id": user_id, "name": name, "bet": data.amount, "cashout_mult": 0, "is_bot": False, "avatar": avatar,
+        "auto_mult": 0
+    })
+    crash_state["bank"] += data.amount
+
+    return {"success": True, "new_balance": current_coins - data.amount}
+
+
+@app.post("/api/crash_cashout")
+async def crash_cashout(data: CrashCashout):
+    user = verify_telegram_data(data.initData)
+    if not user: raise HTTPException(status_code=401, detail="Invalid auth data")
+    user_id = str(user["id"])
+
+    if crash_state["status"] != "flying": raise HTTPException(status_code=400, detail="Игра не идет")
+
+    player = next((p for p in crash_state["players"] if p["id"] == user_id), None)
+    if not player or player["cashout_mult"] > 0: raise HTTPException(status_code=400, detail="Вы уже забрали")
+
+    player["cashout_mult"] = crash_state["multiplier"]
+    win_amount = int(player["bet"] * player["cashout_mult"])
+
+    return {"success": True, "win_amount": win_amount, "mult": player["cashout_mult"], "new_balance": int(
+        supabase.table("users").select("coins").eq("user_id", int(user_id)).execute().data[0].get("coins",
+                                                                                                  0)) + win_amount}
+
+
+@app.get("/api/crash_history")
+async def get_crash_history(): return crash_history
+
+
 # ==================== ЮЗЕР И ЭКОНОМИКА ====================
 @app.post("/api/user")
 async def get_user(auth: UserAuth):
@@ -331,7 +506,6 @@ async def update_keys(data: UpdateKeys):
 
 @app.get("/api/global_top")
 async def get_global_top():
-    # Исключаем всех админов из топа
     res = supabase.table("users").select("user_id, username, coins").order("coins", desc=True).limit(50).execute()
     filtered = [u for u in res.data if int(u["user_id"]) not in ADMIN_IDS]
     return filtered[:50]

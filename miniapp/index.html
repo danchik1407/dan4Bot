@@ -26,6 +26,7 @@
             <div class="games-grid">
                 <div class="game-card" onclick="openGame('mines')"><div class="game-icon">💣</div><div class="game-info"><h3>Мины</h3><p>Разминируй поле</p></div></div>
                 <div class="game-card" onclick="openGame('hockey')"><div class="game-icon">🏒</div><div class="game-info"><h3>Хоккей</h3><p>Онлайн-рулетка</p></div></div>
+                <div class="game-card" onclick="openGame('crash')"><div class="game-icon">🚀</div><div class="game-info"><h3>Ракета</h3><p>Успей забрать</p></div></div>
             </div>
         </section>
 
@@ -137,9 +138,42 @@
                 <button class="action-btn" id="hockey-btn" onclick="placeHockeyBet()">Поставить ставку</button>
             </div>
         </section>
+
+        <!-- ЭКРАН РАКЕТЫ -->
+        <section id="screen-crash" class="game-screen" style="padding: 10px;">
+            <button class="back-btn" onclick="closeGame()">← Назад</button>
+            <div class="game-balance-badge">💎 <span class="game-balance-val">0</span></div>
+
+            <h2 class="game-title" style="margin-bottom: 5px;">🚀 Ракета</h2>
+
+            <div id="crash-field" class="crash-field">
+                <div id="crash-status" class="crash-status">Ожидание...</div>
+                <div id="crash-multiplier" class="crash-multiplier">x1.00</div>
+                <div id="crash-rocket" class="crash-rocket" style="background-image: url(''); left: 50px; bottom: 50px;">
+                    <div id="crash-flame" class="crash-flame"></div>
+                </div>
+                <div id="crash-explosion" class="crash-explosion"></div>
+            </div>
+
+            <div class="crash-info">
+                <span>Банк: <b id="crash-bank">0</b> 🪙</span>
+            </div>
+
+            <div class="bet-input-container" id="crash-bet-container">
+                <input type="number" id="crash-bet" class="bet-input" value="10" min="1" max="100000">
+                <div class="bet-buttons">
+                    <button onclick="addBet('crash', 10)">+10</button>
+                    <button onclick="addBet('crash', 100)">+100</button>
+                </div>
+            </div>
+
+            <button class="action-btn" id="crash-btn" onclick="crashAction()">Поставить ставку</button>
+
+            <div class="crash-participants" id="crash-participants"></div>
+        </section>
     </main>
 
-    <!-- Модалка победителя -->
+    <!-- Модалка победителя (Хоккей) -->
     <div id="winner-modal" class="winner-modal">
         <div class="winner-content">
             <div class="winner-icon">🏆</div>
