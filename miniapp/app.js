@@ -20,6 +20,10 @@ let crashInterval = null;
 let lastCrashStatus = null;
 let currentCrashData = null;
 
+let animFrameId = null;
+let flightStartTime = 0;
+let isAnimatingFlight = false;
+
 let lbTimerEnd = Date.now() + (30 * 24 * 3600 * 1000);
 
 // ================= ЗВУКИ =================
@@ -50,7 +54,7 @@ function playSound(type) {
             for (let i = 0; i < bs; i++) d[i] = Math.random() * 2 - 1;
             const n = audioCtx.createBufferSource(); n.buffer = b;
             const ng = audioCtx.createGain(); ng.gain.setValueAtTime(0.1, now); ng.gain.exponentialRampToValueAtTime(0.01, now + 0.5);
-            n.connect(ng); ng.connect(audioCtx.destination); n.start(now);
+            n.connect(ng); n.connect(audioCtx.destination); n.start(now);
         }
     } catch(e) {}
 }
@@ -480,7 +484,12 @@ async function startCrashPolling() {
     await pollCrashState();
     crashInterval = setInterval(pollCrashState, 400);
 }
-function stopCrashPolling() { if (crashInterval) clearInterval(crashInterval); crashInterval = null; }
+function stopCrashPolling() {
+    if (crashInterval) clearInterval(crashInterval);
+    crashInterval = null;
+    if (animFrameId) cancelAnimationFrame(animFrameId);
+    isAnimatingFlight = false;
+}
 
 async function crashAction() {
     if (isProcessing) return;
@@ -517,6 +526,69 @@ async function crashAction() {
     isProcessing = false;
 }
 
+// Локальная плавная анимация полета (60 FPS)
+function animateFlight() {
+    if (!currentCrashData || currentCrashData.status !== 'flying') {
+        isAnimatingFlight = false;
+        return;
+    }
+
+    const el = (id) => document.getElementById(id);
+    const multEl = el('crash-multiplier');
+    const rocketEl = el('crash-rocket');
+    const field = el('crash-field');
+
+    // Вычисляем время полета с момента старта
+    const elapsed = (Date.now() / 1000) - flightStartTime;
+
+    // Визуально плавная формула для множителя (на клиенте)
+    let smoothMult = 1.0;
+    if (elapsed <= 7.0) {
+        const t = elapsed / 7.0;
+        smoothMult = 1.0 + (t ** 2);
+    } else if (elapsed <= 12.0) {
+        smoothMult = 2.0 + ((elapsed - 7.0) / 5.0);
+    } else if (elapsed <= 16.0) {
+        smoothMult = 3.0 + ((elapsed - 12.0) / 4.0);
+    } else if (elapsed <= 19.0) {
+        smoothMult = 4.0 + ((elapsed - 16.0) / 3.0);
+    } else {
+        smoothMult = 5.0 + ((elapsed - 19.0) * 2);
+    }
+
+    // Ограничиваем сверху краш-поинтом, чтобы не улетал дальше
+    const crashPoint = currentCrashData.crash_point;
+    if (smoothMult > crashPoint) smoothMult = crashPoint;
+
+    // Обновляем текст
+    if (multEl) {
+        multEl.innerText = `x${smoothMult.toFixed(2)}`;
+        multEl.style.color = smoothMult > 2 ? '#ffcc00' : '#fff';
+    }
+
+    // Обновляем кнопку "Забрать"
+    const btn = el('crash-btn');
+    if (btn && currentCrashData.my_status === 'bet') {
+        btn.innerText = `Забрать (x${smoothMult.toFixed(2)})`;
+        if (smoothMult > 2) btn.classList.add('pulse'); else btn.classList.remove('pulse');
+    }
+
+    // Двигаем ракету по диагонали
+    if (field && rocketEl) {
+        const w = field.offsetWidth, h = field.offsetHeight;
+        const t = Math.min((smoothMult - 1) / 15, 1);
+        const x = 40 + t * (w - 100);
+        const y = 40 + Math.pow(t, 1.1) * (h - 100);
+        rocketEl.style.left = x + 'px';
+        rocketEl.style.bottom = y + 'px';
+    }
+
+    // Продолжаем анимацию
+    if (isAnimatingFlight) {
+        animFrameId = requestAnimationFrame(animateFlight);
+    }
+}
+
 async function pollCrashState() {
     if (!document.getElementById('screen-crash').classList.contains('active')) return;
     try {
@@ -533,59 +605,66 @@ async function pollCrashState() {
         const historyEl = document.getElementById('crash-history-bar');
 
         if (state.status === 'waiting') {
+            if (isAnimatingFlight) { cancelAnimationFrame(animFrameId); isAnimatingFlight = false; }
+
             statusEl.innerText = `Ставки: ${state.timer} сек`; statusEl.style.color = '#ffcc00';
             multEl.innerText = 'x1.00'; multEl.style.color = '#fff';
             betContainer.style.display = 'block';
             rocketEl.style.left = '40px'; rocketEl.style.bottom = '40px'; rocketEl.style.transform = 'rotate(45deg)'; rocketEl.style.opacity = '1';
             document.getElementById('crash-flame').style.display = 'block'; document.getElementById('crash-explosion').style.display = 'none';
+
+            if (state.my_status === 'none') { btn.disabled = false; btn.innerText = 'Поставить ставку'; btn.style.background = '#007aff'; }
+            else if (state.my_status === 'bet') { btn.disabled = false; btn.innerText = `Добавить (+${getBet('crash')} 🪙)`; btn.style.background = '#007aff'; }
+
         } else if (state.status === 'ready') {
+            if (isAnimatingFlight) { cancelAnimationFrame(animFrameId); isAnimatingFlight = false; }
+
             statusEl.innerText = `Готовность: ${state.timer} сек`; statusEl.style.color = '#ff9500';
             multEl.innerText = 'x1.00'; multEl.style.color = '#fff';
             betContainer.style.display = 'none';
             rocketEl.style.left = '40px'; rocketEl.style.bottom = '40px';
+            btn.disabled = true; btn.innerText = `Готовность ${state.timer}...`; btn.style.background = '#555';
+
         } else if (state.status === 'flying') {
             statusEl.innerText = 'Идёт полет...'; statusEl.style.color = '#34c759';
-            multEl.innerText = `x${state.multiplier.toFixed(2)}`; multEl.style.color = state.multiplier > 2 ? '#ffcc00' : '#fff';
             betContainer.style.display = 'none';
 
-            const field = document.getElementById('crash-field');
-            const w = field.offsetWidth, h = field.offsetHeight;
-            const t = Math.min((state.multiplier - 1) / 15, 1);
-            const x = 40 + t * (w - 100);
-            const y = 40 + Math.pow(t, 1.1) * (h - 100);
-            rocketEl.style.left = x + 'px';
-            rocketEl.style.bottom = y + 'px';
+            // Синхронизируем время с сервером
+            flightStartTime = state.status_start;
+
+            // Запускаем локальную плавную анимацию, если её ещё нет
+            if (!isAnimatingFlight) {
+                isAnimatingFlight = true;
+                animateFlight();
+            }
+
+            // Обновляем кнопку (текст в кнопке будет плавно меняться в animateFlight)
+            if (state.my_status === 'bet') {
+                btn.disabled = false; btn.style.background = '#34c759';
+            } else if (state.my_status === 'cashed_out') {
+                btn.disabled = true; btn.innerText = `Забрано ✅ (x${state.my_cashout_mult.toFixed(2)})`; btn.style.background = '#555'; btn.classList.remove('pulse');
+            } else {
+                btn.disabled = true; btn.innerText = 'Ожидание раунда...'; btn.style.background = '#555';
+            }
+
         } else if (state.status === 'crashed') {
+            if (isAnimatingFlight) { cancelAnimationFrame(animFrameId); isAnimatingFlight = false; }
+
             statusEl.innerText = 'КРАШ!'; statusEl.style.color = '#ff3b30';
             multEl.innerText = `x${(state.crash_point || 0).toFixed(2)}`; multEl.style.color = '#ff3b30';
             betContainer.style.display = 'none';
             rocketEl.style.opacity = '0'; document.getElementById('crash-flame').style.display = 'none';
             const exp = document.getElementById('crash-explosion');
             exp.style.display = 'block'; exp.style.left = rocketEl.style.left; exp.style.bottom = rocketEl.style.bottom;
+
+            btn.classList.remove('pulse');
+            btn.disabled = false; btn.innerText = 'Поставить ставку'; btn.style.background = '#007aff';
+
             if (lastCrashStatus !== 'crashed') {
                 playSound('boom');
                 setTimeout(() => { exp.style.display = 'none'; }, 600);
                 setTimeout(async () => { await loadUserData(); }, 500);
             }
-        }
-
-        if (state.status === 'waiting') {
-            if (state.my_status === 'none') { btn.disabled = false; btn.innerText = 'Поставить ставку'; btn.style.background = '#007aff'; }
-            else if (state.my_status === 'bet') { btn.disabled = false; btn.innerText = `Добавить (+${getBet('crash')} 🪙)`; btn.style.background = '#007aff'; }
-        } else if (state.status === 'ready') {
-            btn.disabled = true; btn.innerText = `Готовность ${state.timer}...`; btn.style.background = '#555';
-        } else if (state.status === 'flying') {
-            if (state.my_status === 'bet') {
-                btn.disabled = false; btn.innerText = `Забрать (x${state.multiplier.toFixed(2)})`; btn.style.background = '#34c759';
-                if (state.multiplier > 2) btn.classList.add('pulse'); else btn.classList.remove('pulse');
-            } else if (state.my_status === 'cashed_out') {
-                btn.disabled = true; btn.innerText = `Забрано ✅ (x${state.my_cashout_mult.toFixed(2)})`; btn.style.background = '#555'; btn.classList.remove('pulse');
-            } else {
-                btn.disabled = true; btn.innerText = 'Ожидание раунда...'; btn.style.background = '#555';
-            }
-        } else if (state.status === 'crashed') {
-            btn.classList.remove('pulse');
-            btn.disabled = false; btn.innerText = 'Поставить ставку'; btn.style.background = '#007aff';
         }
 
         if (historyEl) {

@@ -2,7 +2,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
-import os, hashlib, hmac, json, time, random, uvicorn, datetime
+import os, hashlib, hmac, json, time, random, uvicorn, datetime, math
 from urllib.parse import parse_qsl
 from dotenv import load_dotenv
 from supabase import create_client, Client
@@ -251,6 +251,53 @@ async def get_hockey_history(): return history
 
 
 # ==================== РАКЕТА (CRASH) ====================
+def get_crash_point_by_chance():
+    """Генерирует crash_point с заданными шансами"""
+    rv = random.random()
+
+    # 1% шанс на сотку
+    if rv < 0.01:
+        return 100.0
+
+    # 15% шанс на x4.0+ (но не сотка)
+    elif rv < 0.16:
+        return random.uniform(4.0, 99.9)
+
+    # 30% шанс на x2.0+ (но не x4.0)
+    elif rv < 0.46:
+        return random.uniform(2.0, 4.0)
+
+    # Остальные 54% - краш до x2.0
+    else:
+        return random.uniform(1.0, 2.0)
+
+
+def get_multiplier_by_time(elapsed):
+    """Сложная функция для плавного роста: 7с до x2, потом 5с до x3 и т.д."""
+    if elapsed <= 7.0:
+        # Плавный рост от 1 до 2 за 7 секунд
+        # Используем ease-in-out для красоты
+        t = elapsed / 7.0
+        # Плавная кривая (x = 1 + t^2)
+        return 1.0 + (t ** 2)
+    elif elapsed <= 12.0:
+        # От 2 до 3 за 5 секунд
+        t = (elapsed - 7.0) / 5.0
+        return 2.0 + t
+    elif elapsed <= 16.0:
+        # От 3 до 4 за 4 секунды
+        t = (elapsed - 12.0) / 4.0
+        return 3.0 + t
+    elif elapsed <= 19.0:
+        # От 4 до 5 за 3 секунды
+        t = (elapsed - 16.0) / 3.0
+        return 4.0 + t
+    else:
+        # После 5 растет быстро (для сотки)
+        t = elapsed - 19.0
+        return 5.0 + (t * 2)  # ускорение
+
+
 @app.get("/api/crash_state")
 async def get_crash_state(initData: str = ""):
     global crash_state, crash_history
@@ -289,35 +336,18 @@ async def get_crash_state(initData: str = ""):
             crash_state["last_update"] = now
             crash_state["multiplier"] = 1.0
 
-            # НОВЫЙ ШАНС НА КРАШ:
-            # 30% - краш на х1.0 - х2.0
-            # 40% - краш на х2.0 - х5.0
-            # 25% - краш на х5.0 - х10.0
-            # 5% - краш на х10.0+
-            rv = random.random()
-            if rv < 0.30:
-                cp = random.uniform(1.0, 2.0)
-            elif rv < 0.70:
-                cp = random.uniform(2.0, 5.0)
-            elif rv < 0.95:
-                cp = random.uniform(5.0, 10.0)
-            else:
-                cp = random.uniform(10.0, 100.0)
-
-            total_user = sum(p["bet"] for p in crash_state["players"] if not p["is_bot"])
-            if total_user > 5000: cp *= 0.7
-            crash_state["crash_point"] = cp
+            # Генерируем точку краша с заданными шансами
+            crash_state["crash_point"] = get_crash_point_by_chance()
 
     elif crash_state["status"] == "flying":
-        # ПЛАВНЫЙ РОСТ
-        speed = 0.05 * (crash_state["multiplier"] ** 1.3)
-        crash_state["multiplier"] += speed
+        elapsed = now - crash_state["status_start"]
 
-        for p in crash_state["players"]:
-            if p["cashout_mult"] == 0 and p["is_bot"] and random.random() < 0.05:
-                p["cashout_mult"] = crash_state["multiplier"]
+        # Вычисляем множитель по нашей функции
+        current_mult = get_multiplier_by_time(elapsed)
 
-        if crash_state["multiplier"] >= crash_state["crash_point"]:
+        # Ограничиваем множителем краша
+        if current_mult >= crash_state["crash_point"]:
+            crash_state["multiplier"] = crash_state["crash_point"]
             crash_state["status"] = "crashed"
             crash_state["status_start"] = now
             crash_state["last_update"] = now
@@ -326,6 +356,12 @@ async def get_crash_state(initData: str = ""):
                     {"name": p["name"], "bet": p["bet"], "cashout": p["cashout_mult"], "is_bot": p["is_bot"]} for p in
                     crash_state["players"]]})
             if len(crash_history) > 20: crash_history.pop()
+        else:
+            crash_state["multiplier"] = current_mult
+
+        for p in crash_state["players"]:
+            if p["cashout_mult"] == 0 and p["is_bot"] and random.random() < 0.05:
+                p["cashout_mult"] = crash_state["multiplier"]
 
     elif crash_state["status"] == "crashed":
         elapsed = now - crash_state["status_start"]
@@ -367,6 +403,7 @@ def _crash_response(initData: str):
         "bank": crash_state["bank"], "round_id": crash_state["round_id"],
         "players": players_sorted, "history": crash_history[:10],
         "my_status": my_status, "my_bet": my_bet, "my_cashout_mult": my_cashout, "my_win": my_win,
+        "status_start": crash_state["status_start"],
     }
 
 
@@ -505,7 +542,6 @@ async def get_global_top():
 
 @app.get("/api/season_end")
 async def get_season_end():
-    # Строгая дата окончания: 1 ноября 2026 года, 15:00:00
     end_date = datetime.datetime(2026, 11, 1, 15, 0, 0)
     return {"end_timestamp": int(end_date.timestamp())}
 
