@@ -113,15 +113,12 @@ function startBallPhysics() {
 
         // ЛОГИКА ЗАМЕДЛЕНИЯ (15 СЕК)
         if (elapsed < 8000) {
-            // 0-8 сек: нормальный полет
             ball.vx *= 0.995;
             ball.vy *= 0.995;
         } else if (elapsed >= 8000 && elapsed < 13000) {
-            // 8-13 сек: плавное замедление
             ball.vx *= 0.97;
             ball.vy *= 0.97;
         } else {
-            // 13-15 сек: микро-движения (почти стоит)
             ball.vx *= 0.85;
             ball.vy *= 0.85;
         }
@@ -199,6 +196,7 @@ async function pollHockeyState() {
 
         bankEl.innerText = `Банк: ${state.bank} 🪙`;
 
+        // РЕНДЕР СЕКТОРОВ (ТОЛЬКО КРУГИ, ВПИСАННЫЕ В ГРАНИЦЫ)
         arena.querySelectorAll('.hockey-sector').forEach(el => el.remove());
         let totalWidth = 0;
         state.players.forEach((p, index) => {
@@ -211,19 +209,26 @@ async function pollHockeyState() {
             sector.style.width = width + '%';
             sector.style.background = p.color;
             sector.style.borderRight = '1px solid rgba(0,0,0,0.5)';
+            sector.style.overflow = 'hidden';
 
             const shapeClass = 'shape-circle';
 
             const shapeWrap = document.createElement('div'); shapeWrap.className = 'player-shape-wrapper';
             const shape = document.createElement('div'); shape.className = `player-shape ${shapeClass}`;
-            const size = Math.max(40, Math.min(60, width * 4)); shape.style.width = size + 'px'; shape.style.height = size + 'px';
+
+            const sectorPixelWidth = (width / 100) * arena.offsetWidth;
+            let size = Math.min(sectorPixelWidth * 0.7, 60);
+            if (size < 25) size = 25;
+
+            shape.style.width = size + 'px';
+            shape.style.height = size + 'px';
 
             if (!p.is_bot && p.avatar && p.avatar.startsWith('http')) {
                 shape.innerHTML = `<img src="${p.avatar}" style="width:100%; height:100%; object-fit:cover; border-radius:50%;">`;
                 shape.style.background = 'transparent'; shape.style.border = '2px solid #fff';
             } else {
                 const letter = p.name ? p.name[0].toUpperCase() : '?';
-                shape.innerHTML = `<span style="color:white; font-weight:900; font-size:${size/2}px; text-shadow: 0 2px 4px rgba(0,0,0,0.5);">${letter}</span>`;
+                shape.innerHTML = `<span style="color:white; font-weight:900; font-size:${size*0.5}px; text-shadow: 0 2px 4px rgba(0,0,0,0.5);">${letter}</span>`;
                 shape.style.backgroundColor = p.color; shape.style.border = '2px solid rgba(255,255,255,0.5)';
             }
             shapeWrap.appendChild(shape); sector.appendChild(shapeWrap); arena.appendChild(sector);

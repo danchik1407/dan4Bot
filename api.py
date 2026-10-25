@@ -33,7 +33,7 @@ game_state = {
     "is_paid": False,
     "round_id": str(int(time.time())),
     "whales_added": 0,
-    "whale_chance": random.random() < 0.07  # Шанс 7% на кита в раунде
+    "whale_chance": random.random() < 0.07
 }
 
 history = []
@@ -80,7 +80,6 @@ async def get_hockey_state():
     if game_state["status"] == "waiting":
         time_left = 15 - (now - game_state["last_update"])
 
-        # Устанавливаем начальный лимит, но потом будем его пересчитывать
         if time_left <= 10 and game_state["target_bots"] == 0:
             game_state["target_bots"] = random.randint(1, 5)
 
@@ -90,7 +89,6 @@ async def get_hockey_state():
 
             bot_delay = random.uniform(1.0, 4.0)
 
-            # Обычные боты
             if current_bots < game_state["target_bots"] and len(game_state["players"]) < 20 and (
                     now - game_state["last_bot_added"]) > bot_delay:
                 bot_bet = random.randint(10, 100)
@@ -106,8 +104,6 @@ async def get_hockey_state():
                 game_state["bank"] += bot_bet
                 game_state["last_bot_added"] = now
 
-                # === ВАЖНО: ПЕРЕСЧЕТ ЦЕЛИ БОТОВ ===
-                # Теперь после каждого бота мы заново рандомим, сколько их всего будет
                 game_state["target_bots"] = random.randint(1, 5)
 
                 total_bank = game_state["bank"]
@@ -115,7 +111,6 @@ async def get_hockey_state():
                     for p in game_state["players"]:
                         p["percent"] = (p["bet"] / total_bank) * 100
 
-            # Киты (только если выпал шанс и их меньше 2)
             if game_state["whale_chance"] and game_state["whales_added"] < 2 and current_whales < 2 and len(
                     game_state["players"]) < 20 and (now - game_state["last_bot_added"]) > bot_delay:
                 if random.random() < 0.3:
@@ -150,7 +145,6 @@ async def get_hockey_state():
                     p["percent"] = 0
 
     elif game_state["status"] == "rolling":
-        # Ждем 15.5 секунд (15 сек анимация + запас)
         if now - game_state["last_update"] > 15.5:
             game_state["status"] = "finished"
             game_state["last_update"] = now
@@ -248,15 +242,29 @@ async def place_bet(data: PlaceBet):
 async def finish_hockey(data: FinishHockey):
     global game_state
     if game_state["status"] != "rolling": return {"success": False}
-    total_p = 0
+
+    # === ИСПРАВЛЕНИЕ БАГА С ГРАНИЦАМИ ===
+    # Считаем точные кумулятивные границы и ищем, в какой интервал попал шарик
+    total_bank = game_state["bank"]
+    if total_bank == 0 or not game_state["players"]:
+        return {"success": False}
+
+    # Пересчитываем проценты с высокой точностью перед финишем
+    current_x = 0.0
     winner = None
     for p in game_state["players"]:
-        if total_p <= data.x <= total_p + p["percent"]:
+        # Точный процент без округления
+        exact_percent = (p["bet"] / total_bank) * 100.0
+        # Проверяем, попадает ли точка в этот интервал (с небольшим допуском 0.0001)
+        if current_x <= data.x <= current_x + exact_percent + 0.0001:
             winner = p
             break
-        total_p += p["percent"]
+        current_x += exact_percent
+
+    # Если из-за погрешности точка вышла за 100%, берем последнего
     if not winner and game_state["players"]:
-        winner = min(game_state["players"], key=lambda p: abs(total_p - data.x))
+        winner = game_state["players"][-1]
+
     game_state["winner"] = winner
     game_state["status"] = "finished"
     game_state["last_update"] = time.time()
