@@ -26,7 +26,8 @@ game_state = {
     "winner": None,
     "last_update": time.time(),
     "last_bot_added": 0,
-    "target_bots": 0
+    "target_bots": 0,
+    "is_paid": False
 }
 
 
@@ -50,12 +51,19 @@ class UserAuth(BaseModel): initData: str
 class UpdateBalance(BaseModel): initData: str; amount: int
 
 
+class UpdateKeys(BaseModel): initData: str; amount: int
+
+
+class BuyItem(BaseModel): initData: str; item_id: str; price: int
+
+
 class PlaceBet(BaseModel): initData: str; amount: int
 
 
 class FinishHockey(BaseModel): initData: str; x: float; y: float
 
 
+# ==================== ХОККЕЙ ====================
 @app.get("/api/hockey_state")
 async def get_hockey_state():
     global game_state
@@ -85,8 +93,6 @@ async def get_hockey_state():
         if time_left <= 0:
             game_state["status"] = "rolling"
             game_state["last_update"] = now
-
-            # Распределяем проценты
             total_bank = game_state["bank"]
             if total_bank > 0:
                 for p in game_state["players"]:
@@ -96,15 +102,14 @@ async def get_hockey_state():
                     p["percent"] = 0
 
     elif game_state["status"] == "rolling":
-        # Ждем, пока клиент пришлет координаты остановки (максимум 10 секунд)
-        if now - game_state["last_update"] > 10:
+        if now - game_state["last_update"] > 12:
             game_state["status"] = "finished"
             game_state["last_update"] = now
 
     elif game_state["status"] == "finished":
         if now - game_state["last_update"] > 4:
-            # Начисление монет
-            if game_state["winner"]:
+            if game_state["winner"] and not game_state["is_paid"]:
+                game_state["is_paid"] = True
                 winner_id = game_state["winner"]["id"]
                 bank_amount = game_state["bank"]
                 try:
@@ -119,25 +124,21 @@ async def get_hockey_state():
             game_state = {
                 "status": "waiting", "timer": 20, "bank": 0, "players": [],
                 "winner": None, "last_update": now,
-                "last_bot_added": 0, "target_bots": 0
+                "last_bot_added": 0, "target_bots": 0, "is_paid": False
             }
 
     game_state["timer"] = max(0, int(time_left) if game_state["status"] == "waiting" else 0)
     return game_state
 
 
-# НОВЫЙ ЭНДПОИНТ: Клиент говорит, где остановился шарик
 @app.post("/api/finish_hockey")
 async def finish_hockey(data: FinishHockey):
     global game_state
     if game_state["status"] != "rolling":
-        return {"success": False, "message": "Раунд не активен"}
+        return {"success": False}
 
-    # Определяем, в чью зону попал шарик
-    # У нас зоны вертикальные, поэтому смотрим только на X (координату)
     total_p = 0
     winner = None
-
     for p in game_state["players"]:
         zone_width = p["percent"]
         if total_p <= data.x <= total_p + zone_width:
@@ -145,18 +146,13 @@ async def finish_hockey(data: FinishHockey):
             break
         total_p += zone_width
 
-    if winner:
-        game_state["winner"] = winner
-        game_state["status"] = "finished"
-        game_state["last_update"] = time.time()
-        return {"success": True, "winner": winner, "bank": game_state["bank"]}
-    else:
-        # Если шарик попал в пустоту (баг), берем случайного игрока
+    if not winner and game_state["players"]:
         winner = random.choice(game_state["players"])
-        game_state["winner"] = winner
-        game_state["status"] = "finished"
-        game_state["last_update"] = time.time()
-        return {"success": True, "winner": winner, "bank": game_state["bank"]}
+
+    game_state["winner"] = winner
+    game_state["status"] = "finished"
+    game_state["last_update"] = time.time()
+    return {"success": True, "winner": winner, "bank": game_state["bank"]}
 
 
 @app.post("/api/place_bet")
@@ -197,6 +193,7 @@ async def place_bet(data: PlaceBet):
     return {"success": True, "new_balance": new_coins}
 
 
+# ==================== ЮЗЕР И ЭКОНОМИКА ====================
 @app.post("/api/user")
 async def get_user(auth: UserAuth):
     user = verify_telegram_data(auth.initData)
@@ -209,8 +206,53 @@ async def get_user(auth: UserAuth):
         supabase.table("users").insert(new_user).execute()
         return {"coins": 0, "keys": 0, "inventory": [], "last_chest": 0}
     db_user = res.data[0]
-    return {"coins": int(db_user.get("coins", 0)), "keys": int(db_user.get("keys", 0)),
-            "inventory": json.loads(db_user.get("inventory") or "[]"), "last_chest": int(db_user.get("last_chest", 0))}
+    return {
+        "coins": int(db_user.get("coins", 0)),
+        "keys": int(db_user.get("keys", 0)),
+        "inventory": json.loads(db_user.get("inventory") or "[]"),
+        "last_chest": int(db_user.get("last_chest", 0))
+    }
+
+
+@app.post("/api/open_chest")
+async def open_chest(auth: UserAuth):
+    user = verify_telegram_data(auth.initData)
+    if not user: raise HTTPException(status_code=401, detail="Invalid auth data")
+    user_id = user["id"]
+    now = int(time.time())
+
+    res = supabase.table("users").select("last_chest").eq("user_id", user_id).execute()
+    if not res.data: raise HTTPException(status_code=404, detail="User not found")
+
+    last_chest = int(res.data[0].get("last_chest", 0) or 0)
+    if (now - last_chest) < 18000:
+        raise HTTPException(status_code=400, detail="Сундук перезаряжается")
+
+    supabase.table("users").update({"last_chest": now}).eq("user_id", user_id).execute()
+    return {"success": True}
+
+
+@app.post("/api/buy_item")
+async def buy_item(data: BuyItem):
+    user = verify_telegram_data(data.initData)
+    if not user: raise HTTPException(status_code=401, detail="Invalid auth data")
+    user_id = user["id"]
+
+    res = supabase.table("users").select("coins, inventory").eq("user_id", user_id).execute()
+    if not res.data: raise HTTPException(status_code=404, detail="User not found")
+
+    current_coins = int(res.data[0].get("coins", 0))
+    inventory = json.loads(res.data[0].get("inventory") or "[]")
+
+    if current_coins < data.price:
+        raise HTTPException(status_code=400, detail="Недостаточно коинов")
+
+    inventory.append(data.item_id)
+    supabase.table("users").update({
+        "coins": current_coins - data.price,
+        "inventory": json.dumps(inventory)
+    }).eq("user_id", user_id).execute()
+    return {"success": True, "new_balance": current_coins - data.price, "inventory": inventory}
 
 
 @app.post("/api/update_balance")
@@ -223,6 +265,18 @@ async def update_balance(data: UpdateBalance):
     new_coins = max(0, current_coins + data.amount)
     supabase.table("users").update({"coins": new_coins}).eq("user_id", user_id).execute()
     return {"success": True, "new_balance": new_coins}
+
+
+@app.post("/api/update_keys")
+async def update_keys(data: UpdateKeys):
+    user = verify_telegram_data(data.initData)
+    if not user: raise HTTPException(status_code=401, detail="Invalid auth data")
+    user_id = user["id"]
+    res = supabase.table("users").select("keys").eq("user_id", user_id).execute()
+    current_keys = int(res.data[0].get("keys", 0) or 0)
+    new_keys = max(0, current_keys + data.amount)
+    supabase.table("users").update({"keys": new_keys}).eq("user_id", user_id).execute()
+    return {"success": True, "new_keys": new_keys}
 
 
 @app.get("/api/global_top")
