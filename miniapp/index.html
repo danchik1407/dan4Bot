@@ -114,7 +114,7 @@
             <div class="hockey-header">
                 <div id="hockey-status" style="color: #34c759; font-weight: bold;">Ожидание...</div>
                 <div id="hockey-bank" style="font-size: 20px; font-weight: 900;">Банк: 0 🪙</div>
-                <button class="action-btn" style="width: auto; padding: 5px 10px; margin: 0; background: transparent; font-size: 20px;" onclick="openHistory()">🕒</button>
+                <!-- Кнопка истории удалена -->
             </div>
 
             <div class="hockey-arena" id="hockey-arena">
@@ -146,15 +146,6 @@
             <div class="winner-name" id="winner-modal-name">Nil_Ven</div>
             <div class="winner-amount" id="winner-modal-amount">+7348.31</div>
             <button class="action-btn" style="background: #ffcc00; color: #000; margin-top: 20px;" onclick="closeWinnerModal()">Продолжить</button>
-        </div>
-    </div>
-
-    <!-- Модалка истории -->
-    <div id="history-modal" class="winner-modal" style="display: none;">
-        <div class="winner-content" style="max-height: 80vh; overflow-y: auto; border-color: #007aff; box-shadow: 0 0 50px rgba(0, 122, 255, 0.3);">
-            <h3 style="color: white; margin-bottom: 15px;">История игр</h3>
-            <div id="history-list" style="width: 100%; text-align: left;"></div>
-            <button class="action-btn" style="background: #333; margin-top: 15px;" onclick="document.getElementById('history-modal').classList.remove('active')">Закрыть</button>
         </div>
     </div>
 
