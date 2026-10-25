@@ -69,7 +69,7 @@ async function placeHockeyBet() {
     isProcessing = false;
 }
 
-// ФИЗИКА ШАРИКА (10 СЕК, ПЛАВНО)
+// ФИЗИКА ШАРИКА (12 СЕК, ПЛАВНО, С ЗУМОМ)
 function startBallPhysics() {
     if (ball.active || ball.hasStartedAnim) return;
     ball.hasStartedAnim = true;
@@ -90,7 +90,7 @@ function startBallPhysics() {
     let scale = 1;
     const maxScale = 2.5;
     const startTime = performance.now();
-    const duration = 10000;
+    const duration = 12000; // 12 секунд полета
 
     const step = () => {
         if (!ball.active) return;
@@ -111,7 +111,7 @@ function startBallPhysics() {
             playSound('click');
         }
 
-        // Плавное замедление (0.985 - тормозит медленно и красиво)
+        // Плавное замедление
         ball.vx *= 0.985;
         ball.vy *= 0.985;
 
@@ -120,9 +120,9 @@ function startBallPhysics() {
             ballEl.style.top = ball.y + '%';
         }
 
-        // Зум на последних 3 секундах
-        if (elapsed > duration * 0.7) {
-            scale += (maxScale - scale) * 0.03;
+        // Зум начинается с 8-й секунды
+        if (elapsed > duration * 0.67) {
+            scale += (maxScale - scale) * 0.02;
             arena.style.transform = `scale(${scale})`;
             arena.style.transformOrigin = `${ball.x}% ${ball.y}%`;
         }
@@ -188,23 +188,20 @@ async function pollHockeyState() {
 
         bankEl.innerText = `Банк: ${state.bank} 🪙`;
 
-        // === РЕНДЕР СЕКТОРОВ (ВСЕГДА) ===
+        // РЕНДЕР СЕКТОРОВ
         arena.querySelectorAll('.hockey-sector').forEach(el => el.remove());
         let totalWidth = 0;
-
         state.players.forEach((p, index) => {
             const sector = document.createElement('div');
             sector.className = 'hockey-sector';
 
             let width = p.percent;
-            if (index === state.players.length - 1) { width = 100 - totalWidth; }
-            else { width = parseFloat(p.percent.toFixed(2)); totalWidth += width; }
+            if (index === state.players.length - 1) { width = 100 - totalWidth; } else { width = parseFloat(p.percent.toFixed(2)); totalWidth += width; }
 
             sector.style.width = width + '%';
             sector.style.background = p.color;
             sector.style.borderRight = '1px solid rgba(0,0,0,0.5)';
 
-            // Создаем фигуру внутри сектора
             let shapeClass = 'shape-square';
             if (index % 4 === 0) shapeClass = 'shape-circle';
             if (index % 4 === 1) shapeClass = 'shape-square';
@@ -213,8 +210,7 @@ async function pollHockeyState() {
 
             const shapeWrap = document.createElement('div'); shapeWrap.className = 'player-shape-wrapper';
             const shape = document.createElement('div'); shape.className = `player-shape ${shapeClass}`;
-            const size = Math.max(40, Math.min(60, width * 4));
-            shape.style.width = size + 'px'; shape.style.height = size + 'px';
+            const size = Math.max(40, Math.min(60, width * 4)); shape.style.width = size + 'px'; shape.style.height = size + 'px';
 
             if (!p.is_bot && p.avatar && p.avatar.startsWith('http')) {
                 shape.innerHTML = `<img src="${p.avatar}" style="width:100%; height:100%; object-fit:cover; border-radius:50%;">`;
@@ -224,9 +220,7 @@ async function pollHockeyState() {
                 shape.innerHTML = `<span style="color:white; font-weight:900; font-size:${size/2}px; text-shadow: 0 2px 4px rgba(0,0,0,0.5);">${letter}</span>`;
                 shape.style.backgroundColor = p.color; shape.style.border = '2px solid rgba(255,255,255,0.5)';
             }
-            shapeWrap.appendChild(shape);
-            sector.appendChild(shapeWrap);
-            arena.appendChild(sector);
+            shapeWrap.appendChild(shape); sector.appendChild(shapeWrap); arena.appendChild(sector);
         });
 
         if (!document.getElementById('hockey-ball')) {

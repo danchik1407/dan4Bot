@@ -75,17 +75,16 @@ async def get_hockey_state():
     if game_state["status"] == "waiting":
         time_left = 15 - (now - game_state["last_update"])
 
-        # Выбираем случайное количество ботов от 1 до 5 на раунд
+        # Рандомное количество ботов (1-5)
         if time_left <= 10 and game_state["target_bots"] == 0:
             game_state["target_bots"] = random.randint(1, 5)
 
         if time_left <= 10 and game_state["target_bots"] > 0:
             current_bots = sum(1 for p in game_state["players"] if p["is_bot"])
 
-            # Рандомная задержка между ставками ботов (от 1 до 4 секунд)
+            # Рандомная задержка для ботов (1-4 сек)
             bot_delay = random.uniform(1.0, 4.0)
 
-            # Проверяем, не набралось ли уже 20 игроков
             if current_bots < game_state["target_bots"] and len(game_state["players"]) < 20 and (
                     now - game_state["last_bot_added"]) > bot_delay:
                 bot_bet = random.randint(10, 100)
@@ -101,7 +100,7 @@ async def get_hockey_state():
                 game_state["bank"] += bot_bet
                 game_state["last_bot_added"] = now
 
-                # Сразу пересчитываем проценты, чтобы поле делилось
+                # Мгновенный пересчет процентов
                 total_bank = game_state["bank"]
                 if total_bank > 0:
                     for p in game_state["players"]:
@@ -119,8 +118,8 @@ async def get_hockey_state():
                     p["percent"] = 0
 
     elif game_state["status"] == "rolling":
-        # Даем 10.5 секунд на полет шарика (фронт работает 10 сек)
-        if now - game_state["last_update"] > 10.5:
+        # Даем 12.5 секунд на полет шарика (фронт работает 12 сек)
+        if now - game_state["last_update"] > 12.5:
             game_state["status"] = "finished"
             game_state["last_update"] = now
 
@@ -171,9 +170,7 @@ async def place_bet(data: PlaceBet):
 
     if game_state["status"] != "waiting": raise HTTPException(status_code=400, detail="Ставки закрыты")
 
-    # Проверка на лимит игроков (не более 20)
     if len(game_state["players"]) >= 20:
-        # Если этот игрок уже есть в списке, разрешаем ему увеличить ставку
         existing = next((p for p in game_state["players"] if p["id"] == user_id), None)
         if not existing:
             raise HTTPException(status_code=400, detail="Комната заполнена")
@@ -205,7 +202,7 @@ async def place_bet(data: PlaceBet):
         })
         game_state["bank"] += data.amount
 
-    # СРАЗУ ПЕРЕСЧИТЫВАЕМ ПРОЦЕНТЫ
+    # Мгновенный пересчет процентов
     total_bank = game_state["bank"]
     if total_bank > 0:
         for p in game_state["players"]:
