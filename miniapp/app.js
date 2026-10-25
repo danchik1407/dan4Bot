@@ -20,13 +20,9 @@ let crashInterval = null;
 let lastCrashStatus = null;
 let currentCrashData = null;
 
-// Плавная интерполяция для Ракеты
 let animFrameId = null;
 let isAnimatingFlight = false;
-let lastSentMult = 1.0;     // Последнее полученное с сервера
-let targetSentMult = 1.0;   // К чему стремимся (тоже с сервера, для обновлений)
-let displayMult = 1.0;      // То, что рисуем
-let lastServerUpdateTime = 0; // Когда последний раз обновлялись данные
+let flightStartTime = 0;
 
 let lbTimerEnd = Date.now() + (30 * 24 * 3600 * 1000);
 
@@ -428,7 +424,13 @@ async function pollHockeyState() {
                     document.getElementById('winner-modal-name').innerText = state.winner.name;
                     document.getElementById('winner-modal-amount').innerText = `+${state.bank} 🪙`;
                     modal.classList.add('active');
-                    // Делаем задержку в 1.5 секунды, чтобы баланс успел обновиться на сервере
+
+                    // МГНОВЕННО добавляем выигрыш к балансу
+                    if (state.winner.id === String(user.id)) {
+                        balance += state.bank;
+                        updateUI();
+                    }
+
                     setTimeout(async () => { await loadUserData(); }, 1500);
                     if (state.winner.id === String(user.id)) { playSound('win'); } else { playSound('lose'); }
                 }, 1000);
@@ -526,7 +528,7 @@ async function crashAction() {
     isProcessing = false;
 }
 
-// Плавная анимация (60 FPS), которая догоняет сервер
+// ИДЕАЛЬНО ПЛАВНАЯ АНИМАЦИЯ
 function animateFlight() {
     if (!currentCrashData || currentCrashData.status !== 'flying') {
         isAnimatingFlight = false;
@@ -538,35 +540,34 @@ function animateFlight() {
     const rocketEl = el('crash-rocket');
     const field = el('crash-field');
 
-    // Плавная интерполяция (Lerp)
-    // displayMult догоняет targetSentMult
-    // Если разница большая (новый таргет с сервера), то догоняем быстрее
-    const diff = targetSentMult - displayMult;
-    if (Math.abs(diff) > 0.01) {
-        displayMult += diff * 0.15; // Скорость догона (0.15 = плавно, но не слишком медленно)
-    } else {
-        displayMult = targetSentMult;
+    // Вычисляем время с точностью до миллисекунды
+    const elapsed = (Date.now() / 1000) - flightStartTime;
+
+    // Формула (совпадает с сервером)
+    let smoothMult = 1.0 + 0.05 * (Math.exp(0.45 * elapsed) - 1);
+
+    // Ограничиваем, чтобы не улетал за краш
+    if (smoothMult > currentCrashData.multiplier) {
+        smoothMult = currentCrashData.multiplier;
     }
 
-    // Обновляем текст
     if (multEl) {
-        multEl.innerText = `x${displayMult.toFixed(2)}`;
-        multEl.style.color = displayMult > 2 ? '#ffcc00' : '#fff';
+        multEl.innerText = `x${smoothMult.toFixed(2)}`;
+        multEl.style.color = smoothMult > 2 ? '#ffcc00' : '#fff';
     }
 
-    // Обновляем кнопку "Забрать"
     const btn = el('crash-btn');
     if (btn && currentCrashData.my_status === 'bet') {
-        btn.innerText = `Забрать (x${displayMult.toFixed(2)})`;
-        if (displayMult > 2) btn.classList.add('pulse'); else btn.classList.remove('pulse');
+        btn.innerText = `Забрать (x${smoothMult.toFixed(2)})`;
+        if (smoothMult > 2) btn.classList.add('pulse'); else btn.classList.remove('pulse');
     }
 
-    // Двигаем ракету по диагонали
     if (field && rocketEl) {
         const w = field.offsetWidth, h = field.offsetHeight;
-        const t = Math.min((displayMult - 1) / 15, 1);
-        const x = 40 + t * (w - 100);
-        const y = 40 + Math.pow(t, 1.1) * (h - 100);
+        const t = Math.min((smoothMult - 1) / 15, 1);
+        // Плавный полет по диагонали
+        const x = 40 + Math.pow(t, 1.2) * (w - 100);
+        const y = 40 + Math.pow(t, 1.2) * (h - 100);
         rocketEl.style.left = x + 'px';
         rocketEl.style.bottom = y + 'px';
     }
@@ -616,12 +617,9 @@ async function pollCrashState() {
             statusEl.innerText = 'Идёт полет...'; statusEl.style.color = '#34c759';
             betContainer.style.display = 'none';
 
-            // Берем множитель с сервера, НЕ СЧИТАЕМ ЛОКАЛЬНО
-            targetSentMult = state.multiplier;
-
-            // Запускаем цикл, если его нет
             if (!isAnimatingFlight) {
-                displayMult = targetSentMult; // Сбрасываем, чтобы не было скачков
+                // Синхронизируем точное время старта
+                flightStartTime = state.status_start;
                 isAnimatingFlight = true;
                 animateFlight();
             }
@@ -650,7 +648,7 @@ async function pollCrashState() {
             if (lastCrashStatus !== 'crashed') {
                 playSound('boom');
                 setTimeout(() => { exp.style.display = 'none'; }, 600);
-                setTimeout(async () => { await loadUserData(); }, 1000); // Задержка
+                setTimeout(async () => { await loadUserData(); }, 1000);
             }
         }
 

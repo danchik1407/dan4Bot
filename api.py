@@ -164,19 +164,7 @@ async def get_hockey_state():
                 if len(history) > 10: history.pop()
 
     elif game_state["status"] == "finished":
-        # Увеличили паузу до 8 секунд, чтобы клиент успел показать модалку и обновить баланс
-        if now - game_state["last_update"] > 8:
-            if game_state["winner"] and not game_state["is_paid"]:
-                game_state["is_paid"] = True
-                winner_id = game_state["winner"]["id"]
-                bank_amount = game_state["bank"]
-                try:
-                    res = supabase.table("users").select("coins").eq("user_id", int(winner_id)).execute()
-                    if res.data:
-                        supabase.table("users").update({"coins": int(res.data[0].get("coins", 0)) + bank_amount}).eq(
-                            "user_id", int(winner_id)).execute()
-                except Exception as e:
-                    print(f"❌ Ошибка выплаты: {e}")
+        if now - game_state["last_update"] > 5:
             game_state = {"status": "waiting", "timer": 15, "bank": 0, "players": [], "winner": None,
                           "last_update": now, "last_bot_added": 0, "target_bots": 0, "is_paid": False,
                           "round_id": str(int(time.time())), "whales_added": 0, "whale_chance": random.random() < 0.07}
@@ -241,9 +229,24 @@ async def finish_hockey(data: FinishHockey):
             break
         current_x += exact_percent
     if not winner and game_state["players"]: winner = game_state["players"][-1]
+
     game_state["winner"] = winner
     game_state["status"] = "finished"
     game_state["last_update"] = time.time()
+
+    # СРАЗУ ВЫПЛАЧИВАЕМ
+    if winner and not game_state["is_paid"]:
+        game_state["is_paid"] = True
+        winner_id = winner["id"]
+        bank_amount = game_state["bank"]
+        try:
+            res = supabase.table("users").select("coins").eq("user_id", int(winner_id)).execute()
+            if res.data:
+                new_coins = int(res.data[0].get("coins", 0)) + bank_amount
+                supabase.table("users").update({"coins": new_coins}).eq("user_id", int(winner_id)).execute()
+        except Exception as e:
+            print(f"❌ Ошибка выплаты: {e}")
+
     return {"success": True, "winner": winner, "bank": game_state["bank"]}
 
 
@@ -262,24 +265,6 @@ def get_crash_point_by_chance():
         return random.uniform(2.0, 4.0)
     else:
         return random.uniform(1.0, 2.0)
-
-
-def get_multiplier_by_time(elapsed):
-    if elapsed <= 7.0:
-        t = elapsed / 7.0
-        return 1.0 + (t ** 2)
-    elif elapsed <= 12.0:
-        t = (elapsed - 7.0) / 5.0
-        return 2.0 + t
-    elif elapsed <= 16.0:
-        t = (elapsed - 12.0) / 4.0
-        return 3.0 + t
-    elif elapsed <= 19.0:
-        t = (elapsed - 16.0) / 3.0
-        return 4.0 + t
-    else:
-        t = elapsed - 19.0
-        return 5.0 + (t * 2)
 
 
 @app.get("/api/crash_state")
@@ -323,14 +308,31 @@ async def get_crash_state(initData: str = ""):
 
     elif crash_state["status"] == "flying":
         elapsed = now - crash_state["status_start"]
-        current_mult = get_multiplier_by_time(elapsed)
 
-        # Обновляем множитель, но НЕ дальше точки краша (но мы её скроем в ответе)
+        # Экспоненциальный рост: медленно в начале, очень быстро в конце
+        # 1.0 + 0.05 * (e^(0.4 * t) - 1)
+        current_mult = 1.0 + 0.05 * (math.exp(0.45 * elapsed) - 1)
+
         if current_mult >= crash_state["crash_point"]:
             crash_state["multiplier"] = crash_state["crash_point"]
             crash_state["status"] = "crashed"
             crash_state["status_start"] = now
             crash_state["last_update"] = now
+
+            if not crash_state["is_paid"]:
+                crash_state["is_paid"] = True
+                for p in crash_state["players"]:
+                    if p["cashout_mult"] > 0 and not p["is_bot"]:
+                        win_amount = int(p["bet"] * p["cashout_mult"])
+                        try:
+                            res = supabase.table("users").select("coins").eq("user_id", int(p["id"])).execute()
+                            if res.data:
+                                new_coins = int(res.data[0].get("coins", 0)) + win_amount
+                                supabase.table("users").update({"coins": new_coins}).eq("user_id",
+                                                                                        int(p["id"])).execute()
+                        except:
+                            pass
+
             crash_history.insert(0, {"round_id": crash_state["round_id"],
                                      "crash_point": round(crash_state["crash_point"], 2), "players": [
                     {"name": p["name"], "bet": p["bet"], "cashout": p["cashout_mult"], "is_bot": p["is_bot"]} for p in
@@ -377,7 +379,6 @@ def _crash_response(initData: str):
 
     players_sorted = sorted(crash_state["players"], key=lambda p: p["bet"], reverse=True)
 
-    # СКРЫВАЕМ ТОЧКУ КРАША, пока летит
     crash_point_to_send = 0
     if crash_state["status"] == "crashed":
         crash_point_to_send = round(crash_state["crash_point"], 2)
@@ -385,7 +386,7 @@ def _crash_response(initData: str):
     return {
         "status": crash_state["status"], "timer": crash_state["timer"],
         "multiplier": crash_state["multiplier"],
-        "crash_point": crash_point_to_send,  # <--- Скрываем
+        "crash_point": crash_point_to_send,
         "bank": crash_state["bank"], "round_id": crash_state["round_id"],
         "players": players_sorted, "history": crash_history[:10],
         "my_status": my_status, "my_bet": my_bet, "my_cashout_mult": my_cashout, "my_win": my_win,
