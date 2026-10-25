@@ -15,7 +15,7 @@ const API_URL = "https://aura-api-mptt.onrender.com";
 let balance = 0, keys = 0, currentBet = 10, inventory = [], lastChestTime = 0, isProcessing = false;
 let hockeyInterval = null, hasBetThisRound = false, hasShownWinner = false;
 
-let ball = { x: 0, y: 50, vx: 0, vy: 0, active: false, animationId: null };
+let ball = { x: 0, y: 50, vx: 0, vy: 0, active: false, animationId: null, hasStartedAnim: false };
 
 // ЗВУКИ
 const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
@@ -73,9 +73,11 @@ async function placeHockeyBet() {
     isProcessing = false;
 }
 
+// ИСПРАВЛЕННАЯ ФИЗИКА (не перезапускается)
 function startBallPhysics(targetX) {
-    if (ball.active) return;
+    if (ball.active || ball.hasStartedAnim) return;
 
+    ball.hasStartedAnim = true;
     ball.x = 0;
     ball.y = 50;
     ball.active = true;
@@ -94,9 +96,9 @@ function startBallPhysics(targetX) {
         if (!ball.active) return;
 
         const dist = targetX - ball.x;
+        // Плавное торможение
         let friction = 0.985;
         if (dist < 15) friction = 0.96;
-
         speed *= friction;
 
         if (speed < 0.05 || Math.abs(dist) < 0.1) {
@@ -141,6 +143,7 @@ async function pollHockeyState() {
             if (hasBetThisRound) hasBetThisRound = false;
             hasShownWinner = false;
             ball.active = false;
+            ball.hasStartedAnim = false; // СБРОС ФЛАГА
 
             if (ball.animationId) cancelAnimationFrame(ball.animationId);
 
@@ -156,7 +159,8 @@ async function pollHockeyState() {
         } else if (state.status === 'rolling') {
             statusEl.innerText = 'Идёт бросок...'; statusEl.style.color = '#007aff';
             document.getElementById('hockey-controls').style.display = 'none';
-            if (!ball.active) startBallPhysics(state.win_x);
+            // Запускаем ТОЛЬКО ОДИН РАЗ
+            if (!ball.hasStartedAnim) startBallPhysics(state.win_x);
 
         } else if (state.status === 'finished') {
             statusEl.innerText = 'Раунд окончен!'; statusEl.style.color = '#ff3b30';
@@ -230,16 +234,13 @@ async function pollHockeyState() {
                 shape.style.width = size + 'px';
                 shape.style.height = size + 'px';
 
-                // ЛОГИКА АВАТАРОК: Если есть ссылка на фото - показываем, иначе букву
                 if (!p.is_bot && p.avatar && p.avatar.startsWith('http')) {
                     shape.innerHTML = `<img src="${p.avatar}" style="width:100%; height:100%; object-fit:cover;">`;
-                    shape.style.background = 'transparent';
-                    shape.style.border = '2px solid #fff';
+                    shape.style.background = 'transparent'; shape.style.border = '2px solid #fff';
                 } else {
-                    // Для ботов и юзеров без фото — цветной кружок с буквой
                     const letter = p.name ? p.name[0].toUpperCase() : '?';
                     shape.innerHTML = `<span style="color:white; font-weight:900; font-size:${size/2}px; text-shadow: 0 2px 4px rgba(0,0,0,0.5);">${letter}</span>`;
-                    shape.style.backgroundColor = p.color; // Используем цвет сектора или свой
+                    shape.style.backgroundColor = p.color;
                     shape.style.border = '2px solid rgba(255,255,255,0.5)';
                 }
                 shapeWrap.appendChild(shape);
@@ -258,13 +259,10 @@ async function pollHockeyState() {
             const div = document.createElement('div'); div.className = 'part-item';
             const width = p.percent || (p.bet / state.bank * 100);
             let iconHtml = '';
-
-            // ЛОГИКА ИКОНОК В СПИСКЕ
             if (!p.is_bot && p.avatar && p.avatar.startsWith('http')) {
                 iconHtml = `<img src="${p.avatar}" style="width:20px; height:20px; border-radius:50%; margin-right:5px; vertical-align:middle;">`;
             } else {
                 const letter = p.name ? p.name[0].toUpperCase() : '?';
-                // Фон иконки берем из цвета игрока
                 iconHtml = `<span style="display:inline-flex; justify-content:center; align-items:center; width:20px; height:20px; border-radius:50%; background:${p.color}; color:white; font-size:10px; font-weight:bold; margin-right:5px;">${letter}</span>`;
             }
             div.innerHTML = `<div class="name"><span>#${i+1}</span>${iconHtml}<span>${p.name}</span></div><div class="stats">${width.toFixed(1)}% | ${p.bet} 🪙</div>`;
@@ -285,39 +283,46 @@ function stopHockeyPolling() {
 
 function closeWinnerModal() { document.getElementById('winner-modal').classList.remove('active'); }
 
-// ИСТОРИЯ
-async function loadHistory() {
+// ИСТОРИЯ (ИСПРАВЛЕНО)
+async function openHistory() {
+    const modal = document.getElementById('history-modal');
+    const list = document.getElementById('history-list');
+    list.innerHTML = '<p style="text-align:center;color:#888;">Загрузка...</p>';
+    modal.classList.add('active');
+
     try {
         const res = await fetch(`${API_URL}/api/hockey_history`);
         const history = await res.json();
-        const list = document.getElementById('history-list');
         list.innerHTML = '';
+
         if (history.length === 0) {
             list.innerHTML = '<p style="text-align:center;color:#888;">История пуста</p>';
             return;
         }
+
         history.forEach(item => {
             const div = document.createElement('div');
             div.className = 'history-item';
-            div.style.cssText = "background: #252525; padding: 15px; border-radius: 10px; margin-bottom: 10px; cursor: pointer;";
+            div.style.cssText = "background: #252525; padding: 15px; border-radius: 10px; margin-bottom: 10px; cursor: pointer; border: 1px solid #333;";
+
+            // Собираем имена всех участников
+            let playersText = item.players.map(p => `${p.name} (${p.bet} 🪙) ${p.is_winner ? '🏆' : ''}`).join('\n');
+
             div.innerHTML = `
-                <div style="display:flex; justify-content:space-between; width:100%; align-items:center;">
-                    <span style="font-weight:bold;">🏆 ${item.winner_name}</span>
-                    <span style="color:#34c759; font-weight:900;">+${item.amount} 🪙</span>
+                <div style="display:flex; justify-content:space-between; width:100%; align-items:center; margin-bottom: 10px;">
+                    <span style="font-weight:bold; color: #ffcc00;">🏆 ${item.winner_name}</span>
+                    <span style="color:#34c759; font-weight:900; font-size: 18px;">+${item.amount} 🪙</span>
+                </div>
+                <div style="font-size: 12px; color: #8e8e93; white-space: pre-line;">
+                    ${playersText}
                 </div>
             `;
-            div.onclick = () => {
-                let playersText = item.players.map(p => `${p.name}: ${p.bet} 🪙 ${p.is_winner ? '🏆' : ''}`).join('\n');
-                tg.showAlert(`Победитель: ${item.winner_name}\nСумма: ${item.amount} 🪙\n\nУчастники:\n${playersText}`);
-            };
             list.appendChild(div);
         });
-    } catch (e) { console.error(e); }
-}
-
-function openHistory() {
-    loadHistory();
-    document.getElementById('history-modal').classList.add('active');
+    } catch (e) {
+        list.innerHTML = '<p style="text-align:center;color:#888;">Ошибка загрузки истории</p>';
+        console.error(e);
+    }
 }
 
 // ОБЩИЕ ФУНКЦИИ
@@ -555,7 +560,6 @@ function openGame(game) {
     document.getElementById('screen-' + game).classList.add('active');
     if (game === 'hockey') {
         startHockeyPolling();
-        loadHistory();
     }
     if (tg.HapticFeedback) tg.HapticFeedback.impactOccurred('soft');
 }

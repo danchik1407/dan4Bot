@@ -73,6 +73,7 @@ async def get_hockey_state():
     if game_state["status"] == "waiting":
         time_left = 15 - (now - game_state["last_update"])
 
+        # Добавляем ботов
         if time_left <= 8 and game_state["target_bots"] == 0:
             game_state["target_bots"] = random.randint(1, 5)
 
@@ -88,12 +89,12 @@ async def get_hockey_state():
 
                 game_state["players"].append({
                     "id": str(random.randint(10000, 99999)), "name": bot_name, "avatar": "",
-                    # Аватарка пустая, рисуем букву
                     "bet": bot_bet, "color": bot_color, "is_bot": True
                 })
                 game_state["bank"] += bot_bet
                 game_state["last_bot_added"] = now
 
+        # Старт раунда
         if time_left <= 0:
             game_state["status"] = "rolling"
             game_state["last_update"] = now
@@ -105,6 +106,7 @@ async def get_hockey_state():
                 for p in game_state["players"]:
                     p["percent"] = 0
 
+            # СРАЗУ ОПРЕДЕЛЯЕМ ПОБЕДИТЕЛЯ
             if game_state["players"]:
                 winner = random.choice(game_state["players"])
                 game_state["winner"] = winner
@@ -118,11 +120,13 @@ async def get_hockey_state():
                 game_state["win_x"] = 50
 
     elif game_state["status"] == "rolling":
-        if now - game_state["last_update"] > 10:
+        # Анимация длится 6.5 секунд
+        if now - game_state["last_update"] > 6.5:
             game_state["status"] = "finished"
             game_state["last_update"] = now
 
             if game_state["winner"]:
+                # Сохраняем в историю
                 history.insert(0, {
                     "round_id": game_state["round_id"],
                     "winner_name": game_state["winner"]["name"],
@@ -133,7 +137,8 @@ async def get_hockey_state():
                 if len(history) > 10: history.pop()
 
     elif game_state["status"] == "finished":
-        if now - game_state["last_update"] > 5:
+        # Ждем 4 секунды на показ модалки
+        if now - game_state["last_update"] > 4:
             if game_state["winner"] and not game_state["is_paid"]:
                 game_state["is_paid"] = True
                 winner_id = game_state["winner"]["id"]
@@ -147,6 +152,7 @@ async def get_hockey_state():
                 except Exception as e:
                     print(f"❌ Ошибка выплаты: {e}")
 
+            # Новый раунд
             game_state = {
                 "status": "waiting", "timer": 15, "bank": 0, "players": [],
                 "winner": None, "win_x": 50, "last_update": now,
