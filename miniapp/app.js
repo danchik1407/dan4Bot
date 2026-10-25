@@ -11,7 +11,7 @@ if (user) {
     }
 }
 
-const API_URL = "https://aura-api-mptt.onrender.com";
+const API_URL = "https://aura-api-mptt.onrender.com"; // Убедись, что это твой актуальный URL
 let balance = 0, keys = 0, currentBet = 10, inventory = [], lastChestTime = 0, isProcessing = false;
 let hockeyInterval = null, hasBetThisRound = false, hasShownWinner = false;
 
@@ -73,40 +73,67 @@ async function placeHockeyBet() {
     isProcessing = false;
 }
 
+// ИСПРАВЛЕННАЯ ФИЗИКА ШАЙБЫ
 function startBallPhysics() {
     if (ball.active) return;
+
     ball.x = 50; ball.y = 50;
     const angle = Math.random() * Math.PI * 2;
-    ball.vx = Math.cos(angle) * 1.5; ball.vy = Math.sin(angle) * 1.5;
+    ball.vx = Math.cos(angle) * 1.2;
+    ball.vy = Math.sin(angle) * 1.2;
     ball.active = true;
 
     const arena = document.getElementById('hockey-arena');
     const ballEl = document.getElementById('hockey-ball');
 
+    arena.style.transform = 'scale(1)';
+    arena.style.transformOrigin = 'center center';
+
+    let scale = 1;
+    const maxScale = 2.5;
+
     const step = () => {
         if (!ball.active) return;
-        ball.x += ball.vx; ball.y += ball.vy;
-        if (ball.x <= 0 || ball.x >= 100) { ball.vx *= -1; ball.x = Math.max(0, Math.min(100, ball.x)); playSound('click'); }
-        if (ball.y <= 0 || ball.y >= 100) { ball.vy *= -1; ball.y = Math.max(0, Math.min(100, ball.y)); playSound('click'); }
 
-        ball.vx *= 0.985; ball.vy *= 0.985;
-        if (ballEl) { ballEl.style.left = ball.x + '%'; ballEl.style.top = ball.y + '%'; }
+        ball.vx *= 0.985;
+        ball.vy *= 0.985;
+
+        ball.x += ball.vx;
+        ball.y += ball.vy;
+
+        if (ball.x <= 0 || ball.x >= 100) {
+            ball.vx *= -1;
+            ball.x = Math.max(0, Math.min(100, ball.x));
+            playSound('click');
+        }
+        if (ball.y <= 0 || ball.y >= 100) {
+            ball.vy *= -1;
+            ball.y = Math.max(0, Math.min(100, ball.y));
+            playSound('click');
+        }
+
+        if (ballEl) {
+            ballEl.style.left = ball.x + '%';
+            ballEl.style.top = ball.y + '%';
+        }
 
         const speed = Math.sqrt(ball.vx**2 + ball.vy**2);
-        if (speed < 1.5 && arena) {
-            if (!arena.classList.contains('zoomed')) arena.classList.add('zoomed');
+        if (speed < 0.5) {
+            scale += (maxScale - scale) * 0.05;
+            arena.style.transform = `scale(${scale})`;
             arena.style.transformOrigin = `${ball.x}% ${ball.y}%`;
         }
 
-        if (Math.abs(ball.vx) < 0.1 && Math.abs(ball.vy) < 0.1) {
+        if (Math.abs(ball.vx) < 0.05 && Math.abs(ball.vy) < 0.05) {
             ball.active = false;
             fetch(`${API_URL}/api/finish_hockey`, {
                 method: 'POST', headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ initData: tg.initData, x: ball.x, y: ball.y })
             });
-        } else {
-            ball.animationId = requestAnimationFrame(step);
+            return;
         }
+
+        ball.animationId = requestAnimationFrame(step);
     };
     ball.animationId = requestAnimationFrame(step);
 }
@@ -124,11 +151,19 @@ async function pollHockeyState() {
         if (state.status === 'waiting') {
             statusEl.innerText = `Ставки: ${state.timer} сек`; statusEl.style.color = '#ffcc00';
             document.getElementById('hockey-controls').style.display = 'block';
-            hasBetThisRound = false; hasShownWinner = false; ball.active = false;
+
+            if (hasBetThisRound) hasBetThisRound = false;
+            hasShownWinner = false;
+            ball.active = false;
+
             if (ball.animationId) cancelAnimationFrame(ball.animationId);
+
             const ballEl = document.getElementById('hockey-ball');
             if (ballEl) { ballEl.style.left = '50%'; ballEl.style.top = '50%'; }
-            if (arena) { arena.classList.remove('zoomed'); arena.style.transformOrigin = 'center center'; }
+            if (arena) {
+                arena.style.transform = 'scale(1)';
+                arena.style.transformOrigin = 'center center';
+            }
             document.getElementById('winner-modal').classList.remove('active');
 
         } else if (state.status === 'rolling') {
@@ -140,7 +175,11 @@ async function pollHockeyState() {
             statusEl.innerText = 'Раунд окончен!'; statusEl.style.color = '#ff3b30';
             ball.active = false;
             if (ball.animationId) cancelAnimationFrame(ball.animationId);
-            if (arena) { arena.classList.remove('zoomed'); arena.style.transformOrigin = 'center center'; }
+
+            if (arena) {
+                arena.style.transform = 'scale(1)';
+                arena.style.transformOrigin = 'center center';
+            }
 
             const modal = document.getElementById('winner-modal');
             if (state.winner && !hasShownWinner) {
@@ -297,6 +336,7 @@ function checkChestCooldown() {
 
 let pendingChestReward = 0, pendingChestIsKey = false, pendingChestIsGold = false;
 
+// ИСПРАВЛЕННАЯ АНИМАЦИЯ СУНДУКОВ
 async function openChest(type) {
     if (isProcessing) return;
     const isGold = type === 'gold';
@@ -317,12 +357,11 @@ async function openChest(type) {
     const roulette = document.getElementById('roulette-container');
     roulette.style.display = 'block';
     const track = document.getElementById('roulette-track');
-    track.style.transition = 'none';
+
     track.style.transform = 'translateX(0)';
     track.innerHTML = '';
     void track.offsetWidth;
 
-    // Рандомная остановка (20-80 элемент)
     let winIndex = Math.floor(Math.random() * 60) + 20;
     let finalAmount = 0, isKey = false;
 
@@ -347,23 +386,36 @@ async function openChest(type) {
         track.appendChild(div);
     }
 
-    setTimeout(() => {
-        track.style.transition = 'transform 8s cubic-bezier(0.15, 0.9, 0.1, 1)';
-        const itemWidth = 81, windowWidth = 350;
-        const centerOffset = (windowWidth / 2) - (itemWidth / 2);
-        const moveX = -((winIndex * itemWidth) - centerOffset);
-        track.style.transform = `translateX(${moveX}px)`;
-    }, 100);
+    const itemWidth = 81;
+    const windowWidth = 350;
+    const centerOffset = (windowWidth / 2) - (itemWidth / 2);
+    const targetScroll = (winIndex * itemWidth) - centerOffset;
 
-    setTimeout(() => {
-        pendingChestReward = finalAmount; pendingChestIsKey = isKey; pendingChestIsGold = isGold;
-        const modal = document.getElementById('chest-win-modal');
-        document.getElementById('chest-win-icon').innerText = isKey ? '🔑' : '💎';
-        document.getElementById('chest-win-text').innerText = isKey ? 'ЗОЛОТОЙ КЛЮЧ!' : `Вы получили ${finalAmount} 🪙`;
-        modal.classList.add('active');
-        playSound('win');
-        if (tg.HapticFeedback) tg.HapticFeedback.notificationOccurred('success');
-    }, 8200);
+    let start = null;
+    const duration = 6000;
+
+    function step(timestamp) {
+        if (!start) start = timestamp;
+        const progress = timestamp - start;
+        const easeOut = 1 - Math.pow(1 - Math.min(progress / duration, 1), 4);
+        const currentScroll = targetScroll * easeOut;
+        track.style.transform = `translateX(-${currentScroll}px)`;
+
+        if (progress < duration) {
+            requestAnimationFrame(step);
+        } else {
+            pendingChestReward = finalAmount;
+            pendingChestIsKey = isKey;
+            pendingChestIsGold = isGold;
+            const modal = document.getElementById('chest-win-modal');
+            document.getElementById('chest-win-icon').innerText = isKey ? '🔑' : '💎';
+            document.getElementById('chest-win-text').innerText = isKey ? 'ЗОЛОТОЙ КЛЮЧ!' : `Вы получили ${finalAmount} 🪙`;
+            modal.classList.add('active');
+            playSound('win');
+            if (tg.HapticFeedback) tg.HapticFeedback.notificationOccurred('success');
+        }
+    }
+    requestAnimationFrame(step);
 }
 
 async function claimChestReward() {
@@ -462,6 +514,7 @@ function getBet(game) {
     return val;
 }
 
+// МИНЫ
 let minesActive = false, minesCoef = 1.0, minesSafeOpened = 0, selectedMines = 1;
 const board = document.getElementById('mines-board');
 for (let i = 0; i < 16; i++) {

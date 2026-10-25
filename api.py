@@ -68,9 +68,10 @@ class FinishHockey(BaseModel): initData: str; x: float; y: float
 async def get_hockey_state():
     global game_state
     now = time.time()
-    time_left = 20 - (now - game_state["last_update"])
 
     if game_state["status"] == "waiting":
+        time_left = 20 - (now - game_state["last_update"])
+
         if time_left <= 8 and game_state["target_bots"] == 0:
             game_state["target_bots"] = random.randint(1, 5)
 
@@ -102,12 +103,14 @@ async def get_hockey_state():
                     p["percent"] = 0
 
     elif game_state["status"] == "rolling":
-        if now - game_state["last_update"] > 12:
+        # Даем 10 секунд на полную анимацию и остановку шайбы
+        if now - game_state["last_update"] > 10:
             game_state["status"] = "finished"
             game_state["last_update"] = now
 
     elif game_state["status"] == "finished":
-        if now - game_state["last_update"] > 4:
+        # Даем 5 секунд на просмотр модалки победителя
+        if now - game_state["last_update"] > 5:
             if game_state["winner"] and not game_state["is_paid"]:
                 game_state["is_paid"] = True
                 winner_id = game_state["winner"]["id"]
@@ -119,15 +122,17 @@ async def get_hockey_state():
                         new_coins = current_coins + bank_amount
                         supabase.table("users").update({"coins": new_coins}).eq("user_id", winner_id).execute()
                 except Exception as e:
-                    print(f"❌ Ошибка: {e}")
+                    print(f"❌ Ошибка выплаты: {e}")
 
             game_state = {
                 "status": "waiting", "timer": 20, "bank": 0, "players": [],
                 "winner": None, "last_update": now,
                 "last_bot_added": 0, "target_bots": 0, "is_paid": False
             }
+            return game_state
 
-    game_state["timer"] = max(0, int(time_left) if game_state["status"] == "waiting" else 0)
+    time_left = 20 - (now - game_state["last_update"]) if game_state["status"] == "waiting" else 0
+    game_state["timer"] = max(0, int(time_left))
     return game_state
 
 
