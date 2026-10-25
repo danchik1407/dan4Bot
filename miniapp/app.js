@@ -494,16 +494,30 @@ async function crashAction() {
         if (!crashBetActive) {
             const bet = getBet('crash');
             if (balance < bet) { isProcessing = false; return tg.showAlert("Недостаточно коинов!"); }
+
+            // ОПТИМИСТИЧНО: сразу меняем кнопку
+            crashBetActive = true;
+            balance -= bet; updateUI();
+            const btn = document.getElementById('crash-btn');
+            btn.innerText = 'Забрать (x1.00)';
+            btn.style.background = '#34c759';
+
             const res = await fetch(`${API_URL}/api/crash_bet`, {
                 method: 'POST', headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ initData: tg.initData, amount: bet })
             });
-            if (!res.ok) { const e = await res.json().catch(()=>({})); isProcessing = false; return tg.showAlert(e.detail || "Ошибка"); }
+            if (!res.ok) {
+                // откат
+                crashBetActive = false;
+                balance += bet; updateUI();
+                btn.innerText = 'Поставить ставку';
+                btn.style.background = '#007aff';
+                const e = await res.json().catch(()=>({}));
+                isProcessing = false;
+                return tg.showAlert(e.detail || "Ставки закрыты");
+            }
             const data = await res.json();
             balance = data.new_balance; updateUI();
-            crashBetActive = true;
-            document.getElementById('crash-btn').innerText = 'Забрать (x1.00)';
-            document.getElementById('crash-btn').style.background = '#34c759';
             playSound('click');
         } else {
             const res = await fetch(`${API_URL}/api/crash_cashout`, {
@@ -543,8 +557,8 @@ async function pollCrashState() {
         const betContainer = document.getElementById('crash-bet-container');
         const historyEl = document.getElementById('crash-history-bar');
 
-        const myId = user ? String(user.id) : '';
-        const me = (state.players || []).find(p => String(p.id) === myId);
+        const myId = user && user.id ? String(user.id) : null;
+        const me = myId ? (state.players || []).find(p => String(p.id) === myId) : null;
 
         if (state.status === 'waiting') {
             statusEl.innerText = `Ставки: ${state.timer} сек`;
@@ -580,7 +594,8 @@ async function pollCrashState() {
             multEl.innerText = `x${state.multiplier.toFixed(2)}`;
             betContainer.style.display = 'none';
 
-            if (crashBetActive && (!me || me.cashout_mult > 0)) {
+            // сбрасываем флаг ТОЛЬКО если сервер явно показал, что мой игрок уже забрал
+            if (crashBetActive && me && me.cashout_mult > 0) {
                 crashBetActive = false;
                 btn.innerText = 'Поставить ставку';
                 btn.style.background = '#007aff';
@@ -627,7 +642,7 @@ async function pollCrashState() {
             (state.players || []).forEach(p => {
                 const d = document.createElement('div');
                 d.className = 'crash-part-item';
-                const isMe = String(p.id) === myId;
+                const isMe = myId && String(p.id) === myId;
                 const cashout = p.cashout_mult > 0
                     ? ` → <b style="color:#34c759">x${Number(p.cashout_mult).toFixed(2)}</b>`
                     : '';

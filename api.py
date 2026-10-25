@@ -429,7 +429,6 @@ async def crash_cashout(data: CrashCashout):
     player["cashout_mult"] = crash_state["multiplier"]
     win_amount = int(player["bet"] * player["cashout_mult"])
 
-    # Начисляем сразу, чтобы клиент увидел новый баланс
     try:
         res = supabase.table("users").select("coins").eq("user_id", int(user_id)).execute()
         current_coins = int(res.data[0].get("coins", 0)) if res.data else 0
