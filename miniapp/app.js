@@ -549,13 +549,17 @@ function animateFlight() {
 
     const elapsed = (Date.now() / 1000) - flightStartTime;
 
-    // Формула Ease-in-out с ускорением после 2х
+    // Формула с плавным ускорением после 2х и 3х
     let smoothMult = 1.0;
     if (elapsed <= 2.0) {
         const t = elapsed / 2.0;
-        smoothMult = 1.0 + (t ** 2) * 0.2;
+        smoothMult = 1.0 + (t ** 2) * 0.2; // Плавный разгон до 1.2 за 2 секунды
+    } else if (elapsed <= 4.0) {
+        const t = (elapsed - 2.0) / 2.0;
+        smoothMult = 1.2 + t * 0.8 + (t ** 2) * 0.8; // Ускорение от 1.2 до 2.8 за 2 секунды
     } else {
-        smoothMult = 1.2 + (elapsed - 2.0) * 0.15 + Math.pow(elapsed - 2.0, 1.2) * 0.05;
+        const t = elapsed - 4.0;
+        smoothMult = 2.8 + t * 1.5 + (t ** 1.5) * 0.5; // После 2.8 летит еще быстрее
     }
 
     if (smoothMult > currentCrashData.multiplier) {
