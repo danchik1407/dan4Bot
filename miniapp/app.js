@@ -351,8 +351,30 @@ function getBet(game) { const input = document.getElementById(game + '-bet'); if
 // ================= МИНЫ =================
 let minesActive = false, minesCoef = 1.0, minesSafeOpened = 0, selectedMines = 1;
 const board = document.getElementById('mines-board');
-for (let i = 0; i < 16; i++) { const cell = document.createElement('div'); cell.className = 'cell'; cell.dataset.index = i; cell.onclick = () => clickMineCell(cell); board.appendChild(cell); }
-function selectMines(count, element) { if (minesActive) return; selectedMines = count; document.querySelectorAll('.mine-btn').forEach(btn => btn.classList.remove('active')); element.classList.add('active'); }
+
+for (let i = 0; i < 16; i++) {
+    const cell = document.createElement('div');
+    cell.className = 'cell';
+    cell.dataset.index = i;
+    cell.onclick = () => clickMineCell(cell);
+    board.appendChild(cell);
+}
+
+const MINES_MULTIPLIERS = {
+    1: [1.03, 1.10, 1.18, 1.28, 1.40, 1.55, 1.75, 2.00, 2.35, 2.80, 3.40, 4.20, 5.30, 7.00, 10.00],
+    2: [1.06, 1.18, 1.35, 1.58, 1.88, 2.28, 2.82, 3.55, 4.60, 6.10, 8.30, 11.50, 16.50, 25.00, 40.00],
+    3: [1.10, 1.30, 1.60, 2.00, 2.55, 3.35, 4.50, 6.20, 8.80, 13.00, 20.00, 32.00, 55.00, 100.00, 200.00],
+    4: [1.15, 1.45, 1.90, 2.55, 3.50, 4.95, 7.20, 10.80, 17.00, 28.00, 48.00, 85.00, 160.00, 320.00, 700.00],
+    5: [1.20, 1.60, 2.25, 3.20, 4.70, 7.20, 11.50, 19.00, 32.00, 58.00, 110.00, 220.00, 480.00, 1200.00, 3500.00]
+};
+
+function selectMines(count, element) {
+    if (minesActive) return;
+    selectedMines = count;
+    document.querySelectorAll('.mine-btn').forEach(btn => btn.classList.remove('active'));
+    element.classList.add('active');
+}
+
 async function minesAction() {
     if (isProcessing) return;
     if (minesActive) {
@@ -365,16 +387,24 @@ async function minesAction() {
         btn.disabled = false; btn.innerText = 'Сделать ставку'; btn.style.background = '#007aff';
         isProcessing = false; return;
     }
+
     currentBet = getBet('mines');
     if (balance < currentBet) return tg.showAlert("Недостаточно средств!");
     isProcessing = true; await changeBalance(-currentBet); isProcessing = false;
+
     minesActive = true; minesCoef = 1.0; minesSafeOpened = 0;
     document.querySelectorAll('.cell').forEach(c => { c.className = 'cell'; c.innerText = ''; c.style.pointerEvents = 'auto'; });
     document.getElementById('mines-btn').innerText = 'Забрать (0 🪙)'; document.getElementById('mines-btn').style.background = '#34c759';
     document.getElementById('mines-current-coef').innerText = 'x1.00'; document.getElementById('mines-cashout-amount').innerText = '0';
     playSound('click');
-    window.mineIndices = []; while(window.mineIndices.length < selectedMines) { let r = Math.floor(Math.random() * 16); if(window.mineIndices.indexOf(r) === -1) window.mineIndices.push(r); }
+
+    window.mineIndices = [];
+    while(window.mineIndices.length < selectedMines) {
+        let r = Math.floor(Math.random() * 16);
+        if(window.mineIndices.indexOf(r) === -1) window.mineIndices.push(r);
+    }
 }
+
 function clickMineCell(cell) {
     if (!minesActive || isProcessing) return;
     const idx = parseInt(cell.dataset.index); if (cell.classList.contains('flipped')) return;
@@ -388,10 +418,14 @@ function clickMineCell(cell) {
             const btn = document.getElementById('mines-btn'); btn.innerText = `Играть снова`; btn.style.background = '#007aff';
         } else {
             cell.classList.add('good'); cell.innerText = '💎'; minesSafeOpened++;
-            let base = 1.0; if (selectedMines === 1) base = 1.05; if (selectedMines === 2) base = 1.15; if (selectedMines === 3) base = 1.30;
-            let multiplier = 1 + (Math.log2(minesSafeOpened) * 0.3); minesCoef = base * multiplier;
+
+            const multipliers = MINES_MULTIPLIERS[selectedMines];
+            minesCoef = multipliers[minesSafeOpened - 1] || multipliers[multipliers.length - 1];
+
             const cashout = Math.floor(currentBet * minesCoef);
-            document.getElementById('mines-current-coef').innerText = `x${minesCoef.toFixed(2)}`; document.getElementById('mines-cashout-amount').innerText = cashout; document.getElementById('mines-btn').innerText = `Забрать (${cashout} 🪙)`;
+            document.getElementById('mines-current-coef').innerText = `x${minesCoef.toFixed(2)}`;
+            document.getElementById('mines-cashout-amount').innerText = cashout;
+            document.getElementById('mines-btn').innerText = `Забрать (${cashout} 🪙)`;
         }
         isProcessing = false;
     }, 200);

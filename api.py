@@ -14,6 +14,9 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, 
 supabase: Client = create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_KEY"))
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
+# ЗАМЕНИ НА СВОЙ ID
+ADMIN_ID = 123456789
+
 BOT_NAMES = ["Shark_V", "LuckyFox", "NeonWolf", "GhostByte", "PixelKing", "CyberCat", "IronFist", "VoidWalker",
              "ShadowAce", "RogueOne"]
 BOT_COLORS = ["#ff3b30", "#ff9500", "#ffcc00", "#34c759", "#007aff", "#5856d6", "#af52de", "#ff2d55"]
@@ -22,20 +25,10 @@ WHALE_NAMES = ["KingPin", "MrMoney", "WhaleGod", "BigBoss", "RichMan", "GoldFing
 WHALE_COLORS = ["#ffd700", "#c0c0c0", "#b8860b", "#ff8c00", "#8b0000", "#daa520"]
 
 game_state = {
-    "status": "waiting",
-    "timer": 15,
-    "bank": 0,
-    "players": [],
-    "winner": None,
-    "last_update": time.time(),
-    "last_bot_added": 0,
-    "target_bots": 0,
-    "is_paid": False,
-    "round_id": str(int(time.time())),
-    "whales_added": 0,
-    "whale_chance": random.random() < 0.07
+    "status": "waiting", "timer": 15, "bank": 0, "players": [], "winner": None,
+    "last_update": time.time(), "last_bot_added": 0, "target_bots": 0, "is_paid": False,
+    "round_id": str(int(time.time())), "whales_added": 0, "whale_chance": random.random() < 0.07
 }
-
 history = []
 
 
@@ -86,7 +79,6 @@ async def get_hockey_state():
         if time_left <= 10 and game_state["target_bots"] > 0:
             current_bots = sum(1 for p in game_state["players"] if p["is_bot"] and p["bet"] < 500)
             current_whales = sum(1 for p in game_state["players"] if p["is_bot"] and p["bet"] >= 500)
-
             bot_delay = random.uniform(1.0, 4.0)
 
             if current_bots < game_state["target_bots"] and len(game_state["players"]) < 20 and (
@@ -103,7 +95,6 @@ async def get_hockey_state():
                 })
                 game_state["bank"] += bot_bet
                 game_state["last_bot_added"] = now
-
                 game_state["target_bots"] = random.randint(1, 5)
 
                 total_bank = game_state["bank"]
@@ -145,7 +136,6 @@ async def get_hockey_state():
                     p["percent"] = 0
 
     elif game_state["status"] == "rolling":
-        # Ждем 15.5 секунд (15 сек анимация + запас)
         if now - game_state["last_update"] > 15.5:
             game_state["status"] = "finished"
             game_state["last_update"] = now
@@ -194,7 +184,6 @@ async def get_hockey_state():
 async def place_bet(data: PlaceBet):
     user = verify_telegram_data(data.initData)
     if not user: raise HTTPException(status_code=401, detail="Invalid auth data")
-
     user_id = str(user["id"])
 
     if game_state["status"] != "waiting": raise HTTPException(status_code=400, detail="Ставки закрыты")
@@ -342,8 +331,9 @@ async def update_keys(data: UpdateKeys):
 
 @app.get("/api/global_top")
 async def get_global_top():
-    res = supabase.table("users").select("username, coins").order("coins", desc=True).limit(50).execute()
-    return res.data
+    res = supabase.table("users").select("user_id, username, coins").order("coins", desc=True).limit(50).execute()
+    filtered = [u for u in res.data if int(u["user_id"]) != ADMIN_ID]
+    return filtered[:50]
 
 
 if __name__ == "__main__":

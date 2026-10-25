@@ -42,8 +42,8 @@ main { padding: 0 16px; }
 .bet-buttons button { flex: 1; background: #2a2a2a; border: 1px solid #444; color: white; padding: 10px; border-radius: 10px; font-weight: 700; cursor: pointer; }
 .bet-buttons button:active { background: #444; }
 
-.mines-selector-buttons { display: flex; gap: 10px; width: 100%; max-width: 350px; margin-bottom: 15px; }
-.mine-btn { flex: 1; background: var(--card); border: 1px solid #444; color: var(--text-muted); padding: 15px 0; border-radius: 12px; font-size: 18px; font-weight: 800; cursor: pointer; transition: 0.2s; }
+.mines-selector-buttons { display: flex; gap: 5px; width: 100%; max-width: 350px; margin-bottom: 15px; }
+.mine-btn { flex: 1; background: var(--card); border: 1px solid #444; color: var(--text-muted); padding: 12px 0; border-radius: 10px; font-size: 14px; font-weight: 800; cursor: pointer; transition: 0.2s; }
 .mine-btn.active { background: #ff3b30; border-color: #ff3b30; color: white; box-shadow: 0 0 15px rgba(255, 59, 48, 0.5); }
 .mine-btn:active { transform: scale(0.95); }
 

@@ -100,10 +100,12 @@
                     <button onclick="addBet('mines', 500)">+500</button>
                 </div>
             </div>
-            <div class="mines-selector-buttons">
+            <div class="mines-selector-buttons" style="gap: 5px;">
                 <button class="mine-btn active" onclick="selectMines(1, this)">1 💣</button>
                 <button class="mine-btn" onclick="selectMines(2, this)">2 💣</button>
                 <button class="mine-btn" onclick="selectMines(3, this)">3 💣</button>
+                <button class="mine-btn" onclick="selectMines(4, this)">4 💣</button>
+                <button class="mine-btn" onclick="selectMines(5, this)">5 💣</button>
             </div>
             <div class="mines-grid" id="mines-board"></div>
             <div class="game-info-bar" id="mines-info"><span>Кэф: <b id="mines-current-coef">x1.00</b></span><span>Забрать: <b id="mines-cashout-amount">0</b> 🪙</span></div>
