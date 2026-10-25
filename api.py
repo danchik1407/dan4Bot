@@ -311,7 +311,6 @@ async def get_crash_state(initData: str = ""):
     elif crash_state["status"] == "flying":
         elapsed = now - crash_state["status_start"]
 
-        # НОВАЯ ПЛАВНАЯ ФОРМУЛА (Ease-in-out)
         if elapsed <= 2.0:
             t = elapsed / 2.0
             current_mult = 1.0 + (t ** 2) * 0.2

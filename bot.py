@@ -155,6 +155,50 @@ async def process_random_coin_drop(message: Message):
         pass
 
 
+# ================= 🎁 ПРОМОКОДЫ (ДЛЯ ВСЕХ) =================
+@dp.message(F.text & F.text.regexp(r'(?i)^[/!]?промо(?:\s|$)'))
+async def cmd_promo(message: Message):
+    parts = message.text.strip().split()
+    if len(parts) < 2:
+        return await message.answer("❌ Формат: <code>!промо КОД</code>", parse_mode="HTML")
+
+    code = parts[1].strip()
+
+    def _fetch():
+        return supabase.table("promocodes").select("*").eq("code", code).execute()
+
+    res = await asyncio.to_thread(_fetch)
+    if not res.data:
+        return await message.answer("❌ Промокод не найден.")
+
+    promo = res.data[0]
+    if promo["uses"] <= 0:
+        return await message.answer("❌ Этот промокод уже закончился.")
+
+    user_id = str(message.from_user.id)
+
+    def _check_used():
+        return supabase.table("promocode_uses").select("*").eq("code", code).eq("user_id", user_id).execute()
+
+    used_res = await asyncio.to_thread(_check_used)
+    if used_res.data:
+        return await message.answer("❌ Вы уже активировали этот промокод.")
+
+    # Выдаем награду
+    new_uses = promo["uses"] - 1
+    await asyncio.to_thread(lambda: supabase.table("promocodes").update({"uses": new_uses}).eq("code", code).execute())
+
+    user = await get_user(message.from_user.id, message.from_user.username)
+    await update_user(message.from_user.id, coins=user["coins"] + promo["amount"])
+
+    await asyncio.to_thread(
+        lambda: supabase.table("promocode_uses").insert({"code": code, "user_id": user_id}).execute())
+
+    await message.answer(
+        f"🎉 <b>Промокод активирован!</b>\n\n🎁 Вы получили: <b>{promo['amount']}</b> 🪙\n💰 Новый баланс: <b>{user['coins'] + promo['amount']}</b> 🪙",
+        parse_mode="HTML")
+
+
 # ================= 🛍️ МАГАЗИН =================
 @dp.message(F.text & F.text.regexp(r'(?i)^[/!]?магазин\s*$'))
 async def cmd_shop(message: Message):
@@ -768,6 +812,8 @@ async def cmd_help(message: Message):
         "━━━━━━━━━━━━━━━━━━━━\n\n"
         "🎁 <b>Случайные коины:</b>\n"
         "• Просто пиши в чате — с шансом 0.5% получишь 1-5 🪙\n\n"
+        "🎟️ <b>Промокоды:</b>\n"
+        "• <code>!промо код</code> — активировать промокод\n\n"
         "📦 <b>Сундуки:</b>\n"
         "• <code>!открыть</code> — открыть сундук (КД 5 часов)\n\n"
         "💰 <b>Экономика:</b>\n"
