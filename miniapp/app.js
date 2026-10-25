@@ -69,7 +69,7 @@ async function placeHockeyBet() {
     isProcessing = false;
 }
 
-// ФИЗИКА ШАРИКА: РЕЗКИЙ СТАРТ, ПЛАВНОЕ ТОРМОЖЕНИЕ, ЗУМ ЗА 4 СЕК
+// ФИЗИКА ШАРИКА: 15 СЕК, ЗУМ ЗА 4 СЕК, ТОРМОЖЕНИЕ
 function startBallPhysics() {
     if (ball.active || ball.hasStartedAnim) return;
     ball.hasStartedAnim = true;
@@ -84,6 +84,7 @@ function startBallPhysics() {
     const arena = document.getElementById('hockey-arena');
     const ballEl = document.getElementById('hockey-ball');
 
+    // СБРОС ЗУМА
     arena.style.transform = 'scale(1)';
     arena.style.transformOrigin = 'center center';
 
@@ -119,9 +120,11 @@ function startBallPhysics() {
             ballEl.style.top = ball.y + '%';
         }
 
+        // ЗУМ
         if (elapsed > zoomStartTime) {
             scale += (maxScale - scale) * 0.02;
             arena.style.transform = `scale(${scale})`;
+            // ВАЖНО: зум следует за шариком
             arena.style.transformOrigin = `${ball.x}% ${ball.y}%`;
         }
 

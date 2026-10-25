@@ -14,7 +14,7 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, 
 supabase: Client = create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_KEY"))
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
-# ЗАМЕНИ НА СВОЙ ID
+# ВПИШИ СВОЙ ID
 ADMIN_ID = 123456789
 
 BOT_NAMES = ["Shark_V", "LuckyFox", "NeonWolf", "GhostByte", "PixelKing", "CyberCat", "IronFist", "VoidWalker",
