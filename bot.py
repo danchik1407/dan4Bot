@@ -43,7 +43,6 @@ MIN_BET = 10
 active_summons: dict[int, bool] = {}
 active_challenges: dict[str, dict] = {}
 
-
 # ================= БАЗА ДАННЫХ =================
 async def get_user(user_id: int, username: str = None, chat_id: int = None):
     def _fetch():
@@ -74,15 +73,12 @@ async def get_user(user_id: int, username: str = None, chat_id: int = None):
 
     return user
 
-
 async def update_user(user_id: int, **kwargs):
     await asyncio.to_thread(lambda: supabase.table("users").update(kwargs).eq("user_id", user_id).execute())
-
 
 async def get_users_from_chat(chat_id: int):
     def _fetch(): return supabase.table("users").select("*").eq("chat_id", chat_id).execute().data
     return await asyncio.to_thread(_fetch)
-
 
 def find_user_in_list(users_list, arg_username):
     clean_username = arg_username.lstrip("@").lower()
@@ -91,16 +87,13 @@ def find_user_in_list(users_list, arg_username):
             return SimpleNamespace(id=int(u["user_id"]), username=u["username"])
     return None
 
-
 # ================= ИНИЦИАЛИЗАЦИЯ =================
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-
 # ================= ВСПОМОГАТЕЛЬНЫЕ =================
 def is_admin(user_id: int) -> bool:
     return user_id in ADMIN_IDS
-
 
 async def is_chat_admin(user_id: int, chat_id: int) -> bool:
     try:
@@ -108,7 +101,6 @@ async def is_chat_admin(user_id: int, chat_id: int) -> bool:
         return member.status in (ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR)
     except Exception:
         return False
-
 
 def format_time(seconds: float) -> str:
     seconds = int(seconds)
@@ -120,11 +112,9 @@ def format_time(seconds: float) -> str:
     if s and not h: parts.append(f"{s}с")
     return " ".join(parts) or "0с"
 
-
 def safe_text(text) -> str:
     import html as html_module
     return html_module.escape(str(text))
-
 
 # ================= 🎁 ДРОП =================
 async def process_random_coin_drop(message: Message):
@@ -152,7 +142,6 @@ async def process_random_coin_drop(message: Message):
     except Exception:
         pass
 
-
 # ================= 🛍️ МАГАЗИН =================
 @dp.message(F.text & F.text.regexp(r'(?i)^[/!]?магазин\s*$'))
 async def cmd_shop(message: Message):
@@ -167,7 +156,6 @@ async def cmd_shop(message: Message):
         [InlineKeyboardButton(text="⚱️ Купить Уник. Капсулу (500 🪙)", callback_data="buy_uniq_capsule")]
     ])
     await message.answer(text, parse_mode="HTML", reply_markup=kb)
-
 
 @dp.callback_query(F.data == "buy_capsule")
 async def cb_buy_capsule(callback: CallbackQuery):
@@ -184,7 +172,6 @@ async def cb_buy_capsule(callback: CallbackQuery):
     await update_user(callback.from_user.id, coins=new_coins, inventory=json.dumps(inv))
     await callback.answer("✅ Успешно куплено! Проверь !карман", show_alert=True)
 
-
 @dp.callback_query(F.data == "buy_uniq_capsule")
 async def cb_buy_uniq_capsule(callback: CallbackQuery):
     user = await get_user(callback.from_user.id, callback.from_user.username)
@@ -199,7 +186,6 @@ async def cb_buy_uniq_capsule(callback: CallbackQuery):
 
     await update_user(callback.from_user.id, coins=new_coins, inventory=json.dumps(inv))
     await callback.answer("✅ Успешно куплено! Проверь !карман", show_alert=True)
-
 
 # ================= 💰 ЭКОНОМИКА =================
 @dp.message(F.text & F.text.regexp(r'(?i)^[/!]?(карман|баланс)\s*$'))
@@ -232,7 +218,6 @@ async def cmd_pocket(message: Message):
 
     await message.answer(text, parse_mode="HTML")
 
-
 @dp.message(F.text & F.text.regexp(r'(?i)^[/!]?(топ)\s*$'))
 async def cmd_top(message: Message):
     users = await get_users_from_chat(message.chat.id) if message.chat.type in ("group", "supergroup") else await get_users_from_chat(None)
@@ -249,7 +234,6 @@ async def cmd_top(message: Message):
         msg += f"{prefix} {safe_text(display_name)} — <b>{u['coins']}</b> 🪙\n"
 
     await message.answer(msg, parse_mode="HTML")
-
 
 @dp.message(F.text & F.text.regexp(r'(?i)^[/!]?открыть\s*$'))
 async def cmd_open(message: Message):
@@ -269,7 +253,6 @@ async def cmd_open(message: Message):
         await message.answer(f"✨ <b>ЗОЛОТОЙ СУНДУК!</b> 🔑\n🎉 Выпало: <b>{reward}</b> 🪙", parse_mode="HTML")
     else:
         await message.answer(f"🎁 <b>Сундук открыт!</b>\n🎉 Выпало: <b>{reward}</b> 🪙", parse_mode="HTML")
-
 
 @dp.message(F.text & F.text.regexp(r'(?i)^[/!]?перевод(?:\s|$)'))
 async def cmd_transfer(message: Message):
@@ -296,7 +279,6 @@ async def cmd_transfer(message: Message):
     await update_user(target.id, coins=target_user["coins"] + amount)
 
     await message.answer(f"✅ <b>Перевод выполнен!</b>\n👤 Кому: @{target.username}\n💸 Сумма: <b>{amount}</b> 🪙", parse_mode="HTML")
-
 
 # ================= 🎲 КУБЫ =================
 @dp.message(F.text & F.text.regexp(r'(?i)^[/!]?кубы(?:\s|$)'))
@@ -338,7 +320,6 @@ async def cmd_dice(message: Message):
         f"⏳ Время на ответ: {CHALLENGE_TIMEOUT} секунд",
         parse_mode="HTML", reply_markup=kb,
     )
-
 
 @dp.callback_query(F.data.startswith("dice_accept|"))
 async def cb_dice_accept(callback: CallbackQuery):
@@ -383,7 +364,6 @@ async def cb_dice_accept(callback: CallbackQuery):
     await callback.message.answer(f"🎲 <b>Кубы брошены!</b>\n\n{result}", parse_mode="HTML")
     await callback.answer()
 
-
 @dp.callback_query(F.data.startswith("dice_decline|"))
 async def cb_dice_decline(callback: CallbackQuery):
     challenge_id = callback.data.split("|", 1)[1]
@@ -394,7 +374,6 @@ async def cb_dice_decline(callback: CallbackQuery):
     await callback.message.edit_text("❌ Вызов отклонён.")
     await callback.answer()
 
-
 # ================= 📛 ПОЗЫВНЫЕ =================
 @dp.message(F.text & F.text.regexp(r'(?i)^[/!]?(me|позывной)\s*$'))
 async def cmd_me(message: Message):
@@ -404,7 +383,6 @@ async def cmd_me(message: Message):
     else:
         await message.answer(f"👤 Имя: {safe_text(message.from_user.full_name)}\n💡 Установи позывной: <code>!setme 🔥</code>", parse_mode="HTML")
 
-
 @dp.message(F.text & F.text.regexp(r'(?i)^[/!]?setme\s+(.+)$'))
 async def cmd_setme(message: Message):
     emoji = message.text.split(maxsplit=1)[1].strip()
@@ -412,13 +390,11 @@ async def cmd_setme(message: Message):
     await update_user(message.from_user.id, call_sign=emoji)
     await message.answer(f"✅ Новый позывной: {emoji}")
 
-
 @dp.message(F.text & F.text.regexp(r'(?i)^[/!]?changeme\s*$'))
 async def cmd_changeme(message: Message):
     emoji = random.choice(["🔥", "⚡", "🐺", "🦊", "🦁", "🐯", "🐲", "👻", "🤖", "👽", "💀", "👑", "🎭", "🦅", "🐍"])
     await update_user(message.from_user.id, call_sign=emoji)
     await message.answer(f"✅ Новый случайный позывной: {emoji}")
-
 
 # ================= 📢 СОЗЫВЫ =================
 async def summon_all_members(chat_id: int, call_text: str, starter_id: int):
@@ -443,7 +419,6 @@ async def summon_all_members(chat_id: int, call_text: str, starter_id: int):
     finally:
         active_summons.pop(chat_id, None)
 
-
 @dp.message(F.text & F.text.regexp(r'(?i)^[/!]?all(?:\s|$)'))
 async def cmd_all(message: Message):
     if message.chat.type not in ("group", "supergroup"): return await message.answer("❌ Только для групп!")
@@ -458,7 +433,6 @@ async def cmd_all(message: Message):
     await message.answer(f"🔄 Начинаю созыв...", parse_mode="HTML")
     asyncio.create_task(summon_all_members(message.chat.id, call_text, message.from_user.id))
 
-
 @dp.message(F.text & F.text.regexp(r'(?i)^[/!]?(stop|стоп)\s*$'))
 async def cmd_stop(message: Message):
     if message.chat.type in ("group", "supergroup"):
@@ -469,7 +443,6 @@ async def cmd_stop(message: Message):
         await message.answer("⏹️ Созыв прекращён.")
     else:
         await message.answer("❌ Активных созывов нет.")
-
 
 @dp.message(F.text & F.text.regexp(r'(?i)^[/!]?(admins|админы)(?:\s|$)'))
 async def cmd_admins(message: Message):
@@ -484,7 +457,6 @@ async def cmd_admins(message: Message):
         await message.answer(f"📢 {safe_text(call_text)}\n\n" + ", ".join(mentions), parse_mode="HTML")
     except Exception as e:
         await message.answer(f"❌ Ошибка: {e}")
-
 
 # ================= 🔧 АДМИН-КОМАНДЫ =================
 @dp.message(F.text & F.text.regexp(r'(?i)^\+пополнить\s+карман(?:\s|$)'))
@@ -513,7 +485,6 @@ async def cmd_admin_add(message: Message):
     user = await get_user(target.id, target.username)
     await update_user(target.id, coins=user["coins"] + amount)
     await message.answer(f"💰 <b>Карман пополнен!</b>\n👤 Кому: @{target.username}\n➕ Начислено: <b>{amount}</b> 🪙\n📊 Баланс: <b>{user['coins'] + amount}</b> 🪙", parse_mode="HTML")
-
 
 @dp.message(F.text & F.text.regexp(r'(?i)^[/!]?забрать\s+всё(?:\s|$)'))
 async def cmd_admin_wipe_all(message: Message):
@@ -563,7 +534,6 @@ async def cmd_admin_wipe_all(message: Message):
         parse_mode="HTML"
     )
 
-
 @dp.message(F.text & F.text.regexp(r'(?i)^[/!]?забрать(?:\s|$)'))
 async def cmd_admin_withdraw(message: Message):
     try:
@@ -594,7 +564,6 @@ async def cmd_admin_withdraw(message: Message):
     await message.answer(
         f"💸 <b>Коины списаны!</b>\n👤 У кого: @{target.username}\n➖ Снято: <b>{amount}</b> 🪙\nОстаток: <b>{user['coins'] - amount}</b> 🪙",
         parse_mode="HTML")
-
 
 @dp.message(F.text & F.text.regexp(r'(?i)^[/!]?выдать\s+ключ(?:\s|$)'))
 async def cmd_admin_give_key(message: Message):
@@ -645,7 +614,6 @@ async def cmd_admin_give_key(message: Message):
         parse_mode="HTML"
     )
 
-
 # ================= 📊 СТАТИСТИКА (АДМИН) =================
 @dp.message(F.text & F.text.regexp(r'(?i)^[/!]?стата\s+бота\s*$'))
 async def cmd_bot_stats(message: Message):
@@ -672,7 +640,6 @@ async def cmd_bot_stats(message: Message):
         logger.error(f"Ошибка при получении статистики: {e}")
         await message.answer(f"❌ Ошибка при получении статистики: {e}")
 
-
 # ================= 🔧 ПОМОЩЬ =================
 @dp.message(F.text & F.text.regexp(r'(?i)^[/!]?(помощь|help)\s*$'))
 async def cmd_help(message: Message):
@@ -693,10 +660,6 @@ async def cmd_help(message: Message):
         "🎲 <b>Игры:</b>\n"
         "• <code>!кубы @user ставка</code> — дуэль в кости\n"
         "• <code>!кубы ставка</code> (ответом) — быстрый вызов\n\n"
-        "📛 <b>Позывные:</b>\n"
-        "• <code>!me</code> — мой позывной\n"
-        "• <code>!setme эмодзи</code> — установить\n"
-        "• <code>!changeme</code> — случайный\n\n"
         "📱 <b>Мини-приложение:</b>\n"
         "• <code>!апка</code> — ссылка на наше казино\n\n"
         "• <code>!тег</code> — проверка бота\n"
@@ -704,11 +667,9 @@ async def cmd_help(message: Message):
     )
     await message.answer(text, parse_mode="HTML")
 
-
 @dp.message(F.text & F.text.regexp(r'(?i)^[/!]?тег\s*$'))
 async def cmd_tag(message: Message):
     await message.answer(f"👋 Я на месте, {safe_text(message.from_user.full_name)}!")
-
 
 @dp.message(F.text & F.text.regexp(r'(?i)^[/!]?апка\s*$'))
 async def cmd_apka(message: Message):
@@ -720,7 +681,6 @@ async def cmd_apka(message: Message):
     )
     await message.answer(text, parse_mode="HTML")
 
-
 # ================= 🌐 FALLBACK =================
 @dp.message()
 async def handle_all_messages(message: Message):
@@ -728,7 +688,6 @@ async def handle_all_messages(message: Message):
         await process_random_coin_drop(message)
     except Exception as e:
         logger.error(f"Ошибка дропа: {e}")
-
 
 # ================= 🚀 ЗАПУСК =================
 async def start_fake_website():
@@ -741,7 +700,6 @@ async def start_fake_website():
     site = web.TCPSite(runner, '0.0.0.0', port)
     await site.start()
 
-
 async def main():
     await start_fake_website()
     me = await bot.get_me()
@@ -749,7 +707,6 @@ async def main():
     if not me.can_read_all_group_messages:
         logger.warning("⚠️ Privacy Mode ВКЛЮЧЕН! Бот не видит '!команды'. Отключи в BotFather.")
     await dp.start_polling(bot)
-
 
 if __name__ == "__main__":
     asyncio.run(main())
