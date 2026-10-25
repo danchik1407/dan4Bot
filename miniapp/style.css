@@ -290,6 +290,28 @@ main { padding: 0 16px; }
     border-radius: 10px;
 }
 
+.crash-history-bar {
+    width: 100%;
+    max-width: 350px;
+    display: flex;
+    gap: 5px;
+    overflow-x: auto;
+    padding: 5px 0;
+    margin-bottom: 10px;
+    scrollbar-width: none;
+}
+.crash-history-bar::-webkit-scrollbar { display: none; }
+.crash-hist-item {
+    background: var(--card);
+    border: 1px solid #333;
+    padding: 5px 10px;
+    border-radius: 8px;
+    font-size: 12px;
+    font-weight: 800;
+    color: #34c759;
+    white-space: nowrap;
+}
+
 .crash-participants {
     width: 100%;
     max-width: 350px;

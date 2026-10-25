@@ -14,7 +14,6 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, 
 supabase: Client = create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_KEY"))
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
-# ТВОИ ID
 ADMIN_IDS = [6338018270, 5184813347, 8890834384]
 
 BOT_NAMES = ["Shark_V", "LuckyFox", "NeonWolf", "GhostByte", "PixelKing", "CyberCat", "IronFist", "VoidWalker",
@@ -319,14 +318,15 @@ async def get_crash_state():
             crash_state["last_update"] = now
             crash_state["multiplier"] = 1.0
 
+            # НОВЫЕ ШАНСЫ: 1% на кэф выше 10x
             rand_val = random.random()
-            if rand_val < 0.5:
+            if rand_val < 0.50:  # 50% шанс на кэф 1.1 - 2.0
                 crash_state["crash_point"] = random.uniform(1.1, 2.0)
-            elif rand_val < 0.8:
+            elif rand_val < 0.80:  # 30% шанс на кэф 2.0 - 5.0
                 crash_state["crash_point"] = random.uniform(2.0, 5.0)
-            elif rand_val < 0.95:
+            elif rand_val < 0.99:  # 19% шанс на кэф 5.0 - 10.0
                 crash_state["crash_point"] = random.uniform(5.0, 10.0)
-            else:
+            else:  # 1% шанс на кэф 10.0 - 100.0
                 crash_state["crash_point"] = random.uniform(10.0, 100.0)
 
             total_user_balance = sum(p["bet"] for p in crash_state["players"] if not p["is_bot"])
@@ -443,7 +443,6 @@ async def get_user(auth: UserAuth):
     if not user: raise HTTPException(status_code=401, detail="Invalid auth data")
     user_id = user["id"]
 
-    # Скрываем баланс, если запрашивают админа (но не самого себя)
     if user_id in ADMIN_IDS and user_id != user.get("id"):
         return {"coins": -1, "keys": 0, "inventory": [], "last_chest": 0, "hidden": True}
 
