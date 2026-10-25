@@ -478,7 +478,7 @@ function closeWinnerModal() { document.getElementById('winner-modal').classList.
 async function startCrashPolling() {
     if (crashInterval) clearInterval(crashInterval);
     await pollCrashState();
-    crashInterval = setInterval(pollCrashState, 300);
+    crashInterval = setInterval(pollCrashState, 400);
 }
 function stopCrashPolling() { if (crashInterval) clearInterval(crashInterval); crashInterval = null; }
 
@@ -548,12 +548,11 @@ async function pollCrashState() {
             multEl.innerText = `x${state.multiplier.toFixed(2)}`; multEl.style.color = state.multiplier > 2 ? '#ffcc00' : '#fff';
             betContainer.style.display = 'none';
 
-            // ТРАЕКТОРИЯ: прямая вверх-вправо
             const field = document.getElementById('crash-field');
             const w = field.offsetWidth, h = field.offsetHeight;
             const t = Math.min((state.multiplier - 1) / 15, 1);
             const x = 40 + t * (w - 100);
-            const y = 40 + t * (h - 100);
+            const y = 40 + Math.pow(t, 1.1) * (h - 100);
             rocketEl.style.left = x + 'px';
             rocketEl.style.bottom = y + 'px';
         } else if (state.status === 'crashed') {
