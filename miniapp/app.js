@@ -97,11 +97,11 @@ function startBallPhysics() {
     ball.animationId = requestAnimationFrame(step);
 }
 
-// === ИСТОРИЯ (ИСПРАВЛЕНО: ГЛОБАЛЬНАЯ ФУНКЦИЯ) ===
+// ================= ИСТОРИЯ (ИСПРАВЛЕНО) =================
 window.openHistory = async function() {
     const modal = document.getElementById('history-modal');
-    if (!modal) { alert("Ошибка: нет окна истории в HTML"); return; }
     const list = document.getElementById('history-list');
+    if (!modal) { alert("Ошибка: Модальное окно истории не найдено!"); return; }
     list.innerHTML = '<p style="text-align:center;color:#888;">Загрузка...</p>';
     modal.classList.add('active');
 
@@ -117,7 +117,7 @@ window.openHistory = async function() {
             div.innerHTML = `<div style="display:flex; justify-content:space-between; width:100%; align-items:center; margin-bottom: 10px;"><span style="font-weight:bold; color: #ffcc00;">🏆 ${item.winner_name}</span><span style="color:#34c759; font-weight:900; font-size: 18px;">+${item.amount} 🪙</span></div><div style="font-size: 12px; color: #8e8e93; white-space: pre-line;">${playersText}</div>`;
             list.appendChild(div);
         });
-    } catch (e) { list.innerHTML = '<p style="text-align:center;color:#888;">Ошибка загрузки</p>'; console.error(e); }
+    } catch (e) { list.innerHTML = '<p style="text-align:center;color:#888;">Ошибка загрузки истории</p>'; console.error(e); }
 };
 
 async function pollHockeyState() {
@@ -159,8 +159,9 @@ async function pollHockeyState() {
 
         bankEl.innerText = `Банк: ${state.bank} 🪙`;
 
-        // === РЕНДЕР УЧАСТНИКОВ (ВСЕГДА, ВНЕ ЗАВИСИМОСТИ ОТ СТАТУСА) ===
-        arena.querySelectorAll('.hockey-sector').forEach(el => el.remove()); let totalWidth = 0;
+        // РЕНДЕР ВСЕГДА
+        arena.querySelectorAll('.hockey-sector').forEach(el => el.remove());
+        let totalWidth = 0;
         state.players.forEach((p, index) => {
             const sector = document.createElement('div'); sector.className = 'hockey-sector';
             let width = p.percent;
@@ -217,7 +218,12 @@ async function openChest(type) {
         }
         const div = document.createElement('div'); div.className = 'roulette-item'; div.innerHTML = `${icon}<span>${val > 0 ? val : 'Ключ'}</span>`; if (i === winIndex) div.classList.add('win'); track.appendChild(div);
     }
-    const itemWidth = 81; const windowWidth = 350; const centerOffset = (windowWidth / 2) - (itemWidth / 2); const targetScroll = (winIndex * itemWidth) - centerOffset;
+    await new Promise(r => setTimeout(r, 50));
+    const firstItem = track.firstElementChild;
+    const itemWidth = firstItem ? firstItem.offsetWidth : 81;
+    const windowWidth = track.parentElement ? track.parentElement.offsetWidth : 350;
+    const centerOffset = (windowWidth / 2) - (itemWidth / 2);
+    const targetScroll = (winIndex * itemWidth) - centerOffset;
     let start = null; const duration = 6000;
     function step(timestamp) {
         if (!start) start = timestamp;
@@ -225,6 +231,7 @@ async function openChest(type) {
         track.style.transform = `translateX(-${currentScroll}px)`;
         if (progress < duration) { requestAnimationFrame(step); }
         else {
+            track.style.transform = `translateX(-${targetScroll}px)`;
             pendingChestReward = finalAmount; pendingChestIsKey = isKey; pendingChestIsGold = isGold;
             const modal = document.getElementById('chest-win-modal');
             document.getElementById('chest-win-icon').innerText = isKey ? '🔑' : '💎';
