@@ -75,7 +75,6 @@ function startBallPhysics() {
     ball.hasStartedAnim = true;
     ball.x = 50; ball.y = 50;
 
-    // Начальный резкий бросок
     let angle = Math.random() * Math.PI * 2;
     let speed = 4.5;
     ball.vx = Math.cos(angle) * speed;
@@ -91,17 +90,15 @@ function startBallPhysics() {
     let scale = 1;
     const maxScale = 2.5;
     const startTime = performance.now();
-    const duration = 12000; // 12 секунд всего
+    const duration = 12000;
 
     const step = () => {
         if (!ball.active) return;
         const elapsed = performance.now() - startTime;
 
-        // Движение
         ball.x += ball.vx;
         ball.y += ball.vy;
 
-        // Отскоки от стен с звуком
         if (ball.x <= 0 || ball.x >= 100) {
             ball.vx *= -1;
             ball.x = Math.max(0, Math.min(100, ball.x));
@@ -113,13 +110,10 @@ function startBallPhysics() {
             playSound('click');
         }
 
-        // ЛОГИКА ЗАМЕДЛЕНИЯ
-        // Первые 7 секунд (7000 мс) шарик летит с легким трением
         if (elapsed < 7000) {
             ball.vx *= 0.995;
             ball.vy *= 0.995;
         } else {
-            // После 7 секунд начинается сильное плавное замедление
             ball.vx *= 0.96;
             ball.vy *= 0.96;
         }
@@ -129,19 +123,14 @@ function startBallPhysics() {
             ballEl.style.top = ball.y + '%';
         }
 
-        // ЗУМ: начинается только после 7-й секунды и следует за шариком
         if (elapsed > 7000) {
-            // Плавно наращиваем зум до 2.5
             scale += (maxScale - scale) * 0.02;
             arena.style.transform = `scale(${scale})`;
-            // Центр зума привязан к шарику
             arena.style.transformOrigin = `${ball.x}% ${ball.y}%`;
         }
 
-        // ОСТАНОВКА: если скорость почти нулевая
         if (Math.abs(ball.vx) < 0.05 && Math.abs(ball.vy) < 0.05) {
             ball.active = false;
-            // Отправляем финальные координаты на сервер
             fetch(`${API_URL}/api/finish_hockey`, {
                 method: 'POST', headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ initData: tg.initData, x: ball.x, y: ball.y })
@@ -214,7 +203,6 @@ async function pollHockeyState() {
             sector.style.background = p.color;
             sector.style.borderRight = '1px solid rgba(0,0,0,0.5)';
 
-            // ВСЕГДА ТОЛЬКО КРУГ
             const shapeClass = 'shape-circle';
 
             const shapeWrap = document.createElement('div'); shapeWrap.className = 'player-shape-wrapper';
@@ -325,7 +313,28 @@ async function loadUserData() { try { const response = await fetch(`${API_URL}/a
 async function changeBalance(amount) { const response = await fetch(`${API_URL}/api/update_balance`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ initData: tg.initData, amount: amount }) }); const data = await response.json(); balance = data.new_balance; updateUI(); }
 async function changeKeys(amount) { const response = await fetch(`${API_URL}/api/update_keys`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ initData: tg.initData, amount: amount }) }); const data = await response.json(); keys = data.new_keys; updateUI(); }
 async function loadGlobalTop() { const list = document.getElementById('global-top-list'); list.innerHTML = '<p style="text-align: center; color: #888;">Загрузка...</p>'; try { const res = await fetch(`${API_URL}/api/global_top`); const users = await res.json(); if (!users || users.length === 0) { list.innerHTML = '<p style="text-align: center; color: #888;">Топ пока пуст</p>'; return; } list.innerHTML = ''; const medals = ["🥇", "🥈", "🥉"]; users.forEach((u, i) => { const prefix = i < 3 ? medals[i] : `<span class="rank">${i+1}</span>`; const div = document.createElement('div'); div.innerHTML = `<div style="display: flex; align-items: center; gap: 10px;">${prefix} <span>${u.username || 'Игрок'}</span></div><span>${u.coins} 💎</span>`; list.appendChild(div); }); } catch (e) { list.innerHTML = '<p style="text-align: center; color: #888;">Ошибка загрузки</p>'; } }
-function updateUI() { document.getElementById('user-balance').innerText = balance; document.getElementById('profile-coins').innerText = balance; document.getElementById('profile-keys').innerText = keys; const inv = document.getElementById('inventory'); let capCount = 0, uniqCount = 0; inventory.forEach(item => { if (item === 'capsule') capCount++; if (item === 'uniq_capsule') uniqCount++; }); if (capCount === 0 && uniqCount === 0) { inv.innerHTML = `<div class="inv-item">📦<br><span>Пусто</span></div>`; } else { let html = ''; if (capCount > 0) html += `<div class="inv-item" onclick="tg.showAlert('Скоро...')">💊<br><span>Капсула x${capCount}</span></div>`; if (uniqCount > 0) html += `<div class="inv-item" onclick="tg.showAlert('Скоро...')">⚱️<br><span>Уник. Капсула x${uniqCount}</span></div>`; inv.innerHTML = html; } }
+function updateUI() {
+    document.getElementById('user-balance').innerText = balance;
+    document.getElementById('profile-coins').innerText = balance;
+    document.getElementById('profile-keys').innerText = keys;
+
+    // Обновляем бейджи в играх
+    document.querySelectorAll('.game-balance-val').forEach(el => {
+        el.innerText = balance;
+    });
+
+    const inv = document.getElementById('inventory');
+    let capCount = 0, uniqCount = 0;
+    inventory.forEach(item => { if (item === 'capsule') capCount++; if (item === 'uniq_capsule') uniqCount++; });
+    if (capCount === 0 && uniqCount === 0) {
+        inv.innerHTML = `<div class="inv-item">📦<br><span>Пусто</span></div>`;
+    } else {
+        let html = '';
+        if (capCount > 0) html += `<div class="inv-item" onclick="tg.showAlert('Скоро...')">💊<br><span>Капсула x${capCount}</span></div>`;
+        if (uniqCount > 0) html += `<div class="inv-item" onclick="tg.showAlert('Скоро...')">⚱️<br><span>Уник. Капсула x${uniqCount}</span></div>`;
+        inv.innerHTML = html;
+    }
+}
 function checkChestCooldown() { const now = Math.floor(Date.now() / 1000); const diff = now - lastChestTime; const btn = document.getElementById('normal-chest-btn'); if (diff < 18000) { btn.disabled = true; btn.innerText = `КД: ${Math.floor((18000 - diff) / 3600)}ч ${Math.floor(((18000 - diff) % 3600) / 60)}м`; setTimeout(checkChestCooldown, 60000); } else { btn.disabled = false; btn.innerText = 'Открыть (Бесплатно)'; } }
 function showWin(text) { const popup = document.getElementById('win-popup'); popup.querySelector('.win-text').innerText = text; popup.classList.add('show'); setTimeout(() => popup.classList.remove('show'), 1500); }
 function switchTab(tabId, element) { const popup = document.getElementById('win-popup'); if (popup) popup.classList.remove('show'); document.querySelectorAll('.tab').forEach(tab => tab.classList.remove('active')); document.getElementById('tab-' + tabId).classList.add('active'); document.querySelectorAll('.nav-item').forEach(nav => nav.classList.remove('active')); if (element) element.classList.add('active'); if (tabId === 'top') loadGlobalTop(); }

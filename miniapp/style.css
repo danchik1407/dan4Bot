@@ -178,3 +178,25 @@ main { padding: 0 16px; }
 .winner-title { font-size: 16px; color: #8e8e93; text-transform: uppercase; letter-spacing: 2px; margin-bottom: 5px; }
 .winner-name { font-size: 24px; font-weight: 900; color: #ffcc00; margin-bottom: 10px; text-shadow: 0 0 10px rgba(255, 204, 0, 0.5); }
 .winner-amount { font-size: 48px; font-weight: 900; color: #34c759; margin-bottom: 20px; text-shadow: 0 0 20px rgba(52, 199, 89, 0.5); }
+
+/* Бейдж баланса в играх */
+.game-balance-badge {
+    position: fixed;
+    top: 20px;
+    right: 20px;
+    background: rgba(28, 28, 28, 0.9);
+    border: 1px solid #444;
+    padding: 8px 14px;
+    border-radius: 20px;
+    font-weight: 800;
+    font-size: 15px;
+    color: #fff;
+    z-index: 100;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    box-shadow: 0 4px 10px rgba(0,0,0,0.3);
+}
+.game-balance-val {
+    color: #34c759;
+}

@@ -90,6 +90,9 @@
 
         <section id="screen-mines" class="game-screen">
             <button class="back-btn" onclick="closeGame()">← Назад</button>
+            <!-- БЕЙДЖ БАЛАНСА ДЛЯ МИН -->
+            <div class="game-balance-badge">💎 <span class="game-balance-val">0</span></div>
+
             <h2 class="game-title">💣 Мины</h2>
             <div class="bet-input-container">
                 <input type="number" id="mines-bet" class="bet-input" value="10" min="10" max="10000">
@@ -111,10 +114,12 @@
 
         <section id="screen-hockey" class="game-screen" style="padding: 10px;">
             <button class="back-btn" onclick="closeGame()">← Назад</button>
+            <!-- БЕЙДЖ БАЛАНСА ДЛЯ ХОККЕЯ -->
+            <div class="game-balance-badge">💎 <span class="game-balance-val">0</span></div>
+
             <div class="hockey-header">
                 <div id="hockey-status" style="color: #34c759; font-weight: bold;">Ожидание...</div>
                 <div id="hockey-bank" style="font-size: 20px; font-weight: 900;">Банк: 0 🪙</div>
-                <!-- Кнопка истории удалена -->
             </div>
 
             <div class="hockey-arena" id="hockey-arena">

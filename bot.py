@@ -243,11 +243,7 @@ async def cmd_top(message: Message):
     for i, u in enumerate(users[:10]):
         prefix = medals[i] if i < 3 else f"{i + 1}."
         username = u.get("username", "Игрок")
-
-        # Просто выводим текст ника (без @ и без ссылок)
-        # Если ник слишком длинный, обрезаем
         display_name = username if len(username) < 20 else username[:17] + "..."
-
         msg += f"{prefix} {safe_text(display_name)} — <b>{u['coins']}</b> 🪙\n"
 
     await message.answer(msg, parse_mode="HTML")
@@ -415,6 +411,7 @@ async def cb_dice_decline(callback: CallbackQuery):
 
 # ================= 💣 МИНЫ =================
 MINES_STEP_COEFS = {1: 1.03, 2: 1.08, 3: 1.15}
+
 
 def get_mines_kb(game_id: str):
     return InlineKeyboardMarkup(inline_keyboard=[
@@ -747,7 +744,6 @@ async def cmd_admin_wipe_all(message: Message):
     if old_coins == 0 and old_keys == 0 and not inv:
         return await message.answer("❌ У пользователя и так всё пусто.")
 
-    # Обнуляем всё
     await update_user(target.id, coins=0, keys=0, inventory="[]")
 
     target_name = f"@{safe_text(target.username)}" if getattr(target, "username", None) else f"id{target.id}"
@@ -761,6 +757,7 @@ async def cmd_admin_wipe_all(message: Message):
         f"📊 Новый баланс: <b>0</b> 🪙",
         parse_mode="HTML"
     )
+
 
 @dp.message(F.text & F.text.regexp(r'(?i)^[/!]?забрать(?:\s|$)'))
 async def cmd_admin_withdraw(message: Message):
@@ -848,6 +845,44 @@ async def cmd_admin_give_key(message: Message):
         f"📊 Всего ключей: <b>{new_keys}</b>",
         parse_mode="HTML"
     )
+
+
+# ================= 📊 СТАТИСТИКА (АДМИН) =================
+@dp.message(F.text & F.text.regexp(r'(?i)^[/!]?стата\s+бота\s*$'))
+async def cmd_bot_stats(message: Message):
+    # Проверяем, что это админ
+    if not is_admin(message.from_user.id):
+        return await message.answer("❌ Эта команда доступна только администраторам бота.")
+
+    # Проверяем, что команда вызвана в ЛС
+    if message.chat.type != "private":
+        return await message.answer("❌ Эта команда работает только в личных сообщениях с ботом.")
+
+    try:
+        # Получаем всех пользователей
+        response = await asyncio.to_thread(lambda: supabase.table("users").select("*").execute())
+        users = response.data
+
+        total_users = len(users)
+        # Активные за последние 24 часа (если last_chest обновлялся)
+        now = time.time()
+        active_24h = sum(1 for u in users if u.get("last_chest") and (now - float(u.get("last_chest"))) < 86400)
+
+        # Общий баланс коинов у всех
+        total_coins = sum(u.get("coins", 0) for u in users)
+
+        text = (
+            f"📊 <b>СТАТИСТИКА БОТА</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"👥 Всего пользователей: <b>{total_users}</b>\n"
+            f"🔥 Активных за 24ч: <b>{active_24h}</b>\n"
+            f"💰 Всего коинов в системе: <b>{total_coins}</b> 🪙\n"
+        )
+        await message.answer(text, parse_mode="HTML")
+
+    except Exception as e:
+        logger.error(f"Ошибка при получении статистики: {e}")
+        await message.answer(f"❌ Ошибка при получении статистики: {e}")
 
 
 # ================= 🔧 ПОМОЩЬ =================
