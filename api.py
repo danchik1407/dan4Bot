@@ -258,6 +258,7 @@ async def get_hockey_history(): return history
 
 # ==================== РАКЕТА (CRASH) ====================
 def get_crash_point_by_chance():
+    # ШАНСЫ: 1% сотка, 15% выше х4, 30% выше х2
     rv = random.random()
     if rv < 0.01:
         return 100.0
@@ -309,15 +310,18 @@ async def get_crash_state(initData: str = ""):
             crash_state["crash_point"] = get_crash_point_by_chance()
 
     elif crash_state["status"] == "flying":
-        # СЕРВЕР ТОЛЬКО ПРОВЕРЯЕТ КРАШ, ЛОГИКА МНОЖИТЕЛЯ НА КЛИЕНТЕ
         elapsed = now - crash_state["status_start"]
 
-        # Формула для сервера (совпадает с клиентом)
+        # Формула: плавно до 2х, ускорение после 2х, сильное ускорение после 3х
         if elapsed <= 2.0:
             t = elapsed / 2.0
-            current_mult = 1.0 + (t ** 2) * 0.2
+            current_mult = 1.0 + (t ** 2) * 0.2  # До 1.2
+        elif elapsed <= 4.0:
+            t = (elapsed - 2.0) / 2.0
+            current_mult = 1.2 + t * 0.8 + (t ** 2) * 0.8  # До 2.8
         else:
-            current_mult = 1.2 + (elapsed - 2.0) * 0.15 + math.pow(elapsed - 2.0, 1.2) * 0.05
+            t = elapsed - 4.0
+            current_mult = 2.8 + t * 1.5 + (t ** 1.5) * 0.5  # После 3х летит быстро
 
         crash_state["multiplier"] = current_mult
 

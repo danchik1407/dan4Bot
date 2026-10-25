@@ -549,6 +549,7 @@ function animateFlight() {
 
     const elapsed = (Date.now() / 1000) - flightStartTime;
 
+    // Формула Ease-in-out с ускорением после 2х
     let smoothMult = 1.0;
     if (elapsed <= 2.0) {
         const t = elapsed / 2.0;
