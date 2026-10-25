@@ -79,7 +79,6 @@ main { padding: 0 16px; }
 .nav-item.active { color: var(--accent); }
 .nav-icon { font-size: 22px; margin-bottom: 4px; }
 
-/* ВАЖНО: Убираем overflow: hidden, чтобы зум работал */
 .game-screen { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: var(--bg); z-index: 200; padding: 20px; flex-direction: column; align-items: center; }
 .game-screen.active { display: flex; }
 .back-btn { background: transparent; color: var(--text-muted); border: none; font-size: 16px; cursor: pointer; align-self: flex-start; margin-bottom: 20px; }
