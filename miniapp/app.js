@@ -104,30 +104,6 @@ async function changeKeys(amount) {
     } catch(e) {}
 }
 
-// ================= ПРОМОКОДЫ =================
-async function activatePromo() {
-    const input = document.getElementById('promo-input');
-    const code = input.value.trim();
-    if (!code) return tg.showAlert("Введите промокод!");
-
-    isProcessing = true;
-    try {
-        const res = await fetch(`${API_URL}/api/activate_promocode`, {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ initData: tg.initData, code: code })
-        });
-        const data = await res.json();
-        if (!res.ok) { isProcessing = false; return tg.showAlert(data.detail || "Ошибка"); }
-
-        balance = data.new_balance;
-        updateUI();
-        input.value = '';
-        tg.showAlert(`🎉 Промокод активирован! Вы получили ${data.reward} 🪙`);
-        playSound('win');
-    } catch(e) { tg.showAlert("Ошибка соединения"); }
-    isProcessing = false;
-}
-
 function showWin(text) { const popup = document.getElementById('win-popup'); popup.querySelector('.win-text').innerText = text; popup.classList.add('show'); setTimeout(() => popup.classList.remove('show'), 1500); }
 
 function checkChestCooldown() {
@@ -554,7 +530,7 @@ async function crashAction() {
     isProcessing = false;
 }
 
-// ИДЕАЛЬНО ПЛАВНАЯ АНИМАЦИЯ И СОХРАНЕНИЕ ПРИ ПЕРЕЗАПУСКЕ
+// ПЛАВНАЯ АНИМАЦИЯ
 function animateFlight() {
     if (!currentCrashData || currentCrashData.status !== 'flying') {
         isAnimatingFlight = false;
@@ -566,7 +542,6 @@ function animateFlight() {
     const rocketEl = el('crash-rocket');
     const field = el('crash-field');
 
-    // Если анимация только запустилась, сразу ставим нужное время
     if (!isAnimatingFlight && currentCrashData.status_start) {
         flightStartTime = currentCrashData.status_start;
         isAnimatingFlight = true;
@@ -651,10 +626,9 @@ async function pollCrashState() {
             statusEl.innerText = 'Идёт полет...'; statusEl.style.color = '#34c759';
             betContainer.style.display = 'none';
 
-            // ВАЖНО: Принудительно стартуем с серверного времени при первом заходе
             if (!isAnimatingFlight) {
                 isAnimatingFlight = true;
-                flightStartTime = state.status_start; // СИНХРОНИЗАЦИЯ ВРЕМЕНИ
+                flightStartTime = state.status_start;
                 animateFlight();
             }
 
