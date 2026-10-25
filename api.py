@@ -15,7 +15,7 @@ supabase: Client = create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
 BOT_NAMES = ["Shark_V", "LuckyFox", "NeonWolf", "GhostByte", "PixelKing", "CyberCat", "IronFist", "VoidWalker",
-             "ShadowAce", "RogueOne", "Toxic", "Viper", "Sniper", "ProGamer", "NoobMaster", "Killer", "Dragon"]
+             "ShadowAce", "RogueOne"]
 BOT_COLORS = ["#ff3b30", "#ff9500", "#ffcc00", "#34c759", "#007aff", "#5856d6", "#af52de", "#ff2d55"]
 
 game_state = {
@@ -63,9 +63,6 @@ class BuyItem(BaseModel): initData: str; item_id: str; price: int
 class PlaceBet(BaseModel): initData: str; amount: int
 
 
-class FinishHockey(BaseModel): initData: str; x: float; y: float
-
-
 # ==================== ХОККЕЙ ====================
 @app.get("/api/hockey_state")
 async def get_hockey_state():
@@ -75,6 +72,7 @@ async def get_hockey_state():
     if game_state["status"] == "waiting":
         time_left = 15 - (now - game_state["last_update"])
 
+        # Добавление ботов
         if time_left <= 8 and game_state["target_bots"] == 0:
             game_state["target_bots"] = random.randint(1, 5)
 
@@ -84,13 +82,16 @@ async def get_hockey_state():
                 bot_bet = random.randint(10, 100)
                 bot_name = random.choice(BOT_NAMES) + str(random.randint(1, 99))
                 bot_color = random.choice(BOT_COLORS)
-
                 while any(p["color"] == bot_color for p in game_state["players"]):
                     bot_color = random.choice(BOT_COLORS)
 
                 game_state["players"].append({
-                    "id": str(random.randint(10000, 99999)), "name": bot_name, "avatar": "",
-                    "bet": bot_bet, "color": bot_color, "is_bot": True
+                    "id": str(random.randint(10000, 99999)),
+                    "name": bot_name,
+                    "avatar": "",
+                    "bet": bot_bet,
+                    "color": bot_color,
+                    "is_bot": True
                 })
                 game_state["bank"] += bot_bet
                 game_state["last_bot_added"] = now
@@ -107,7 +108,7 @@ async def get_hockey_state():
                     p["percent"] = 0
 
     elif game_state["status"] == "rolling":
-        # Ждем 10 секунд, пока шарик не остановится и не пришлет координаты
+        # Даем 10 секунд на анимацию шарика
         if now - game_state["last_update"] > 10:
             game_state["status"] = "finished"
             game_state["last_update"] = now
@@ -123,7 +124,8 @@ async def get_hockey_state():
                 if len(history) > 10: history.pop()
 
     elif game_state["status"] == "finished":
-        if now - game_state["last_update"] > 4:
+        # Ждем 5 секунд после показа победителя
+        if now - game_state["last_update"] > 5:
             if game_state["winner"] and not game_state["is_paid"]:
                 game_state["is_paid"] = True
                 winner_id = game_state["winner"]["id"]
@@ -137,6 +139,7 @@ async def get_hockey_state():
                 except Exception as e:
                     print(f"❌ Ошибка выплаты: {e}")
 
+            # Новый раунд
             game_state = {
                 "status": "waiting", "timer": 15, "bank": 0, "players": [],
                 "winner": None, "last_update": now,
@@ -150,36 +153,12 @@ async def get_hockey_state():
     return game_state
 
 
-@app.post("/api/finish_hockey")
-async def finish_hockey(data: FinishHockey):
-    global game_state
-    if game_state["status"] != "rolling":
-        return {"success": False}
-
-    # Определяем победителя по координате X
-    total_p = 0
-    winner = None
-    for p in game_state["players"]:
-        zone_width = p["percent"]
-        if total_p <= data.x <= total_p + zone_width:
-            winner = p
-            break
-        total_p += zone_width
-
-    if not winner and game_state["players"]:
-        winner = min(game_state["players"], key=lambda p: abs(total_p - data.x))
-
-    game_state["winner"] = winner
-    game_state["status"] = "finished"
-    game_state["last_update"] = time.time()
-    return {"success": True, "winner": winner, "bank": game_state["bank"]}
-
-
 @app.post("/api/place_bet")
 async def place_bet(data: PlaceBet):
     user = verify_telegram_data(data.initData)
     if not user: raise HTTPException(status_code=401, detail="Invalid auth data")
 
+    # ВАЖНО: Приводим к строке для стабильного поиска
     user_id = str(user["id"])
 
     if game_state["status"] != "waiting": raise HTTPException(status_code=400, detail="Ставки закрыты")
@@ -195,7 +174,8 @@ async def place_bet(data: PlaceBet):
     name = user.get("username", user.get("first_name", f"id{user_id}"))
     avatar = user.get("photo_url", "")
 
-    existing_player = next((p for p in game_state["players"] if p["id"] == user_id and not p["is_bot"]), None)
+    # Поиск игрока (сравнение строк)
+    existing_player = next((p for p in game_state["players"] if p["id"] == user_id), None)
 
     if existing_player:
         existing_player["bet"] += data.amount
@@ -207,17 +187,37 @@ async def place_bet(data: PlaceBet):
             player_color = f"hsl({random.randint(0, 360)}, 80%, 50%)"
 
         game_state["players"].append({
-            "id": user_id, "name": name, "avatar": avatar, "bet": data.amount,
-            "color": player_color, "is_bot": False
+            "id": user_id,
+            "name": name,
+            "avatar": avatar,
+            "bet": data.amount,
+            "color": player_color,
+            "is_bot": False
         })
         game_state["bank"] += data.amount
 
     return {"success": True, "new_balance": new_coins}
 
 
+@app.post("/api/finish_hockey")
+async def finish_hockey(data: dict):
+    global game_state
+    if game_state["status"] != "rolling": return {"success": False}
+    total_p = 0
+    winner = None
+    for p in game_state["players"]:
+        if total_p <= data["x"] <= total_p + p["percent"]:
+            winner = p
+            break
+        total_p += p["percent"]
+    game_state["winner"] = winner or (game_state["players"][0] if game_state["players"] else None)
+    game_state["status"] = "finished"
+    game_state["last_update"] = time.time()
+    return {"success": True}
+
+
 @app.get("/api/hockey_history")
-async def get_hockey_history():
-    return history
+async def get_hockey_history(): return history
 
 
 # ==================== ЮЗЕР И ЭКОНОМИКА ====================
@@ -233,25 +233,20 @@ async def get_user(auth: UserAuth):
         supabase.table("users").insert(new_user).execute()
         return {"coins": 0, "keys": 0, "inventory": [], "last_chest": 0}
     db_user = res.data[0]
-    return {
-        "coins": int(db_user.get("coins", 0)),
-        "keys": int(db_user.get("keys", 0)),
-        "inventory": json.loads(db_user.get("inventory") or "[]"),
-        "last_chest": int(db_user.get("last_chest", 0))
-    }
+    return {"coins": int(db_user.get("coins", 0)), "keys": int(db_user.get("keys", 0)),
+            "inventory": json.loads(db_user.get("inventory") or "[]"), "last_chest": int(db_user.get("last_chest", 0))}
 
 
 @app.post("/api/open_chest")
 async def open_chest(auth: UserAuth):
     user = verify_telegram_data(auth.initData)
     if not user: raise HTTPException(status_code=401, detail="Invalid auth data")
-    user_id = user["id"]
+    user_id = user["id"];
     now = int(time.time())
     res = supabase.table("users").select("last_chest").eq("user_id", user_id).execute()
     if not res.data: raise HTTPException(status_code=404, detail="User not found")
     last_chest = int(res.data[0].get("last_chest", 0) or 0)
-    if (now - last_chest) < 18000:
-        raise HTTPException(status_code=400, detail="Сундук перезаряжается")
+    if (now - last_chest) < 18000: raise HTTPException(status_code=400, detail="Сундук перезаряжается")
     supabase.table("users").update({"last_chest": now}).eq("user_id", user_id).execute()
     return {"success": True}
 
@@ -262,16 +257,12 @@ async def buy_item(data: BuyItem):
     if not user: raise HTTPException(status_code=401, detail="Invalid auth data")
     user_id = user["id"]
     res = supabase.table("users").select("coins, inventory").eq("user_id", user_id).execute()
-    if not res.data: raise HTTPException(status_code=404, detail="User not found")
-    current_coins = int(res.data[0].get("coins", 0))
+    current_coins = int(res.data[0].get("coins", 0));
     inventory = json.loads(res.data[0].get("inventory") or "[]")
-    if current_coins < data.price:
-        raise HTTPException(status_code=400, detail="Недостаточно коинов")
+    if current_coins < data.price: raise HTTPException(status_code=400, detail="Недостаточно коинов")
     inventory.append(data.item_id)
-    supabase.table("users").update({
-        "coins": current_coins - data.price,
-        "inventory": json.dumps(inventory)
-    }).eq("user_id", user_id).execute()
+    supabase.table("users").update({"coins": current_coins - data.price, "inventory": json.dumps(inventory)}).eq(
+        "user_id", user_id).execute()
     return {"success": True, "new_balance": current_coins - data.price, "inventory": inventory}
 
 
@@ -281,7 +272,7 @@ async def update_balance(data: UpdateBalance):
     if not user: raise HTTPException(status_code=401, detail="Invalid auth data")
     user_id = user["id"]
     res = supabase.table("users").select("coins").eq("user_id", user_id).execute()
-    current_coins = int(res.data[0].get("coins", 0))
+    current_coins = int(res.data[0].get("coins", 0));
     new_coins = max(0, current_coins + data.amount)
     supabase.table("users").update({"coins": new_coins}).eq("user_id", user_id).execute()
     return {"success": True, "new_balance": new_coins}
@@ -293,7 +284,7 @@ async def update_keys(data: UpdateKeys):
     if not user: raise HTTPException(status_code=401, detail="Invalid auth data")
     user_id = user["id"]
     res = supabase.table("users").select("keys").eq("user_id", user_id).execute()
-    current_keys = int(res.data[0].get("keys", 0) or 0)
+    current_keys = int(res.data[0].get("keys", 0) or 0);
     new_keys = max(0, current_keys + data.amount)
     supabase.table("users").update({"keys": new_keys}).eq("user_id", user_id).execute()
     return {"success": True, "new_keys": new_keys}
