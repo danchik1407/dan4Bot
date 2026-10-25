@@ -73,7 +73,7 @@ async function placeHockeyBet() {
     isProcessing = false;
 }
 
-// ХАОТИЧНЫЙ ПОЛЕТ С ОТСКОКАМИ
+// ФИЗИКА: ОТСКОКИ ОТ СТЕН
 function startBallPhysics() {
     if (ball.active || ball.hasStartedAnim) return;
 
@@ -212,7 +212,7 @@ async function pollHockeyState() {
 
         bankEl.innerText = `Банк: ${state.bank} 🪙`;
 
-        // === РЕНДЕР УЧАСТНИКОВ (ИСПРАВЛЕНО) ===
+        // --- РЕНДЕР УЧАСТНИКОВ (БЕЗ БАГОВ) ---
         arena.querySelectorAll('.hockey-sector').forEach(el => el.remove());
         let totalWidth = 0;
 
@@ -232,14 +232,13 @@ async function pollHockeyState() {
             sector.style.background = p.color;
             sector.style.borderRight = '1px solid rgba(0,0,0,0.5)';
 
-            // Создаем аватарку
+            // ВСЕГДА РИСУЕМ АВАТАРКУ, ЕСЛИ ЕСТЬ ИГРОК
             let shapeClass = 'shape-square';
             if (index % 4 === 0) shapeClass = 'shape-circle';
             if (index % 4 === 1) shapeClass = 'shape-square';
             if (index % 4 === 2) shapeClass = 'shape-trapezoid';
             if (index % 4 === 3) shapeClass = 'shape-triangle';
 
-            // Убрал проверку width > 5, чтобы показывать аватарку даже на весь экран
             const shapeWrap = document.createElement('div');
             shapeWrap.className = 'player-shape-wrapper';
             const shape = document.createElement('div');
@@ -250,7 +249,7 @@ async function pollHockeyState() {
             shape.style.height = size + 'px';
 
             if (!p.is_bot && p.avatar && p.avatar.startsWith('http')) {
-                shape.innerHTML = `<img src="${p.avatar}" style="width:100%; height:100%; object-fit:cover;">`;
+                shape.innerHTML = `<img src="${p.avatar}" style="width:100%; height:100%; object-fit:cover; border-radius: 50%;">`;
                 shape.style.background = 'transparent'; shape.style.border = '2px solid #fff';
             } else {
                 const letter = p.name ? p.name[0].toUpperCase() : '?';
@@ -593,7 +592,7 @@ function getBet(game) {
     return val;
 }
 
-// МИНЫ
+// МИНЫ (ИСПРАВЛЕНО: КНОПКА СНОВА АКТИВНА)
 let minesActive = false, minesCoef = 1.0, minesSafeOpened = 0, selectedMines = 1;
 const board = document.getElementById('mines-board');
 for (let i = 0; i < 16; i++) {
@@ -614,6 +613,8 @@ function selectMines(count, element) {
 
 async function minesAction() {
     if (isProcessing) return;
+
+    // Если игра активна - забираем выигрыш
     if (minesActive) {
         isProcessing = true; minesActive = false;
         const cashout = Math.floor(currentBet * minesCoef);
@@ -621,8 +622,16 @@ async function minesAction() {
         btn.disabled = true; btn.innerText = 'Забрано!'; btn.style.background = '#555';
         await changeBalance(cashout); showWin(cashout); playSound('win');
         document.querySelectorAll('.cell').forEach(c => c.style.pointerEvents = 'none');
-        isProcessing = false; return;
+
+        // ВАЖНО: Возвращаем кнопку в исходное состояние для новой игры
+        btn.disabled = false;
+        btn.innerText = 'Сделать ставку';
+        btn.style.background = '#007aff'; // Синий цвет как в HTML
+        isProcessing = false;
+        return;
     }
+
+    // Если игра не активна - начинаем новую
     currentBet = getBet('mines');
     if (balance < currentBet) return tg.showAlert("Недостаточно средств!");
     isProcessing = true; await changeBalance(-currentBet); isProcessing = false;
