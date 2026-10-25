@@ -2,7 +2,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
-import os, hashlib, hmac, json, time, random, uvicorn, math
+import os, hashlib, hmac, json, time, random, uvicorn, math, datetime
 from urllib.parse import parse_qsl
 from dotenv import load_dotenv
 from supabase import create_client, Client
@@ -11,7 +11,7 @@ load_dotenv()
 app = FastAPI()
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
-# Подключаем статику для Mini App
+# Подключаем статику (если файлы лежат в папке miniapp)
 if os.path.exists("miniapp"):
     app.mount("/miniapp", StaticFiles(directory="miniapp", html=True), name="miniapp")
 
@@ -94,8 +94,7 @@ async def get_hockey_state():
                 bot_bet = random.randint(10, 100)
                 bot_name = random.choice(BOT_NAMES) + str(random.randint(1, 99))
                 bot_color = random.choice(BOT_COLORS)
-                while any(p["color"] == bot_color for p in game_state["players"]):
-                    bot_color = random.choice(BOT_COLORS)
+                while any(p["color"] == bot_color for p in game_state["players"]): bot_color = random.choice(BOT_COLORS)
                 game_state["players"].append({"id": str(random.randint(10000, 99999)), "name": bot_name, "avatar": "", "bet": bot_bet, "color": bot_color, "is_bot": True})
                 game_state["bank"] += bot_bet
                 game_state["last_bot_added"] = now
@@ -109,8 +108,7 @@ async def get_hockey_state():
                     whale_bet = random.randint(500, 1000)
                     whale_name = random.choice(WHALE_NAMES) + str(random.randint(1, 99))
                     whale_color = random.choice(WHALE_COLORS)
-                    while any(p["color"] == whale_color for p in game_state["players"]):
-                        whale_color = random.choice(WHALE_COLORS)
+                    while any(p["color"] == whale_color for p in game_state["players"]): whale_color = random.choice(WHALE_COLORS)
                     game_state["players"].append({"id": str(random.randint(10000, 99999)), "name": whale_name, "avatar": "", "bet": whale_bet, "color": whale_color, "is_bot": True})
                     game_state["bank"] += whale_bet
                     game_state["whales_added"] += 1
@@ -289,14 +287,12 @@ def _crash_response(initData: str):
             my_status, my_bet, my_cashout, my_win = "none", 0, 0, 0
             if me:
                 my_bet = me["bet"]
-                if crash_state["status"] == "crashed" and me["cashout_mult"] == 0:
-                    my_status = "lost"
+                if crash_state["status"] == "crashed" and me["cashout_mult"] == 0: my_status = "lost"
                 elif me["cashout_mult"] > 0:
                     my_status = "cashed_out"
                     my_cashout = me["cashout_mult"]
                     my_win = int(me["bet"] * me["cashout_mult"])
-                else:
-                    my_status = "bet"
+                else: my_status = "bet"
     else:
         my_status, my_bet, my_cashout, my_win = "none", 0, 0, 0
 
@@ -425,6 +421,14 @@ async def get_global_top():
     res = supabase.table("users").select("user_id, username, coins").order("coins", desc=True).limit(50).execute()
     filtered = [u for u in res.data if int(u["user_id"]) not in ADMIN_IDS]
     return filtered[:50]
+
+@app.get("/api/season_end")
+async def get_season_end():
+    # Генерирует время окончания сезона (например, конец текущего месяца)
+    now = datetime.datetime.now()
+    if now.month == 12: next_month = datetime.datetime(now.year + 1, 1, 1)
+    else: next_month = datetime.datetime(now.year, now.month + 1, 1)
+    return {"end_timestamp": int(next_month.timestamp())}
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8000)))

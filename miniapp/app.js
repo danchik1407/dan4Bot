@@ -11,10 +11,7 @@ if (user) {
     }
 }
 
-// ВАЖНО: Замени на свой URL, если бэкенд развернут отдельно.
-// Если api.py раздает статику, можно оставить пустую строку "".
 const API_URL = "https://aura-api-mptt.onrender.com";
-
 let balance = 0, keys = 0, currentBet = 10, inventory = [], lastChestTime = 0, isProcessing = false;
 let hockeyInterval = null, hasBetThisRound = false, hasShownWinner = false;
 let ball = { x: 50, y: 50, vx: 0, vy: 0, active: false, animationId: null, hasStartedAnim: false };
@@ -23,8 +20,7 @@ let crashInterval = null;
 let lastCrashStatus = null;
 let currentCrashData = null;
 
-// Таймер лидерборда
-let lbTimerEnd = Date.now() + (167 * 3600 + 59 * 60 + 59) * 1000;
+let lbTimerEnd = Date.now() + (30 * 24 * 3600 * 1000); // Фоллбэк на 30 дней
 
 // ================= ЗВУКИ =================
 const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
@@ -59,7 +55,7 @@ function playSound(type) {
     } catch(e) {}
 }
 
-// ================= ОБЩИЕ ФУНКЦИИ =================
+// ================= ОБЩИЕ =================
 function updateUI() {
     document.getElementById('user-balance').innerText = balance;
     document.getElementById('profile-coins').innerText = balance;
@@ -116,7 +112,7 @@ function switchTab(tabId, element) {
     document.getElementById('tab-' + tabId).classList.add('active');
     document.querySelectorAll('.nav-item').forEach(nav => nav.classList.remove('active'));
     if (element) element.classList.add('active');
-    if (tabId === 'top') loadGlobalTop();
+    if (tabId === 'top') { loadGlobalTop(); }
 }
 
 function openGame(game) {
@@ -146,17 +142,27 @@ function toggleLbInfo() {
     document.getElementById('lb-info-modal').classList.toggle('active');
 }
 
+async function initLbTimer() {
+    try {
+        const res = await fetch(`${API_URL}/api/season_end`);
+        const data = await res.json();
+        lbTimerEnd = data.end_timestamp * 1000;
+    } catch(e) { console.error("Не удалось получить время окончания сезона", e); }
+    updateLbTimer();
+    setInterval(updateLbTimer, 1000);
+}
+
 function updateLbTimer() {
     const now = Date.now();
     let diff = Math.max(0, lbTimerEnd - now);
     const h = Math.floor(diff / 3600000); diff -= h * 3600000;
     const m = Math.floor(diff / 60000); diff -= m * 60000;
     const s = Math.floor(diff / 1000);
-    document.getElementById('lb-timer-val').innerText = `${h} ч ${m} м ${s} с`;
-    document.getElementById('lb-big-timer').innerText = `${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
+    const timerVal = document.getElementById('lb-timer-val');
+    const bigTimer = document.getElementById('lb-big-timer');
+    if(timerVal) timerVal.innerText = `${h} ч ${m} м ${s} с`;
+    if(bigTimer) bigTimer.innerText = `${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
 }
-setInterval(updateLbTimer, 1000);
-updateLbTimer();
 
 async function loadGlobalTop() {
     const list = document.getElementById('global-top-list');
@@ -270,7 +276,7 @@ async function buyItem(itemId, price) {
     isProcessing = false;
 }
 
-// ================= ИГРА: МИНЫ =================
+// ================= МИНЫ =================
 let minesActive = false, minesCoef = 1.0, minesSafeOpened = 0, selectedMines = 1;
 const board = document.getElementById('mines-board');
 if (board) {
@@ -333,7 +339,7 @@ function clickMineCell(cell) {
     }, 200);
 }
 
-// ================= ИГРА: ХОККЕЙ =================
+// ================= ХОККЕЙ =================
 async function placeHockeyBet() {
     if (isProcessing) return;
     if (hasBetThisRound) return tg.showAlert("Вы уже сделали ставку в этом раунде!");
@@ -468,7 +474,7 @@ function startHockeyPolling() { if (hockeyInterval) clearInterval(hockeyInterval
 function stopHockeyPolling() { if (hockeyInterval) clearInterval(hockeyInterval); hockeyInterval = null; if (ball.animationId) cancelAnimationFrame(ball.animationId); }
 function closeWinnerModal() { document.getElementById('winner-modal').classList.remove('active'); }
 
-// ================= ИГРА: РАКЕТА (CRASH) =================
+// ================= РАКЕТА =================
 async function startCrashPolling() {
     if (crashInterval) clearInterval(crashInterval);
     await pollCrashState();
@@ -561,7 +567,6 @@ async function pollCrashState() {
             }
         }
 
-        // КНОПКА СТРОГО ПО СТАТУСУ СЕРВЕРА
         if (state.status === 'waiting') {
             if (state.my_status === 'none') { btn.disabled = false; btn.innerText = 'Поставить ставку'; btn.style.background = '#007aff'; }
             else if (state.my_status === 'bet') { btn.disabled = false; btn.innerText = `Добавить (+${getBet('crash')} 🪙)`; btn.style.background = '#007aff'; }
@@ -619,5 +624,6 @@ async function pollCrashState() {
 // ================= СТАРТ =================
 window.addEventListener('load', async () => {
     try { await loadUserData(); } catch(e) {}
+    initLbTimer();
     document.querySelectorAll('.winner-modal, .chest-win-modal').forEach(m => m.classList.remove('active'));
 });
