@@ -18,6 +18,9 @@ BOT_NAMES = ["Shark_V", "LuckyFox", "NeonWolf", "GhostByte", "PixelKing", "Cyber
              "ShadowAce", "RogueOne"]
 BOT_COLORS = ["#ff3b30", "#ff9500", "#ffcc00", "#34c759", "#007aff", "#5856d6", "#af52de", "#ff2d55"]
 
+WHALE_NAMES = ["KingPin", "MrMoney", "WhaleGod", "BigBoss", "RichMan"]
+WHALE_COLORS = ["#ffd700", "#c0c0c0", "#b8860b", "#ff8c00", "#8b0000"]
+
 game_state = {
     "status": "waiting",
     "timer": 15,
@@ -28,7 +31,8 @@ game_state = {
     "last_bot_added": 0,
     "target_bots": 0,
     "is_paid": False,
-    "round_id": str(int(time.time()))
+    "round_id": str(int(time.time())),
+    "whales_added": 0  # Счетчик китов за раунд
 }
 
 history = []
@@ -75,16 +79,17 @@ async def get_hockey_state():
     if game_state["status"] == "waiting":
         time_left = 15 - (now - game_state["last_update"])
 
-        # Рандомное количество ботов (1-5)
+        # Выбираем случайное количество обычных ботов (1-5)
         if time_left <= 10 and game_state["target_bots"] == 0:
             game_state["target_bots"] = random.randint(1, 5)
 
         if time_left <= 10 and game_state["target_bots"] > 0:
-            current_bots = sum(1 for p in game_state["players"] if p["is_bot"])
+            current_bots = sum(1 for p in game_state["players"] if p["is_bot"] and p["bet"] < 500)
+            current_whales = sum(1 for p in game_state["players"] if p["is_bot"] and p["bet"] >= 500)
 
-            # Рандомная задержка для ботов (1-4 сек)
             bot_delay = random.uniform(1.0, 4.0)
 
+            # Логика для обычных ботов
             if current_bots < game_state["target_bots"] and len(game_state["players"]) < 20 and (
                     now - game_state["last_bot_added"]) > bot_delay:
                 bot_bet = random.randint(10, 100)
@@ -100,7 +105,29 @@ async def get_hockey_state():
                 game_state["bank"] += bot_bet
                 game_state["last_bot_added"] = now
 
-                # Мгновенный пересчет процентов
+                # Пересчет процентов
+                total_bank = game_state["bank"]
+                if total_bank > 0:
+                    for p in game_state["players"]:
+                        p["percent"] = (p["bet"] / total_bank) * 100
+
+            # Логика для Китов (5% шанс, максимум 2 за раунд)
+            if game_state["whales_added"] < 2 and current_whales < 2 and len(
+                    game_state["players"]) < 20 and random.random() < 0.05:
+                whale_bet = random.randint(500, 1000)
+                whale_name = random.choice(WHALE_NAMES) + str(random.randint(1, 9))
+                whale_color = random.choice(WHALE_COLORS)
+                while any(p["color"] == whale_color for p in game_state["players"]):
+                    whale_color = random.choice(WHALE_COLORS)
+
+                game_state["players"].append({
+                    "id": str(random.randint(10000, 99999)), "name": whale_name, "avatar": "",
+                    "bet": whale_bet, "color": whale_color, "is_bot": True
+                })
+                game_state["bank"] += whale_bet
+                game_state["whales_added"] += 1
+                game_state["last_bot_added"] = now
+
                 total_bank = game_state["bank"]
                 if total_bank > 0:
                     for p in game_state["players"]:
@@ -118,7 +145,6 @@ async def get_hockey_state():
                     p["percent"] = 0
 
     elif game_state["status"] == "rolling":
-        # Ждем 13 секунд (12 сек анимация + 1 сек запас)
         if now - game_state["last_update"] > 13:
             game_state["status"] = "finished"
             game_state["last_update"] = now
@@ -152,7 +178,8 @@ async def get_hockey_state():
                 "status": "waiting", "timer": 15, "bank": 0, "players": [],
                 "winner": None, "last_update": now,
                 "last_bot_added": 0, "target_bots": 0, "is_paid": False,
-                "round_id": str(int(time.time()))
+                "round_id": str(int(time.time())),
+                "whales_added": 0
             }
             return game_state
 
@@ -202,7 +229,6 @@ async def place_bet(data: PlaceBet):
         })
         game_state["bank"] += data.amount
 
-    # Мгновенный пересчет процентов
     total_bank = game_state["bank"]
     if total_bank > 0:
         for p in game_state["players"]:
@@ -306,7 +332,8 @@ async def update_keys(data: UpdateKeys):
 
 @app.get("/api/global_top")
 async def get_global_top():
-    res = supabase.table("users").select("username, coins").order("coins", desc=True).limit(10).execute()
+    # Теперь возвращаем ТОП-50
+    res = supabase.table("users").select("username, coins").order("coins", desc=True).limit(50).execute()
     return res.data
 
 

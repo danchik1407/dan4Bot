@@ -69,7 +69,7 @@ async function placeHockeyBet() {
     isProcessing = false;
 }
 
-// ФИЗИКА ШАРИКА (12 СЕК, ЗАМЕДЛЕНИЕ С 7-Й СЕК, ПЛАВНЫЙ ЗУМ)
+// ФИЗИКА ШАРИКА (12 СЕК, ПЛАВНОЕ ТОРМОЖЕНИЕ НА ПОСЛЕДНИХ 1.5 СЕК)
 function startBallPhysics() {
     if (ball.active || ball.hasStartedAnim) return;
     ball.hasStartedAnim = true;
@@ -99,6 +99,7 @@ function startBallPhysics() {
         ball.x += ball.vx;
         ball.y += ball.vy;
 
+        // Отскоки
         if (ball.x <= 0 || ball.x >= 100) {
             ball.vx *= -1;
             ball.x = Math.max(0, Math.min(100, ball.x));
@@ -110,12 +111,19 @@ function startBallPhysics() {
             playSound('click');
         }
 
+        // ЛОГИКА ЗАМЕДЛЕНИЯ
         if (elapsed < 7000) {
+            // Первые 7 сек - быстро
             ball.vx *= 0.995;
             ball.vy *= 0.995;
+        } else if (elapsed >= 7000 && elapsed < 10500) {
+            // С 7 до 10.5 сек - плавное торможение
+            ball.vx *= 0.97;
+            ball.vy *= 0.97;
         } else {
-            ball.vx *= 0.96;
-            ball.vy *= 0.96;
+            // Последние 1.5 сек (с 10.5 до 12) - очень сильное торможение (почти замирает)
+            ball.vx *= 0.85;
+            ball.vy *= 0.85;
         }
 
         if (ballEl) {
@@ -123,12 +131,14 @@ function startBallPhysics() {
             ballEl.style.top = ball.y + '%';
         }
 
+        // Зум
         if (elapsed > 7000) {
             scale += (maxScale - scale) * 0.02;
             arena.style.transform = `scale(${scale})`;
             arena.style.transformOrigin = `${ball.x}% ${ball.y}%`;
         }
 
+        // Остановка
         if (Math.abs(ball.vx) < 0.05 && Math.abs(ball.vy) < 0.05) {
             ball.active = false;
             fetch(`${API_URL}/api/finish_hockey`, {
@@ -189,7 +199,6 @@ async function pollHockeyState() {
 
         bankEl.innerText = `Банк: ${state.bank} 🪙`;
 
-        // РЕНДЕР СЕКТОРОВ (ТОЛЬКО КРУГИ)
         arena.querySelectorAll('.hockey-sector').forEach(el => el.remove());
         let totalWidth = 0;
         state.players.forEach((p, index) => {
@@ -318,7 +327,6 @@ function updateUI() {
     document.getElementById('profile-coins').innerText = balance;
     document.getElementById('profile-keys').innerText = keys;
 
-    // Обновляем бейджи в играх
     document.querySelectorAll('.game-balance-val').forEach(el => {
         el.innerText = balance;
     });
