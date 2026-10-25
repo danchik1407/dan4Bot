@@ -75,12 +75,19 @@ async def get_hockey_state():
     if game_state["status"] == "waiting":
         time_left = 15 - (now - game_state["last_update"])
 
-        if time_left <= 8 and game_state["target_bots"] == 0:
+        # Выбираем случайное количество ботов от 1 до 5 на раунд
+        if time_left <= 10 and game_state["target_bots"] == 0:
             game_state["target_bots"] = random.randint(1, 5)
 
-        if time_left <= 8 and game_state["target_bots"] > 0:
+        if time_left <= 10 and game_state["target_bots"] > 0:
             current_bots = sum(1 for p in game_state["players"] if p["is_bot"])
-            if current_bots < game_state["target_bots"] and (now - game_state["last_bot_added"]) > 0.8:
+
+            # Рандомная задержка между ставками ботов (от 1 до 4 секунд)
+            bot_delay = random.uniform(1.0, 4.0)
+
+            # Проверяем, не набралось ли уже 20 игроков
+            if current_bots < game_state["target_bots"] and len(game_state["players"]) < 20 and (
+                    now - game_state["last_bot_added"]) > bot_delay:
                 bot_bet = random.randint(10, 100)
                 bot_name = random.choice(BOT_NAMES) + str(random.randint(1, 99))
                 bot_color = random.choice(BOT_COLORS)
@@ -94,6 +101,12 @@ async def get_hockey_state():
                 game_state["bank"] += bot_bet
                 game_state["last_bot_added"] = now
 
+                # Сразу пересчитываем проценты, чтобы поле делилось
+                total_bank = game_state["bank"]
+                if total_bank > 0:
+                    for p in game_state["players"]:
+                        p["percent"] = (p["bet"] / total_bank) * 100
+
         if time_left <= 0:
             game_state["status"] = "rolling"
             game_state["last_update"] = now
@@ -106,7 +119,8 @@ async def get_hockey_state():
                     p["percent"] = 0
 
     elif game_state["status"] == "rolling":
-        if now - game_state["last_update"] > 10:
+        # Даем 10.5 секунд на полет шарика (фронт работает 10 сек)
+        if now - game_state["last_update"] > 10.5:
             game_state["status"] = "finished"
             game_state["last_update"] = now
 
@@ -157,6 +171,13 @@ async def place_bet(data: PlaceBet):
 
     if game_state["status"] != "waiting": raise HTTPException(status_code=400, detail="Ставки закрыты")
 
+    # Проверка на лимит игроков (не более 20)
+    if len(game_state["players"]) >= 20:
+        # Если этот игрок уже есть в списке, разрешаем ему увеличить ставку
+        existing = next((p for p in game_state["players"] if p["id"] == user_id), None)
+        if not existing:
+            raise HTTPException(status_code=400, detail="Комната заполнена")
+
     res = supabase.table("users").select("coins").eq("user_id", int(user_id)).execute()
     if not res.data: raise HTTPException(status_code=404, detail="User not found")
     current_coins = int(res.data[0].get("coins", 0))
@@ -174,7 +195,6 @@ async def place_bet(data: PlaceBet):
         existing_player["bet"] += data.amount
         game_state["bank"] += data.amount
     else:
-        if len(game_state["players"]) >= 20: raise HTTPException(status_code=400, detail="Комната заполнена")
         player_color = "#007aff"
         while any(p["color"] == player_color for p in game_state["players"]):
             player_color = f"hsl({random.randint(0, 360)}, 80%, 50%)"
@@ -185,7 +205,7 @@ async def place_bet(data: PlaceBet):
         })
         game_state["bank"] += data.amount
 
-    # === ВАЖНО: ПЕРЕСЧЕТ ПРОЦЕНТОВ СРАЗУ ПОСЛЕ СТАВКИ ===
+    # СРАЗУ ПЕРЕСЧИТЫВАЕМ ПРОЦЕНТЫ
     total_bank = game_state["bank"]
     if total_bank > 0:
         for p in game_state["players"]:
