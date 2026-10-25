@@ -21,7 +21,6 @@
     </header>
 
     <main>
-        <!-- ИГРАТЬ -->
         <section id="tab-play" class="tab active">
             <div class="banner"><div class="banner-title">AURA GAME</div><div class="banner-sub">Твой путь к миллионам</div></div>
             <div class="games-grid">
@@ -31,7 +30,6 @@
             </div>
         </section>
 
-        <!-- ЛИДЕРБОРД -->
         <section id="tab-top" class="tab">
             <div class="lb-header">
                 <h2>ЛИДЕРБОРД</h2>
@@ -45,7 +43,6 @@
             <div class="leaderboard" id="global-top-list"><p style="text-align: center; color: #888;">Загрузка...</p></div>
         </section>
 
-        <!-- СУНДУКИ -->
         <section id="tab-chests" class="tab">
             <div class="page-header"><h2>📦 Сундуки</h2></div>
             <div id="roulette-container" class="roulette-container" style="display: none;">
@@ -68,7 +65,6 @@
             </div>
         </section>
 
-        <!-- МАГАЗИН -->
         <section id="tab-shop" class="tab">
             <div class="page-header"><h2>🛒 Магазин</h2></div>
             <div class="shop-grid">
@@ -87,7 +83,6 @@
             </div>
         </section>
 
-        <!-- ПРОФИЛЬ -->
         <section id="tab-profile" class="tab">
             <div class="page-header"><h2>👤 Профиль</h2></div>
             <div class="profile-card-pro">
@@ -97,12 +92,18 @@
                     <div class="stat-box"><span class="stat-icon">💎</span><span class="stat-value" id="profile-coins">0</span><span class="stat-label">Баланс</span></div>
                     <div class="stat-box"><span class="stat-icon">🔑</span><span class="stat-value" id="profile-keys">0</span><span class="stat-label">Ключи</span></div>
                 </div>
+
+                <h3 style="margin-top: 25px; margin-bottom: 10px; text-align: left;">🎁 Промокод</h3>
+                <div style="display: flex; gap: 10px; margin-bottom: 20px;">
+                    <input type="text" id="promo-input" class="bet-input" placeholder="Введите код" style="margin-bottom: 0; padding: 10px; font-size: 16px;">
+                    <button class="action-btn" onclick="activatePromo()" style="width: auto; margin-bottom: 0; padding: 0 20px; font-size: 14px; background: #ffcc00; color: #000;">Активировать</button>
+                </div>
+
                 <h3 style="margin-top: 25px; margin-bottom: 10px; text-align: left;">🎒 Инвентарь</h3>
                 <div class="inventory-grid" id="inventory"></div>
             </div>
         </section>
 
-        <!-- ИГРА: МИНЫ -->
         <section id="screen-mines" class="game-screen">
             <button class="back-btn" onclick="closeGame()">← Назад</button>
             <div class="game-balance-badge">💎 <span class="game-balance-val">0</span></div>
@@ -127,7 +128,6 @@
             <button class="action-btn" id="mines-btn" onclick="minesAction()">Сделать ставку</button>
         </section>
 
-        <!-- ИГРА: ХОККЕЙ -->
         <section id="screen-hockey" class="game-screen" style="padding: 10px;">
             <button class="back-btn" onclick="closeGame()">← Назад</button>
             <div class="game-balance-badge">💎 <span class="game-balance-val">0</span></div>
@@ -154,7 +154,6 @@
             </div>
         </section>
 
-        <!-- ИГРА: РАКЕТА -->
         <section id="screen-crash" class="game-screen" style="padding: 10px;">
             <button class="back-btn" onclick="closeGame()">← Назад</button>
             <div class="game-balance-badge">💎 <span class="game-balance-val">0</span></div>
@@ -202,7 +201,6 @@
         </section>
     </main>
 
-    <!-- МОДАЛКА ЛИДЕРБОРДА -->
     <div id="lb-info-modal" class="winner-modal">
         <div class="winner-content" style="background: #1c1c1c; border-color: #333; padding: 25px; max-width: 380px; text-align: left;">
             <h2 style="color: #ffcc00; font-size: 22px; text-align: center; margin-bottom: 20px;">ЛИДЕРБОРД:<br>КАК ЭТО РАБОТАЕТ?</h2>

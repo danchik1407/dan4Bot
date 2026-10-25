@@ -48,13 +48,17 @@ function playSound(type) {
             gain.gain.setValueAtTime(0.08, now); gain.gain.exponentialRampToValueAtTime(0.01, now + 0.4);
             osc.start(now); osc.stop(now + 0.4);
         } else if (type === 'boom') {
-            const bs = audioCtx.sampleRate * 0.5;
+            // ОЧЕНЬ ТИХИЙ ВЗРЫВ
+            const bs = audioCtx.sampleRate * 0.8;
             const b = audioCtx.createBuffer(1, bs, audioCtx.sampleRate);
             const d = b.getChannelData(0);
-            for (let i = 0; i < bs; i++) d[i] = Math.random() * 2 - 1;
+            for (let i = 0; i < bs; i++) d[i] = (Math.random() * 2 - 1) * Math.exp(-i / (bs * 0.1)); // Затухание
             const n = audioCtx.createBufferSource(); n.buffer = b;
-            const ng = audioCtx.createGain(); ng.gain.setValueAtTime(0.1, now); ng.gain.exponentialRampToValueAtTime(0.01, now + 0.5);
-            n.connect(ng); n.connect(audioCtx.destination); n.start(now);
+            const ng = audioCtx.createGain();
+            ng.gain.setValueAtTime(0.03, now); // Громкость снижена в 3 раза
+            const filter = audioCtx.createBiquadFilter();
+            filter.type = 'lowpass'; filter.frequency.setValueAtTime(400, now); // Убираем высокие частоты (скрежет)
+            n.connect(filter); filter.connect(ng); ng.connect(audioCtx.destination); n.start(now);
         }
     } catch(e) {}
 }
@@ -99,6 +103,30 @@ async function changeKeys(amount) {
         const response = await fetch(`${API_URL}/api/update_keys`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ initData: tg.initData, amount: amount }) });
         const data = await response.json(); keys = data.new_keys; updateUI();
     } catch(e) {}
+}
+
+// ================= ПРОМОКОДЫ =================
+async function activatePromo() {
+    const input = document.getElementById('promo-input');
+    const code = input.value.trim();
+    if (!code) return tg.showAlert("Введите промокод!");
+
+    isProcessing = true;
+    try {
+        const res = await fetch(`${API_URL}/api/activate_promocode`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ initData: tg.initData, code: code })
+        });
+        const data = await res.json();
+        if (!res.ok) { isProcessing = false; return tg.showAlert(data.detail || "Ошибка"); }
+
+        balance = data.new_balance;
+        updateUI();
+        input.value = '';
+        tg.showAlert(`🎉 Промокод активирован! Вы получили ${data.reward} 🪙`);
+        playSound('win');
+    } catch(e) { tg.showAlert("Ошибка соединения"); }
+    isProcessing = false;
 }
 
 function showWin(text) { const popup = document.getElementById('win-popup'); popup.querySelector('.win-text').innerText = text; popup.classList.add('show'); setTimeout(() => popup.classList.remove('show'), 1500); }
@@ -425,7 +453,6 @@ async function pollHockeyState() {
                     document.getElementById('winner-modal-amount').innerText = `+${state.bank} 🪙`;
                     modal.classList.add('active');
 
-                    // МГНОВЕННО добавляем выигрыш к балансу
                     if (state.winner.id === String(user.id)) {
                         balance += state.bank;
                         updateUI();
@@ -528,7 +555,7 @@ async function crashAction() {
     isProcessing = false;
 }
 
-// ИДЕАЛЬНО ПЛАВНАЯ АНИМАЦИЯ
+// ПЛАВНАЯ АНИМАЦИЯ
 function animateFlight() {
     if (!currentCrashData || currentCrashData.status !== 'flying') {
         isAnimatingFlight = false;
@@ -540,13 +567,17 @@ function animateFlight() {
     const rocketEl = el('crash-rocket');
     const field = el('crash-field');
 
-    // Вычисляем время с точностью до миллисекунды
     const elapsed = (Date.now() / 1000) - flightStartTime;
 
-    // Формула (совпадает с сервером)
-    let smoothMult = 1.0 + 0.05 * (Math.exp(0.45 * elapsed) - 1);
+    // Формула Ease-in-out (медленно -> быстро -> медленно)
+    let smoothMult = 1.0;
+    if (elapsed <= 2.0) {
+        const t = elapsed / 2.0;
+        smoothMult = 1.0 + (t ** 2) * 0.2;
+    } else {
+        smoothMult = 1.2 + (elapsed - 2.0) * 0.15 + Math.pow(elapsed - 2.0, 1.2) * 0.05;
+    }
 
-    // Ограничиваем, чтобы не улетал за краш
     if (smoothMult > currentCrashData.multiplier) {
         smoothMult = currentCrashData.multiplier;
     }
@@ -565,7 +596,6 @@ function animateFlight() {
     if (field && rocketEl) {
         const w = field.offsetWidth, h = field.offsetHeight;
         const t = Math.min((smoothMult - 1) / 15, 1);
-        // Плавный полет по диагонали
         const x = 40 + Math.pow(t, 1.2) * (w - 100);
         const y = 40 + Math.pow(t, 1.2) * (h - 100);
         rocketEl.style.left = x + 'px';
@@ -618,7 +648,6 @@ async function pollCrashState() {
             betContainer.style.display = 'none';
 
             if (!isAnimatingFlight) {
-                // Синхронизируем точное время старта
                 flightStartTime = state.status_start;
                 isAnimatingFlight = true;
                 animateFlight();

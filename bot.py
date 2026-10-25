@@ -8,7 +8,8 @@ import json
 from types import SimpleNamespace
 from dotenv import load_dotenv
 from aiogram import Bot, Dispatcher, F
-from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, FSInputFile, Dice, WebAppInfo
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, FSInputFile, Dice, \
+    WebAppInfo
 from aiogram.enums import ChatMemberStatus
 from aiohttp import web
 from supabase import create_client, Client
@@ -43,6 +44,7 @@ MIN_BET = 10
 active_summons: dict[int, bool] = {}
 active_challenges: dict[str, dict] = {}
 
+
 # ================= БАЗА ДАННЫХ =================
 async def get_user(user_id: int, username: str = None, chat_id: int = None):
     def _fetch():
@@ -73,12 +75,16 @@ async def get_user(user_id: int, username: str = None, chat_id: int = None):
 
     return user
 
+
 async def update_user(user_id: int, **kwargs):
     await asyncio.to_thread(lambda: supabase.table("users").update(kwargs).eq("user_id", user_id).execute())
 
+
 async def get_users_from_chat(chat_id: int):
     def _fetch(): return supabase.table("users").select("*").eq("chat_id", chat_id).execute().data
+
     return await asyncio.to_thread(_fetch)
+
 
 def find_user_in_list(users_list, arg_username):
     clean_username = arg_username.lstrip("@").lower()
@@ -87,13 +93,16 @@ def find_user_in_list(users_list, arg_username):
             return SimpleNamespace(id=int(u["user_id"]), username=u["username"])
     return None
 
+
 # ================= ИНИЦИАЛИЗАЦИЯ =================
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
+
 # ================= ВСПОМОГАТЕЛЬНЫЕ =================
 def is_admin(user_id: int) -> bool:
     return user_id in ADMIN_IDS
+
 
 async def is_chat_admin(user_id: int, chat_id: int) -> bool:
     try:
@@ -101,6 +110,7 @@ async def is_chat_admin(user_id: int, chat_id: int) -> bool:
         return member.status in (ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR)
     except Exception:
         return False
+
 
 def format_time(seconds: float) -> str:
     seconds = int(seconds)
@@ -112,9 +122,11 @@ def format_time(seconds: float) -> str:
     if s and not h: parts.append(f"{s}с")
     return " ".join(parts) or "0с"
 
+
 def safe_text(text) -> str:
     import html as html_module
     return html_module.escape(str(text))
+
 
 # ================= 🎁 ДРОП =================
 async def process_random_coin_drop(message: Message):
@@ -142,6 +154,7 @@ async def process_random_coin_drop(message: Message):
     except Exception:
         pass
 
+
 # ================= 🛍️ МАГАЗИН =================
 @dp.message(F.text & F.text.regexp(r'(?i)^[/!]?магазин\s*$'))
 async def cmd_shop(message: Message):
@@ -156,6 +169,7 @@ async def cmd_shop(message: Message):
         [InlineKeyboardButton(text="⚱️ Купить Уник. Капсулу (500 🪙)", callback_data="buy_uniq_capsule")]
     ])
     await message.answer(text, parse_mode="HTML", reply_markup=kb)
+
 
 @dp.callback_query(F.data == "buy_capsule")
 async def cb_buy_capsule(callback: CallbackQuery):
@@ -172,6 +186,7 @@ async def cb_buy_capsule(callback: CallbackQuery):
     await update_user(callback.from_user.id, coins=new_coins, inventory=json.dumps(inv))
     await callback.answer("✅ Успешно куплено! Проверь !карман", show_alert=True)
 
+
 @dp.callback_query(F.data == "buy_uniq_capsule")
 async def cb_buy_uniq_capsule(callback: CallbackQuery):
     user = await get_user(callback.from_user.id, callback.from_user.username)
@@ -186,6 +201,7 @@ async def cb_buy_uniq_capsule(callback: CallbackQuery):
 
     await update_user(callback.from_user.id, coins=new_coins, inventory=json.dumps(inv))
     await callback.answer("✅ Успешно куплено! Проверь !карман", show_alert=True)
+
 
 # ================= 💰 ЭКОНОМИКА =================
 @dp.message(F.text & F.text.regexp(r'(?i)^[/!]?(карман|баланс)\s*$'))
@@ -218,9 +234,12 @@ async def cmd_pocket(message: Message):
 
     await message.answer(text, parse_mode="HTML")
 
+
 @dp.message(F.text & F.text.regexp(r'(?i)^[/!]?(топ)\s*$'))
 async def cmd_top(message: Message):
-    users = await get_users_from_chat(message.chat.id) if message.chat.type in ("group", "supergroup") else await get_users_from_chat(None)
+    users = await get_users_from_chat(message.chat.id) if message.chat.type in ("group",
+                                                                                "supergroup") else await get_users_from_chat(
+        None)
     users = [u for u in users if int(u["user_id"]) not in ADMIN_IDS]
     users.sort(key=lambda x: x.get("coins", 0), reverse=True)
 
@@ -234,6 +253,7 @@ async def cmd_top(message: Message):
         msg += f"{prefix} {safe_text(display_name)} — <b>{u['coins']}</b> 🪙\n"
 
     await message.answer(msg, parse_mode="HTML")
+
 
 @dp.message(F.text & F.text.regexp(r'(?i)^[/!]?открыть\s*$'))
 async def cmd_open(message: Message):
@@ -254,6 +274,7 @@ async def cmd_open(message: Message):
     else:
         await message.answer(f"🎁 <b>Сундук открыт!</b>\n🎉 Выпало: <b>{reward}</b> 🪙", parse_mode="HTML")
 
+
 @dp.message(F.text & F.text.regexp(r'(?i)^[/!]?перевод(?:\s|$)'))
 async def cmd_transfer(message: Message):
     user = await get_user(message.from_user.id, message.from_user.username)
@@ -261,24 +282,32 @@ async def cmd_transfer(message: Message):
 
     if message.reply_to_message and message.reply_to_message.from_user:
         target = message.reply_to_message.from_user
-        if len(parts) < 2: return await message.answer("❌ Формат: <code>!перевод 50</code> (ответом)", parse_mode="HTML")
-        try: amount = int(parts[1])
-        except ValueError: return await message.answer("❌ Сумма должна быть числом.")
+        if len(parts) < 2: return await message.answer("❌ Формат: <code>!перевод 50</code> (ответом)",
+                                                       parse_mode="HTML")
+        try:
+            amount = int(parts[1])
+        except ValueError:
+            return await message.answer("❌ Сумма должна быть числом.")
     else:
         if len(parts) < 3: return await message.answer("❌ Формат: <code>!перевод @user 50</code>", parse_mode="HTML")
         target = find_user_in_list(await get_users_from_chat(message.chat.id), parts[1])
         if not target: return await message.answer("❌ Пользователь не найден в базе.")
-        try: amount = int(parts[2])
-        except ValueError: return await message.answer("❌ Сумма должна быть числом.")
+        try:
+            amount = int(parts[2])
+        except ValueError:
+            return await message.answer("❌ Сумма должна быть числом.")
 
-    if amount <= 0 or target.id == message.from_user.id: return await message.answer("❌ Нельзя переводить себе или сумму <= 0.")
+    if amount <= 0 or target.id == message.from_user.id: return await message.answer(
+        "❌ Нельзя переводить себе или сумму <= 0.")
     if user["coins"] < amount: return await message.answer(f"❌ Недостаточно коинов. У тебя: {user['coins']} 🪙")
 
     target_user = await get_user(target.id, target.username)
     await update_user(message.from_user.id, coins=user["coins"] - amount)
     await update_user(target.id, coins=target_user["coins"] + amount)
 
-    await message.answer(f"✅ <b>Перевод выполнен!</b>\n👤 Кому: @{target.username}\n💸 Сумма: <b>{amount}</b> 🪙", parse_mode="HTML")
+    await message.answer(f"✅ <b>Перевод выполнен!</b>\n👤 Кому: @{target.username}\n💸 Сумма: <b>{amount}</b> 🪙",
+                         parse_mode="HTML")
+
 
 # ================= 🎲 КУБЫ =================
 @dp.message(F.text & F.text.regexp(r'(?i)^[/!]?кубы(?:\s|$)'))
@@ -286,27 +315,36 @@ async def cmd_dice(message: Message):
     parts = message.text.strip().split()
     if message.reply_to_message:
         target = message.reply_to_message.from_user
-        if len(parts) < 2: return await message.answer("🎲 Формат: <code>!кубы ставка</code> (ответом)", parse_mode="HTML")
-        try: amount = int(parts[1])
-        except ValueError: return await message.answer("❌ Ставка должна быть числом.")
+        if len(parts) < 2: return await message.answer("🎲 Формат: <code>!кубы ставка</code> (ответом)",
+                                                       parse_mode="HTML")
+        try:
+            amount = int(parts[1])
+        except ValueError:
+            return await message.answer("❌ Ставка должна быть числом.")
     else:
-        if len(parts) < 3: return await message.answer("🎲 Формат: <code>!кубы @username ставка</code>", parse_mode="HTML")
+        if len(parts) < 3: return await message.answer("🎲 Формат: <code>!кубы @username ставка</code>",
+                                                       parse_mode="HTML")
         target = find_user_in_list(await get_users_from_chat(message.chat.id), parts[1])
         if not target: return await message.answer("❌ Пользователь не найден.")
-        try: amount = int(parts[2])
-        except ValueError: return await message.answer("❌ Ставка должна быть числом.")
+        try:
+            amount = int(parts[2])
+        except ValueError:
+            return await message.answer("❌ Ставка должна быть числом.")
 
     if amount < MIN_BET: return await message.answer(f"❌ Минимальная ставка: {MIN_BET} 🪙")
 
     challenger = await get_user(message.from_user.id, message.from_user.username)
     if target.id == message.from_user.id: return await message.answer("❌ Нельзя играть сам с собой 😄")
-    if challenger["coins"] < amount: return await message.answer(f"❌ У тебя недостаточно коинов.\nНужно: <b>{amount}</b> 🪙", parse_mode="HTML")
+    if challenger["coins"] < amount: return await message.answer(
+        f"❌ У тебя недостаточно коинов.\nНужно: <b>{amount}</b> 🪙", parse_mode="HTML")
 
     challenged = await get_user(target.id, target.username)
-    if challenged["coins"] < amount: return await message.answer(f"❌ У @{target.username} недостаточно коинов.", parse_mode="HTML")
+    if challenged["coins"] < amount: return await message.answer(f"❌ У @{target.username} недостаточно коинов.",
+                                                                 parse_mode="HTML")
 
     challenge_id = f"{message.from_user.id}_{target.id}_{int(time.time())}"
-    active_challenges[challenge_id] = {"challenger_id": message.from_user.id, "challenged_id": target.id, "amount": amount}
+    active_challenges[challenge_id] = {"challenger_id": message.from_user.id, "challenged_id": target.id,
+                                       "amount": amount}
 
     kb = InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(text="✅ Принять", callback_data=f"dice_accept|{challenge_id}"),
@@ -320,6 +358,7 @@ async def cmd_dice(message: Message):
         f"⏳ Время на ответ: {CHALLENGE_TIMEOUT} секунд",
         parse_mode="HTML", reply_markup=kb,
     )
+
 
 @dp.callback_query(F.data.startswith("dice_accept|"))
 async def cb_dice_accept(callback: CallbackQuery):
@@ -364,6 +403,7 @@ async def cb_dice_accept(callback: CallbackQuery):
     await callback.message.answer(f"🎲 <b>Кубы брошены!</b>\n\n{result}", parse_mode="HTML")
     await callback.answer()
 
+
 @dp.callback_query(F.data.startswith("dice_decline|"))
 async def cb_dice_decline(callback: CallbackQuery):
     challenge_id = callback.data.split("|", 1)[1]
@@ -374,6 +414,7 @@ async def cb_dice_decline(callback: CallbackQuery):
     await callback.message.edit_text("❌ Вызов отклонён.")
     await callback.answer()
 
+
 # ================= 📛 ПОЗЫВНЫЕ =================
 @dp.message(F.text & F.text.regexp(r'(?i)^[/!]?(me|позывной)\s*$'))
 async def cmd_me(message: Message):
@@ -381,7 +422,10 @@ async def cmd_me(message: Message):
     if user.get("call_sign"):
         await message.answer(f"📛 Твой позывной: {user['call_sign']}\n👤 Имя: {safe_text(message.from_user.full_name)}")
     else:
-        await message.answer(f"👤 Имя: {safe_text(message.from_user.full_name)}\n💡 Установи позывной: <code>!setme 🔥</code>", parse_mode="HTML")
+        await message.answer(
+            f"👤 Имя: {safe_text(message.from_user.full_name)}\n💡 Установи позывной: <code>!setme 🔥</code>",
+            parse_mode="HTML")
+
 
 @dp.message(F.text & F.text.regexp(r'(?i)^[/!]?setme\s+(.+)$'))
 async def cmd_setme(message: Message):
@@ -390,11 +434,13 @@ async def cmd_setme(message: Message):
     await update_user(message.from_user.id, call_sign=emoji)
     await message.answer(f"✅ Новый позывной: {emoji}")
 
+
 @dp.message(F.text & F.text.regexp(r'(?i)^[/!]?changeme\s*$'))
 async def cmd_changeme(message: Message):
     emoji = random.choice(["🔥", "⚡", "🐺", "🦊", "🦁", "🐯", "🐲", "👻", "🤖", "👽", "💀", "👑", "🎭", "🦅", "🐍"])
     await update_user(message.from_user.id, call_sign=emoji)
     await message.answer(f"✅ Новый случайный позывной: {emoji}")
+
 
 # ================= 📢 СОЗЫВЫ =================
 async def summon_all_members(chat_id: int, call_text: str, starter_id: int):
@@ -419,6 +465,7 @@ async def summon_all_members(chat_id: int, call_text: str, starter_id: int):
     finally:
         active_summons.pop(chat_id, None)
 
+
 @dp.message(F.text & F.text.regexp(r'(?i)^[/!]?all(?:\s|$)'))
 async def cmd_all(message: Message):
     if message.chat.type not in ("group", "supergroup"): return await message.answer("❌ Только для групп!")
@@ -433,6 +480,7 @@ async def cmd_all(message: Message):
     await message.answer(f"🔄 Начинаю созыв...", parse_mode="HTML")
     asyncio.create_task(summon_all_members(message.chat.id, call_text, message.from_user.id))
 
+
 @dp.message(F.text & F.text.regexp(r'(?i)^[/!]?(stop|стоп)\s*$'))
 async def cmd_stop(message: Message):
     if message.chat.type in ("group", "supergroup"):
@@ -443,6 +491,7 @@ async def cmd_stop(message: Message):
         await message.answer("⏹️ Созыв прекращён.")
     else:
         await message.answer("❌ Активных созывов нет.")
+
 
 @dp.message(F.text & F.text.regexp(r'(?i)^[/!]?(admins|админы)(?:\s|$)'))
 async def cmd_admins(message: Message):
@@ -458,7 +507,59 @@ async def cmd_admins(message: Message):
     except Exception as e:
         await message.answer(f"❌ Ошибка: {e}")
 
+
 # ================= 🔧 АДМИН-КОМАНДЫ =================
+@dp.message(F.text & F.text.regexp(r'(?i)^\+промокод(?:\s|$)'))
+async def cmd_admin_promocode(message: Message):
+    if not is_admin(message.from_user.id): return
+    try:
+        await message.delete()
+    except:
+        pass
+
+    parts = message.text.strip().split()
+    if len(parts) < 4: return await message.answer(
+        "❌ Формат: <code>+промокод НАЗВАНИЕ 10 500</code> (10 активаций, 500 коинов)", parse_mode="HTML")
+
+    code = parts[1]
+    try:
+        uses = int(parts[2])
+        amount = int(parts[3])
+    except:
+        return await message.answer("❌ Активации и сумма должны быть числами.")
+
+    def _add():
+        try:
+            supabase.table("promocodes").insert({"code": code, "uses": uses, "amount": amount}).execute()
+        except Exception as e:
+            print(e)
+
+    await asyncio.to_thread(_add)
+    await message.answer(f"✅ Промокод <code>{code}</code> создан!\nАктиваций: {uses}\nНаграда: {amount} 🪙",
+                         parse_mode="HTML")
+
+
+@dp.message(F.text & F.text.regexp(r'(?i)^-удалить промокод(?:\s|$)'))
+async def cmd_admin_delpromo(message: Message):
+    if not is_admin(message.from_user.id): return
+    try:
+        await message.delete()
+    except:
+        pass
+
+    parts = message.text.strip().split()
+    if len(parts) < 3: return await message.answer("❌ Формат: <code>-удалить промокод НАЗВАНИЕ</code>",
+                                                   parse_mode="HTML")
+
+    code = parts[2]
+
+    def _del():
+        supabase.table("promocodes").delete().eq("code", code).execute()
+
+    await asyncio.to_thread(_del)
+    await message.answer(f"✅ Промокод <code>{code}</code> удалён.", parse_mode="HTML")
+
+
 @dp.message(F.text & F.text.regexp(r'(?i)^\+пополнить\s+карман(?:\s|$)'))
 async def cmd_admin_add(message: Message):
     try:
@@ -466,13 +567,16 @@ async def cmd_admin_add(message: Message):
     except:
         pass
     if not is_admin(message.from_user.id): return await message.answer("❌ Только для админов бота.")
-    if message.chat.type in ("group", "supergroup") and not await is_chat_admin(message.from_user.id, message.chat.id): return await message.answer("❌ Только для админов чата.")
+    if message.chat.type in ("group", "supergroup") and not await is_chat_admin(message.from_user.id,
+                                                                                message.chat.id): return await message.answer(
+        "❌ Только для админов чата.")
 
     parts = message.text.strip().split()
     if message.reply_to_message:
         target, amount_idx = message.reply_to_message.from_user, 2
     else:
-        if len(parts) < 4: return await message.answer("❌ Формат: <code>+пополнить карман @user 500</code>", parse_mode="HTML")
+        if len(parts) < 4: return await message.answer("❌ Формат: <code>+пополнить карман @user 500</code>",
+                                                       parse_mode="HTML")
         target = find_user_in_list(await get_users_from_chat(message.chat.id), parts[2])
         if not target: return await message.answer("❌ Пользователь не найден (пусть напишет в чат).")
         amount_idx = 3
@@ -484,7 +588,10 @@ async def cmd_admin_add(message: Message):
 
     user = await get_user(target.id, target.username)
     await update_user(target.id, coins=user["coins"] + amount)
-    await message.answer(f"💰 <b>Карман пополнен!</b>\n👤 Кому: @{target.username}\n➕ Начислено: <b>{amount}</b> 🪙\n📊 Баланс: <b>{user['coins'] + amount}</b> 🪙", parse_mode="HTML")
+    await message.answer(
+        f"💰 <b>Карман пополнен!</b>\n👤 Кому: @{target.username}\n➕ Начислено: <b>{amount}</b> 🪙\n📊 Баланс: <b>{user['coins'] + amount}</b> 🪙",
+        parse_mode="HTML")
+
 
 @dp.message(F.text & F.text.regexp(r'(?i)^[/!]?забрать\s+всё(?:\s|$)'))
 async def cmd_admin_wipe_all(message: Message):
@@ -508,7 +615,8 @@ async def cmd_admin_wipe_all(message: Message):
         if not target:
             return await message.answer("❌ Пользователь не найден (пусть напишет в чат).")
     else:
-        return await message.answer("❌ Формат: <code>!забрать всё @user</code> или ответом на сообщение", parse_mode="HTML")
+        return await message.answer("❌ Формат: <code>!забрать всё @user</code> или ответом на сообщение",
+                                    parse_mode="HTML")
 
     user = await get_user(target.id, target.username)
 
@@ -534,6 +642,7 @@ async def cmd_admin_wipe_all(message: Message):
         parse_mode="HTML"
     )
 
+
 @dp.message(F.text & F.text.regexp(r'(?i)^[/!]?забрать(?:\s|$)'))
 async def cmd_admin_withdraw(message: Message):
     try:
@@ -541,7 +650,9 @@ async def cmd_admin_withdraw(message: Message):
     except:
         pass
     if not is_admin(message.from_user.id): return await message.answer("❌ Только для админов бота.")
-    if message.chat.type in ("group", "supergroup") and not await is_chat_admin(message.from_user.id, message.chat.id): return await message.answer("❌ Только для админов чата.")
+    if message.chat.type in ("group", "supergroup") and not await is_chat_admin(message.from_user.id,
+                                                                                message.chat.id): return await message.answer(
+        "❌ Только для админов чата.")
 
     parts = message.text.strip().split()
     if message.reply_to_message:
@@ -565,6 +676,7 @@ async def cmd_admin_withdraw(message: Message):
         f"💸 <b>Коины списаны!</b>\n👤 У кого: @{target.username}\n➖ Снято: <b>{amount}</b> 🪙\nОстаток: <b>{user['coins'] - amount}</b> 🪙",
         parse_mode="HTML")
 
+
 @dp.message(F.text & F.text.regexp(r'(?i)^[/!]?выдать\s+ключ(?:\s|$)'))
 async def cmd_admin_give_key(message: Message):
     try:
@@ -584,8 +696,10 @@ async def cmd_admin_give_key(message: Message):
         if len(parts) < 3:
             amount = 1
         else:
-            try: amount = int(parts[2])
-            except: return await message.answer("❌ Укажи число ключей (например: !выдать ключ 5).")
+            try:
+                amount = int(parts[2])
+            except:
+                return await message.answer("❌ Укажи число ключей (например: !выдать ключ 5).")
     else:
         if len(parts) < 4:
             return await message.answer("❌ Формат: <code>!выдать ключ @user 5</code>", parse_mode="HTML")
@@ -594,8 +708,10 @@ async def cmd_admin_give_key(message: Message):
         if not target:
             return await message.answer("❌ Пользователь не найден (пусть напишет в чат).")
 
-        try: amount = int(parts[3])
-        except: return await message.answer("❌ Укажи число ключей (например: !выдать ключ @user 5).")
+        try:
+            amount = int(parts[3])
+        except:
+            return await message.answer("❌ Укажи число ключей (например: !выдать ключ @user 5).")
 
     if amount <= 0:
         return await message.answer("❌ Количество должно быть больше 0.")
@@ -614,11 +730,14 @@ async def cmd_admin_give_key(message: Message):
         parse_mode="HTML"
     )
 
+
 # ================= 📊 СТАТИСТИКА (АДМИН) =================
 @dp.message(F.text & F.text.regexp(r'(?i)^[/!]?стата\s+бота\s*$'))
 async def cmd_bot_stats(message: Message):
-    if not is_admin(message.from_user.id): return await message.answer("❌ Эта команда доступна только администраторам бота.")
-    if message.chat.type != "private": return await message.answer("❌ Эта команда работает только в личных сообщениях с ботом.")
+    if not is_admin(message.from_user.id): return await message.answer(
+        "❌ Эта команда доступна только администраторам бота.")
+    if message.chat.type != "private": return await message.answer(
+        "❌ Эта команда работает только в личных сообщениях с ботом.")
 
     try:
         response = await asyncio.to_thread(lambda: supabase.table("users").select("*").execute())
@@ -639,6 +758,7 @@ async def cmd_bot_stats(message: Message):
     except Exception as e:
         logger.error(f"Ошибка при получении статистики: {e}")
         await message.answer(f"❌ Ошибка при получении статистики: {e}")
+
 
 # ================= 🔧 ПОМОЩЬ =================
 @dp.message(F.text & F.text.regexp(r'(?i)^[/!]?(помощь|help)\s*$'))
@@ -667,9 +787,11 @@ async def cmd_help(message: Message):
     )
     await message.answer(text, parse_mode="HTML")
 
+
 @dp.message(F.text & F.text.regexp(r'(?i)^[/!]?тег\s*$'))
 async def cmd_tag(message: Message):
     await message.answer(f"👋 Я на месте, {safe_text(message.from_user.full_name)}!")
+
 
 @dp.message(F.text & F.text.regexp(r'(?i)^[/!]?апка\s*$'))
 async def cmd_apka(message: Message):
@@ -681,6 +803,7 @@ async def cmd_apka(message: Message):
     )
     await message.answer(text, parse_mode="HTML")
 
+
 # ================= 🌐 FALLBACK =================
 @dp.message()
 async def handle_all_messages(message: Message):
@@ -688,6 +811,7 @@ async def handle_all_messages(message: Message):
         await process_random_coin_drop(message)
     except Exception as e:
         logger.error(f"Ошибка дропа: {e}")
+
 
 # ================= 🚀 ЗАПУСК =================
 async def start_fake_website():
@@ -700,6 +824,7 @@ async def start_fake_website():
     site = web.TCPSite(runner, '0.0.0.0', port)
     await site.start()
 
+
 async def main():
     await start_fake_website()
     me = await bot.get_me()
@@ -707,6 +832,7 @@ async def main():
     if not me.can_read_all_group_messages:
         logger.warning("⚠️ Privacy Mode ВКЛЮЧЕН! Бот не видит '!команды'. Отключи в BotFather.")
     await dp.start_polling(bot)
+
 
 if __name__ == "__main__":
     asyncio.run(main())

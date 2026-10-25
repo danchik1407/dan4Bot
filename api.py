@@ -94,6 +94,9 @@ class CrashBet(BaseModel): initData: str; amount: int
 class CrashCashout(BaseModel): initData: str
 
 
+class PromocodeActivate(BaseModel): initData: str; code: str
+
+
 # ==================== ХОККЕЙ ====================
 @app.get("/api/hockey_state")
 async def get_hockey_state():
@@ -234,7 +237,6 @@ async def finish_hockey(data: FinishHockey):
     game_state["status"] = "finished"
     game_state["last_update"] = time.time()
 
-    # СРАЗУ ВЫПЛАЧИВАЕМ
     if winner and not game_state["is_paid"]:
         game_state["is_paid"] = True
         winner_id = winner["id"]
@@ -309,9 +311,12 @@ async def get_crash_state(initData: str = ""):
     elif crash_state["status"] == "flying":
         elapsed = now - crash_state["status_start"]
 
-        # Экспоненциальный рост: медленно в начале, очень быстро в конце
-        # 1.0 + 0.05 * (e^(0.4 * t) - 1)
-        current_mult = 1.0 + 0.05 * (math.exp(0.45 * elapsed) - 1)
+        # НОВАЯ ПЛАВНАЯ ФОРМУЛА (Ease-in-out)
+        if elapsed <= 2.0:
+            t = elapsed / 2.0
+            current_mult = 1.0 + (t ** 2) * 0.2
+        else:
+            current_mult = 1.2 + (elapsed - 2.0) * 0.15 + math.pow(elapsed - 2.0, 1.2) * 0.05
 
         if current_mult >= crash_state["crash_point"]:
             crash_state["multiplier"] = crash_state["crash_point"]
@@ -531,6 +536,35 @@ async def get_global_top():
 async def get_season_end():
     end_date = datetime.datetime(2026, 11, 1, 15, 0, 0)
     return {"end_timestamp": int(end_date.timestamp())}
+
+
+# ==================== ПРОМОКОДЫ ====================
+@app.post("/api/activate_promocode")
+async def activate_promocode(data: PromocodeActivate):
+    user = verify_telegram_data(data.initData)
+    if not user: raise HTTPException(status_code=401, detail="Invalid auth data")
+    user_id = str(user["id"])
+
+    res = supabase.table("promocodes").select("*").eq("code", data.code).execute()
+    if not res.data: raise HTTPException(status_code=400, detail="Промокод не найден")
+
+    promo = res.data[0]
+    if promo["uses"] <= 0: raise HTTPException(status_code=400, detail="Промокод закончился")
+
+    used_res = supabase.table("promocode_uses").select("*").eq("code", data.code).eq("user_id", user_id).execute()
+    if used_res.data: raise HTTPException(status_code=400, detail="Вы уже активировали этот промокод")
+
+    new_uses = promo["uses"] - 1
+    supabase.table("promocodes").update({"uses": new_uses}).eq("code", data.code).execute()
+
+    user_res = supabase.table("users").select("coins").eq("user_id", int(user_id)).execute()
+    current_coins = int(user_res.data[0].get("coins", 0)) if user_res.data else 0
+    new_coins = current_coins + promo["amount"]
+    supabase.table("users").update({"coins": new_coins}).eq("user_id", int(user_id)).execute()
+
+    supabase.table("promocode_uses").insert({"code": data.code, "user_id": user_id}).execute()
+
+    return {"success": True, "reward": promo["amount"], "new_balance": new_coins}
 
 
 if __name__ == "__main__":
