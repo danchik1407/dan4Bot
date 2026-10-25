@@ -110,6 +110,7 @@ main { padding: 0 16px; }
 .hockey-sector:last-child { border-right: none; }
 .player-shape-wrapper { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); display: flex; justify-content: center; align-items: center; pointer-events: none; z-index: 5; }
 .player-shape { display: flex; justify-content: center; align-items: center; overflow: hidden; box-shadow: 0 0 15px rgba(0,0,0,0.5); border: 2px solid rgba(255,255,255,0.4); }
+
 .hockey-ball {
     width: 20px; height: 20px; background: white; border-radius: 50%;
     position: absolute; box-shadow: 0 0 15px #fff;
