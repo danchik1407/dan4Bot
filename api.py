@@ -309,13 +309,17 @@ async def get_crash_state(initData: str = ""):
             crash_state["crash_point"] = get_crash_point_by_chance()
 
     elif crash_state["status"] == "flying":
+        # СЕРВЕР ТОЛЬКО ПРОВЕРЯЕТ КРАШ, ЛОГИКА МНОЖИТЕЛЯ НА КЛИЕНТЕ
         elapsed = now - crash_state["status_start"]
 
+        # Формула для сервера (совпадает с клиентом)
         if elapsed <= 2.0:
             t = elapsed / 2.0
             current_mult = 1.0 + (t ** 2) * 0.2
         else:
             current_mult = 1.2 + (elapsed - 2.0) * 0.15 + math.pow(elapsed - 2.0, 1.2) * 0.05
+
+        crash_state["multiplier"] = current_mult
 
         if current_mult >= crash_state["crash_point"]:
             crash_state["multiplier"] = crash_state["crash_point"]
@@ -342,8 +346,6 @@ async def get_crash_state(initData: str = ""):
                     {"name": p["name"], "bet": p["bet"], "cashout": p["cashout_mult"], "is_bot": p["is_bot"]} for p in
                     crash_state["players"]]})
             if len(crash_history) > 20: crash_history.pop()
-        else:
-            crash_state["multiplier"] = current_mult
 
         for p in crash_state["players"]:
             if p["cashout_mult"] == 0 and p["is_bot"] and random.random() < 0.05:

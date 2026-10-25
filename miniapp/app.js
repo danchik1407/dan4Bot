@@ -48,16 +48,15 @@ function playSound(type) {
             gain.gain.setValueAtTime(0.08, now); gain.gain.exponentialRampToValueAtTime(0.01, now + 0.4);
             osc.start(now); osc.stop(now + 0.4);
         } else if (type === 'boom') {
-            // ОЧЕНЬ ТИХИЙ ВЗРЫВ
             const bs = audioCtx.sampleRate * 0.8;
             const b = audioCtx.createBuffer(1, bs, audioCtx.sampleRate);
             const d = b.getChannelData(0);
-            for (let i = 0; i < bs; i++) d[i] = (Math.random() * 2 - 1) * Math.exp(-i / (bs * 0.1)); // Затухание
+            for (let i = 0; i < bs; i++) d[i] = (Math.random() * 2 - 1) * Math.exp(-i / (bs * 0.1));
             const n = audioCtx.createBufferSource(); n.buffer = b;
             const ng = audioCtx.createGain();
-            ng.gain.setValueAtTime(0.03, now); // Громкость снижена в 3 раза
+            ng.gain.setValueAtTime(0.03, now);
             const filter = audioCtx.createBiquadFilter();
-            filter.type = 'lowpass'; filter.frequency.setValueAtTime(400, now); // Убираем высокие частоты (скрежет)
+            filter.type = 'lowpass'; filter.frequency.setValueAtTime(400, now);
             n.connect(filter); filter.connect(ng); ng.connect(audioCtx.destination); n.start(now);
         }
     } catch(e) {}
@@ -555,7 +554,7 @@ async function crashAction() {
     isProcessing = false;
 }
 
-// ПЛАВНАЯ АНИМАЦИЯ
+// ИДЕАЛЬНО ПЛАВНАЯ АНИМАЦИЯ И СОХРАНЕНИЕ ПРИ ПЕРЕЗАПУСКЕ
 function animateFlight() {
     if (!currentCrashData || currentCrashData.status !== 'flying') {
         isAnimatingFlight = false;
@@ -567,9 +566,14 @@ function animateFlight() {
     const rocketEl = el('crash-rocket');
     const field = el('crash-field');
 
+    // Если анимация только запустилась, сразу ставим нужное время
+    if (!isAnimatingFlight && currentCrashData.status_start) {
+        flightStartTime = currentCrashData.status_start;
+        isAnimatingFlight = true;
+    }
+
     const elapsed = (Date.now() / 1000) - flightStartTime;
 
-    // Формула Ease-in-out (медленно -> быстро -> медленно)
     let smoothMult = 1.0;
     if (elapsed <= 2.0) {
         const t = elapsed / 2.0;
@@ -647,9 +651,10 @@ async function pollCrashState() {
             statusEl.innerText = 'Идёт полет...'; statusEl.style.color = '#34c759';
             betContainer.style.display = 'none';
 
+            // ВАЖНО: Принудительно стартуем с серверного времени при первом заходе
             if (!isAnimatingFlight) {
-                flightStartTime = state.status_start;
                 isAnimatingFlight = true;
+                flightStartTime = state.status_start; // СИНХРОНИЗАЦИЯ ВРЕМЕНИ
                 animateFlight();
             }
 
