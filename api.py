@@ -2,7 +2,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
-import os, hashlib, hmac, json, time, random, uvicorn, math, datetime
+import os, hashlib, hmac, json, time, random, uvicorn, datetime
 from urllib.parse import parse_qsl
 from dotenv import load_dotenv
 from supabase import create_client, Client
@@ -11,7 +11,6 @@ load_dotenv()
 app = FastAPI()
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
-# Подключаем статику (если файлы лежат в папке miniapp)
 if os.path.exists("miniapp"):
     app.mount("/miniapp", StaticFiles(directory="miniapp", html=True), name="miniapp")
 
@@ -255,8 +254,10 @@ async def get_crash_state(initData: str = ""):
             crash_state["crash_point"] = cp
 
     elif crash_state["status"] == "flying":
-        growth = 0.1 + (crash_state["multiplier"] * 0.05)
-        crash_state["multiplier"] += growth * 0.1
+        # УСКОРЕНИЕ РОСТА (чем больше икс, тем быстрее)
+        growth = 0.05 + (crash_state["multiplier"] ** 1.5) * 0.02
+        crash_state["multiplier"] += growth
+
         for p in crash_state["players"]:
             if p["cashout_mult"] == 0 and p["is_bot"] and random.random() < 0.05:
                 p["cashout_mult"] = crash_state["multiplier"]
@@ -424,11 +425,9 @@ async def get_global_top():
 
 @app.get("/api/season_end")
 async def get_season_end():
-    # Генерирует время окончания сезона (например, конец текущего месяца)
-    now = datetime.datetime.now()
-    if now.month == 12: next_month = datetime.datetime(now.year + 1, 1, 1)
-    else: next_month = datetime.datetime(now.year, now.month + 1, 1)
-    return {"end_timestamp": int(next_month.timestamp())}
+    # Строгая дата окончания: 1 ноября 2026 года, 15:00:00
+    end_date = datetime.datetime(2026, 11, 1, 15, 0, 0)
+    return {"end_timestamp": int(end_date.timestamp())}
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8000)))

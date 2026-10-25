@@ -20,7 +20,7 @@ let crashInterval = null;
 let lastCrashStatus = null;
 let currentCrashData = null;
 
-let lbTimerEnd = Date.now() + (30 * 24 * 3600 * 1000); // Фоллбэк на 30 дней
+let lbTimerEnd = Date.now() + (30 * 24 * 3600 * 1000);
 
 // ================= ЗВУКИ =================
 const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
@@ -536,23 +536,26 @@ async function pollCrashState() {
             statusEl.innerText = `Ставки: ${state.timer} сек`; statusEl.style.color = '#ffcc00';
             multEl.innerText = 'x1.00'; multEl.style.color = '#fff';
             betContainer.style.display = 'block';
-            rocketEl.style.left = '50px'; rocketEl.style.bottom = '50px'; rocketEl.style.transform = 'rotate(0deg)'; rocketEl.style.opacity = '1';
+            rocketEl.style.left = '40px'; rocketEl.style.bottom = '40px'; rocketEl.style.transform = 'rotate(45deg)'; rocketEl.style.opacity = '1';
             document.getElementById('crash-flame').style.display = 'block'; document.getElementById('crash-explosion').style.display = 'none';
         } else if (state.status === 'ready') {
             statusEl.innerText = `Готовность: ${state.timer} сек`; statusEl.style.color = '#ff9500';
             multEl.innerText = 'x1.00'; multEl.style.color = '#fff';
             betContainer.style.display = 'none';
-            rocketEl.style.left = '50px'; rocketEl.style.bottom = '50px';
+            rocketEl.style.left = '40px'; rocketEl.style.bottom = '40px';
         } else if (state.status === 'flying') {
             statusEl.innerText = 'Идёт полет...'; statusEl.style.color = '#34c759';
             multEl.innerText = `x${state.multiplier.toFixed(2)}`; multEl.style.color = state.multiplier > 2 ? '#ffcc00' : '#fff';
             betContainer.style.display = 'none';
+
+            // ТРАЕКТОРИЯ: прямая вверх-вправо
             const field = document.getElementById('crash-field');
             const w = field.offsetWidth, h = field.offsetHeight;
-            const t = Math.min((state.multiplier - 1) / 10, 1);
-            const x = 40 + t * (w - 130);
-            const y = 40 + Math.pow(t, 1.3) * (h - 130);
-            rocketEl.style.left = x + 'px'; rocketEl.style.bottom = y + 'px'; rocketEl.style.transform = `rotate(${-10 - t * 35}deg)`;
+            const t = Math.min((state.multiplier - 1) / 15, 1);
+            const x = 40 + t * (w - 100);
+            const y = 40 + t * (h - 100);
+            rocketEl.style.left = x + 'px';
+            rocketEl.style.bottom = y + 'px';
         } else if (state.status === 'crashed') {
             statusEl.innerText = 'КРАШ!'; statusEl.style.color = '#ff3b30';
             multEl.innerText = `x${(state.crash_point || 0).toFixed(2)}`; multEl.style.color = '#ff3b30';
@@ -588,6 +591,17 @@ async function pollCrashState() {
 
         if (historyEl) {
             historyEl.innerHTML = '';
+            const firstDiv = document.createElement('div');
+            firstDiv.className = 'crash-hist-item';
+            firstDiv.style.background = '#34c759';
+            firstDiv.style.color = '#000';
+            firstDiv.style.fontWeight = '900';
+            if (state.status === 'waiting') firstDiv.innerText = 'Ожидание';
+            else if (state.status === 'ready') firstDiv.innerText = 'Готовность';
+            else if (state.status === 'flying') firstDiv.innerText = `x${state.multiplier.toFixed(2)}`;
+            else if (state.status === 'crashed') { firstDiv.innerText = `x${state.crash_point.toFixed(2)}`; firstDiv.style.background = '#ff3b30'; firstDiv.style.color = '#fff'; }
+            historyEl.appendChild(firstDiv);
+
             (state.history || []).forEach(h => {
                 const div = document.createElement('div');
                 div.className = 'crash-hist-item';
