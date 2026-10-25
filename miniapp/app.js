@@ -69,12 +69,13 @@ async function placeHockeyBet() {
     isProcessing = false;
 }
 
-// ФИЗИКА ШАРИКА: РЕЗКИЙ СТАРТ, ПЛАВНАЯ ОСТАНОВКА, ЗУМ ЗА 4 СЕК
+// ФИЗИКА ШАРИКА: РЕЗКИЙ СТАРТ, ПЛАВНОЕ ТОРМОЖЕНИЕ, ЗУМ ЗА 4 СЕК
 function startBallPhysics() {
     if (ball.active || ball.hasStartedAnim) return;
     ball.hasStartedAnim = true;
     ball.x = 50; ball.y = 50;
 
+    // Резкий разгон (большая начальная скорость)
     let angle = Math.random() * Math.PI * 2;
     let speed = 8.0;
     ball.vx = Math.cos(angle) * speed;
@@ -90,8 +91,8 @@ function startBallPhysics() {
     let scale = 1;
     const maxScale = 2.5;
     const startTime = performance.now();
-    const duration = 15000;
-    const zoomStartTime = duration - 4000;
+    const duration = 15000; // Всего 15 секунд полета
+    const zoomStartTime = duration - 4000; // Зум начинается за 4 секунды до конца
 
     const step = () => {
         if (!ball.active) return;
@@ -100,6 +101,7 @@ function startBallPhysics() {
         ball.x += ball.vx;
         ball.y += ball.vy;
 
+        // Отскоки
         if (ball.x <= 0 || ball.x >= 100) {
             ball.vx *= -1;
             ball.x = Math.max(0, Math.min(100, ball.x));
@@ -111,6 +113,7 @@ function startBallPhysics() {
             playSound('click');
         }
 
+        // ПЛАВНОЕ ЗАМЕДЛЕНИЕ
         ball.vx *= 0.985;
         ball.vy *= 0.985;
 
@@ -119,12 +122,14 @@ function startBallPhysics() {
             ballEl.style.top = ball.y + '%';
         }
 
+        // ЗУМ ЗА 4 СЕКУНДЫ ДО ОСТАНОВКИ
         if (elapsed > zoomStartTime) {
             scale += (maxScale - scale) * 0.02;
             arena.style.transform = `scale(${scale})`;
             arena.style.transformOrigin = `${ball.x}% ${ball.y}%`;
         }
 
+        // Остановка
         if (Math.abs(ball.vx) < 0.05 && Math.abs(ball.vy) < 0.05) {
             ball.active = false;
             fetch(`${API_URL}/api/finish_hockey`, {
@@ -175,6 +180,7 @@ async function pollHockeyState() {
                 }
             }
 
+            // ЗАДЕРЖКА 1 СЕК ПЕРЕД ПОКАЗОМ МОДАЛКИ
             const modal = document.getElementById('winner-modal');
             if (state.winner && !hasShownWinner) {
                 hasShownWinner = true;
