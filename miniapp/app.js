@@ -69,12 +69,12 @@ async function placeHockeyBet() {
     isProcessing = false;
 }
 
-// ФИЗИКА: ШАРИК С ОТСКОКАМИ
+// ФИЗИКА: ШАРИК С ОТСКОКАМИ (ДЛИТЕЛЬНОСТЬ 8.5 СЕК)
 function startBallPhysics() {
     if (ball.active || ball.hasStartedAnim) return;
     ball.hasStartedAnim = true;
     ball.x = 50; ball.y = 50;
-    // Случайный угол и скорость
+
     let angle = Math.random() * Math.PI * 2;
     let speed = 2.5;
     ball.vx = Math.cos(angle) * speed;
@@ -90,7 +90,7 @@ function startBallPhysics() {
     let scale = 1;
     const maxScale = 2.5;
     const startTime = performance.now();
-    const duration = 6000;
+    const duration = 8500; // Увеличили длительность анимации до 8.5 сек
 
     const step = () => {
         if (!ball.active) return;
@@ -101,30 +101,28 @@ function startBallPhysics() {
         ball.x += ball.vx;
         ball.y += ball.vy;
 
-        // Отскок от левой/правой стены
+        // Отскок от стен
         if (ball.x <= 0 || ball.x >= 100) {
             ball.vx *= -1;
-            ball.x = Math.max(0, Math.min(100, ball.x)); // Фикс, чтобы не вылетал
-            playSound('click'); // Звук отскока
+            ball.x = Math.max(0, Math.min(100, ball.x));
+            playSound('click');
         }
-        // Отскок от верхней/нижней стены
         if (ball.y <= 0 || ball.y >= 100) {
             ball.vy *= -1;
             ball.y = Math.max(0, Math.min(100, ball.y));
-            playSound('click'); // Звук отскока
+            playSound('click');
         }
 
-        // Трение (замедление)
+        // Замедление
         ball.vx *= 0.97;
         ball.vy *= 0.97;
 
-        // Обновляем позицию
         if (ballEl) {
             ballEl.style.left = ball.x + '%';
             ballEl.style.top = ball.y + '%';
         }
 
-        // Зум на последних секундах
+        // Зум
         if (elapsed > duration * 0.7) {
             scale += (maxScale - scale) * 0.05;
             arena.style.transform = `scale(${scale})`;
@@ -146,8 +144,42 @@ function startBallPhysics() {
     ball.animationId = requestAnimationFrame(step);
 }
 
-// ИСТОРИЯ (ПОКА НЕ НУЖНА, НО ОСТАВЛЮ ЗАГЛУШКУ)
-window.openHistory = function() { alert("История скоро появится!"); };
+// ================= ИСТОРИЯ =================
+window.openHistory = async function() {
+    const modal = document.getElementById('history-modal');
+    const list = document.getElementById('history-list');
+    if (!modal) { tg.showAlert("Ошибка HTML: нет окна истории"); return; }
+
+    list.innerHTML = '<p style="text-align:center;color:#888;">Загрузка...</p>';
+    modal.classList.add('active');
+
+    try {
+        const res = await fetch(`${API_URL}/api/hockey_history`);
+        const history = await res.json();
+        list.innerHTML = '';
+
+        if (history.length === 0) {
+            list.innerHTML = '<p style="text-align:center;color:#888;">История пуста</p>';
+            return;
+        }
+
+        history.forEach(item => {
+            const div = document.createElement('div');
+            div.style.cssText = "background: #252525; padding: 15px; border-radius: 10px; margin-bottom: 10px; border: 1px solid #333;";
+            let playersText = item.players.map(p => `${p.name} (${p.bet} 🪙) ${p.is_winner ? '🏆' : ''}`).join('\n');
+            div.innerHTML = `
+                <div style="display:flex; justify-content:space-between; width:100%; align-items:center; margin-bottom: 10px;">
+                    <span style="font-weight:bold; color: #ffcc00;">🏆 ${item.winner_name}</span>
+                    <span style="color:#34c759; font-weight:900; font-size: 18px;">+${item.amount} 🪙</span>
+                </div>
+                <div style="font-size: 12px; color: #8e8e93; white-space: pre-line;">${playersText}</div>
+            `;
+            list.appendChild(div);
+        });
+    } catch (e) {
+        list.innerHTML = '<p style="text-align:center;color:#888;">Ошибка загрузки истории</p>';
+    }
+};
 
 async function pollHockeyState() {
     if (!document.getElementById('screen-hockey').classList.contains('active')) return;
@@ -170,12 +202,10 @@ async function pollHockeyState() {
             if (arena) { arena.style.transform = 'scale(1)'; arena.style.transformOrigin = 'center center'; arena.querySelectorAll('.hockey-sector').forEach(s => s.style.boxShadow = 'none'); }
             document.getElementById('winner-modal').classList.remove('active');
         } else if (state.status === 'rolling') {
-            statusEl.innerText = 'Идёт бросок...'; statusEl.style.color = '#007aff';
-            document.getElementById('hockey-controls').style.display = 'none';
+            statusEl.innerText = 'Идёт бросок...'; statusEl.style.color = '#007aff'; document.getElementById('hockey-controls').style.display = 'none';
             if (!ball.hasStartedAnim) startBallPhysics();
         } else if (state.status === 'finished') {
-            statusEl.innerText = 'Раунд окончен!'; statusEl.style.color = '#ff3b30';
-            ball.active = false;
+            statusEl.innerText = 'Раунд окончен!'; statusEl.style.color = '#ff3b30'; ball.active = false;
             if (ball.animationId) cancelAnimationFrame(ball.animationId);
             if (state.winner) {
                 const sectors = arena.querySelectorAll('.hockey-sector');
@@ -198,7 +228,7 @@ async function pollHockeyState() {
 
         bankEl.innerText = `Банк: ${state.bank} 🪙`;
 
-        // РЕНДЕР ВСЕГДА
+        // РЕНДЕР
         arena.querySelectorAll('.hockey-sector').forEach(el => el.remove());
         let totalWidth = 0;
         state.players.forEach((p, index) => {
@@ -254,7 +284,7 @@ function startHockeyPolling() { if (hockeyInterval) clearInterval(hockeyInterval
 function stopHockeyPolling() { if (hockeyInterval) clearInterval(hockeyInterval); hockeyInterval = null; if (ball.animationId) cancelAnimationFrame(ball.animationId); }
 function closeWinnerModal() { document.getElementById('winner-modal').classList.remove('active'); }
 
-// СУНДУКИ (ИСПРАВЛЕННЫЙ ЦЕНТР)
+// ================= СУНДУКИ =================
 let pendingChestReward = 0, pendingChestIsKey = false, pendingChestIsGold = false;
 async function openChest(type) {
     if (isProcessing) return;
@@ -309,7 +339,7 @@ async function claimChestReward() {
     pendingChestReward = 0; pendingChestIsKey = false; pendingChestIsGold = false; isProcessing = false;
 }
 
-// МАГАЗИН
+// ================= МАГАЗИН =================
 async function buyItem(itemId, price) {
     if (isProcessing) return; if (balance < price) return tg.showAlert("Недостаточно коинов!");
     isProcessing = true;
@@ -321,7 +351,7 @@ async function buyItem(itemId, price) {
     isProcessing = false;
 }
 
-// ОБЩИЕ
+// ================= ОБЩИЕ =================
 async function loadUserData() { try { const response = await fetch(`${API_URL}/api/user`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ initData: tg.initData }) }); const data = await response.json(); balance = data.coins; keys = data.keys || 0; inventory = data.inventory || []; lastChestTime = data.last_chest || 0; updateUI(); checkChestCooldown(); } catch (e) { } }
 async function changeBalance(amount) { const response = await fetch(`${API_URL}/api/update_balance`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ initData: tg.initData, amount: amount }) }); const data = await response.json(); balance = data.new_balance; updateUI(); }
 async function changeKeys(amount) { const response = await fetch(`${API_URL}/api/update_keys`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ initData: tg.initData, amount: amount }) }); const data = await response.json(); keys = data.new_keys; updateUI(); }
@@ -335,7 +365,7 @@ function openGame(game) { document.getElementById('main-header').style.display =
 function addBet(game, amount) { const input = document.getElementById(game + '-bet'); if (!input) return; let current = parseInt(input.value) || 10; current += amount; if (current > 10000) current = 10000; input.value = current; }
 function getBet(game) { const input = document.getElementById(game + '-bet'); if (!input) return 10; let val = parseInt(input.value) || 10; if (val < 10) val = 10; if (val > 10000) val = 10000; return val; }
 
-// МИНЫ
+// ================= МИНЫ =================
 let minesActive = false, minesCoef = 1.0, minesSafeOpened = 0, selectedMines = 1;
 const board = document.getElementById('mines-board');
 for (let i = 0; i < 16; i++) { const cell = document.createElement('div'); cell.className = 'cell'; cell.dataset.index = i; cell.onclick = () => clickMineCell(cell); board.appendChild(cell); }
