@@ -14,6 +14,7 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, 
 supabase: Client = create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_KEY"))
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
+# ТВОИ ID
 ADMIN_IDS = [6338018270, 5184813347, 8890834384]
 
 BOT_NAMES = ["Shark_V", "LuckyFox", "NeonWolf", "GhostByte", "PixelKing", "CyberCat", "IronFist", "VoidWalker",
@@ -291,6 +292,8 @@ async def get_crash_state():
     if crash_state["status"] == "waiting":
         time_left = 10 - (now - crash_state["last_update"])
 
+        if time_left < -1: time_left = 0
+
         if time_left <= 8 and crash_state["target_bots"] == 0:
             crash_state["target_bots"] = random.randint(1, 3)
 
@@ -439,6 +442,11 @@ async def get_user(auth: UserAuth):
     user = verify_telegram_data(auth.initData)
     if not user: raise HTTPException(status_code=401, detail="Invalid auth data")
     user_id = user["id"]
+
+    # Скрываем баланс, если запрашивают админа (но не самого себя)
+    if user_id in ADMIN_IDS and user_id != user.get("id"):
+        return {"coins": -1, "keys": 0, "inventory": [], "last_chest": 0, "hidden": True}
+
     res = supabase.table("users").select("*").eq("user_id", user_id).execute()
     if not res.data:
         new_user = {"user_id": user_id, "coins": 0, "keys": 0, "username": user.get("username", f"id{user_id}"),

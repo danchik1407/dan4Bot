@@ -8,8 +8,7 @@ import json
 from types import SimpleNamespace
 from dotenv import load_dotenv
 from aiogram import Bot, Dispatcher, F
-from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, FSInputFile, Dice, \
-    WebAppInfo
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, FSInputFile, Dice, WebAppInfo
 from aiogram.enums import ChatMemberStatus
 from aiohttp import web
 from supabase import create_client, Client
@@ -21,8 +20,7 @@ load_dotenv()
 
 # ================= НАСТРОЙКИ =================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-admin_ids_str = os.getenv("ADMIN_IDS", "")
-ADMIN_IDS = [int(x.strip()) for x in admin_ids_str.split(",") if x.strip().isdigit()]
+ADMIN_IDS = [6338018270, 5184813347, 8890834384] # Твои ID
 
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
@@ -84,7 +82,6 @@ async def update_user(user_id: int, **kwargs):
 
 async def get_users_from_chat(chat_id: int):
     def _fetch(): return supabase.table("users").select("*").eq("chat_id", chat_id).execute().data
-
     return await asyncio.to_thread(_fetch)
 
 
@@ -211,6 +208,14 @@ async def cmd_pocket(message: Message):
     target = message.reply_to_message.from_user if message.reply_to_message else message.from_user
     user = await get_user(target.id, target.username)
 
+    # СКРЫТИЕ БАЛАНСА АДМИНОВ
+    if target.id in ADMIN_IDS and message.from_user.id != target.id:
+        return await message.answer(
+            f"💰 <b>Карман @{safe_text(target.username)}</b>\n\n"
+            f"💎 Баланс: <b>Скрыто</b> 🔒",
+            parse_mode="HTML"
+        )
+
     inv = json.loads(user.get("inventory") or "[]")
     name = f"@{safe_text(target.username)}" if target.username else f"id{target.id}"
 
@@ -232,9 +237,9 @@ async def cmd_pocket(message: Message):
 
 @dp.message(F.text & F.text.regexp(r'(?i)^[/!]?(топ)\s*$'))
 async def cmd_top(message: Message):
-    users = await get_users_from_chat(message.chat.id) if message.chat.type in ("group",
-                                                                                "supergroup") else await get_users_from_chat(
-        None)
+    users = await get_users_from_chat(message.chat.id) if message.chat.type in ("group", "supergroup") else await get_users_from_chat(None)
+    # Исключаем админов из топа
+    users = [u for u in users if int(u["user_id"]) not in ADMIN_IDS]
     users.sort(key=lambda x: x.get("coins", 0), reverse=True)
 
     msg = "💰 <b>ТОП-10 ПО КОИНАМ</b>\n━━━━━━━━━━━━━━━━━━━━\n\n"
@@ -276,31 +281,24 @@ async def cmd_transfer(message: Message):
 
     if message.reply_to_message and message.reply_to_message.from_user:
         target = message.reply_to_message.from_user
-        if len(parts) < 2: return await message.answer("❌ Формат: <code>!перевод 50</code> (ответом)",
-                                                       parse_mode="HTML")
-        try:
-            amount = int(parts[1])
-        except ValueError:
-            return await message.answer("❌ Сумма должна быть числом.")
+        if len(parts) < 2: return await message.answer("❌ Формат: <code>!перевод 50</code> (ответом)", parse_mode="HTML")
+        try: amount = int(parts[1])
+        except ValueError: return await message.answer("❌ Сумма должна быть числом.")
     else:
         if len(parts) < 3: return await message.answer("❌ Формат: <code>!перевод @user 50</code>", parse_mode="HTML")
         target = find_user_in_list(await get_users_from_chat(message.chat.id), parts[1])
         if not target: return await message.answer("❌ Пользователь не найден в базе.")
-        try:
-            amount = int(parts[2])
-        except ValueError:
-            return await message.answer("❌ Сумма должна быть числом.")
+        try: amount = int(parts[2])
+        except ValueError: return await message.answer("❌ Сумма должна быть числом.")
 
-    if amount <= 0 or target.id == message.from_user.id: return await message.answer(
-        "❌ Нельзя переводить себе или сумму <= 0.")
+    if amount <= 0 or target.id == message.from_user.id: return await message.answer("❌ Нельзя переводить себе или сумму <= 0.")
     if user["coins"] < amount: return await message.answer(f"❌ Недостаточно коинов. У тебя: {user['coins']} 🪙")
 
     target_user = await get_user(target.id, target.username)
     await update_user(message.from_user.id, coins=user["coins"] - amount)
     await update_user(target.id, coins=target_user["coins"] + amount)
 
-    await message.answer(f"✅ <b>Перевод выполнен!</b>\n👤 Кому: @{target.username}\n💸 Сумма: <b>{amount}</b> 🪙",
-                         parse_mode="HTML")
+    await message.answer(f"✅ <b>Перевод выполнен!</b>\n👤 Кому: @{target.username}\n💸 Сумма: <b>{amount}</b> 🪙", parse_mode="HTML")
 
 
 # ================= 🎲 КУБЫ =================
@@ -309,36 +307,27 @@ async def cmd_dice(message: Message):
     parts = message.text.strip().split()
     if message.reply_to_message:
         target = message.reply_to_message.from_user
-        if len(parts) < 2: return await message.answer("🎲 Формат: <code>!кубы ставка</code> (ответом)",
-                                                       parse_mode="HTML")
-        try:
-            amount = int(parts[1])
-        except ValueError:
-            return await message.answer("❌ Ставка должна быть числом.")
+        if len(parts) < 2: return await message.answer("🎲 Формат: <code>!кубы ставка</code> (ответом)", parse_mode="HTML")
+        try: amount = int(parts[1])
+        except ValueError: return await message.answer("❌ Ставка должна быть числом.")
     else:
-        if len(parts) < 3: return await message.answer("🎲 Формат: <code>!кубы @username ставка</code>",
-                                                       parse_mode="HTML")
+        if len(parts) < 3: return await message.answer("🎲 Формат: <code>!кубы @username ставка</code>", parse_mode="HTML")
         target = find_user_in_list(await get_users_from_chat(message.chat.id), parts[1])
         if not target: return await message.answer("❌ Пользователь не найден.")
-        try:
-            amount = int(parts[2])
-        except ValueError:
-            return await message.answer("❌ Ставка должна быть числом.")
+        try: amount = int(parts[2])
+        except ValueError: return await message.answer("❌ Ставка должна быть числом.")
 
     if amount < MIN_BET: return await message.answer(f"❌ Минимальная ставка: {MIN_BET} 🪙")
 
     challenger = await get_user(message.from_user.id, message.from_user.username)
     if target.id == message.from_user.id: return await message.answer("❌ Нельзя играть сам с собой 😄")
-    if challenger["coins"] < amount: return await message.answer(
-        f"❌ У тебя недостаточно коинов.\nНужно: <b>{amount}</b> 🪙", parse_mode="HTML")
+    if challenger["coins"] < amount: return await message.answer(f"❌ У тебя недостаточно коинов.\nНужно: <b>{amount}</b> 🪙", parse_mode="HTML")
 
     challenged = await get_user(target.id, target.username)
-    if challenged["coins"] < amount: return await message.answer(f"❌ У @{target.username} недостаточно коинов.",
-                                                                 parse_mode="HTML")
+    if challenged["coins"] < amount: return await message.answer(f"❌ У @{target.username} недостаточно коинов.", parse_mode="HTML")
 
     challenge_id = f"{message.from_user.id}_{target.id}_{int(time.time())}"
-    active_challenges[challenge_id] = {"challenger_id": message.from_user.id, "challenged_id": target.id,
-                                       "amount": amount}
+    active_challenges[challenge_id] = {"challenger_id": message.from_user.id, "challenged_id": target.id, "amount": amount}
 
     kb = InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(text="✅ Принять", callback_data=f"dice_accept|{challenge_id}"),
@@ -412,7 +401,6 @@ async def cb_dice_decline(callback: CallbackQuery):
 # ================= 💣 МИНЫ =================
 MINES_STEP_COEFS = {1: 1.03, 2: 1.08, 3: 1.15}
 
-
 def get_mines_kb(game_id: str):
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="1 💣 (x1.10)", callback_data=f"mines_start_1|{game_id}"),
@@ -438,8 +426,7 @@ async def cmd_mines_bet(message: Message):
     game_id = f"{message.from_user.id}_{message.message_id}"
     active_mines_games[game_id] = {"user_id": message.from_user.id, "amount": amount, "active": False}
 
-    await message.answer(f"💣 <b>Ставка: {amount} 🪙</b>\nВыбери количество мин:", reply_markup=get_mines_kb(game_id),
-                         parse_mode="HTML")
+    await message.answer(f"💣 <b>Ставка: {amount} 🪙</b>\nВыбери количество мин:", reply_markup=get_mines_kb(game_id), parse_mode="HTML")
 
 
 @dp.callback_query(F.data.startswith("mines_start_"))
@@ -460,11 +447,9 @@ async def cb_mines_start(callback: CallbackQuery):
 
     kb = InlineKeyboardMarkup(inline_keyboard=[])
     for r in range(4):
-        kb.inline_keyboard.append(
-            [InlineKeyboardButton(text="⬜", callback_data=f"mines_open_{r * 4 + c}|{game_id}") for c in range(4)])
+        kb.inline_keyboard.append([InlineKeyboardButton(text="⬜", callback_data=f"mines_open_{r * 4 + c}|{game_id}") for c in range(4)])
 
-    kb.inline_keyboard.append([InlineKeyboardButton(text=f"💰 Забрать ({game['amount']} 🪙) | Кэф: x1.0",
-                                                    callback_data=f"mines_cashout|{game_id}")])
+    kb.inline_keyboard.append([InlineKeyboardButton(text=f"💰 Забрать ({game['amount']} 🪙) | Кэф: x1.0", callback_data=f"mines_cashout|{game_id}")])
 
     await callback.message.edit_text(
         f"💣 <b>Мины: {mines_count}</b>\nСтавка: <b>{game['amount']}</b> 🪙\nТекущий кэф: <b>x1.0</b>\nОткрыто: 0/16",
@@ -491,11 +476,8 @@ async def cb_mines_open(callback: CallbackQuery):
 
         kb = InlineKeyboardMarkup(inline_keyboard=[])
         for r in range(4):
-            kb.inline_keyboard.append(
-                [InlineKeyboardButton(text="💥" if game["board"][r * 4 + c] else "⬜", callback_data="ignore") for c in
-                 range(4)])
-        await callback.message.edit_text(f"💥 <b>БАБАХ!</b>\nТы потерял {game['amount']} 🪙", reply_markup=kb,
-                                         parse_mode="HTML")
+            kb.inline_keyboard.append([InlineKeyboardButton(text="💥" if game["board"][r * 4 + c] else "⬜", callback_data="ignore") for c in range(4)])
+        await callback.message.edit_text(f"💥 <b>БАБАХ!</b>\nТы потерял {game['amount']} 🪙", reply_markup=kb, parse_mode="HTML")
         return await callback.answer("💥 БУМ!")
 
     game["opened"][idx] = True
@@ -507,13 +489,9 @@ async def cb_mines_open(callback: CallbackQuery):
 
     kb = InlineKeyboardMarkup(inline_keyboard=[])
     for r in range(4):
-        kb.inline_keyboard.append([InlineKeyboardButton(text="✅" if game["opened"][r * 4 + c] else "⬜",
-                                                        callback_data="ignore" if game["opened"][
-                                                            r * 4 + c] else f"mines_open_{r * 4 + c}|{game_id}") for c
-                                   in range(4)])
+        kb.inline_keyboard.append([InlineKeyboardButton(text="✅" if game["opened"][r * 4 + c] else "⬜", callback_data="ignore" if game["opened"][r * 4 + c] else f"mines_open_{r * 4 + c}|{game_id}") for c in range(4)])
 
-    kb.inline_keyboard.append([InlineKeyboardButton(text=f"💰 Забрать ({win_amount} 🪙) | Кэф: x{current_coef}",
-                                                    callback_data=f"mines_cashout|{game_id}")])
+    kb.inline_keyboard.append([InlineKeyboardButton(text=f"💰 Забрать ({win_amount} 🪙) | Кэф: x{current_coef}", callback_data=f"mines_cashout|{game_id}")])
 
     await callback.message.edit_text(
         f"💣 <b>Мины: {game['mines_count']}</b>\nСтавка: <b>{game['amount']}</b> 🪙\nТекущий кэф: <b>x{current_coef}</b>\nОткрыто: {safe_opened}/16",
@@ -548,9 +526,7 @@ async def cb_mines_cashout(callback: CallbackQuery):
 
     kb = InlineKeyboardMarkup(inline_keyboard=[])
     for r in range(4):
-        kb.inline_keyboard.append(
-            [InlineKeyboardButton(text="💣" if game["board"][r * 4 + c] else "✅", callback_data="ignore") for c in
-             range(4)])
+        kb.inline_keyboard.append([InlineKeyboardButton(text="💣" if game["board"][r * 4 + c] else "✅", callback_data="ignore") for c in range(4)])
 
     await callback.message.edit_text(
         f"💰 <b>Забрано!</b>\nКэф: <b>x{coef}</b>\nВыигрыш: <b>{win_amount}</b> 🪙\nПрибыль: <b>{profit}</b> 🪙",
@@ -589,9 +565,7 @@ async def cmd_me(message: Message):
     if user.get("call_sign"):
         await message.answer(f"📛 Твой позывной: {user['call_sign']}\n👤 Имя: {safe_text(message.from_user.full_name)}")
     else:
-        await message.answer(
-            f"👤 Имя: {safe_text(message.from_user.full_name)}\n💡 Установи позывной: <code>!setme 🔥</code>",
-            parse_mode="HTML")
+        await message.answer(f"👤 Имя: {safe_text(message.from_user.full_name)}\n💡 Установи позывной: <code>!setme 🔥</code>", parse_mode="HTML")
 
 
 @dp.message(F.text & F.text.regexp(r'(?i)^[/!]?setme\s+(.+)$'))
@@ -683,16 +657,13 @@ async def cmd_admin_add(message: Message):
     except:
         pass
     if not is_admin(message.from_user.id): return await message.answer("❌ Только для админов бота.")
-    if message.chat.type in ("group", "supergroup") and not await is_chat_admin(message.from_user.id,
-                                                                                message.chat.id): return await message.answer(
-        "❌ Только для админов чата.")
+    if message.chat.type in ("group", "supergroup") and not await is_chat_admin(message.from_user.id, message.chat.id): return await message.answer("❌ Только для админов чата.")
 
     parts = message.text.strip().split()
     if message.reply_to_message:
         target, amount_idx = message.reply_to_message.from_user, 2
     else:
-        if len(parts) < 4: return await message.answer("❌ Формат: <code>+пополнить карман @user 500</code>",
-                                                       parse_mode="HTML")
+        if len(parts) < 4: return await message.answer("❌ Формат: <code>+пополнить карман @user 500</code>", parse_mode="HTML")
         target = find_user_in_list(await get_users_from_chat(message.chat.id), parts[2])
         if not target: return await message.answer("❌ Пользователь не найден (пусть напишет в чат).")
         amount_idx = 3
@@ -704,9 +675,7 @@ async def cmd_admin_add(message: Message):
 
     user = await get_user(target.id, target.username)
     await update_user(target.id, coins=user["coins"] + amount)
-    await message.answer(
-        f"💰 <b>Карман пополнен!</b>\n👤 Кому: @{target.username}\n➕ Начислено: <b>{amount}</b> 🪙\n📊 Баланс: <b>{user['coins'] + amount}</b> 🪙",
-        parse_mode="HTML")
+    await message.answer(f"💰 <b>Карман пополнен!</b>\n👤 Кому: @{target.username}\n➕ Начислено: <b>{amount}</b> 🪙\n📊 Баланс: <b>{user['coins'] + amount}</b> 🪙", parse_mode="HTML")
 
 
 @dp.message(F.text & F.text.regexp(r'(?i)^[/!]?забрать\s+всё(?:\s|$)'))
@@ -731,8 +700,7 @@ async def cmd_admin_wipe_all(message: Message):
         if not target:
             return await message.answer("❌ Пользователь не найден (пусть напишет в чат).")
     else:
-        return await message.answer("❌ Формат: <code>!забрать всё @user</code> или ответом на сообщение",
-                                    parse_mode="HTML")
+        return await message.answer("❌ Формат: <code>!забрать всё @user</code> или ответом на сообщение", parse_mode="HTML")
 
     user = await get_user(target.id, target.username)
 
@@ -758,7 +726,6 @@ async def cmd_admin_wipe_all(message: Message):
         parse_mode="HTML"
     )
 
-
 @dp.message(F.text & F.text.regexp(r'(?i)^[/!]?забрать(?:\s|$)'))
 async def cmd_admin_withdraw(message: Message):
     try:
@@ -766,9 +733,7 @@ async def cmd_admin_withdraw(message: Message):
     except:
         pass
     if not is_admin(message.from_user.id): return await message.answer("❌ Только для админов бота.")
-    if message.chat.type in ("group", "supergroup") and not await is_chat_admin(message.from_user.id,
-                                                                                message.chat.id): return await message.answer(
-        "❌ Только для админов чата.")
+    if message.chat.type in ("group", "supergroup") and not await is_chat_admin(message.from_user.id, message.chat.id): return await message.answer("❌ Только для админов чата.")
 
     parts = message.text.strip().split()
     if message.reply_to_message:
@@ -812,10 +777,8 @@ async def cmd_admin_give_key(message: Message):
         if len(parts) < 3:
             amount = 1
         else:
-            try:
-                amount = int(parts[2])
-            except:
-                return await message.answer("❌ Укажи число ключей (например: !выдать ключ 5).")
+            try: amount = int(parts[2])
+            except: return await message.answer("❌ Укажи число ключей (например: !выдать ключ 5).")
     else:
         if len(parts) < 4:
             return await message.answer("❌ Формат: <code>!выдать ключ @user 5</code>", parse_mode="HTML")
@@ -824,10 +787,8 @@ async def cmd_admin_give_key(message: Message):
         if not target:
             return await message.answer("❌ Пользователь не найден (пусть напишет в чат).")
 
-        try:
-            amount = int(parts[3])
-        except:
-            return await message.answer("❌ Укажи число ключей (например: !выдать ключ @user 5).")
+        try: amount = int(parts[3])
+        except: return await message.answer("❌ Укажи число ключей (например: !выдать ключ @user 5).")
 
     if amount <= 0:
         return await message.answer("❌ Количество должно быть больше 0.")
@@ -850,25 +811,15 @@ async def cmd_admin_give_key(message: Message):
 # ================= 📊 СТАТИСТИКА (АДМИН) =================
 @dp.message(F.text & F.text.regexp(r'(?i)^[/!]?стата\s+бота\s*$'))
 async def cmd_bot_stats(message: Message):
-    # Проверяем, что это админ
-    if not is_admin(message.from_user.id):
-        return await message.answer("❌ Эта команда доступна только администраторам бота.")
-
-    # Проверяем, что команда вызвана в ЛС
-    if message.chat.type != "private":
-        return await message.answer("❌ Эта команда работает только в личных сообщениях с ботом.")
+    if not is_admin(message.from_user.id): return await message.answer("❌ Эта команда доступна только администраторам бота.")
+    if message.chat.type != "private": return await message.answer("❌ Эта команда работает только в личных сообщениях с ботом.")
 
     try:
-        # Получаем всех пользователей
         response = await asyncio.to_thread(lambda: supabase.table("users").select("*").execute())
         users = response.data
-
         total_users = len(users)
-        # Активные за последние 24 часа (если last_chest обновлялся)
         now = time.time()
         active_24h = sum(1 for u in users if u.get("last_chest") and (now - float(u.get("last_chest"))) < 86400)
-
-        # Общий баланс коинов у всех
         total_coins = sum(u.get("coins", 0) for u in users)
 
         text = (
@@ -879,7 +830,6 @@ async def cmd_bot_stats(message: Message):
             f"💰 Всего коинов в системе: <b>{total_coins}</b> 🪙\n"
         )
         await message.answer(text, parse_mode="HTML")
-
     except Exception as e:
         logger.error(f"Ошибка при получении статистики: {e}")
         await message.answer(f"❌ Ошибка при получении статистики: {e}")
