@@ -118,8 +118,8 @@ async def get_hockey_state():
                     p["percent"] = 0
 
     elif game_state["status"] == "rolling":
-        # Даем 12.5 секунд на полет шарика (фронт работает 12 сек)
-        if now - game_state["last_update"] > 12.5:
+        # Ждем 13 секунд (12 сек анимация + 1 сек запас)
+        if now - game_state["last_update"] > 13:
             game_state["status"] = "finished"
             game_state["last_update"] = now
 

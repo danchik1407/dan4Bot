@@ -69,14 +69,15 @@ async function placeHockeyBet() {
     isProcessing = false;
 }
 
-// ФИЗИКА ШАРИКА (12 СЕК, ПЛАВНО, С ЗУМОМ)
+// ФИЗИКА ШАРИКА (12 СЕК, ЗАМЕДЛЕНИЕ С 7-Й СЕК, ПЛАВНЫЙ ЗУМ)
 function startBallPhysics() {
     if (ball.active || ball.hasStartedAnim) return;
     ball.hasStartedAnim = true;
     ball.x = 50; ball.y = 50;
 
+    // Начальный резкий бросок
     let angle = Math.random() * Math.PI * 2;
-    let speed = 3.5;
+    let speed = 4.5;
     ball.vx = Math.cos(angle) * speed;
     ball.vy = Math.sin(angle) * speed;
     ball.active = true;
@@ -90,12 +91,13 @@ function startBallPhysics() {
     let scale = 1;
     const maxScale = 2.5;
     const startTime = performance.now();
-    const duration = 12000; // 12 секунд полета
+    const duration = 12000; // 12 секунд всего
 
     const step = () => {
         if (!ball.active) return;
         const elapsed = performance.now() - startTime;
 
+        // Движение
         ball.x += ball.vx;
         ball.y += ball.vy;
 
@@ -111,25 +113,35 @@ function startBallPhysics() {
             playSound('click');
         }
 
-        // Плавное замедление
-        ball.vx *= 0.985;
-        ball.vy *= 0.985;
+        // ЛОГИКА ЗАМЕДЛЕНИЯ
+        // Первые 7 секунд (7000 мс) шарик летит с легким трением
+        if (elapsed < 7000) {
+            ball.vx *= 0.995;
+            ball.vy *= 0.995;
+        } else {
+            // После 7 секунд начинается сильное плавное замедление
+            ball.vx *= 0.96;
+            ball.vy *= 0.96;
+        }
 
         if (ballEl) {
             ballEl.style.left = ball.x + '%';
             ballEl.style.top = ball.y + '%';
         }
 
-        // Зум начинается с 8-й секунды
-        if (elapsed > duration * 0.67) {
+        // ЗУМ: начинается только после 7-й секунды и следует за шариком
+        if (elapsed > 7000) {
+            // Плавно наращиваем зум до 2.5
             scale += (maxScale - scale) * 0.02;
             arena.style.transform = `scale(${scale})`;
+            // Центр зума привязан к шарику
             arena.style.transformOrigin = `${ball.x}% ${ball.y}%`;
         }
 
-        // Остановка и отправка координат
-        if (Math.abs(ball.vx) < 0.1 && Math.abs(ball.vy) < 0.1) {
+        // ОСТАНОВКА: если скорость почти нулевая
+        if (Math.abs(ball.vx) < 0.05 && Math.abs(ball.vy) < 0.05) {
             ball.active = false;
+            // Отправляем финальные координаты на сервер
             fetch(`${API_URL}/api/finish_hockey`, {
                 method: 'POST', headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ initData: tg.initData, x: ball.x, y: ball.y })
@@ -188,7 +200,7 @@ async function pollHockeyState() {
 
         bankEl.innerText = `Банк: ${state.bank} 🪙`;
 
-        // РЕНДЕР СЕКТОРОВ
+        // РЕНДЕР СЕКТОРОВ (ТОЛЬКО КРУГИ)
         arena.querySelectorAll('.hockey-sector').forEach(el => el.remove());
         let totalWidth = 0;
         state.players.forEach((p, index) => {
@@ -202,11 +214,8 @@ async function pollHockeyState() {
             sector.style.background = p.color;
             sector.style.borderRight = '1px solid rgba(0,0,0,0.5)';
 
-            let shapeClass = 'shape-square';
-            if (index % 4 === 0) shapeClass = 'shape-circle';
-            if (index % 4 === 1) shapeClass = 'shape-square';
-            if (index % 4 === 2) shapeClass = 'shape-trapezoid';
-            if (index % 4 === 3) shapeClass = 'shape-triangle';
+            // ВСЕГДА ТОЛЬКО КРУГ
+            const shapeClass = 'shape-circle';
 
             const shapeWrap = document.createElement('div'); shapeWrap.className = 'player-shape-wrapper';
             const shape = document.createElement('div'); shape.className = `player-shape ${shapeClass}`;
