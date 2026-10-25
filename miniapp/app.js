@@ -69,7 +69,7 @@ async function placeHockeyBet() {
     isProcessing = false;
 }
 
-// ФИЗИКА ШАРИКА (12 СЕК, ПЛАВНОЕ ТОРМОЖЕНИЕ НА ПОСЛЕДНИХ 1.5 СЕК)
+// ФИЗИКА ШАРИКА (15 СЕК, 8-13 ЗАМЕДЛЕНИЕ, 13-15 МИКРО)
 function startBallPhysics() {
     if (ball.active || ball.hasStartedAnim) return;
     ball.hasStartedAnim = true;
@@ -90,7 +90,7 @@ function startBallPhysics() {
     let scale = 1;
     const maxScale = 2.5;
     const startTime = performance.now();
-    const duration = 12000;
+    const duration = 15000;
 
     const step = () => {
         if (!ball.active) return;
@@ -111,17 +111,17 @@ function startBallPhysics() {
             playSound('click');
         }
 
-        // ЛОГИКА ЗАМЕДЛЕНИЯ
-        if (elapsed < 7000) {
-            // Первые 7 сек - быстро
+        // ЛОГИКА ЗАМЕДЛЕНИЯ (15 СЕК)
+        if (elapsed < 8000) {
+            // 0-8 сек: нормальный полет
             ball.vx *= 0.995;
             ball.vy *= 0.995;
-        } else if (elapsed >= 7000 && elapsed < 10500) {
-            // С 7 до 10.5 сек - плавное торможение
+        } else if (elapsed >= 8000 && elapsed < 13000) {
+            // 8-13 сек: плавное замедление
             ball.vx *= 0.97;
             ball.vy *= 0.97;
         } else {
-            // Последние 1.5 сек (с 10.5 до 12) - очень сильное торможение (почти замирает)
+            // 13-15 сек: микро-движения (почти стоит)
             ball.vx *= 0.85;
             ball.vy *= 0.85;
         }
@@ -131,8 +131,8 @@ function startBallPhysics() {
             ballEl.style.top = ball.y + '%';
         }
 
-        // Зум
-        if (elapsed > 7000) {
+        // Зум с 8-й секунды
+        if (elapsed > 8000) {
             scale += (maxScale - scale) * 0.02;
             arena.style.transform = `scale(${scale})`;
             arena.style.transformOrigin = `${ball.x}% ${ball.y}%`;
