@@ -97,11 +97,18 @@ function startBallPhysics() {
     ball.animationId = requestAnimationFrame(step);
 }
 
+// === ИСТОРИЯ (ИСПРАВЛЕНО: ГЛОБАЛЬНАЯ ФУНКЦИЯ) ===
 window.openHistory = async function() {
-    const modal = document.getElementById('history-modal'); if (!modal) return;
-    const list = document.getElementById('history-list'); list.innerHTML = '<p style="text-align:center;color:#888;">Загрузка...</p>'; modal.classList.add('active');
+    const modal = document.getElementById('history-modal');
+    if (!modal) { alert("Ошибка: нет окна истории в HTML"); return; }
+    const list = document.getElementById('history-list');
+    list.innerHTML = '<p style="text-align:center;color:#888;">Загрузка...</p>';
+    modal.classList.add('active');
+
     try {
-        const res = await fetch(`${API_URL}/api/hockey_history`); const history = await res.json(); list.innerHTML = '';
+        const res = await fetch(`${API_URL}/api/hockey_history`);
+        const history = await res.json();
+        list.innerHTML = '';
         if (history.length === 0) { list.innerHTML = '<p style="text-align:center;color:#888;">История пуста</p>'; return; }
         history.forEach(item => {
             const div = document.createElement('div');
@@ -110,21 +117,26 @@ window.openHistory = async function() {
             div.innerHTML = `<div style="display:flex; justify-content:space-between; width:100%; align-items:center; margin-bottom: 10px;"><span style="font-weight:bold; color: #ffcc00;">🏆 ${item.winner_name}</span><span style="color:#34c759; font-weight:900; font-size: 18px;">+${item.amount} 🪙</span></div><div style="font-size: 12px; color: #8e8e93; white-space: pre-line;">${playersText}</div>`;
             list.appendChild(div);
         });
-    } catch (e) { list.innerHTML = '<p style="text-align:center;color:#888;">Ошибка</p>'; }
+    } catch (e) { list.innerHTML = '<p style="text-align:center;color:#888;">Ошибка загрузки</p>'; console.error(e); }
 };
 
 async function pollHockeyState() {
     if (!document.getElementById('screen-hockey').classList.contains('active')) return;
     try {
-        const res = await fetch(`${API_URL}/api/hockey_state`); const state = await res.json();
-        const statusEl = document.getElementById('hockey-status'); const bankEl = document.getElementById('hockey-bank'); const arena = document.getElementById('hockey-arena');
+        const res = await fetch(`${API_URL}/api/hockey_state`);
+        const state = await res.json();
+
+        const statusEl = document.getElementById('hockey-status');
+        const bankEl = document.getElementById('hockey-bank');
+        const arena = document.getElementById('hockey-arena');
 
         if (state.status === 'waiting') {
             statusEl.innerText = `Ставки: ${state.timer} сек`; statusEl.style.color = '#ffcc00';
             document.getElementById('hockey-controls').style.display = 'block';
             if (hasBetThisRound) hasBetThisRound = false; hasShownWinner = false; ball.active = false; ball.hasStartedAnim = false;
             if (ball.animationId) cancelAnimationFrame(ball.animationId);
-            const ballEl = document.getElementById('hockey-ball'); if (ballEl) { ballEl.style.left = '50%'; ballEl.style.top = '50%'; }
+            const ballEl = document.getElementById('hockey-ball');
+            if (ballEl) { ballEl.style.left = '50%'; ballEl.style.top = '50%'; }
             if (arena) { arena.style.transform = 'scale(1)'; arena.style.transformOrigin = 'center center'; arena.querySelectorAll('.hockey-sector').forEach(s => s.style.boxShadow = 'none'); }
             document.getElementById('winner-modal').classList.remove('active');
         } else if (state.status === 'rolling') {
@@ -144,8 +156,10 @@ async function pollHockeyState() {
                 if (state.winner.id === String(user.id)) { playSound('win'); setTimeout(async () => { await loadUserData(); }, 1000); } else { playSound('lose'); }
             }
         }
+
         bankEl.innerText = `Банк: ${state.bank} 🪙`;
 
+        // === РЕНДЕР УЧАСТНИКОВ (ВСЕГДА, ВНЕ ЗАВИСИМОСТИ ОТ СТАТУСА) ===
         arena.querySelectorAll('.hockey-sector').forEach(el => el.remove()); let totalWidth = 0;
         state.players.forEach((p, index) => {
             const sector = document.createElement('div'); sector.className = 'hockey-sector';
@@ -179,117 +193,63 @@ function startHockeyPolling() { if (hockeyInterval) clearInterval(hockeyInterval
 function stopHockeyPolling() { if (hockeyInterval) clearInterval(hockeyInterval); hockeyInterval = null; if (ball.animationId) cancelAnimationFrame(ball.animationId); }
 function closeWinnerModal() { document.getElementById('winner-modal').classList.remove('active'); }
 
-// ================= СУНДУКИ И МАГАЗИН =================
+// ================= СУНДУКИ =================
 let pendingChestReward = 0, pendingChestIsKey = false, pendingChestIsGold = false;
-
 async function openChest(type) {
     if (isProcessing) return;
     const isGold = type === 'gold';
     if (isGold && keys <= 0) return tg.showAlert("У вас нет ключей!");
-
     isProcessing = true;
-    const res = await fetch(`${API_URL}/api/open_chest`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ initData: tg.initData })
-    });
+    const res = await fetch(`${API_URL}/api/open_chest`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ initData: tg.initData }) });
     isProcessing = false;
-    if (!isGold && !res.ok) {
-        const err = await res.json();
-        return tg.showAlert(err.detail || "Сундук перезаряжается!");
-    }
-
+    if (!isGold && !res.ok) { const err = await res.json(); return tg.showAlert(err.detail || "Сундук перезаряжается!"); }
     document.getElementById('chest-buttons').style.display = 'none';
-    const roulette = document.getElementById('roulette-container');
-    roulette.style.display = 'block';
-    const track = document.getElementById('roulette-track');
-
-    track.style.transform = 'translateX(0)';
-    track.innerHTML = '';
-    void track.offsetWidth;
-
-    let winIndex = Math.floor(Math.random() * 60) + 20;
-    let finalAmount = 0, isKey = false;
-
+    const roulette = document.getElementById('roulette-container'); roulette.style.display = 'block';
+    const track = document.getElementById('roulette-track'); track.style.transform = 'translateX(0)'; track.innerHTML = ''; void track.offsetWidth;
+    let winIndex = Math.floor(Math.random() * 60) + 20; let finalAmount = 0, isKey = false;
     for (let i = 0; i < 100; i++) {
         let val, icon;
         if (isGold) { val = Math.floor(Math.random() * 90) + 10; icon = '💎'; }
-        else {
-            if (Math.random() < 0.2) { val = 0; icon = '🔑'; }
-            else { val = Math.floor(Math.random() * 10) + 1; icon = '💎'; }
-        }
+        else { if (Math.random() < 0.2) { val = 0; icon = '🔑'; } else { val = Math.floor(Math.random() * 10) + 1; icon = '💎'; } }
         if (i === winIndex) {
             if (isGold) { finalAmount = Math.floor(Math.random() * 90) + 10; icon = '💎'; val = finalAmount; }
-            else {
-                if (Math.random() < 0.01) { isKey = true; icon = '🔑'; val = 0; }
-                else { finalAmount = Math.floor(Math.random() * 10) + 1; icon = '💎'; val = finalAmount; }
-            }
+            else { if (Math.random() < 0.01) { isKey = true; icon = '🔑'; val = 0; } else { finalAmount = Math.floor(Math.random() * 10) + 1; icon = '💎'; val = finalAmount; } }
         }
-        const div = document.createElement('div');
-        div.className = 'roulette-item';
-        div.innerHTML = `${icon}<span>${val > 0 ? val : 'Ключ'}</span>`;
-        if (i === winIndex) div.classList.add('win');
-        track.appendChild(div);
+        const div = document.createElement('div'); div.className = 'roulette-item'; div.innerHTML = `${icon}<span>${val > 0 ? val : 'Ключ'}</span>`; if (i === winIndex) div.classList.add('win'); track.appendChild(div);
     }
-
-    const itemWidth = 81;
-    const windowWidth = 350;
-    const centerOffset = (windowWidth / 2) - (itemWidth / 2);
-    const targetScroll = (winIndex * itemWidth) - centerOffset;
-
-    let start = null;
-    const duration = 6000;
-
+    const itemWidth = 81; const windowWidth = 350; const centerOffset = (windowWidth / 2) - (itemWidth / 2); const targetScroll = (winIndex * itemWidth) - centerOffset;
+    let start = null; const duration = 6000;
     function step(timestamp) {
         if (!start) start = timestamp;
-        const progress = timestamp - start;
-        const easeOut = 1 - Math.pow(1 - Math.min(progress / duration, 1), 4);
-        const currentScroll = targetScroll * easeOut;
+        const progress = timestamp - start; const easeOut = 1 - Math.pow(1 - Math.min(progress / duration, 1), 4); const currentScroll = targetScroll * easeOut;
         track.style.transform = `translateX(-${currentScroll}px)`;
-
-        if (progress < duration) {
-            requestAnimationFrame(step);
-        } else {
-            pendingChestReward = finalAmount;
-            pendingChestIsKey = isKey;
-            pendingChestIsGold = isGold;
+        if (progress < duration) { requestAnimationFrame(step); }
+        else {
+            pendingChestReward = finalAmount; pendingChestIsKey = isKey; pendingChestIsGold = isGold;
             const modal = document.getElementById('chest-win-modal');
             document.getElementById('chest-win-icon').innerText = isKey ? '🔑' : '💎';
             document.getElementById('chest-win-text').innerText = isKey ? 'ЗОЛОТОЙ КЛЮЧ!' : `Вы получили ${finalAmount} 🪙`;
-            modal.classList.add('active');
-            playSound('win');
+            modal.classList.add('active'); playSound('win');
         }
     }
     requestAnimationFrame(step);
 }
-
 async function claimChestReward() {
-    if (isProcessing) return;
-    isProcessing = true;
-    document.getElementById('chest-win-modal').classList.remove('active');
-    if (pendingChestIsGold) await changeKeys(-1);
-    if (pendingChestIsKey) await changeKeys(1);
-    else if (pendingChestReward > 0) await changeBalance(pendingChestReward);
+    if (isProcessing) return; isProcessing = true; document.getElementById('chest-win-modal').classList.remove('active');
+    if (pendingChestIsGold) await changeKeys(-1); if (pendingChestIsKey) await changeKeys(1); else if (pendingChestReward > 0) await changeBalance(pendingChestReward);
     if (!pendingChestIsGold) lastChestTime = Math.floor(Date.now() / 1000);
-    document.getElementById('roulette-container').style.display = 'none';
-    document.getElementById('chest-buttons').style.display = 'flex';
-    checkChestCooldown();
-    pendingChestReward = 0; pendingChestIsKey = false; pendingChestIsGold = false;
-    isProcessing = false;
+    document.getElementById('roulette-container').style.display = 'none'; document.getElementById('chest-buttons').style.display = 'flex'; checkChestCooldown();
+    pendingChestReward = 0; pendingChestIsKey = false; pendingChestIsGold = false; isProcessing = false;
 }
 
+// ================= МАГАЗИН =================
 async function buyItem(itemId, price) {
-    if (isProcessing) return;
-    if (balance < price) return tg.showAlert("Недостаточно коинов!");
+    if (isProcessing) return; if (balance < price) return tg.showAlert("Недостаточно коинов!");
     isProcessing = true;
     try {
-        const res = await fetch(`${API_URL}/api/buy_item`, {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ initData: tg.initData, item_id: itemId, price: price })
-        });
+        const res = await fetch(`${API_URL}/api/buy_item`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ initData: tg.initData, item_id: itemId, price: price }) });
         if (!res.ok) { const err = await res.json(); isProcessing = false; return tg.showAlert(err.detail || "Ошибка"); }
-        const data = await res.json();
-        balance = data.new_balance; inventory = data.inventory; updateUI();
-        showWin("✅ Успешно куплено!"); playSound('click');
+        const data = await res.json(); balance = data.new_balance; inventory = data.inventory; updateUI(); showWin("✅ Успешно куплено!"); playSound('click');
     } catch(e) { tg.showAlert("Ошибка соединения"); }
     isProcessing = false;
 }
