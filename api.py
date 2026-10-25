@@ -80,6 +80,7 @@ async def get_hockey_state():
     if game_state["status"] == "waiting":
         time_left = 15 - (now - game_state["last_update"])
 
+        # Устанавливаем начальный лимит, но потом будем его пересчитывать
         if time_left <= 10 and game_state["target_bots"] == 0:
             game_state["target_bots"] = random.randint(1, 5)
 
@@ -105,6 +106,10 @@ async def get_hockey_state():
                 game_state["bank"] += bot_bet
                 game_state["last_bot_added"] = now
 
+                # === ВАЖНО: ПЕРЕСЧЕТ ЦЕЛИ БОТОВ ===
+                # Теперь после каждого бота мы заново рандомим, сколько их всего будет
+                game_state["target_bots"] = random.randint(1, 5)
+
                 total_bank = game_state["bank"]
                 if total_bank > 0:
                     for p in game_state["players"]:
@@ -113,7 +118,6 @@ async def get_hockey_state():
             # Киты (только если выпал шанс и их меньше 2)
             if game_state["whale_chance"] and game_state["whales_added"] < 2 and current_whales < 2 and len(
                     game_state["players"]) < 20 and (now - game_state["last_bot_added"]) > bot_delay:
-                # Проверяем, чтобы не зашли два кита одновременно
                 if random.random() < 0.3:
                     whale_bet = random.randint(500, 1000)
                     whale_name = random.choice(WHALE_NAMES) + str(random.randint(1, 9))
