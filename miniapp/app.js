@@ -73,14 +73,11 @@ async function placeHockeyBet() {
     isProcessing = false;
 }
 
-// ИСПРАВЛЕННАЯ ФИЗИКА: Шарик плавно останавливается
-function startBallPhysics() {
+function startBallPhysics(targetX) {
     if (ball.active) return;
 
     ball.x = 0;
     ball.y = 50;
-    ball.vx = 1.5;
-    ball.vy = 0;
     ball.active = true;
 
     const arena = document.getElementById('hockey-arena');
@@ -91,38 +88,35 @@ function startBallPhysics() {
 
     let scale = 1;
     const maxScale = 2.5;
+    let speed = 2.0;
 
     const step = () => {
         if (!ball.active) return;
 
-        ball.vx *= 0.97; // Трение (чуть быстрее замедляется)
+        const dist = targetX - ball.x;
+        let friction = 0.985;
+        if (dist < 15) friction = 0.96;
 
-        ball.x += ball.vx;
+        speed *= friction;
 
-        // Ограничение, чтобы не улетал за края
-        if (ball.x >= 100) {
-            ball.x = 100;
-            ball.vx = 0;
+        if (speed < 0.05 || Math.abs(dist) < 0.1) {
+            ball.x = targetX;
+            if (ballEl) ballEl.style.left = ball.x + '%';
+
+            arena.style.transformOrigin = `${ball.x}% 50%`;
+            arena.style.transform = `scale(${maxScale})`;
+
+            ball.active = false;
+            return;
         }
 
-        if (ballEl) {
-            ballEl.style.left = ball.x + '%';
-        }
+        ball.x += speed;
+        if (ballEl) ballEl.style.left = ball.x + '%';
 
-        const speed = Math.abs(ball.vx);
-        if (speed < 0.5) {
+        if (speed < 1.0) {
             scale += (maxScale - scale) * 0.05;
             arena.style.transform = `scale(${scale})`;
             arena.style.transformOrigin = `${ball.x}% 50%`;
-        }
-
-        if (speed < 0.05) {
-            ball.active = false;
-            fetch(`${API_URL}/api/finish_hockey`, {
-                method: 'POST', headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ initData: tg.initData, x: ball.x, y: 50 })
-            });
-            return;
         }
 
         ball.animationId = requestAnimationFrame(step);
@@ -155,18 +149,30 @@ async function pollHockeyState() {
             if (arena) {
                 arena.style.transform = 'scale(1)';
                 arena.style.transformOrigin = 'center center';
+                arena.querySelectorAll('.hockey-sector').forEach(s => s.style.boxShadow = 'none');
             }
             document.getElementById('winner-modal').classList.remove('active');
 
         } else if (state.status === 'rolling') {
             statusEl.innerText = 'Идёт бросок...'; statusEl.style.color = '#007aff';
             document.getElementById('hockey-controls').style.display = 'none';
-            if (!ball.active) startBallPhysics();
+            if (!ball.active) startBallPhysics(state.win_x);
 
         } else if (state.status === 'finished') {
             statusEl.innerText = 'Раунд окончен!'; statusEl.style.color = '#ff3b30';
             ball.active = false;
             if (ball.animationId) cancelAnimationFrame(ball.animationId);
+
+            if (state.winner) {
+                const sectors = arena.querySelectorAll('.hockey-sector');
+                const winnerId = state.winner.id;
+                const winnerIndex = state.players.findIndex(p => p.id === winnerId);
+                if (winnerIndex !== -1 && sectors[winnerIndex]) {
+                    sectors[winnerIndex].style.transition = 'box-shadow 0.3s';
+                    sectors[winnerIndex].style.boxShadow = 'inset 0 0 50px #fff, 0 0 30px #fff';
+                    setTimeout(() => { sectors[winnerIndex].style.boxShadow = 'none'; }, 1000);
+                }
+            }
 
             if (arena) {
                 arena.style.transform = 'scale(1)';
@@ -191,7 +197,6 @@ async function pollHockeyState() {
         bankEl.innerText = `Банк: ${state.bank} 🪙`;
 
         arena.querySelectorAll('.hockey-sector').forEach(el => el.remove());
-
         let totalWidth = 0;
         state.players.forEach((p, index) => {
             const sector = document.createElement('div');
@@ -225,13 +230,17 @@ async function pollHockeyState() {
                 shape.style.width = size + 'px';
                 shape.style.height = size + 'px';
 
-                if (!p.is_bot && p.avatar) {
+                // ЛОГИКА АВАТАРОК: Если есть ссылка на фото - показываем, иначе букву
+                if (!p.is_bot && p.avatar && p.avatar.startsWith('http')) {
                     shape.innerHTML = `<img src="${p.avatar}" style="width:100%; height:100%; object-fit:cover;">`;
-                    shape.style.background = 'transparent'; shape.style.border = '2px solid #fff';
+                    shape.style.background = 'transparent';
+                    shape.style.border = '2px solid #fff';
                 } else {
+                    // Для ботов и юзеров без фото — цветной кружок с буквой
                     const letter = p.name ? p.name[0].toUpperCase() : '?';
                     shape.innerHTML = `<span style="color:white; font-weight:900; font-size:${size/2}px; text-shadow: 0 2px 4px rgba(0,0,0,0.5);">${letter}</span>`;
-                    shape.style.backgroundColor = '#2a2a2a'; shape.style.border = '2px solid rgba(255,255,255,0.5)';
+                    shape.style.backgroundColor = p.color; // Используем цвет сектора или свой
+                    shape.style.border = '2px solid rgba(255,255,255,0.5)';
                 }
                 shapeWrap.appendChild(shape);
                 sector.appendChild(shapeWrap);
@@ -249,10 +258,14 @@ async function pollHockeyState() {
             const div = document.createElement('div'); div.className = 'part-item';
             const width = p.percent || (p.bet / state.bank * 100);
             let iconHtml = '';
-            if (!p.is_bot && p.avatar) { iconHtml = `<img src="${p.avatar}" style="width:20px; height:20px; border-radius:50%; margin-right:5px; vertical-align:middle;">`; }
-            else {
+
+            // ЛОГИКА ИКОНОК В СПИСКЕ
+            if (!p.is_bot && p.avatar && p.avatar.startsWith('http')) {
+                iconHtml = `<img src="${p.avatar}" style="width:20px; height:20px; border-radius:50%; margin-right:5px; vertical-align:middle;">`;
+            } else {
                 const letter = p.name ? p.name[0].toUpperCase() : '?';
-                iconHtml = `<span style="display:inline-flex; justify-content:center; align-items:center; width:20px; height:20px; border-radius:50%; background:#2a2a2a; color:white; font-size:10px; font-weight:bold; margin-right:5px;">${letter}</span>`;
+                // Фон иконки берем из цвета игрока
+                iconHtml = `<span style="display:inline-flex; justify-content:center; align-items:center; width:20px; height:20px; border-radius:50%; background:${p.color}; color:white; font-size:10px; font-weight:bold; margin-right:5px;">${letter}</span>`;
             }
             div.innerHTML = `<div class="name"><span>#${i+1}</span>${iconHtml}<span>${p.name}</span></div><div class="stats">${width.toFixed(1)}% | ${p.bet} 🪙</div>`;
             list.appendChild(div);
@@ -271,6 +284,41 @@ function stopHockeyPolling() {
 }
 
 function closeWinnerModal() { document.getElementById('winner-modal').classList.remove('active'); }
+
+// ИСТОРИЯ
+async function loadHistory() {
+    try {
+        const res = await fetch(`${API_URL}/api/hockey_history`);
+        const history = await res.json();
+        const list = document.getElementById('history-list');
+        list.innerHTML = '';
+        if (history.length === 0) {
+            list.innerHTML = '<p style="text-align:center;color:#888;">История пуста</p>';
+            return;
+        }
+        history.forEach(item => {
+            const div = document.createElement('div');
+            div.className = 'history-item';
+            div.style.cssText = "background: #252525; padding: 15px; border-radius: 10px; margin-bottom: 10px; cursor: pointer;";
+            div.innerHTML = `
+                <div style="display:flex; justify-content:space-between; width:100%; align-items:center;">
+                    <span style="font-weight:bold;">🏆 ${item.winner_name}</span>
+                    <span style="color:#34c759; font-weight:900;">+${item.amount} 🪙</span>
+                </div>
+            `;
+            div.onclick = () => {
+                let playersText = item.players.map(p => `${p.name}: ${p.bet} 🪙 ${p.is_winner ? '🏆' : ''}`).join('\n');
+                tg.showAlert(`Победитель: ${item.winner_name}\nСумма: ${item.amount} 🪙\n\nУчастники:\n${playersText}`);
+            };
+            list.appendChild(div);
+        });
+    } catch (e) { console.error(e); }
+}
+
+function openHistory() {
+    loadHistory();
+    document.getElementById('history-modal').classList.add('active');
+}
 
 // ОБЩИЕ ФУНКЦИИ
 async function loadUserData() {
@@ -350,7 +398,6 @@ function checkChestCooldown() {
 
 let pendingChestReward = 0, pendingChestIsKey = false, pendingChestIsGold = false;
 
-// ИСПРАВЛЕННАЯ АНИМАЦИЯ СУНДУКОВ
 async function openChest(type) {
     if (isProcessing) return;
     const isGold = type === 'gold';
@@ -506,7 +553,10 @@ function openGame(game) {
     document.getElementById('main-nav').style.display = 'none';
     document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
     document.getElementById('screen-' + game).classList.add('active');
-    if (game === 'hockey') startHockeyPolling();
+    if (game === 'hockey') {
+        startHockeyPolling();
+        loadHistory();
+    }
     if (tg.HapticFeedback) tg.HapticFeedback.impactOccurred('soft');
 }
 
