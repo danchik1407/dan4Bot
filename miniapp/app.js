@@ -69,14 +69,15 @@ async function placeHockeyBet() {
     isProcessing = false;
 }
 
-// ФИЗИКА: ШАРИК С ОТСКОКАМИ (ДЛИТЕЛЬНОСТЬ 8.5 СЕК)
+// ФИЗИКА: ШАРИК С ОТСКОКАМИ (10 СЕК)
 function startBallPhysics() {
     if (ball.active || ball.hasStartedAnim) return;
     ball.hasStartedAnim = true;
     ball.x = 50; ball.y = 50;
 
+    // Начальный резкий бросок в случайном направлении
     let angle = Math.random() * Math.PI * 2;
-    let speed = 2.5;
+    let speed = 3.5;
     ball.vx = Math.cos(angle) * speed;
     ball.vy = Math.sin(angle) * speed;
     ball.active = true;
@@ -90,7 +91,7 @@ function startBallPhysics() {
     let scale = 1;
     const maxScale = 2.5;
     const startTime = performance.now();
-    const duration = 8500; // Увеличили длительность анимации до 8.5 сек
+    const duration = 10000; // 10 секунд полета
 
     const step = () => {
         if (!ball.active) return;
@@ -101,7 +102,7 @@ function startBallPhysics() {
         ball.x += ball.vx;
         ball.y += ball.vy;
 
-        // Отскок от стен
+        // Отскоки от стен
         if (ball.x <= 0 || ball.x >= 100) {
             ball.vx *= -1;
             ball.x = Math.max(0, Math.min(100, ball.x));
@@ -113,18 +114,18 @@ function startBallPhysics() {
             playSound('click');
         }
 
-        // Замедление
-        ball.vx *= 0.97;
-        ball.vy *= 0.97;
+        // Плавное замедление (трение)
+        ball.vx *= 0.985;
+        ball.vy *= 0.985;
 
         if (ballEl) {
             ballEl.style.left = ball.x + '%';
             ballEl.style.top = ball.y + '%';
         }
 
-        // Зум
+        // Зум на последних 3 секундах
         if (elapsed > duration * 0.7) {
-            scale += (maxScale - scale) * 0.05;
+            scale += (maxScale - scale) * 0.03;
             arena.style.transform = `scale(${scale})`;
             arena.style.transformOrigin = `${ball.x}% ${ball.y}%`;
         }
@@ -149,7 +150,6 @@ window.openHistory = async function() {
     const modal = document.getElementById('history-modal');
     const list = document.getElementById('history-list');
     if (!modal) { tg.showAlert("Ошибка HTML: нет окна истории"); return; }
-
     list.innerHTML = '<p style="text-align:center;color:#888;">Загрузка...</p>';
     modal.classList.add('active');
 
@@ -157,12 +157,7 @@ window.openHistory = async function() {
         const res = await fetch(`${API_URL}/api/hockey_history`);
         const history = await res.json();
         list.innerHTML = '';
-
-        if (history.length === 0) {
-            list.innerHTML = '<p style="text-align:center;color:#888;">История пуста</p>';
-            return;
-        }
-
+        if (history.length === 0) { list.innerHTML = '<p style="text-align:center;color:#888;">История пуста</p>'; return; }
         history.forEach(item => {
             const div = document.createElement('div');
             div.style.cssText = "background: #252525; padding: 15px; border-radius: 10px; margin-bottom: 10px; border: 1px solid #333;";
@@ -176,9 +171,7 @@ window.openHistory = async function() {
             `;
             list.appendChild(div);
         });
-    } catch (e) {
-        list.innerHTML = '<p style="text-align:center;color:#888;">Ошибка загрузки истории</p>';
-    }
+    } catch (e) { list.innerHTML = '<p style="text-align:center;color:#888;">Ошибка загрузки истории</p>'; }
 };
 
 async function pollHockeyState() {
@@ -228,7 +221,7 @@ async function pollHockeyState() {
 
         bankEl.innerText = `Банк: ${state.bank} 🪙`;
 
-        // РЕНДЕР
+        // === РЕНДЕР ВСЕГДА (ИСПРАВЛЕНО) ===
         arena.querySelectorAll('.hockey-sector').forEach(el => el.remove());
         let totalWidth = 0;
         state.players.forEach((p, index) => {
@@ -236,12 +229,14 @@ async function pollHockeyState() {
             sector.className = 'hockey-sector';
 
             let width = p.percent;
-            if (index === state.players.length - 1) { width = 100 - totalWidth; } else { width = parseFloat(p.percent.toFixed(2)); totalWidth += width; }
+            if (index === state.players.length - 1) { width = 100 - totalWidth; }
+            else { width = parseFloat(p.percent.toFixed(2)); totalWidth += width; }
 
             sector.style.width = width + '%';
             sector.style.background = p.color;
             sector.style.borderRight = '1px solid rgba(0,0,0,0.5)';
 
+            // ВСЕГДА создаем фигуру, даже если нет аватарки
             let shapeClass = 'shape-square';
             if (index % 4 === 0) shapeClass = 'shape-circle';
             if (index % 4 === 1) shapeClass = 'shape-square';
@@ -250,12 +245,15 @@ async function pollHockeyState() {
 
             const shapeWrap = document.createElement('div'); shapeWrap.className = 'player-shape-wrapper';
             const shape = document.createElement('div'); shape.className = `player-shape ${shapeClass}`;
-            const size = Math.max(40, Math.min(60, width * 4)); shape.style.width = size + 'px'; shape.style.height = size + 'px';
+            const size = Math.max(40, Math.min(60, width * 4));
+            shape.style.width = size + 'px'; shape.style.height = size + 'px';
 
             if (!p.is_bot && p.avatar && p.avatar.startsWith('http')) {
+                // Если у реального игрока есть аватарка - показываем её
                 shape.innerHTML = `<img src="${p.avatar}" style="width:100%; height:100%; object-fit:cover; border-radius:50%;">`;
                 shape.style.background = 'transparent'; shape.style.border = '2px solid #fff';
             } else {
+                // Если нет - рисуем цветной кружок с буквой
                 const letter = p.name ? p.name[0].toUpperCase() : '?';
                 shape.innerHTML = `<span style="color:white; font-weight:900; font-size:${size/2}px; text-shadow: 0 2px 4px rgba(0,0,0,0.5);">${letter}</span>`;
                 shape.style.backgroundColor = p.color; shape.style.border = '2px solid rgba(255,255,255,0.5)';
