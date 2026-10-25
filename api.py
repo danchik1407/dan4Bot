@@ -72,7 +72,6 @@ async def get_hockey_state():
     if game_state["status"] == "waiting":
         time_left = 15 - (now - game_state["last_update"])
 
-        # Генерация ботов
         if time_left <= 8 and game_state["target_bots"] == 0:
             game_state["target_bots"] = random.randint(1, 5)
 
@@ -86,7 +85,7 @@ async def get_hockey_state():
                     bot_color = random.choice(BOT_COLORS)
 
                 game_state["players"].append({
-                    "id": random.randint(10000, 99999), "name": bot_name, "avatar": "", "bet": bot_bet,
+                    "id": str(random.randint(10000, 99999)), "name": bot_name, "avatar": "", "bet": bot_bet,
                     "color": bot_color, "shape": "circle", "is_bot": True
                 })
                 game_state["bank"] += bot_bet
@@ -104,7 +103,8 @@ async def get_hockey_state():
                     p["percent"] = 0
 
     elif game_state["status"] == "rolling":
-        if now - game_state["last_update"] > 10:
+        # Даем 8 секунд на полет шарика
+        if now - game_state["last_update"] > 8:
             game_state["status"] = "finished"
             game_state["last_update"] = now
 
@@ -116,15 +116,14 @@ async def get_hockey_state():
                 winner_id = game_state["winner"]["id"]
                 bank_amount = game_state["bank"]
                 try:
-                    res = supabase.table("users").select("coins").eq("user_id", winner_id).execute()
+                    res = supabase.table("users").select("coins").eq("user_id", int(winner_id)).execute()
                     if res.data:
                         current_coins = int(res.data[0].get("coins", 0))
                         new_coins = current_coins + bank_amount
-                        supabase.table("users").update({"coins": new_coins}).eq("user_id", winner_id).execute()
+                        supabase.table("users").update({"coins": new_coins}).eq("user_id", int(winner_id)).execute()
                 except Exception as e:
                     print(f"❌ Ошибка выплаты: {e}")
 
-            # Новый раунд
             game_state = {
                 "status": "waiting", "timer": 15, "bank": 0, "players": [],
                 "winner": None, "last_update": now,
@@ -165,20 +164,24 @@ async def finish_hockey(data: FinishHockey):
 async def place_bet(data: PlaceBet):
     user = verify_telegram_data(data.initData)
     if not user: raise HTTPException(status_code=401, detail="Invalid auth data")
-    user_id = user["id"]
+
+    # ВАЖНО: приводим ID к строке для сравнения, чтобы не было багов
+    user_id = str(user["id"])
+
     if game_state["status"] != "waiting": raise HTTPException(status_code=400, detail="Ставки закрыты")
 
-    res = supabase.table("users").select("coins").eq("user_id", user_id).execute()
+    res = supabase.table("users").select("coins").eq("user_id", int(user_id)).execute()
     if not res.data: raise HTTPException(status_code=404, detail="User not found")
     current_coins = int(res.data[0].get("coins", 0))
     if current_coins < data.amount: raise HTTPException(status_code=400, detail="Not enough coins")
 
     new_coins = current_coins - data.amount
-    supabase.table("users").update({"coins": new_coins}).eq("user_id", user_id).execute()
+    supabase.table("users").update({"coins": new_coins}).eq("user_id", int(user_id)).execute()
 
     name = user.get("username", user.get("first_name", f"id{user_id}"))
     avatar = user.get("photo_url", "")
 
+    # Ищем игрока (сравниваем строки)
     existing_player = next((p for p in game_state["players"] if p["id"] == user_id and not p["is_bot"]), None)
 
     if existing_player:

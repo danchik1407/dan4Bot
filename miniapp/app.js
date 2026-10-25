@@ -11,7 +11,7 @@ if (user) {
     }
 }
 
-const API_URL = "https://aura-api-mptt.onrender.com"; // Убедись, что это твой актуальный URL
+const API_URL = "https://aura-api-mptt.onrender.com";
 let balance = 0, keys = 0, currentBet = 10, inventory = [], lastChestTime = 0, isProcessing = false;
 let hockeyInterval = null, hasBetThisRound = false, hasShownWinner = false;
 
@@ -73,13 +73,13 @@ async function placeHockeyBet() {
     isProcessing = false;
 }
 
-// ИСПРАВЛЕННАЯ ФИЗИКА ШАЙБЫ (Летит строго вправо)
+// ИСПРАВЛЕННАЯ ФИЗИКА: Шарик плавно останавливается
 function startBallPhysics() {
     if (ball.active) return;
 
     ball.x = 0;
     ball.y = 50;
-    ball.vx = 1.5; // Только по оси X
+    ball.vx = 1.5;
     ball.vy = 0;
     ball.active = true;
 
@@ -95,13 +95,14 @@ function startBallPhysics() {
     const step = () => {
         if (!ball.active) return;
 
-        ball.vx *= 0.985;
+        ball.vx *= 0.97; // Трение (чуть быстрее замедляется)
 
         ball.x += ball.vx;
 
+        // Ограничение, чтобы не улетал за края
         if (ball.x >= 100) {
-            ball.vx *= -0.5;
             ball.x = 100;
+            ball.vx = 0;
         }
 
         if (ballEl) {
@@ -178,7 +179,7 @@ async function pollHockeyState() {
                 document.getElementById('winner-modal-name').innerText = state.winner.name;
                 document.getElementById('winner-modal-amount').innerText = `+${state.bank} 🪙`;
                 modal.classList.add('active');
-                if (state.winner.id === user.id) {
+                if (state.winner.id === String(user.id)) {
                     playSound('win'); if (tg.HapticFeedback) tg.HapticFeedback.notificationOccurred('success');
                     setTimeout(async () => { await loadUserData(); }, 1000);
                 } else {
@@ -189,7 +190,6 @@ async function pollHockeyState() {
 
         bankEl.innerText = `Банк: ${state.bank} 🪙`;
 
-        // Рендер фигур без пустот
         arena.querySelectorAll('.hockey-sector').forEach(el => el.remove());
 
         let totalWidth = 0;

@@ -117,7 +117,7 @@ main { padding: 0 16px; }
     will-change: left, top;
 }
 
-/* Разные формы для секторов */
+/* Разные формы */
 .player-shape.shape-circle { border-radius: 50%; }
 .player-shape.shape-square { border-radius: 8px; }
 .player-shape.shape-trapezoid { clip-path: polygon(20% 0%, 80% 0%, 100% 100%, 0% 100%); border-radius: 0; }
