@@ -129,7 +129,7 @@ async def get_hockey_state():
                     game_state["players"]) < 20 and (now - game_state["last_bot_added"]) > bot_delay:
                 if random.random() < 0.3:
                     whale_bet = random.randint(500, 1000)
-                    whale_name = random.choice(WHALE_NAMES) + str(random.randint(1, 9))
+                    whale_name = random.choice(WHALE_NAMES) + str(random.randint(1, 99))
                     whale_color = random.choice(WHALE_COLORS)
                     while any(p["color"] == whale_color for p in game_state["players"]):
                         whale_color = random.choice(WHALE_COLORS)
@@ -318,15 +318,14 @@ async def get_crash_state():
             crash_state["last_update"] = now
             crash_state["multiplier"] = 1.0
 
-            # НОВЫЕ ШАНСЫ: 1% на кэф выше 10x
             rand_val = random.random()
-            if rand_val < 0.50:  # 50% шанс на кэф 1.1 - 2.0
+            if rand_val < 0.50:
                 crash_state["crash_point"] = random.uniform(1.1, 2.0)
-            elif rand_val < 0.80:  # 30% шанс на кэф 2.0 - 5.0
+            elif rand_val < 0.80:
                 crash_state["crash_point"] = random.uniform(2.0, 5.0)
-            elif rand_val < 0.99:  # 19% шанс на кэф 5.0 - 10.0
+            elif rand_val < 0.99:
                 crash_state["crash_point"] = random.uniform(5.0, 10.0)
-            else:  # 1% шанс на кэф 10.0 - 100.0
+            else:
                 crash_state["crash_point"] = random.uniform(10.0, 100.0)
 
             total_user_balance = sum(p["bet"] for p in crash_state["players"] if not p["is_bot"])

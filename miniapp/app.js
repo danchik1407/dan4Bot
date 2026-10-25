@@ -21,10 +21,6 @@ let crashBetActive = false;
 let currentCrashMult = 1.0;
 let crashState = { status: 'waiting' };
 
-// SVG Ракеты
-const SVG_ROCKET = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 50 50"><path fill="#fff" d="M25 0l-5 15h10zM20 15v20h10V15zM22 35v10h6V35z"/><path fill="#ff3b30" d="M22 35l-5 10 5-3zM28 35l5 10-5-3z"/></svg>`;
-const imgRocket = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(SVG_ROCKET)}`;
-
 // ================= ЗВУКИ =================
 const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
 function playSound(type) {
@@ -419,12 +415,9 @@ function clickMineCell(cell) {
 }
 
 // ================= РАКЕТА (CRASH) =================
-async function startCrashPolling() {
-    if (crashInterval) clearInterval(crashInterval);
-    pollCrashState();
-    crashInterval = setInterval(pollCrashState, 100);
-}
+async function startCrashPolling() { if (crashInterval) clearInterval(crashInterval); pollCrashState(); crashInterval = setInterval(pollCrashState, 100); }
 function stopCrashPolling() { if (crashInterval) clearInterval(crashInterval); crashInterval = null; }
+
 async function pollCrashState() {
     if (!document.getElementById('screen-crash').classList.contains('active')) return;
     try {
@@ -448,7 +441,6 @@ async function pollCrashState() {
             btn.innerText = 'Поставить ставку';
             btn.style.background = '#007aff';
             btn.disabled = false;
-            btn.style.pointerEvents = 'auto'; // СБРОС КЛИКАБЕЛЬНОСТИ
             crashBetActive = false;
             rocketEl.style.left = '50px';
             rocketEl.style.bottom = '50px';
@@ -467,7 +459,6 @@ async function pollCrashState() {
                     historyEl.appendChild(div);
                 });
             }
-
         } else if (state.status === 'flying') {
             statusEl.innerText = 'Идёт полет...';
             statusEl.style.color = '#34c759';
@@ -476,121 +467,3 @@ async function pollCrashState() {
             betContainer.style.display = 'none';
 
             if (crashBetActive) {
-                btn.innerText = `Забрать ${(parseInt(document.getElementById('crash-bet').value) * state.multiplier).toFixed(0)} 🪙`;
-                btn.style.background = '#34c759';
-                btn.disabled = false;
-                btn.style.pointerEvents = 'auto'; // ВАЖНО: РАЗРЕШАЕМ КЛИК
-            } else {
-                btn.innerText = 'Вы не в игре';
-                btn.style.background = '#555';
-                btn.disabled = true;
-            }
-
-            const progress = Math.min(1, (state.multiplier - 1) / (state.crash_point - 1));
-            const maxLeft = 250;
-            const maxBottom = 250;
-            const leftPos = 50 + progress * maxLeft;
-            const bottomPos = 50 + progress * maxBottom;
-
-            rocketEl.style.left = `${leftPos}px`;
-            rocketEl.style.bottom = `${bottomPos}px`;
-            rocketEl.style.transform = `rotate(${45 - progress * 90}deg)`;
-
-        } else if (state.status === 'crashed') {
-            statusEl.innerText = 'КРАШ!';
-            statusEl.style.color = '#ff3b30';
-            multEl.innerText = `x${state.crash_point.toFixed(2)}`;
-            multEl.style.color = '#ff3b30';
-
-            rocketEl.style.opacity = '0';
-            document.getElementById('crash-flame').style.display = 'none';
-            document.getElementById('crash-explosion').style.display = 'block';
-            document.getElementById('crash-explosion').style.left = rocketEl.style.left;
-            document.getElementById('crash-explosion').style.bottom = rocketEl.style.bottom;
-
-            playSound('boom');
-            if (tg.HapticFeedback) tg.HapticFeedback.notificationOccurred('error');
-            document.body.style.background = '#ff3b30';
-            setTimeout(() => { document.body.style.background = 'var(--bg)'; }, 200);
-
-            btn.innerText = 'Следующий раунд...';
-            btn.style.background = '#555';
-            btn.disabled = true;
-            crashBetActive = false;
-
-            if (historyEl) {
-                historyEl.innerHTML = '';
-                (state.history || []).forEach(h => {
-                    const div = document.createElement('div');
-                    div.className = 'crash-hist-item';
-                    div.innerText = `x${h.crash_point}`;
-                    historyEl.appendChild(div);
-                });
-            }
-        }
-
-        const list = document.getElementById('crash-participants');
-        list.innerHTML = '';
-        state.players.forEach((p, i) => {
-            const div = document.createElement('div');
-            div.className = 'crash-part-item';
-            const status = p.cashout_mult > 0 ? `<span style="color:#34c759">Забрал x${p.cashout_mult.toFixed(2)}</span>` : `<span style="color:#ff3b30">В игре</span>`;
-            div.innerHTML = `<div>${p.name}</div><div>${p.bet} 🪙</div><div>${status}</div>`;
-            list.appendChild(div);
-        });
-
-    } catch (e) { console.error(e); }
-}
-
-async function placeCrashBet() {
-    if (isProcessing) return;
-    const bet = parseInt(document.getElementById('crash-bet').value) || 10;
-    if (balance < bet) return tg.showAlert("Недостаточно коинов!");
-
-    isProcessing = true;
-    try {
-        const res = await fetch(`${API_URL}/api/crash_bet`, {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ initData: tg.initData, amount: bet })
-        });
-        if (!res.ok) { const err = await res.json(); isProcessing = false; return tg.showAlert(err.detail); }
-        const data = await res.json();
-        balance = data.new_balance; updateUI(); crashBetActive = true;
-        playSound('click');
-        document.getElementById('crash-btn').innerText = 'Ждем полет...';
-        document.getElementById('crash-btn').disabled = true;
-    } catch(e) { tg.showAlert("Ошибка"); }
-    isProcessing = false;
-}
-
-async function cashoutCrash() {
-    if (isProcessing) return;
-    isProcessing = true;
-    try {
-        const res = await fetch(`${API_URL}/api/crash_cashout`, {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ initData: tg.initData })
-        });
-        if (!res.ok) { isProcessing = false; return tg.showAlert("Не удалось забрать"); }
-        const data = await res.json();
-
-        balance = data.new_balance; updateUI();
-        playSound('win');
-        tg.showAlert(`Вы забрали ${data.win_amount} 🪙 на кэфе x${data.mult.toFixed(2)}!`);
-
-        crashBetActive = false;
-        document.getElementById('crash-btn').innerText = 'Забрано!';
-        document.getElementById('crash-btn').disabled = true;
-    } catch(e) { tg.showAlert("Ошибка"); }
-    isProcessing = false;
-}
-
-function crashAction() {
-    if (crashState.status === 'waiting') {
-        placeCrashBet();
-    } else if (crashState.status === 'flying' && crashBetActive) {
-        cashoutCrash();
-    }
-}
-
-loadUserData();

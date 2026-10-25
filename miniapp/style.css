@@ -224,16 +224,23 @@ main { padding: 0 16px; }
     opacity: 0.5;
 }
 
+/* Стили для ТГ-эмодзи ракеты */
 .crash-rocket {
     position: absolute;
     width: 60px;
     height: 60px;
-    background-image: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 50 50"><path fill="%23fff" d="M25 0l-5 15h10zM20 15v20h10V15zM22 35v10h6V35z"/><path fill="%23ff3b30" d="M22 35l-5 10 5-3zM28 35l5 10-5-3z"/></svg>');
-    background-size: contain;
-    background-repeat: no-repeat;
+    display: flex;
+    justify-content: center;
+    align-items: center;
     transition: transform 0.1s linear;
     z-index: 10;
     filter: drop-shadow(0 0 10px #ff3b30);
+    font-size: 50px; /* Размер эмодзи */
+}
+
+.crash-rocket tg-emoji {
+    font-size: 50px;
+    line-height: 1;
 }
 
 .crash-flame {
