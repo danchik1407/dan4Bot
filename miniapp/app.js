@@ -73,15 +73,14 @@ async function placeHockeyBet() {
     isProcessing = false;
 }
 
-// ИСПРАВЛЕННАЯ ФИЗИКА: ХАОТИЧНЫЙ ПОЛЕТ И ОСТАНОВКА НА 10 СЕКУНДЕ
+// ХАОТИЧНЫЙ ПОЛЕТ С ОТСКОКАМИ
 function startBallPhysics() {
     if (ball.active || ball.hasStartedAnim) return;
 
     ball.hasStartedAnim = true;
-    ball.x = 50; // Начинаем с центра
+    ball.x = 50;
     ball.y = 50;
 
-    // Случайное направление
     let directionX = Math.random() > 0.5 ? 1 : -1;
     let speed = 2.0;
     ball.active = true;
@@ -95,22 +94,20 @@ function startBallPhysics() {
     let scale = 1;
     const maxScale = 2.5;
 
-    // Засекаем время анимации
     const startTime = performance.now();
-    const duration = 6000; // 6 секунд полета (до 10-й секунды с учетом старта)
+    const duration = 6000;
 
     const step = () => {
         if (!ball.active) return;
 
         const elapsed = performance.now() - startTime;
 
-        // Движение по X с отскоками
         ball.x += speed * directionX;
 
         if (ball.x >= 100) {
             ball.x = 100;
             directionX = -1;
-            speed *= 0.9; // Потеря скорости
+            speed *= 0.9;
             playSound('click');
         } else if (ball.x <= 0) {
             ball.x = 0;
@@ -119,7 +116,6 @@ function startBallPhysics() {
             playSound('click');
         }
 
-        // Плавное замедление к концу
         if (elapsed > duration * 0.6) {
             speed *= 0.95;
         }
@@ -129,18 +125,14 @@ function startBallPhysics() {
             ballEl.style.top = '50%';
         }
 
-        // Зум в конце
         if (elapsed > duration * 0.7) {
             scale += (maxScale - scale) * 0.05;
             arena.style.transform = `scale(${scale})`;
             arena.style.transformOrigin = `${ball.x}% 50%`;
         }
 
-        // ОСТАНОВКА (через 6 секунд полета)
         if (elapsed >= duration) {
             ball.active = false;
-
-            // Сообщаем серверу точную координату остановки
             fetch(`${API_URL}/api/finish_hockey`, {
                 method: 'POST', headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ initData: tg.initData, x: ball.x, y: 50 })
@@ -220,8 +212,10 @@ async function pollHockeyState() {
 
         bankEl.innerText = `Банк: ${state.bank} 🪙`;
 
+        // === РЕНДЕР УЧАСТНИКОВ (ИСПРАВЛЕНО) ===
         arena.querySelectorAll('.hockey-sector').forEach(el => el.remove());
         let totalWidth = 0;
+
         state.players.forEach((p, index) => {
             const sector = document.createElement('div');
             sector.className = 'hockey-sector';
@@ -238,34 +232,35 @@ async function pollHockeyState() {
             sector.style.background = p.color;
             sector.style.borderRight = '1px solid rgba(0,0,0,0.5)';
 
+            // Создаем аватарку
             let shapeClass = 'shape-square';
             if (index % 4 === 0) shapeClass = 'shape-circle';
             if (index % 4 === 1) shapeClass = 'shape-square';
             if (index % 4 === 2) shapeClass = 'shape-trapezoid';
             if (index % 4 === 3) shapeClass = 'shape-triangle';
 
-            if (width > 5) {
-                const shapeWrap = document.createElement('div');
-                shapeWrap.className = 'player-shape-wrapper';
-                const shape = document.createElement('div');
-                shape.className = `player-shape ${shapeClass}`;
+            // Убрал проверку width > 5, чтобы показывать аватарку даже на весь экран
+            const shapeWrap = document.createElement('div');
+            shapeWrap.className = 'player-shape-wrapper';
+            const shape = document.createElement('div');
+            shape.className = `player-shape ${shapeClass}`;
 
-                const size = Math.max(30, Math.min(60, width * 4));
-                shape.style.width = size + 'px';
-                shape.style.height = size + 'px';
+            const size = Math.max(40, Math.min(60, width * 4));
+            shape.style.width = size + 'px';
+            shape.style.height = size + 'px';
 
-                if (!p.is_bot && p.avatar && p.avatar.startsWith('http')) {
-                    shape.innerHTML = `<img src="${p.avatar}" style="width:100%; height:100%; object-fit:cover;">`;
-                    shape.style.background = 'transparent'; shape.style.border = '2px solid #fff';
-                } else {
-                    const letter = p.name ? p.name[0].toUpperCase() : '?';
-                    shape.innerHTML = `<span style="color:white; font-weight:900; font-size:${size/2}px; text-shadow: 0 2px 4px rgba(0,0,0,0.5);">${letter}</span>`;
-                    shape.style.backgroundColor = p.color;
-                    shape.style.border = '2px solid rgba(255,255,255,0.5)';
-                }
-                shapeWrap.appendChild(shape);
-                sector.appendChild(shapeWrap);
+            if (!p.is_bot && p.avatar && p.avatar.startsWith('http')) {
+                shape.innerHTML = `<img src="${p.avatar}" style="width:100%; height:100%; object-fit:cover;">`;
+                shape.style.background = 'transparent'; shape.style.border = '2px solid #fff';
+            } else {
+                const letter = p.name ? p.name[0].toUpperCase() : '?';
+                shape.innerHTML = `<span style="color:white; font-weight:900; font-size:${size/2}px; text-shadow: 0 2px 4px rgba(0,0,0,0.5);">${letter}</span>`;
+                shape.style.backgroundColor = p.color;
+                shape.style.border = '2px solid rgba(255,255,255,0.5)';
             }
+            shapeWrap.appendChild(shape);
+            sector.appendChild(shapeWrap);
+
             arena.appendChild(sector);
         });
 
@@ -303,7 +298,7 @@ function stopHockeyPolling() {
 
 function closeWinnerModal() { document.getElementById('winner-modal').classList.remove('active'); }
 
-// ИСТОРИЯ
+// ИСТОРИЯ (ФИКС)
 async function openHistory() {
     const modal = document.getElementById('history-modal');
     const list = document.getElementById('history-list');
