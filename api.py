@@ -14,7 +14,6 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, 
 supabase: Client = create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_KEY"))
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
-# ТВОИ ID
 ADMIN_IDS = [6338018270, 5184813347, 8890834384]
 
 BOT_NAMES = ["Shark_V", "LuckyFox", "NeonWolf", "GhostByte", "PixelKing", "CyberCat", "IronFist", "VoidWalker",
@@ -44,7 +43,8 @@ crash_state = {
     "is_paid": False,
     "round_id": str(int(time.time())),
     "bots_added": 0,
-    "target_bots": 0
+    "target_bots": 0,
+    "last_bot_added": 0
 }
 crash_history = []
 
@@ -309,6 +309,7 @@ async def get_crash_state():
                 })
                 crash_state["bank"] += bot_bet
                 crash_state["bots_added"] += 1
+                crash_state["last_bot_added"] = now
 
         if time_left <= 0:
             crash_state["status"] = "flying"
@@ -337,8 +338,6 @@ async def get_crash_state():
         for p in crash_state["players"]:
             if p["cashout_mult"] == 0:
                 if p["is_bot"] and random.random() < 0.05:
-                    p["cashout_mult"] = crash_state["multiplier"]
-                elif not p["is_bot"] and p["auto_mult"] > 0 and crash_state["multiplier"] >= p["auto_mult"]:
                     p["cashout_mult"] = crash_state["multiplier"]
 
         if crash_state["multiplier"] >= crash_state["crash_point"]:

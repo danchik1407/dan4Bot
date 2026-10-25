@@ -16,10 +16,10 @@ let balance = 0, keys = 0, currentBet = 10, inventory = [], lastChestTime = 0, i
 let hockeyInterval = null, hasBetThisRound = false, hasShownWinner = false;
 let ball = { x: 50, y: 50, vx: 0, vy: 0, active: false, animationId: null, hasStartedAnim: false };
 
-// === РАКЕТА ===
 let crashInterval = null;
 let crashBetActive = false;
 let currentCrashMult = 1.0;
+let crashState = { status: 'waiting' };
 
 // SVG Ракеты
 const SVG_ROCKET = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 50 50"><path fill="#fff" d="M25 0l-5 15h10zM20 15v20h10V15zM22 35v10h6V35z"/><path fill="#ff3b30" d="M22 35l-5 10 5-3zM28 35l5 10-5-3z"/></svg>`;
@@ -93,7 +93,6 @@ function startBallPhysics() {
     const arena = document.getElementById('hockey-arena');
     const ballEl = document.getElementById('hockey-ball');
 
-    // СБРОС ЗУМА
     arena.style.transform = 'scale(1)';
     arena.style.transformOrigin = 'center center';
 
@@ -129,7 +128,6 @@ function startBallPhysics() {
             ballEl.style.top = ball.y + '%';
         }
 
-        // ЗУМ: плавно приближаем к шарику
         if (elapsed > zoomStartTime) {
             scale += (maxScale - scale) * 0.02;
             arena.style.transform = `scale(${scale})`;
@@ -193,7 +191,9 @@ async function pollHockeyState() {
                     document.getElementById('winner-modal-name').innerText = state.winner.name;
                     document.getElementById('winner-modal-amount').innerText = `+${state.bank} 🪙`;
                     modal.classList.add('active');
-                    if (state.winner.id === String(user.id)) { playSound('win'); setTimeout(async () => { await loadUserData(); }, 1000); } else { playSound('lose'); }
+                    // ОБНОВЛЕНИЕ БАЛАНСА
+                    setTimeout(async () => { await loadUserData(); }, 500);
+                    if (state.winner.id === String(user.id)) { playSound('win'); } else { playSound('lose'); }
                 }, 1000);
             }
         }
@@ -257,160 +257,6 @@ async function pollHockeyState() {
 function startHockeyPolling() { if (hockeyInterval) clearInterval(hockeyInterval); pollHockeyState(); hockeyInterval = setInterval(pollHockeyState, 200); }
 function stopHockeyPolling() { if (hockeyInterval) clearInterval(hockeyInterval); hockeyInterval = null; if (ball.animationId) cancelAnimationFrame(ball.animationId); }
 function closeWinnerModal() { document.getElementById('winner-modal').classList.remove('active'); }
-
-// ================= РАКЕТА (CRASH) =================
-async function startCrashPolling() {
-    if (crashInterval) clearInterval(crashInterval);
-    pollCrashState();
-    crashInterval = setInterval(pollCrashState, 100);
-}
-
-function stopCrashPolling() {
-    if (crashInterval) clearInterval(crashInterval);
-    crashInterval = null;
-}
-
-async function pollCrashState() {
-    if (!document.getElementById('screen-crash').classList.contains('active')) return;
-    try {
-        const res = await fetch(`${API_URL}/api/crash_state`);
-        const state = await res.json();
-
-        const statusEl = document.getElementById('crash-status');
-        const multEl = document.getElementById('crash-multiplier');
-        const rocketEl = document.getElementById('crash-rocket');
-        const btn = document.getElementById('crash-btn');
-        const betContainer = document.getElementById('crash-bet-container');
-
-        if (state.status === 'waiting') {
-            statusEl.innerText = `Ставки: ${state.timer} сек`;
-            statusEl.style.color = '#ffcc00';
-            multEl.innerText = 'x1.00';
-            multEl.style.color = '#fff';
-            betContainer.style.display = 'block';
-            btn.innerText = 'Поставить ставку';
-            btn.style.background = '#007aff';
-            btn.disabled = false;
-            crashBetActive = false;
-            rocketEl.style.left = '50px';
-            rocketEl.style.bottom = '50px';
-            rocketEl.style.transform = 'rotate(0deg)';
-            rocketEl.style.opacity = '1';
-            document.getElementById('crash-flame').style.display = 'block';
-            document.getElementById('crash-explosion').style.display = 'none';
-            document.body.style.background = 'var(--bg)';
-        } else if (state.status === 'flying') {
-            statusEl.innerText = 'Идёт полет...';
-            statusEl.style.color = '#34c759';
-            currentCrashMult = state.multiplier;
-            multEl.innerText = `x${state.multiplier.toFixed(2)}`;
-            betContainer.style.display = 'none';
-
-            if (crashBetActive) {
-                btn.innerText = `Забрать ${(parseInt(document.getElementById('crash-bet').value) * state.multiplier).toFixed(0)} 🪙`;
-                btn.style.background = '#34c759';
-            } else {
-                btn.innerText = 'Вы не в игре';
-                btn.style.background = '#555';
-                btn.disabled = true;
-            }
-
-            const progress = (state.multiplier - 1) / (state.crash_point - 1);
-            const maxLeft = 300;
-            const maxBottom = 300;
-            const leftPos = 50 + progress * maxLeft;
-            const bottomPos = 50 + progress * maxBottom;
-
-            rocketEl.style.left = `${leftPos}px`;
-            rocketEl.style.bottom = `${bottomPos}px`;
-            rocketEl.style.transform = `rotate(${45 - progress * 90}deg)`;
-
-        } else if (state.status === 'crashed') {
-            statusEl.innerText = 'КРАШ!';
-            statusEl.style.color = '#ff3b30';
-            multEl.innerText = `x${state.crash_point.toFixed(2)}`;
-            multEl.style.color = '#ff3b30';
-
-            rocketEl.style.opacity = '0';
-            document.getElementById('crash-flame').style.display = 'none';
-            document.getElementById('crash-explosion').style.display = 'block';
-            document.getElementById('crash-explosion').style.left = rocketEl.style.left;
-            document.getElementById('crash-explosion').style.bottom = rocketEl.style.bottom;
-
-            playSound('boom');
-            if (tg.HapticFeedback) tg.HapticFeedback.notificationOccurred('error');
-            document.body.style.background = '#ff3b30';
-            setTimeout(() => { document.body.style.background = 'var(--bg)'; }, 200);
-
-            btn.innerText = 'Следующий раунд...';
-            btn.style.background = '#555';
-            btn.disabled = true;
-            crashBetActive = false;
-        }
-
-        const list = document.getElementById('crash-participants');
-        list.innerHTML = '';
-        state.players.forEach((p, i) => {
-            const div = document.createElement('div');
-            div.className = 'crash-part-item';
-            const status = p.cashout_mult > 0 ? `<span style="color:#34c759">Забрал x${p.cashout_mult.toFixed(2)}</span>` : `<span style="color:#ff3b30">В игре</span>`;
-            div.innerHTML = `<div>${p.name}</div><div>${p.bet} 🪙</div><div>${status}</div>`;
-            list.appendChild(div);
-        });
-
-    } catch (e) { console.error(e); }
-}
-
-async function placeCrashBet() {
-    if (isProcessing) return;
-    const bet = parseInt(document.getElementById('crash-bet').value) || 10;
-    if (balance < bet) return tg.showAlert("Недостаточно коинов!");
-
-    isProcessing = true;
-    try {
-        const res = await fetch(`${API_URL}/api/crash_bet`, {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ initData: tg.initData, amount: bet })
-        });
-        if (!res.ok) { const err = await res.json(); isProcessing = false; return tg.showAlert(err.detail); }
-        const data = await res.json();
-        balance = data.new_balance; updateUI(); crashBetActive = true;
-        playSound('click');
-        document.getElementById('crash-btn').innerText = 'Ждем полет...';
-        document.getElementById('crash-btn').disabled = true;
-    } catch(e) { tg.showAlert("Ошибка"); }
-    isProcessing = false;
-}
-
-async function cashoutCrash() {
-    if (isProcessing) return;
-    isProcessing = true;
-    try {
-        const res = await fetch(`${API_URL}/api/crash_cashout`, {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ initData: tg.initData })
-        });
-        if (!res.ok) { isProcessing = false; return tg.showAlert("Не удалось забрать"); }
-        const data = await res.json();
-
-        balance = data.new_balance; updateUI();
-        playSound('win');
-        tg.showAlert(`Вы забрали ${data.win_amount} 🪙 на кэфе x${data.mult.toFixed(2)}!`);
-
-        crashBetActive = false;
-        document.getElementById('crash-btn').innerText = 'Забрано!';
-        document.getElementById('crash-btn').disabled = true;
-    } catch(e) { tg.showAlert("Ошибка"); }
-    isProcessing = false;
-}
-
-function crashAction() {
-    if (crashState.status === 'waiting') {
-        placeCrashBet();
-    } else if (crashState.status === 'flying' && crashBetActive) {
-        cashoutCrash();
-    }
-}
 
 // ================= СУНДУКИ =================
 let pendingChestReward = 0, pendingChestIsKey = false, pendingChestIsGold = false;
