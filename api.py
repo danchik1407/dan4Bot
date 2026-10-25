@@ -376,10 +376,12 @@ async def get_crash_state():
                 "round_id": str(int(time.time())),
                 "bots_added": 0, "target_bots": 0, "last_bot_added": 0
             }
+            crash_state["history"] = crash_history[:10]
             return crash_state
 
     time_left = 10 - (now - crash_state["last_update"]) if crash_state["status"] == "waiting" else 0
     crash_state["timer"] = max(0, int(time_left))
+    crash_state["history"] = crash_history[:10]
     return crash_state
 
 
@@ -426,9 +428,17 @@ async def crash_cashout(data: CrashCashout):
     player["cashout_mult"] = crash_state["multiplier"]
     win_amount = int(player["bet"] * player["cashout_mult"])
 
-    return {"success": True, "win_amount": win_amount, "mult": player["cashout_mult"], "new_balance": int(
-        supabase.table("users").select("coins").eq("user_id", int(user_id)).execute().data[0].get("coins",
-                                                                                                  0)) + win_amount}
+    # Начисляем сразу, чтобы клиент увидел новый баланс
+    try:
+        res = supabase.table("users").select("coins").eq("user_id", int(user_id)).execute()
+        current_coins = int(res.data[0].get("coins", 0)) if res.data else 0
+        new_coins = current_coins + win_amount
+        supabase.table("users").update({"coins": new_coins}).eq("user_id", int(user_id)).execute()
+    except Exception as e:
+        print(f"❌ Ошибка начисления cashout: {e}")
+        new_coins = 0
+
+    return {"success": True, "win_amount": win_amount, "mult": player["cashout_mult"], "new_balance": new_coins}
 
 
 @app.get("/api/crash_history")
@@ -460,7 +470,7 @@ async def get_user(auth: UserAuth):
 async def open_chest(auth: UserAuth):
     user = verify_telegram_data(auth.initData)
     if not user: raise HTTPException(status_code=401, detail="Invalid auth data")
-    user_id = user["id"];
+    user_id = user["id"]
     now = int(time.time())
     res = supabase.table("users").select("last_chest").eq("user_id", user_id).execute()
     if not res.data: raise HTTPException(status_code=404, detail="User not found")
@@ -476,7 +486,7 @@ async def buy_item(data: BuyItem):
     if not user: raise HTTPException(status_code=401, detail="Invalid auth data")
     user_id = user["id"]
     res = supabase.table("users").select("coins, inventory").eq("user_id", user_id).execute()
-    current_coins = int(res.data[0].get("coins", 0));
+    current_coins = int(res.data[0].get("coins", 0))
     inventory = json.loads(res.data[0].get("inventory") or "[]")
     if current_coins < data.price: raise HTTPException(status_code=400, detail="Недостаточно коинов")
     inventory.append(data.item_id)
@@ -491,7 +501,7 @@ async def update_balance(data: UpdateBalance):
     if not user: raise HTTPException(status_code=401, detail="Invalid auth data")
     user_id = user["id"]
     res = supabase.table("users").select("coins").eq("user_id", user_id).execute()
-    current_coins = int(res.data[0].get("coins", 0));
+    current_coins = int(res.data[0].get("coins", 0))
     new_coins = max(0, current_coins + data.amount)
     supabase.table("users").update({"coins": new_coins}).eq("user_id", user_id).execute()
     return {"success": True, "new_balance": new_coins}
@@ -503,7 +513,7 @@ async def update_keys(data: UpdateKeys):
     if not user: raise HTTPException(status_code=401, detail="Invalid auth data")
     user_id = user["id"]
     res = supabase.table("users").select("keys").eq("user_id", user_id).execute()
-    current_keys = int(res.data[0].get("keys", 0) or 0);
+    current_keys = int(res.data[0].get("keys", 0) or 0)
     new_keys = max(0, current_keys + data.amount)
     supabase.table("users").update({"keys": new_keys}).eq("user_id", user_id).execute()
     return {"success": True, "new_keys": new_keys}

@@ -24,33 +24,35 @@ let crashState = { status: 'waiting' };
 // ================= ЗВУКИ =================
 const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
 function playSound(type) {
-    if (audioCtx.state === 'suspended') audioCtx.resume();
-    const osc = audioCtx.createOscillator();
-    const gain = audioCtx.createGain();
-    osc.connect(gain); gain.connect(audioCtx.destination);
-    const now = audioCtx.currentTime;
+    try {
+        if (audioCtx.state === 'suspended') audioCtx.resume();
+        const osc = audioCtx.createOscillator();
+        const gain = audioCtx.createGain();
+        osc.connect(gain); gain.connect(audioCtx.destination);
+        const now = audioCtx.currentTime;
 
-    if (type === 'click') {
-        osc.type = 'sine'; osc.frequency.setValueAtTime(1200, now); osc.frequency.exponentialRampToValueAtTime(800, now + 0.05);
-        gain.gain.setValueAtTime(0.05, now); gain.gain.exponentialRampToValueAtTime(0.01, now + 0.05);
-        osc.start(now); osc.stop(now + 0.05);
-    } else if (type === 'win') {
-        osc.type = 'triangle'; osc.frequency.setValueAtTime(523.25, now); osc.frequency.setValueAtTime(659.25, now + 0.1); osc.frequency.setValueAtTime(783.99, now + 0.2);
-        gain.gain.setValueAtTime(0.08, now); gain.gain.exponentialRampToValueAtTime(0.01, now + 0.4);
-        osc.start(now); osc.stop(now + 0.4);
-    } else if (type === 'lose') {
-        osc.type = 'sawtooth'; osc.frequency.setValueAtTime(300, now); osc.frequency.exponentialRampToValueAtTime(100, now + 0.4);
-        gain.gain.setValueAtTime(0.08, now); gain.gain.exponentialRampToValueAtTime(0.01, now + 0.4);
-        osc.start(now); osc.stop(now + 0.4);
-    } else if (type === 'boom') {
-        const bufferSize = audioCtx.sampleRate * 0.5;
-        const buffer = audioCtx.createBuffer(1, bufferSize, audioCtx.sampleRate);
-        const data = buffer.getChannelData(0);
-        for (let i = 0; i < bufferSize; i++) data[i] = Math.random() * 2 - 1;
-        const noise = audioCtx.createBufferSource(); noise.buffer = buffer;
-        const noiseGain = audioCtx.createGain(); noiseGain.gain.setValueAtTime(0.1, now); noiseGain.gain.exponentialRampToValueAtTime(0.01, now + 0.5);
-        noise.connect(noiseGain); noiseGain.connect(audioCtx.destination); noise.start(now);
-    }
+        if (type === 'click') {
+            osc.type = 'sine'; osc.frequency.setValueAtTime(1200, now); osc.frequency.exponentialRampToValueAtTime(800, now + 0.05);
+            gain.gain.setValueAtTime(0.05, now); gain.gain.exponentialRampToValueAtTime(0.01, now + 0.05);
+            osc.start(now); osc.stop(now + 0.05);
+        } else if (type === 'win') {
+            osc.type = 'triangle'; osc.frequency.setValueAtTime(523.25, now); osc.frequency.setValueAtTime(659.25, now + 0.1); osc.frequency.setValueAtTime(783.99, now + 0.2);
+            gain.gain.setValueAtTime(0.08, now); gain.gain.exponentialRampToValueAtTime(0.01, now + 0.4);
+            osc.start(now); osc.stop(now + 0.4);
+        } else if (type === 'lose') {
+            osc.type = 'sawtooth'; osc.frequency.setValueAtTime(300, now); osc.frequency.exponentialRampToValueAtTime(100, now + 0.4);
+            gain.gain.setValueAtTime(0.08, now); gain.gain.exponentialRampToValueAtTime(0.01, now + 0.4);
+            osc.start(now); osc.stop(now + 0.4);
+        } else if (type === 'boom') {
+            const bufferSize = audioCtx.sampleRate * 0.5;
+            const buffer = audioCtx.createBuffer(1, bufferSize, audioCtx.sampleRate);
+            const data = buffer.getChannelData(0);
+            for (let i = 0; i < bufferSize; i++) data[i] = Math.random() * 2 - 1;
+            const noise = audioCtx.createBufferSource(); noise.buffer = buffer;
+            const noiseGain = audioCtx.createGain(); noiseGain.gain.setValueAtTime(0.1, now); noiseGain.gain.exponentialRampToValueAtTime(0.01, now + 0.5);
+            noise.connect(noiseGain); noiseGain.connect(audioCtx.destination); noise.start(now);
+        }
+    } catch(e) { /* аудио не критично */ }
 }
 
 // ================= ХОККЕЙ =================
@@ -259,9 +261,12 @@ async function openChest(type) {
     const isGold = type === 'gold';
     if (isGold && keys <= 0) return tg.showAlert("У вас нет ключей!");
     isProcessing = true;
-    const res = await fetch(`${API_URL}/api/open_chest`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ initData: tg.initData }) });
+    let res;
+    try {
+        res = await fetch(`${API_URL}/api/open_chest`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ initData: tg.initData }) });
+    } catch(e) { isProcessing = false; return tg.showAlert("Ошибка соединения"); }
     isProcessing = false;
-    if (!isGold && !res.ok) { const err = await res.json(); return tg.showAlert(err.detail || "Сундук перезаряжается!"); }
+    if (!isGold && !res.ok) { const err = await res.json().catch(()=>({})); return tg.showAlert(err.detail || "Сундук перезаряжается!"); }
     document.getElementById('chest-buttons').style.display = 'none';
     const roulette = document.getElementById('roulette-container'); roulette.style.display = 'block';
     const track = document.getElementById('roulette-track'); track.style.transform = 'translateX(0)'; track.innerHTML = ''; void track.offsetWidth;
@@ -301,7 +306,10 @@ async function openChest(type) {
 }
 async function claimChestReward() {
     if (isProcessing) return; isProcessing = true; document.getElementById('chest-win-modal').classList.remove('active');
-    if (pendingChestIsGold) await changeKeys(-1); if (pendingChestIsKey) await changeKeys(1); else if (pendingChestReward > 0) await changeBalance(pendingChestReward);
+    try {
+        if (pendingChestIsGold) await changeKeys(-1);
+        if (pendingChestIsKey) await changeKeys(1); else if (pendingChestReward > 0) await changeBalance(pendingChestReward);
+    } catch(e) {}
     if (!pendingChestIsGold) lastChestTime = Math.floor(Date.now() / 1000);
     document.getElementById('roulette-container').style.display = 'none'; document.getElementById('chest-buttons').style.display = 'flex'; checkChestCooldown();
     pendingChestReward = 0; pendingChestIsKey = false; pendingChestIsGold = false; isProcessing = false;
@@ -320,18 +328,46 @@ async function buyItem(itemId, price) {
 }
 
 // ================= ОБЩИЕ =================
-async function loadUserData() { try { const response = await fetch(`${API_URL}/api/user`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ initData: tg.initData }) }); const data = await response.json(); balance = data.coins; keys = data.keys || 0; inventory = data.inventory || []; lastChestTime = data.last_chest || 0; updateUI(); checkChestCooldown(); } catch (e) { } }
-async function changeBalance(amount) { const response = await fetch(`${API_URL}/api/update_balance`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ initData: tg.initData, amount: amount }) }); const data = await response.json(); balance = data.new_balance; updateUI(); }
-async function changeKeys(amount) { const response = await fetch(`${API_URL}/api/update_keys`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ initData: tg.initData, amount: amount }) }); const data = await response.json(); keys = data.new_keys; updateUI(); }
-async function loadGlobalTop() { const list = document.getElementById('global-top-list'); list.innerHTML = '<p style="text-align: center; color: #888;">Загрузка...</p>'; try { const res = await fetch(`${API_URL}/api/global_top`); const users = await res.json(); if (!users || users.length === 0) { list.innerHTML = '<p style="text-align: center; color: #888;">Топ пока пуст</p>'; return; } list.innerHTML = ''; const medals = ["🥇", "🥈", "🥉"]; users.forEach((u, i) => { const prefix = i < 3 ? medals[i] : `<span class="rank">${i+1}</span>`; const div = document.createElement('div'); div.innerHTML = `<div style="display: flex; align-items: center; gap: 10px;">${prefix} <span>${u.username || 'Игрок'}</span></div><span>${u.coins} 💎</span>`; list.appendChild(div); }); } catch (e) { list.innerHTML = '<p style="text-align: center; color: #888;">Ошибка загрузки</p>'; } }
+async function loadUserData() {
+    try {
+        const response = await fetch(`${API_URL}/api/user`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ initData: tg.initData }) });
+        const data = await response.json();
+        balance = data.coins; keys = data.keys || 0; inventory = data.inventory || []; lastChestTime = data.last_chest || 0;
+        updateUI(); checkChestCooldown();
+    } catch (e) { }
+}
+async function changeBalance(amount) {
+    try {
+        const response = await fetch(`${API_URL}/api/update_balance`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ initData: tg.initData, amount: amount }) });
+        const data = await response.json(); balance = data.new_balance; updateUI();
+    } catch(e) {}
+}
+async function changeKeys(amount) {
+    try {
+        const response = await fetch(`${API_URL}/api/update_keys`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ initData: tg.initData, amount: amount }) });
+        const data = await response.json(); keys = data.new_keys; updateUI();
+    } catch(e) {}
+}
+async function loadGlobalTop() {
+    const list = document.getElementById('global-top-list'); list.innerHTML = '<p style="text-align: center; color: #888;">Загрузка...</p>';
+    try {
+        const res = await fetch(`${API_URL}/api/global_top`); const users = await res.json();
+        if (!users || users.length === 0) { list.innerHTML = '<p style="text-align: center; color: #888;">Топ пока пуст</p>'; return; }
+        list.innerHTML = ''; const medals = ["🥇", "🥈", "🥉"];
+        users.forEach((u, i) => {
+            const prefix = i < 3 ? medals[i] : `<span class="rank">${i+1}</span>`;
+            const div = document.createElement('div');
+            div.innerHTML = `<div style="display: flex; align-items: center; gap: 10px;">${prefix} <span>${u.username || 'Игрок'}</span></div><span>${u.coins} 💎</span>`;
+            list.appendChild(div);
+        });
+    } catch (e) { list.innerHTML = '<p style="text-align: center; color: #888;">Ошибка загрузки</p>'; }
+}
 function updateUI() {
     document.getElementById('user-balance').innerText = balance;
     document.getElementById('profile-coins').innerText = balance;
     document.getElementById('profile-keys').innerText = keys;
 
-    document.querySelectorAll('.game-balance-val').forEach(el => {
-        el.innerText = balance;
-    });
+    document.querySelectorAll('.game-balance-val').forEach(el => { el.innerText = balance; });
 
     const inv = document.getElementById('inventory');
     let capCount = 0, uniqCount = 0;
@@ -345,11 +381,41 @@ function updateUI() {
         inv.innerHTML = html;
     }
 }
-function checkChestCooldown() { const now = Math.floor(Date.now() / 1000); const diff = now - lastChestTime; const btn = document.getElementById('normal-chest-btn'); if (diff < 18000) { btn.disabled = true; btn.innerText = `КД: ${Math.floor((18000 - diff) / 3600)}ч ${Math.floor(((18000 - diff) % 3600) / 60)}м`; setTimeout(checkChestCooldown, 60000); } else { btn.disabled = false; btn.innerText = 'Открыть (Бесплатно)'; } }
+function checkChestCooldown() {
+    const now = Math.floor(Date.now() / 1000); const diff = now - lastChestTime; const btn = document.getElementById('normal-chest-btn');
+    if (diff < 18000) { btn.disabled = true; btn.innerText = `КД: ${Math.floor((18000 - diff) / 3600)}ч ${Math.floor(((18000 - diff) % 3600) / 60)}м`; setTimeout(checkChestCooldown, 60000); }
+    else { btn.disabled = false; btn.innerText = 'Открыть (Бесплатно)'; }
+}
 function showWin(text) { const popup = document.getElementById('win-popup'); popup.querySelector('.win-text').innerText = text; popup.classList.add('show'); setTimeout(() => popup.classList.remove('show'), 1500); }
-function switchTab(tabId, element) { const popup = document.getElementById('win-popup'); if (popup) popup.classList.remove('show'); document.querySelectorAll('.tab').forEach(tab => tab.classList.remove('active')); document.getElementById('tab-' + tabId).classList.add('active'); document.querySelectorAll('.nav-item').forEach(nav => nav.classList.remove('active')); if (element) element.classList.add('active'); if (tabId === 'top') loadGlobalTop(); }
-function closeGame() { stopHockeyPolling(); stopCrashPolling(); const popup = document.getElementById('win-popup'); if (popup) popup.classList.remove('show'); document.querySelectorAll('.game-screen').forEach(s => s.classList.remove('active')); document.getElementById('main-header').style.display = 'flex'; document.getElementById('main-nav').style.display = 'flex'; switchTab('play', document.querySelectorAll('.nav-item')[0]); }
-function openGame(game) { document.getElementById('main-header').style.display = 'none'; document.getElementById('main-nav').style.display = 'none'; document.querySelectorAll('.tab').forEach(t => t.classList.remove('active')); document.getElementById('screen-' + game).classList.add('active'); if (game === 'hockey') { startHockeyPolling(); } if (game === 'crash') { startCrashPolling(); } }
+function switchTab(tabId, element) {
+    const popup = document.getElementById('win-popup'); if (popup) popup.classList.remove('show');
+    document.querySelectorAll('.tab').forEach(tab => tab.classList.remove('active'));
+    document.getElementById('tab-' + tabId).classList.add('active');
+    document.querySelectorAll('.nav-item').forEach(nav => nav.classList.remove('active'));
+    if (element) element.classList.add('active');
+    if (tabId === 'top') loadGlobalTop();
+}
+function clearGameModals() {
+    document.getElementById('winner-modal').classList.remove('active');
+    document.getElementById('chest-win-modal').classList.remove('active');
+    const wp = document.getElementById('win-popup'); if (wp) wp.classList.remove('show');
+}
+function closeGame() {
+    stopHockeyPolling(); stopCrashPolling(); clearGameModals();
+    document.querySelectorAll('.game-screen').forEach(s => s.classList.remove('active'));
+    document.getElementById('main-header').style.display = 'flex';
+    document.getElementById('main-nav').style.display = 'flex';
+    switchTab('play', document.querySelectorAll('.nav-item')[0]);
+}
+function openGame(game) {
+    clearGameModals();
+    document.getElementById('main-header').style.display = 'none';
+    document.getElementById('main-nav').style.display = 'none';
+    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+    document.getElementById('screen-' + game).classList.add('active');
+    if (game === 'hockey') { startHockeyPolling(); }
+    if (game === 'crash') { startCrashPolling(); }
+}
 function addBet(game, amount) { const input = document.getElementById(game + '-bet'); if (!input) return; let current = parseInt(input.value) || 10; current += amount; if (current > 100000) current = 100000; input.value = current; }
 function getBet(game) { const input = document.getElementById(game + '-bet'); if (!input) return 10; let val = parseInt(input.value) || 10; if (val < 1) val = 1; if (val > 100000) val = 100000; return val; }
 
@@ -415,8 +481,44 @@ function clickMineCell(cell) {
 }
 
 // ================= РАКЕТА (CRASH) =================
-async function startCrashPolling() { if (crashInterval) clearInterval(crashInterval); pollCrashState(); crashInterval = setInterval(pollCrashState, 100); }
+async function startCrashPolling() { if (crashInterval) clearInterval(crashInterval); pollCrashState(); crashInterval = setInterval(pollCrashState, 150); }
 function stopCrashPolling() { if (crashInterval) clearInterval(crashInterval); crashInterval = null; }
+
+async function crashAction() {
+    if (isProcessing) return;
+    isProcessing = true;
+    try {
+        if (!crashBetActive) {
+            const bet = getBet('crash');
+            if (balance < bet) { isProcessing = false; return tg.showAlert("Недостаточно коинов!"); }
+            const res = await fetch(`${API_URL}/api/crash_bet`, {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ initData: tg.initData, amount: bet })
+            });
+            if (!res.ok) { const e = await res.json().catch(()=>({})); isProcessing = false; return tg.showAlert(e.detail || "Ошибка"); }
+            const data = await res.json();
+            balance = data.new_balance; updateUI();
+            crashBetActive = true;
+            document.getElementById('crash-btn').innerText = 'Забрать (x1.00)';
+            document.getElementById('crash-btn').style.background = '#34c759';
+            playSound('click');
+        } else {
+            const res = await fetch(`${API_URL}/api/crash_cashout`, {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ initData: tg.initData })
+            });
+            if (!res.ok) { const e = await res.json().catch(()=>({})); isProcessing = false; return tg.showAlert(e.detail || "Ошибка"); }
+            const data = await res.json();
+            balance = data.new_balance; updateUI();
+            crashBetActive = false;
+            showWin(`+${data.win_amount} 🪙`);
+            playSound('win');
+            document.getElementById('crash-btn').innerText = 'Поставить ставку';
+            document.getElementById('crash-btn').style.background = '#007aff';
+        }
+    } catch(e) { tg.showAlert("Ошибка соединения"); }
+    isProcessing = false;
+}
 
 async function pollCrashState() {
     if (!document.getElementById('screen-crash').classList.contains('active')) return;
@@ -448,14 +550,14 @@ async function pollCrashState() {
             rocketEl.style.opacity = '1';
             document.getElementById('crash-flame').style.display = 'block';
             document.getElementById('crash-explosion').style.display = 'none';
-            document.body.style.background = 'var(--bg)';
 
             if (historyEl) {
                 historyEl.innerHTML = '';
                 (state.history || []).forEach(h => {
                     const div = document.createElement('div');
                     div.className = 'crash-hist-item';
-                    div.innerText = `x${h.crash_point}`;
+                    const cp = typeof h.crash_point === 'number' ? h.crash_point : (h.crash_point || 0);
+                    div.innerText = `x${Number(cp).toFixed(2)}`;
                     historyEl.appendChild(div);
                 });
             }
@@ -467,3 +569,55 @@ async function pollCrashState() {
             betContainer.style.display = 'none';
 
             if (crashBetActive) {
+                btn.innerText = `Забрать (x${state.multiplier.toFixed(2)})`;
+                btn.style.background = '#34c759';
+            }
+
+            const field = document.getElementById('crash-field');
+            const w = field.offsetWidth, h = field.offsetHeight;
+            const t = Math.min((state.multiplier - 1) / 8, 1);
+            const x = 50 + t * (w - 120);
+            const y = 50 + t * (h - 120);
+            rocketEl.style.left = x + 'px';
+            rocketEl.style.bottom = y + 'px';
+            rocketEl.style.transform = `rotate(${-45 + t*45}deg)`;
+        } else if (state.status === 'crashed') {
+            statusEl.innerText = 'КРАШ!'; statusEl.style.color = '#ff3b30';
+            multEl.innerText = `x${(state.crash_point || 0).toFixed(2)}`;
+            multEl.style.color = '#ff3b30';
+            betContainer.style.display = 'block';
+            btn.innerText = 'Поставить ставку';
+            btn.style.background = '#007aff';
+            btn.disabled = false;
+            crashBetActive = false;
+            rocketEl.style.opacity = '0';
+            document.getElementById('crash-flame').style.display = 'none';
+            const exp = document.getElementById('crash-explosion');
+            exp.style.display = 'block';
+            exp.style.left = rocketEl.style.left;
+            exp.style.bottom = rocketEl.style.bottom;
+            playSound('boom');
+            setTimeout(() => { exp.style.display = 'none'; }, 500);
+            setTimeout(async () => { await loadUserData(); }, 1000);
+        }
+
+        const pl = document.getElementById('crash-participants');
+        if (pl) {
+            pl.innerHTML = '';
+            (state.players || []).forEach(p => {
+                const d = document.createElement('div');
+                d.className = 'crash-part-item';
+                const cashout = p.cashout_mult > 0 ? ` → x${Number(p.cashout_mult).toFixed(2)}` : '';
+                d.innerHTML = `<span>${p.name}</span><span>${p.bet} 🪙${cashout}</span>`;
+                pl.appendChild(d);
+            });
+        }
+    } catch(e) { console.error(e); }
+}
+
+// ================= СТАРТ =================
+window.addEventListener('load', async () => {
+    await loadUserData();
+    // снимаем возможные "залипшие" модалки на старте
+    clearGameModals();
+});

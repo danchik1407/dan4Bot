@@ -79,7 +79,7 @@ main { padding: 0 16px; }
 .nav-item.active { color: var(--accent); }
 .nav-icon { font-size: 22px; margin-bottom: 4px; }
 
-.game-screen { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: var(--bg); z-index: 200; padding: 20px; flex-direction: column; align-items: center; }
+.game-screen { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: var(--bg); z-index: 200; padding: 20px; flex-direction: column; align-items: center; overflow-y: auto; -webkit-overflow-scrolling: touch; }
 .game-screen.active { display: flex; }
 .back-btn { background: transparent; color: var(--text-muted); border: none; font-size: 16px; cursor: pointer; align-self: flex-start; margin-bottom: 20px; }
 .game-title { text-align: center; margin-bottom: 20px; font-weight: 800; font-size: 24px; }
@@ -179,6 +179,12 @@ main { padding: 0 16px; }
 .winner-name { font-size: 24px; font-weight: 900; color: #ffcc00; margin-bottom: 10px; text-shadow: 0 0 10px rgba(255, 204, 0, 0.5); }
 .winner-amount { font-size: 48px; font-weight: 900; color: #34c759; margin-bottom: 20px; text-shadow: 0 0 20px rgba(52, 199, 89, 0.5); }
 
+/* Защита от "залипших" модалок */
+.winner-modal:not(.active),
+.chest-win-modal:not(.active) {
+    pointer-events: none;
+}
+
 /* Бейдж баланса в играх */
 .game-balance-badge {
     position: fixed;
@@ -224,7 +230,6 @@ main { padding: 0 16px; }
     opacity: 0.5;
 }
 
-/* Стили для ТГ-эмодзи ракеты */
 .crash-rocket {
     position: absolute;
     width: 60px;
@@ -235,12 +240,7 @@ main { padding: 0 16px; }
     transition: transform 0.1s linear;
     z-index: 10;
     filter: drop-shadow(0 0 10px #ff3b30);
-    font-size: 50px; /* Размер эмодзи */
-}
-
-.crash-rocket tg-emoji {
     font-size: 50px;
-    line-height: 1;
 }
 
 .crash-flame {
