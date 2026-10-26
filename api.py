@@ -2,6 +2,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+import asyncio
 import os, hashlib, hmac, json, time, random, uvicorn, datetime, math
 from urllib.parse import parse_qsl
 from dotenv import load_dotenv
@@ -34,6 +35,81 @@ game_state = {
     "round_id": str(int(time.time())), "whales_added": 0, "whale_chance": random.random() < 0.07
 }
 history = []
+
+
+def _pick_hockey_winner():
+    """Choose a winner using the same bet-proportional odds as the arena sectors."""
+    players = game_state["players"]
+    total_bet = sum(max(0, int(player.get("bet", 0))) for player in players)
+    if total_bet <= 0:
+        return None
+
+    draw = random.uniform(0, total_bet)
+    accumulated = 0
+    for player in players:
+        accumulated += max(0, int(player.get("bet", 0)))
+        if draw < accumulated:
+            return player
+    return players[-1] if players else None
+
+
+def _payout_hockey_winner():
+    """Credit a resolved round once; this runs on the server, not in the Mini App."""
+    if game_state["is_paid"] or not game_state["winner"]:
+        return
+
+    # Mark first so simultaneous state requests cannot credit the same round twice.
+    game_state["is_paid"] = True
+    winner_id = game_state["winner"]["id"]
+    try:
+        numeric_winner_id = int(winner_id)
+        res = supabase.table("users").select("coins").eq("user_id", numeric_winner_id).execute()
+        if res.data:
+            new_coins = int(res.data[0].get("coins", 0)) + int(game_state["bank"])
+            supabase.table("users").update({"coins": new_coins}).eq("user_id", numeric_winner_id).execute()
+    except (TypeError, ValueError):
+        # Arena bots do not have user accounts and must never receive coins.
+        pass
+    except Exception as e:
+        print(f"❌ Ошибка выплаты Арены: {e}")
+
+
+def _finish_hockey_round(winner=None):
+    """Resolve and pay the round exactly once, whether or not a client is connected."""
+    if game_state["status"] != "rolling":
+        return False
+    if not game_state["players"] or game_state["bank"] <= 0:
+        game_state["winner"] = None
+    else:
+        game_state["winner"] = winner or _pick_hockey_winner()
+
+    game_state["status"] = "finished"
+    game_state["last_update"] = time.time()
+    if game_state["winner"]:
+        history.insert(0, {
+            "round_id": game_state["round_id"],
+            "winner_name": game_state["winner"]["name"],
+            "amount": game_state["bank"],
+            "players": [
+                {"name": p["name"], "bet": p["bet"], "is_winner": p["id"] == game_state["winner"]["id"]}
+                for p in game_state["players"]
+            ],
+        })
+        del history[10:]
+        _payout_hockey_winner()
+    return True
+
+
+@app.on_event("startup")
+async def start_hockey_settlement_worker():
+    async def settle_expired_rounds():
+        while True:
+            await asyncio.sleep(0.2)
+            if game_state["status"] == "rolling" and time.time() - game_state["last_update"] >= 15.5:
+                _finish_hockey_round()
+
+    asyncio.create_task(settle_expired_rounds())
+
 
 # === РАКЕТА (CRASH) ===
 CRASH_WAIT = 10
@@ -157,30 +233,12 @@ async def get_hockey_state():
                 for p in game_state["players"]: p["percent"] = 0
 
     elif game_state["status"] == "rolling":
-        if now - game_state["last_update"] > 15.5:
-            game_state["status"] = "finished"
-            game_state["last_update"] = now
-            if game_state["winner"]:
-                history.insert(0, {"round_id": game_state["round_id"], "winner_name": game_state["winner"]["name"],
-                                   "amount": game_state["bank"], "players": [
-                        {"name": p["name"], "bet": p["bet"], "is_winner": p["id"] == game_state["winner"]["id"]} for p
-                        in game_state["players"]]})
-                if len(history) > 10: history.pop()
+        if now - game_state["last_update"] >= 15.5:
+            # Fallback is server-authoritative: leaving the app cannot cancel the draw or payout.
+            _finish_hockey_round()
 
     elif game_state["status"] == "finished":
         if now - game_state["last_update"] > 5:
-            if game_state["winner"] and not game_state["is_paid"]:
-                game_state["is_paid"] = True
-                winner_id = game_state["winner"]["id"]
-                bank_amount = game_state["bank"]
-                try:
-                    res = supabase.table("users").select("coins").eq("user_id", int(winner_id)).execute()
-                    if res.data:
-                        new_coins = int(res.data[0].get("coins", 0)) + bank_amount
-                        supabase.table("users").update({"coins": new_coins}).eq("user_id", int(winner_id)).execute()
-                except Exception as e:
-                    print(f"❌ Ошибка выплаты: {e}")
-
             game_state = {"status": "waiting", "timer": 15, "bank": 0, "players": [], "winner": None,
                           "last_update": now, "last_bot_added": 0, "target_bots": 0, "is_paid": False,
                           "round_id": str(int(time.time())), "whales_added": 0, "whale_chance": random.random() < 0.07}
@@ -238,39 +296,27 @@ async def place_bet(data: PlaceBet):
 
 @app.post("/api/finish_hockey")
 async def finish_hockey(data: FinishHockey):
-    global game_state
-    if game_state["status"] != "rolling": return {"success": False}
-    total_bank = game_state["bank"]
-    if total_bank == 0 or not game_state["players"]: return {"success": False}
-    if game_state["is_paid"]: return {"success": False}
+    if game_state["status"] != "rolling":
+        return {"success": False}
+    if game_state["bank"] <= 0 or not game_state["players"]:
+        return {"success": False}
 
+    # Existing clients can report the final ball position. If they disconnect, the
+    # server-side timer calls _finish_hockey_round() and draws from the same odds.
+    x = max(0.0, min(100.0, data.x))
     current_x = 0.0
     winner = None
-    for p in game_state["players"]:
-        exact_percent = (p["bet"] / total_bank) * 100.0
-        if current_x <= data.x <= current_x + exact_percent + 0.0001:
-            winner = p;
+    for player in game_state["players"]:
+        exact_percent = (player["bet"] / game_state["bank"]) * 100.0
+        if current_x <= x <= current_x + exact_percent + 0.0001:
+            winner = player
             break
         current_x += exact_percent
-    if not winner and game_state["players"]: winner = game_state["players"][-1]
+    if winner is None:
+        winner = game_state["players"][-1]
 
-    game_state["winner"] = winner
-    game_state["status"] = "finished"
-    game_state["last_update"] = time.time()
-
-    if winner and not game_state["is_paid"]:
-        game_state["is_paid"] = True
-        winner_id = winner["id"]
-        bank_amount = game_state["bank"]
-        try:
-            res = supabase.table("users").select("coins").eq("user_id", int(winner_id)).execute()
-            if res.data:
-                new_coins = int(res.data[0].get("coins", 0)) + bank_amount
-                supabase.table("users").update({"coins": new_coins}).eq("user_id", int(winner_id)).execute()
-        except Exception as e:
-            print(f"❌ Ошибка выплаты: {e}")
-
-    return {"success": True, "winner": winner, "bank": game_state["bank"]}
+    _finish_hockey_round(winner)
+    return {"success": True, "winner": game_state["winner"], "bank": game_state["bank"]}
 
 
 @app.get("/api/hockey_history")
