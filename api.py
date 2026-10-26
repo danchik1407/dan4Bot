@@ -27,7 +27,6 @@ BOT_COLORS = ["#ff3b30", "#ff9500", "#ffcc00", "#34c759", "#007aff", "#5856d6", 
 WHALE_NAMES = ["KingPin", "MrMoney", "WhaleGod", "BigBoss", "RichMan", "GoldFinger"]
 WHALE_COLORS = ["#ffd700", "#c0c0c0", "#b8860b", "#ff8c00", "#8b0000", "#daa520"]
 
-# === ХОККЕЙ ===
 game_state = {
     "status": "waiting", "timer": 15, "bank": 0, "players": [], "winner": None,
     "last_update": time.time(), "last_bot_added": 0, "target_bots": 0, "is_paid": False,
@@ -35,11 +34,9 @@ game_state = {
 }
 history = []
 
-# === РАКЕТА (CRASH) ===
 CRASH_WAIT = 10
 CRASH_READY = 3
 CRASH_CRASHED = 5
-
 crash_state = {
     "status": "waiting", "timer": CRASH_WAIT, "multiplier": 1.0, "last_update": time.time(),
     "crash_point": 0.0, "players": [], "bank": 0, "is_paid": False, "round_id": str(int(time.time())),
@@ -60,6 +57,11 @@ def verify_telegram_data(init_data: str):
         return None
     except:
         return None
+
+
+def check_ban(user_id: str):
+    res = supabase.table("bans").select("*").eq("user_id", user_id).execute()
+    if res.data: raise HTTPException(status_code=403, detail="Вы забанены за нарушение правил.")
 
 
 def _crash_reset_waiting(now):
@@ -103,8 +105,7 @@ async def get_hockey_state():
 
     if game_state["status"] == "waiting":
         time_left = 15 - (now - game_state["last_update"])
-        if time_left <= 10 and game_state["target_bots"] == 0:
-            game_state["target_bots"] = random.randint(1, 5)
+        if time_left <= 10 and game_state["target_bots"] == 0: game_state["target_bots"] = random.randint(1, 5)
         if time_left <= 10 and game_state["target_bots"] > 0:
             current_bots = sum(1 for p in game_state["players"] if p["is_bot"] and p["bet"] < 500)
             current_whales = sum(1 for p in game_state["players"] if p["is_bot"] and p["bet"] >= 500)
@@ -181,6 +182,8 @@ async def place_bet(data: PlaceBet):
     user = verify_telegram_data(data.initData)
     if not user: raise HTTPException(status_code=401, detail="Invalid auth data")
     user_id = str(user["id"])
+
+    check_ban(user_id)
 
     if int(user_id) not in ADMIN_IDS and data.amount > MAX_BET:
         raise HTTPException(status_code=400, detail=f"Максимальная ставка {MAX_BET} 🪙")
@@ -408,6 +411,8 @@ async def crash_bet(data: CrashBet):
     if not user: raise HTTPException(status_code=401, detail="Invalid auth data")
     user_id = str(user["id"])
 
+    check_ban(user_id)
+
     if int(user_id) not in ADMIN_IDS and data.amount > MAX_BET:
         raise HTTPException(status_code=400, detail=f"Максимальная ставка {MAX_BET} 🪙")
 
@@ -438,17 +443,23 @@ async def crash_cashout(data: CrashCashout):
     user = verify_telegram_data(data.initData)
     if not user: raise HTTPException(status_code=401, detail="Invalid auth data")
     user_id = str(user["id"])
+    check_ban(user_id)
+
     if crash_state["status"] != "flying": raise HTTPException(status_code=400, detail="Игра не идёт")
     player = next((p for p in crash_state["players"] if str(p["id"]) == user_id), None)
     if not player: raise HTTPException(status_code=400, detail="Вы не участвуете")
     if player["cashout_mult"] > 0: raise HTTPException(status_code=400, detail="Вы уже забрали")
 
+    # Считаем выигрыш (ставка уже списана при /crash_bet)
     player["cashout_mult"] = crash_state["multiplier"]
     win_amount = int(player["bet"] * player["cashout_mult"])
+
     new_coins = 0
     try:
         res = supabase.table("users").select("coins").eq("user_id", int(user_id)).execute()
         current_coins = int(res.data[0].get("coins", 0)) if res.data else 0
+
+        # Прибавляем к текущему балансу
         new_coins = current_coins + win_amount
         supabase.table("users").update({"coins": new_coins}).eq("user_id", int(user_id)).execute()
     except Exception as e:
@@ -467,8 +478,8 @@ async def get_user(auth: UserAuth):
     if not user: raise HTTPException(status_code=401, detail="Invalid auth data")
     user_id = user["id"]
 
-    ban_res = supabase.table("bans").select("*").eq("user_id", user_id).execute()
-    if ban_res.data:
+    res_ban = supabase.table("bans").select("*").eq("user_id", user_id).execute()
+    if res_ban.data:
         raise HTTPException(status_code=403, detail="Вы забанены за багоюз или нарушение правил.")
 
     if user_id in ADMIN_IDS and user_id != user.get("id"): return {"coins": -1, "keys": 0, "inventory": [],
@@ -489,6 +500,8 @@ async def open_chest(auth: UserAuth):
     user = verify_telegram_data(auth.initData)
     if not user: raise HTTPException(status_code=401, detail="Invalid auth data")
     user_id = user["id"]
+    check_ban(user_id)
+
     now = int(time.time())
     res = supabase.table("users").select("last_chest").eq("user_id", user_id).execute()
     if not res.data: raise HTTPException(status_code=404, detail="User not found")
@@ -503,6 +516,8 @@ async def buy_item(data: BuyItem):
     user = verify_telegram_data(data.initData)
     if not user: raise HTTPException(status_code=401, detail="Invalid auth data")
     user_id = user["id"]
+    check_ban(user_id)
+
     res = supabase.table("users").select("coins, inventory").eq("user_id", user_id).execute()
     current_coins = int(res.data[0].get("coins", 0))
     inventory = json.loads(res.data[0].get("inventory") or "[]")
@@ -518,6 +533,8 @@ async def update_balance(data: UpdateBalance):
     user = verify_telegram_data(data.initData)
     if not user: raise HTTPException(status_code=401, detail="Invalid auth data")
     user_id = user["id"]
+    check_ban(user_id)
+
     res = supabase.table("users").select("coins").eq("user_id", user_id).execute()
     current_coins = int(res.data[0].get("coins", 0))
     new_coins = max(0, current_coins + data.amount)
@@ -530,6 +547,8 @@ async def update_keys(data: UpdateKeys):
     user = verify_telegram_data(data.initData)
     if not user: raise HTTPException(status_code=401, detail="Invalid auth data")
     user_id = user["id"]
+    check_ban(user_id)
+
     res = supabase.table("users").select("keys").eq("user_id", user_id).execute()
     current_keys = int(res.data[0].get("keys", 0) or 0)
     new_keys = max(0, current_keys + data.amount)
