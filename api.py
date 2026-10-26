@@ -39,11 +39,13 @@ game_state = {
 history = []
 
 
-HOCKEY_ROLL_DURATION = 15.5
+HOCKEY_ROLL_DURATION = 9.0
 HOCKEY_WAIT_DURATION = 15.0
 HOCKEY_ROUND_PERIOD = HOCKEY_WAIT_DURATION + HOCKEY_ROLL_DURATION + 5.0
 HOCKEY_SIMULATION_STEP = 0.05
 HOCKEY_DAMPING = 0.985
+HOCKEY_STOP_DAMPING = 0.90
+HOCKEY_SLOWDOWN_START = 6.0
 
 
 def _simulate_hockey_roll(start_angle, speed, start_x=50.0, start_y=50.0):
@@ -54,7 +56,8 @@ def _simulate_hockey_roll(start_angle, speed, start_x=50.0, start_y=50.0):
     steps = round(HOCKEY_ROLL_DURATION / HOCKEY_SIMULATION_STEP)
     path = [[round(x, 6), round(y, 6)]]
 
-    for _ in range(steps):
+    slowdown_step = round(HOCKEY_SLOWDOWN_START / HOCKEY_SIMULATION_STEP)
+    for step in range(steps):
         x += vx
         y += vy
         if x <= 0 or x >= 100:
@@ -63,8 +66,9 @@ def _simulate_hockey_roll(start_angle, speed, start_x=50.0, start_y=50.0):
         if y <= 0 or y >= 100:
             vy *= -1
             y = max(0.0, min(100.0, y))
-        vx *= HOCKEY_DAMPING
-        vy *= HOCKEY_DAMPING
+        damping = HOCKEY_STOP_DAMPING if step >= slowdown_step else HOCKEY_DAMPING
+        vx *= damping
+        vy *= damping
         path.append([round(x, 6), round(y, 6)])
 
     return path
@@ -77,7 +81,7 @@ def _prepare_hockey_roll(now):
     game_state["round_id"] = str(round_slot)
     round_rng = random.Random(round_slot)
     start_angle = round_rng.uniform(0.0, 2 * math.pi)
-    speed = 8.0
+    speed = 8.5
     start_x, start_y = 50.0, 50.0
     path = _simulate_hockey_roll(start_angle, speed, start_x, start_y)
     game_state["winner"] = None
@@ -219,7 +223,7 @@ async def start_hockey_settlement_worker():
     async def settle_expired_rounds():
         while True:
             await asyncio.sleep(0.2)
-            if game_state["status"] == "rolling" and time.time() - game_state["last_update"] >= 15.5:
+            if game_state["status"] == "rolling" and time.time() - game_state["last_update"] >= HOCKEY_ROLL_DURATION:
                 _finish_hockey_round()
 
     asyncio.create_task(settle_expired_rounds())
@@ -315,7 +319,7 @@ async def get_hockey_state():
             _prepare_hockey_roll(now)
 
     elif game_state["status"] == "rolling":
-        if now - game_state["last_update"] >= 15.5:
+        if now - game_state["last_update"] >= HOCKEY_ROLL_DURATION:
             # Fallback is server-authoritative: leaving the app cannot cancel the draw or payout.
             _finish_hockey_round()
 
@@ -396,7 +400,7 @@ async def finish_hockey(data: FinishHockey):
     # Do not let a client decide or prematurely finish the round using its local animation.
     if game_state["status"] != "rolling":
         return {"success": False}
-    if time.time() - game_state["last_update"] < 15.5:
+    if time.time() - game_state["last_update"] < HOCKEY_ROLL_DURATION:
         return {"success": False, "detail": "Раунд ещё идёт"}
 
     _finish_hockey_round()
