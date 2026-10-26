@@ -32,25 +32,70 @@ WHALE_COLORS = ["#ffd700", "#c0c0c0", "#b8860b", "#ff8c00", "#8b0000", "#daa520"
 game_state = {
     "status": "waiting", "timer": 15, "bank": 0, "players": [], "winner": None,
     "last_update": time.time(), "last_bot_added": 0, "target_bots": 0, "is_paid": False,
-    "round_id": str(int(time.time())), "whales_added": 0, "whale_chance": random.random() < 0.07
+    "round_id": str(int(time.time())), "whales_added": 0, "whale_chance": random.random() < 0.07,
+    "roll_data": None, "rolling_started_at": None
 }
 history = []
 
 
-def _pick_hockey_winner():
-    """Choose a winner using the same bet-proportional odds as the arena sectors."""
-    players = game_state["players"]
-    total_bet = sum(max(0, int(player.get("bet", 0))) for player in players)
-    if total_bet <= 0:
+HOCKEY_ROLL_DURATION = 15.5
+HOCKEY_SIMULATION_STEP = 0.05
+HOCKEY_DAMPING = 0.985
+
+
+def _simulate_hockey_roll(start_angle, speed, start_x=50.0, start_y=50.0):
+    """Simulate the full roll with the same fixed-step physics used by the clients."""
+    x, y = float(start_x), float(start_y)
+    vx = math.cos(start_angle) * speed
+    vy = math.sin(start_angle) * speed
+    steps = round(HOCKEY_ROLL_DURATION / HOCKEY_SIMULATION_STEP)
+
+    for _ in range(steps):
+        x += vx
+        y += vy
+        if x <= 0 or x >= 100:
+            vx *= -1
+            x = max(0.0, min(100.0, x))
+        if y <= 0 or y >= 100:
+            vy *= -1
+            y = max(0.0, min(100.0, y))
+        vx *= HOCKEY_DAMPING
+        vy *= HOCKEY_DAMPING
+
+    return x, y
+
+
+def _prepare_hockey_roll(now):
+    """Create shared ball parameters and the server-authoritative final position."""
+    start_angle = random.uniform(0.0, 2 * math.pi)
+    speed = 8.0
+    start_x, start_y = 50.0, 50.0
+    final_x, final_y = _simulate_hockey_roll(start_angle, speed, start_x, start_y)
+    game_state["winner"] = None
+    game_state["rolling_started_at"] = now
+    game_state["roll_data"] = {
+        "start_angle": start_angle,
+        "speed": speed,
+        "start_x": start_x,
+        "start_y": start_y,
+        "final_x": final_x,
+        "final_y": final_y,
+    }
+
+
+def _hockey_winner_at_x(x):
+    """Resolve a final ball x-coordinate to the bet-weighted arena sector."""
+    total_bank = game_state["bank"]
+    if total_bank <= 0:
         return None
 
-    draw = random.uniform(0, total_bet)
-    accumulated = 0
-    for player in players:
-        accumulated += max(0, int(player.get("bet", 0)))
-        if draw < accumulated:
+    current_x = 0.0
+    for player in game_state["players"]:
+        sector_width = player["bet"] / total_bank * 100.0
+        if current_x <= x <= current_x + sector_width + 0.0001:
             return player
-    return players[-1] if players else None
+        current_x += sector_width
+    return game_state["players"][-1] if game_state["players"] else None
 
 
 def _payout_hockey_winner():
@@ -74,14 +119,15 @@ def _payout_hockey_winner():
         print(f"❌ Ошибка выплаты Арены: {e}")
 
 
-def _finish_hockey_round(winner=None):
-    """Resolve and pay the round exactly once, whether or not a client is connected."""
+def _finish_hockey_round():
+    """Resolve from the server-simulated final x and pay exactly once."""
     if game_state["status"] != "rolling":
         return False
-    if not game_state["players"] or game_state["bank"] <= 0:
+    roll_data = game_state.get("roll_data") or {}
+    if not game_state["players"] or game_state["bank"] <= 0 or "final_x" not in roll_data:
         game_state["winner"] = None
     else:
-        game_state["winner"] = winner or _pick_hockey_winner()
+        game_state["winner"] = _hockey_winner_at_x(float(roll_data["final_x"]))
 
     game_state["status"] = "finished"
     game_state["last_update"] = time.time()
@@ -226,6 +272,7 @@ async def get_hockey_state():
         if time_left <= 0:
             game_state["status"] = "rolling"
             game_state["last_update"] = now
+            _prepare_hockey_roll(now)
             total_bank = game_state["bank"]
             if total_bank > 0:
                 for p in game_state["players"]: p["percent"] = (p["bet"] / total_bank) * 100
@@ -241,12 +288,17 @@ async def get_hockey_state():
         if now - game_state["last_update"] > 5:
             game_state = {"status": "waiting", "timer": 15, "bank": 0, "players": [], "winner": None,
                           "last_update": now, "last_bot_added": 0, "target_bots": 0, "is_paid": False,
-                          "round_id": str(int(time.time())), "whales_added": 0, "whale_chance": random.random() < 0.07}
-            return game_state
+                          "round_id": str(int(time.time())), "whales_added": 0, "whale_chance": random.random() < 0.07,
+                          "roll_data": None, "rolling_started_at": None}
+            response = game_state.copy()
+            response["server_time"] = time.time()
+            return response
 
     time_left = 15 - (now - game_state["last_update"]) if game_state["status"] == "waiting" else 0
     game_state["timer"] = max(0, int(time_left))
-    return game_state
+    response = game_state.copy()
+    response["server_time"] = time.time()
+    return response
 
 
 @app.post("/api/place_bet")
@@ -296,26 +348,13 @@ async def place_bet(data: PlaceBet):
 
 @app.post("/api/finish_hockey")
 async def finish_hockey(data: FinishHockey):
+    # Do not let a client decide or prematurely finish the round using its local animation.
     if game_state["status"] != "rolling":
         return {"success": False}
-    if game_state["bank"] <= 0 or not game_state["players"]:
-        return {"success": False}
+    if time.time() - game_state["last_update"] < 15.5:
+        return {"success": False, "detail": "Раунд ещё идёт"}
 
-    # Existing clients can report the final ball position. If they disconnect, the
-    # server-side timer calls _finish_hockey_round() and draws from the same odds.
-    x = max(0.0, min(100.0, data.x))
-    current_x = 0.0
-    winner = None
-    for player in game_state["players"]:
-        exact_percent = (player["bet"] / game_state["bank"]) * 100.0
-        if current_x <= x <= current_x + exact_percent + 0.0001:
-            winner = player
-            break
-        current_x += exact_percent
-    if winner is None:
-        winner = game_state["players"][-1]
-
-    _finish_hockey_round(winner)
+    _finish_hockey_round()
     return {"success": True, "winner": game_state["winner"], "bank": game_state["bank"]}
 
 
