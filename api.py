@@ -28,10 +28,16 @@ BOT_COLORS = ["#ff3b30", "#ff9500", "#ffcc00", "#34c759", "#007aff", "#5856d6", 
 WHALE_NAMES = ["KingPin", "MrMoney", "WhaleGod", "BigBoss", "RichMan", "GoldFinger"]
 WHALE_COLORS = ["#ffd700", "#c0c0c0", "#b8860b", "#ff8c00", "#8b0000", "#daa520"]
 
+
+def _random_arena_bot_count():
+    # Keep most rounds light; large bot rooms are occasional.
+    return random.randint(1, 3) if random.random() < 0.85 else random.randint(4, 10)
+
+
 # === АРЕНА ===
 game_state = {
     "status": "waiting", "timer": 15, "bank": 0, "players": [], "winner": None,
-    "last_update": time.time(), "last_bot_added": time.time(), "target_bots": random.randint(1, 10), "is_paid": False,
+    "last_update": time.time(), "last_bot_added": time.time(), "target_bots": _random_arena_bot_count(), "is_paid": False,
     "round_id": str(int(time.time())), "whales_added": 0,
     "roll_data": None, "rolling_started_at": None, "whale_decided": False,
     "whale_join": False, "whale_trigger_at": None
@@ -326,7 +332,7 @@ async def get_hockey_state():
     elif game_state["status"] == "finished":
         if now - game_state["last_update"] > 5:
             game_state = {"status": "waiting", "timer": 15, "bank": 0, "players": [], "winner": None,
-                          "last_update": now, "last_bot_added": now, "target_bots": random.randint(1, 10),
+                          "last_update": now, "last_bot_added": now, "target_bots": _random_arena_bot_count(),
                           "is_paid": False, "round_id": str(int(time.time())), "whales_added": 0,
                           "roll_data": None, "rolling_started_at": None, "whale_decided": False,
                           "whale_join": False, "whale_trigger_at": None}
