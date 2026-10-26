@@ -49,32 +49,42 @@ HOCKEY_ROLL_DURATION = 9.0
 HOCKEY_WAIT_DURATION = 15.0
 HOCKEY_ROUND_PERIOD = HOCKEY_WAIT_DURATION + HOCKEY_ROLL_DURATION + 5.0
 HOCKEY_SIMULATION_STEP = 0.05
-HOCKEY_DAMPING = 0.985
-HOCKEY_STOP_DAMPING = 0.90
 HOCKEY_SLOWDOWN_START = 6.0
+
+
+def _hockey_speed_factor(elapsed_seconds):
+    """Keep speed steady, then ease smoothly to a stop over the final 3 seconds."""
+    if elapsed_seconds <= HOCKEY_SLOWDOWN_START:
+        return 1.0
+    progress = min(1.0, max(0.0, (elapsed_seconds - HOCKEY_SLOWDOWN_START) /
+                            (HOCKEY_ROLL_DURATION - HOCKEY_SLOWDOWN_START)))
+    eased = progress * progress * (3.0 - 2.0 * progress)
+    return 1.0 - eased
 
 
 def _simulate_hockey_roll(start_angle, speed, start_x=50.0, start_y=50.0):
     """Precompute the authoritative path once; clients only render these server points."""
     x, y = float(start_x), float(start_y)
-    vx = math.cos(start_angle) * speed
-    vy = math.sin(start_angle) * speed
+    direction_x = math.cos(start_angle)
+    direction_y = math.sin(start_angle)
+    base_vx = direction_x * speed
+    base_vy = direction_y * speed
     steps = round(HOCKEY_ROLL_DURATION / HOCKEY_SIMULATION_STEP)
     path = [[round(x, 6), round(y, 6)]]
 
-    slowdown_step = round(HOCKEY_SLOWDOWN_START / HOCKEY_SIMULATION_STEP)
     for step in range(steps):
+        elapsed = (step + 1) * HOCKEY_SIMULATION_STEP
+        speed_factor = _hockey_speed_factor(elapsed)
+        vx = math.copysign(abs(base_vx) * speed_factor, direction_x)
+        vy = math.copysign(abs(base_vy) * speed_factor, direction_y)
         x += vx
         y += vy
-        if x <= 0 or x >= 100:
-            vx *= -1
+        if vx and (x <= 0 or x >= 100):
+            direction_x *= -1
             x = max(0.0, min(100.0, x))
-        if y <= 0 or y >= 100:
-            vy *= -1
+        if vy and (y <= 0 or y >= 100):
+            direction_y *= -1
             y = max(0.0, min(100.0, y))
-        damping = HOCKEY_STOP_DAMPING if step >= slowdown_step else HOCKEY_DAMPING
-        vx *= damping
-        vy *= damping
         path.append([round(x, 6), round(y, 6)])
 
     return path
@@ -384,9 +394,11 @@ async def place_bet(data: PlaceBet):
     if (game_state["status"] != "waiting"
             or time.time() - game_state["last_update"] >= 15):
         raise HTTPException(status_code=400, detail="Ставки закрыты")
-    if any(p["id"] == user_id and not p.get("is_bot") for p in game_state["players"]):
-        raise HTTPException(status_code=400, detail="Вы уже сделали ставку в этом раунде")
-    if len(game_state["players"]) >= 20:
+    existing_player = next(
+        (p for p in game_state["players"] if p["id"] == user_id and not p.get("is_bot")),
+        None,
+    )
+    if existing_player is None and len(game_state["players"]) >= 20:
         raise HTTPException(status_code=400, detail="Комната заполнена")
 
     res = supabase.table("users").select("coins").eq("user_id", int(user_id)).execute()
@@ -399,16 +411,22 @@ async def place_bet(data: PlaceBet):
     if not updated.data:
         raise HTTPException(status_code=500, detail="Не удалось списать ставку")
 
-    name = user.get("username", user.get("first_name", f"id{user_id}"))
-    avatar = user.get("photo_url", "")
-    player_color = "#007aff"
-    while any(p["color"] == player_color for p in game_state["players"]):
-        player_color = f"hsl({random.randint(0, 360)}, 80%, 50%)"
-    game_state["players"].append(
-        {"id": user_id, "name": name, "avatar": avatar, "bet": data.amount, "color": player_color, "is_bot": False})
+    if existing_player is not None:
+        existing_player["bet"] += data.amount
+    else:
+        name = user.get("username", user.get("first_name", f"id{user_id}"))
+        avatar = user.get("photo_url", "")
+        player_color = "#007aff"
+        while any(p["color"] == player_color for p in game_state["players"]):
+            player_color = f"hsl({random.randint(0, 360)}, 80%, 50%)"
+        existing_player = {
+            "id": user_id, "name": name, "avatar": avatar, "bet": data.amount,
+            "color": player_color, "is_bot": False,
+        }
+        game_state["players"].append(existing_player)
 
-    # One 10% chance per round to add a whale shortly before closing, triggered by a 1,000+ human bet.
-    if data.amount >= 1000 and not game_state["whale_decided"]:
+    # One 10% chance per round when a human's accumulated bet reaches 1,000.
+    if existing_player["bet"] >= 1000 and not game_state["whale_decided"]:
         game_state["whale_decided"] = True
         game_state["whale_join"] = random.random() < 0.10
         if game_state["whale_join"]:
