@@ -369,29 +369,40 @@ async function placeHockeyBet() {
 
 const HOCKEY_ROLL_DURATION = 15.5;
 const HOCKEY_SIMULATION_STEP = 0.05;
-const HOCKEY_DAMPING = 0.985;
+let hockeyPathCache = { roundId: null, path: null, pending: null };
 
-function buildHockeyPath(rollData) {
-    if (!rollData) return null;
-    let x = Number(rollData.start_x ?? 50);
-    let y = Number(rollData.start_y ?? 50);
-    let vx = Math.cos(Number(rollData.start_angle)) * Number(rollData.speed);
-    let vy = Math.sin(Number(rollData.start_angle)) * Number(rollData.speed);
-    const steps = Math.round(HOCKEY_ROLL_DURATION / HOCKEY_SIMULATION_STEP);
-    const points = [{ x, y }];
+async function loadHockeyPath(roundId) {
+    if (hockeyPathCache.roundId === roundId && hockeyPathCache.path) return hockeyPathCache.path;
+    if (hockeyPathCache.roundId === roundId && hockeyPathCache.pending) return hockeyPathCache.pending;
 
-    // Same fixed-step simulation and collision order as api.py.
-    for (let step = 1; step <= steps; step++) {
-        x += vx; y += vy;
-        if (x <= 0 || x >= 100) { vx *= -1; x = Math.max(0, Math.min(100, x)); }
-        if (y <= 0 || y >= 100) { vy *= -1; y = Math.max(0, Math.min(100, y)); }
-        vx *= HOCKEY_DAMPING; vy *= HOCKEY_DAMPING;
-        points.push({ x, y });
+    hockeyPathCache = { roundId, path: null, pending: null };
+    const pending = (async () => {
+        const response = await fetch(`${API_URL}/api/hockey_roll/${encodeURIComponent(roundId)}`);
+        if (!response.ok) throw new Error('Не удалось получить траекторию мяча');
+        const data = await response.json();
+        if (data.round_id !== roundId || !Array.isArray(data.path)) throw new Error('Траектория другого раунда');
+        const path = data.path.map(([x, y]) => ({ x: Number(x), y: Number(y) }));
+        if (hockeyPathCache.roundId === roundId) hockeyPathCache.path = path;
+        return path;
+    })();
+    hockeyPathCache.pending = pending.catch(error => {
+        if (hockeyPathCache.roundId === roundId) hockeyPathCache.pending = null;
+        throw error;
+    });
+    return hockeyPathCache.pending;
+}
+
+function renderHockeyFinal(rollData) {
+    if (!rollData) return;
+    ball.x = Number(rollData.final_x);
+    ball.y = Number(rollData.final_y);
+    const ballEl = document.getElementById('hockey-ball');
+    const arena = document.getElementById('hockey-arena');
+    if (ballEl) { ballEl.style.left = `${ball.x}%`; ballEl.style.top = `${ball.y}%`; }
+    if (arena) {
+        arena.style.transform = 'scale(1.25)';
+        arena.style.transformOrigin = `${ball.x}% ${ball.y}%`;
     }
-    if (Number.isFinite(Number(rollData.final_x)) && Number.isFinite(Number(rollData.final_y))) {
-        points[steps] = { x: Number(rollData.final_x), y: Number(rollData.final_y) };
-    }
-    return points;
 }
 
 function renderHockeyBall(elapsedSeconds) {
@@ -415,26 +426,35 @@ function renderHockeyBall(elapsedSeconds) {
     }
 }
 
-function startBallPhysics(state) {
+async function startBallPhysics(state) {
     if (ball.active && ball.roundId === state.round_id) return;
     if (ball.animationId) cancelAnimationFrame(ball.animationId);
     ball.roundId = state.round_id;
-    ball.path = buildHockeyPath(state.roll_data);
+    ball.path = null;
     ball.hasStartedAnim = true;
     ball.active = true;
 
-    const step = () => {
-        if (!ball.active) return;
-        const serverNowMs = performance.now() + hockeyServerOffsetMs;
-        const elapsed = Math.max(0, (serverNowMs - Number(state.rolling_started_at) * 1000) / 1000);
-        renderHockeyBall(Math.min(HOCKEY_ROLL_DURATION, elapsed));
-        if (elapsed >= HOCKEY_ROLL_DURATION) {
-            ball.active = false;
-            return;
-        }
+    try {
+        const path = await loadHockeyPath(state.round_id);
+        if (!ball.active || ball.roundId !== state.round_id) return;
+        ball.path = path;
+
+        const step = () => {
+            if (!ball.active || ball.roundId !== state.round_id) return;
+            const serverNowMs = performance.now() + hockeyServerOffsetMs;
+            const elapsed = Math.max(0, (serverNowMs - Number(state.rolling_started_at) * 1000) / 1000);
+            renderHockeyBall(Math.min(HOCKEY_ROLL_DURATION, elapsed));
+            if (elapsed >= HOCKEY_ROLL_DURATION) {
+                ball.active = false;
+                return;
+            }
+            ball.animationId = requestAnimationFrame(step);
+        };
         ball.animationId = requestAnimationFrame(step);
-    };
-    ball.animationId = requestAnimationFrame(step);
+    } catch (error) {
+        ball.active = false;
+        console.error(error);
+    }
 }
 
 async function pollHockeyState() {
@@ -471,8 +491,9 @@ async function pollHockeyState() {
             statusEl.innerText = 'Раунд окончен!'; statusEl.style.color = '#ff3b30'; ball.active = false;
             if (ball.animationId) cancelAnimationFrame(ball.animationId);
             ball.roundId = state.round_id;
-            ball.path = ball.path || buildHockeyPath(state.roll_data);
-            renderHockeyBall(HOCKEY_ROLL_DURATION);
+            if (!ball.path && hockeyPathCache.roundId === state.round_id) ball.path = hockeyPathCache.path;
+            if (ball.path) renderHockeyBall(HOCKEY_ROLL_DURATION);
+            else renderHockeyFinal(state.roll_data);
             const modal = document.getElementById('winner-modal');
             if (state.winner && !hasShownWinner) {
                 hasShownWinner = true;

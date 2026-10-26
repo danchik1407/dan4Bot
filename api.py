@@ -45,11 +45,12 @@ HOCKEY_DAMPING = 0.985
 
 
 def _simulate_hockey_roll(start_angle, speed, start_x=50.0, start_y=50.0):
-    """Simulate the full roll with the same fixed-step physics used by the clients."""
+    """Precompute the authoritative path once; clients only render these server points."""
     x, y = float(start_x), float(start_y)
     vx = math.cos(start_angle) * speed
     vy = math.sin(start_angle) * speed
     steps = round(HOCKEY_ROLL_DURATION / HOCKEY_SIMULATION_STEP)
+    path = [[round(x, 6), round(y, 6)]]
 
     for _ in range(steps):
         x += vx
@@ -62,8 +63,9 @@ def _simulate_hockey_roll(start_angle, speed, start_x=50.0, start_y=50.0):
             y = max(0.0, min(100.0, y))
         vx *= HOCKEY_DAMPING
         vy *= HOCKEY_DAMPING
+        path.append([round(x, 6), round(y, 6)])
 
-    return x, y
+    return path
 
 
 def _prepare_hockey_roll(now):
@@ -71,7 +73,7 @@ def _prepare_hockey_roll(now):
     start_angle = random.uniform(0.0, 2 * math.pi)
     speed = 8.0
     start_x, start_y = 50.0, 50.0
-    final_x, final_y = _simulate_hockey_roll(start_angle, speed, start_x, start_y)
+    path = _simulate_hockey_roll(start_angle, speed, start_x, start_y)
     game_state["winner"] = None
     game_state["rolling_started_at"] = now
     game_state["roll_data"] = {
@@ -79,8 +81,9 @@ def _prepare_hockey_roll(now):
         "speed": speed,
         "start_x": start_x,
         "start_y": start_y,
-        "final_x": final_x,
-        "final_y": final_y,
+        "final_x": path[-1][0],
+        "final_y": path[-1][1],
+        "path": path,
     }
 
 
@@ -281,6 +284,14 @@ class CrashCashout(BaseModel): initData: str
 
 
 # ==================== АРЕНА (ХОККЕЙ) ====================
+def _hockey_state_response():
+    response = game_state.copy()
+    if response.get("roll_data"):
+        response["roll_data"] = {key: value for key, value in response["roll_data"].items() if key != "path"}
+    response["server_time"] = time.time()
+    return response
+
+
 @app.get("/api/hockey_state")
 async def get_hockey_state():
     global game_state, history
@@ -309,15 +320,20 @@ async def get_hockey_state():
                           "is_paid": False, "round_id": str(int(time.time())), "whales_added": 0,
                           "roll_data": None, "rolling_started_at": None, "whale_decided": False,
                           "whale_join": False, "whale_trigger_at": None}
-            response = game_state.copy()
-            response["server_time"] = time.time()
-            return response
+            return _hockey_state_response()
 
     time_left = 15 - (now - game_state["last_update"]) if game_state["status"] == "waiting" else 0
     game_state["timer"] = max(0, int(time_left))
-    response = game_state.copy()
-    response["server_time"] = time.time()
-    return response
+    return _hockey_state_response()
+
+
+@app.get("/api/hockey_roll/{round_id}")
+async def get_hockey_roll_path(round_id: str):
+    roll_data = game_state.get("roll_data")
+    if (game_state["round_id"] != round_id or not roll_data
+            or game_state["status"] not in {"rolling", "finished"}):
+        raise HTTPException(status_code=404, detail="Траектория раунда не найдена")
+    return {"round_id": round_id, "path": roll_data["path"]}
 
 
 @app.post("/api/place_bet")
@@ -359,7 +375,7 @@ async def place_bet(data: PlaceBet):
     # One 40% chance per round to add a whale shortly before closing, triggered by a 1,000+ human bet.
     if data.amount >= 1000 and not game_state["whale_decided"]:
         game_state["whale_decided"] = True
-        game_state["whale_join"] = random.random() < 0.40
+        game_state["whale_join"] = random.random() < 0.10
         if game_state["whale_join"]:
             game_state["whale_trigger_at"] = random.uniform(1.0, 2.0)
 
