@@ -14,7 +14,8 @@ if (user) {
 const API_URL = "https://aura-api-mptt.onrender.com";
 let balance = 0, keys = 0, currentBet = 10, inventory = [], lastChestTime = 0, isProcessing = false;
 let hockeyInterval = null, hasBetThisRound = false, hasShownWinner = false;
-let ball = { x: 50, y: 50, vx: 0, vy: 0, active: false, animationId: null, hasStartedAnim: false };
+let ball = { x: 50, y: 50, active: false, animationId: null, hasStartedAnim: false, roundId: null, path: null };
+let hockeyServerOffsetMs = 0, hockeyClockSynced = false;
 
 let crashInterval = null;
 let lastCrashStatus = null;
@@ -366,41 +367,108 @@ async function placeHockeyBet() {
     isProcessing = false;
 }
 
-function startBallPhysics() {
-    if (ball.active || ball.hasStartedAnim) return;
-    ball.hasStartedAnim = true; ball.x = 50; ball.y = 50;
-    let angle = Math.random() * Math.PI * 2;
-    let speed = 8.0; ball.vx = Math.cos(angle) * speed; ball.vy = Math.sin(angle) * speed; ball.active = true;
-    const arena = document.getElementById('hockey-arena');
+const HOCKEY_ROLL_DURATION = 15.5;
+const HOCKEY_SIMULATION_STEP = 0.05;
+let hockeyPathCache = { roundId: null, path: null, pending: null };
+
+async function loadHockeyPath(roundId) {
+    if (hockeyPathCache.roundId === roundId && hockeyPathCache.path) return hockeyPathCache.path;
+    if (hockeyPathCache.roundId === roundId && hockeyPathCache.pending) return hockeyPathCache.pending;
+
+    hockeyPathCache = { roundId, path: null, pending: null };
+    const pending = (async () => {
+        const response = await fetch(`${API_URL}/api/hockey_roll/${encodeURIComponent(roundId)}`);
+        if (!response.ok) throw new Error('Не удалось получить траекторию мяча');
+        const data = await response.json();
+        if (data.round_id !== roundId || !Array.isArray(data.path)) throw new Error('Траектория другого раунда');
+        const path = data.path.map(([x, y]) => ({ x: Number(x), y: Number(y) }));
+        if (hockeyPathCache.roundId === roundId) hockeyPathCache.path = path;
+        return path;
+    })();
+    hockeyPathCache.pending = pending.catch(error => {
+        if (hockeyPathCache.roundId === roundId) hockeyPathCache.pending = null;
+        throw error;
+    });
+    return hockeyPathCache.pending;
+}
+
+function renderHockeyFinal(rollData) {
+    if (!rollData) return;
+    ball.x = Number(rollData.final_x);
+    ball.y = Number(rollData.final_y);
     const ballEl = document.getElementById('hockey-ball');
-    arena.style.transform = 'scale(1)'; arena.style.transformOrigin = 'center center';
-    let scale = 1; const maxScale = 2.5; const startTime = performance.now();
-    const duration = 15000; const zoomStartTime = duration - 4000;
-    const step = () => {
-        if (!ball.active) return;
-        const elapsed = performance.now() - startTime;
-        ball.x += ball.vx; ball.y += ball.vy;
-        if (ball.x <= 0 || ball.x >= 100) { ball.vx *= -1; ball.x = Math.max(0, Math.min(100, ball.x)); playSound('click'); }
-        if (ball.y <= 0 || ball.y >= 100) { ball.vy *= -1; ball.y = Math.max(0, Math.min(100, ball.y)); playSound('click'); }
-        ball.vx *= 0.985; ball.vy *= 0.985;
-        if (ballEl) { ballEl.style.left = ball.x + '%'; ballEl.style.top = ball.y + '%'; }
-        if (elapsed > zoomStartTime) { scale += (maxScale - scale) * 0.02; arena.style.transform = `scale(${scale})`; arena.style.transformOrigin = `${ball.x}% ${ball.y}%`; }
-        if (Math.abs(ball.vx) < 0.05 && Math.abs(ball.vy) < 0.05) {
-            ball.active = false;
-            // ОТПРАВЛЯЕМ ФИНИШ НА СЕРВЕР, ЧТОБЫ ОН ЗАПЛАТИЛ
-            fetch(`${API_URL}/api/finish_hockey`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ initData: tg.initData, x: ball.x, y: ball.y }) });
-            return;
-        }
+    const arena = document.getElementById('hockey-arena');
+    if (ballEl) { ballEl.style.left = `${ball.x}%`; ballEl.style.top = `${ball.y}%`; }
+    if (arena) {
+        arena.style.transform = 'scale(1.25)';
+        arena.style.transformOrigin = `${ball.x}% ${ball.y}%`;
+    }
+}
+
+function renderHockeyBall(elapsedSeconds) {
+    const points = ball.path;
+    if (!points) return;
+    const framePosition = Math.max(0, Math.min(points.length - 1, elapsedSeconds / HOCKEY_SIMULATION_STEP));
+    const frame = Math.floor(framePosition);
+    const next = Math.min(points.length - 1, frame + 1);
+    const fraction = framePosition - frame;
+    ball.x = points[frame].x + (points[next].x - points[frame].x) * fraction;
+    ball.y = points[frame].y + (points[next].y - points[frame].y) * fraction;
+
+    const ballEl = document.getElementById('hockey-ball');
+    const arena = document.getElementById('hockey-arena');
+    if (ballEl) { ballEl.style.left = `${ball.x}%`; ballEl.style.top = `${ball.y}%`; }
+    if (arena) {
+        const zoomProgress = Math.max(0, Math.min(1, (elapsedSeconds - 11.5) / 4));
+        const easedZoom = zoomProgress * zoomProgress * (3 - 2 * zoomProgress);
+        arena.style.transform = `scale(${1 + 0.25 * easedZoom})`;
+        arena.style.transformOrigin = `${ball.x}% ${ball.y}%`;
+    }
+}
+
+async function startBallPhysics(state) {
+    if (ball.active && ball.roundId === state.round_id) return;
+    if (ball.animationId) cancelAnimationFrame(ball.animationId);
+    ball.roundId = state.round_id;
+    ball.path = null;
+    ball.hasStartedAnim = true;
+    ball.active = true;
+
+    try {
+        const path = await loadHockeyPath(state.round_id);
+        if (!ball.active || ball.roundId !== state.round_id) return;
+        ball.path = path;
+
+        const step = () => {
+            if (!ball.active || ball.roundId !== state.round_id) return;
+            const serverNowMs = performance.now() + hockeyServerOffsetMs;
+            const elapsed = Math.max(0, (serverNowMs - Number(state.rolling_started_at) * 1000) / 1000);
+            renderHockeyBall(Math.min(HOCKEY_ROLL_DURATION, elapsed));
+            if (elapsed >= HOCKEY_ROLL_DURATION) {
+                ball.active = false;
+                return;
+            }
+            ball.animationId = requestAnimationFrame(step);
+        };
         ball.animationId = requestAnimationFrame(step);
-    };
-    ball.animationId = requestAnimationFrame(step);
+    } catch (error) {
+        ball.active = false;
+        console.error(error);
+    }
 }
 
 async function pollHockeyState() {
     if (!document.getElementById('screen-hockey').classList.contains('active')) return;
     try {
+        const requestStartedAt = performance.now();
         const res = await fetch(`${API_URL}/api/hockey_state`);
         const state = await res.json();
+        const requestFinishedAt = performance.now();
+        if (Number.isFinite(Number(state.server_time))) {
+            const estimatedOffset = Number(state.server_time) * 1000 - (requestStartedAt + requestFinishedAt) / 2;
+            hockeyServerOffsetMs = hockeyClockSynced ? hockeyServerOffsetMs * 0.8 + estimatedOffset * 0.2 : estimatedOffset;
+            hockeyClockSynced = true;
+        }
         const statusEl = document.getElementById('hockey-status');
         const bankEl = document.getElementById('hockey-bank');
         const arena = document.getElementById('hockey-arena');
@@ -410,6 +478,7 @@ async function pollHockeyState() {
             document.getElementById('hockey-controls').style.display = 'block';
             if (hasBetThisRound) hasBetThisRound = false;
             hasShownWinner = false; ball.active = false; ball.hasStartedAnim = false;
+            ball.roundId = null; ball.path = null;
             if (ball.animationId) cancelAnimationFrame(ball.animationId);
             const ballEl = document.getElementById('hockey-ball');
             if (ballEl) { ballEl.style.left = '50%'; ballEl.style.top = '50%'; }
@@ -417,36 +486,38 @@ async function pollHockeyState() {
             document.getElementById('winner-modal').classList.remove('active');
         } else if (state.status === 'rolling') {
             statusEl.innerText = 'Идёт бросок...'; statusEl.style.color = '#007aff'; document.getElementById('hockey-controls').style.display = 'none';
-            if (!ball.hasStartedAnim) startBallPhysics();
+            if (!ball.active || ball.roundId !== state.round_id) startBallPhysics(state);
         } else if (state.status === 'finished') {
             statusEl.innerText = 'Раунд окончен!'; statusEl.style.color = '#ff3b30'; ball.active = false;
             if (ball.animationId) cancelAnimationFrame(ball.animationId);
+            ball.roundId = state.round_id;
+            if (!ball.path && hockeyPathCache.roundId === state.round_id) ball.path = hockeyPathCache.path;
+            if (ball.path) renderHockeyBall(HOCKEY_ROLL_DURATION);
+            else renderHockeyFinal(state.roll_data);
             const modal = document.getElementById('winner-modal');
             if (state.winner && !hasShownWinner) {
                 hasShownWinner = true;
                 setTimeout(() => {
                     document.getElementById('winner-modal-name').innerText = state.winner.name;
-                    document.getElementById('winner-modal-amount').innerText = `+${state.bank} 🪙`;
+                    document.getElementById('winner-modal-amount').innerText = state.winner.is_bot
+                        ? `Бот забрал банк ${state.bank} 🪙`
+                        : `+${state.bank} 🪙`;
                     modal.classList.add('active');
 
-                    if (state.winner.id === String(user.id)) {
-                        balance += state.bank;
-                        updateUI();
-                    }
-
-                    setTimeout(async () => { await loadUserData(); }, 1500);
+                    // The database is the only balance source; never optimistically add the pot here.
+                    loadUserData();
                     if (state.winner.id === String(user.id)) { playSound('win'); } else { playSound('lose'); }
                 }, 1000);
             }
         }
-        bankEl.innerText = `Банк: ${state.bank} 🪙`;
+        bankEl.innerText = `Реальный банк: ${state.bank} 🪙`;
         arena.querySelectorAll('.hockey-sector').forEach(el => el.remove());
         let totalWidth = 0;
         state.players.forEach((p, index) => {
             const sector = document.createElement('div');
             sector.className = 'hockey-sector';
-            let width = p.percent;
-            if (index === state.players.length - 1) { width = 100 - totalWidth; } else { width = parseFloat(p.percent.toFixed(2)); totalWidth += width; }
+            let width = Number(p.percent) || 0;
+            if (index === state.players.length - 1) { width = 100 - totalWidth; } else { totalWidth += width; }
             sector.style.width = width + '%'; sector.style.background = p.color; sector.style.borderRight = '1px solid rgba(0,0,0,0.5)'; sector.style.overflow = 'hidden';
             const shapeWrap = document.createElement('div'); shapeWrap.className = 'player-shape-wrapper';
             const shape = document.createElement('div'); shape.className = `player-shape shape-circle`;
@@ -473,14 +544,21 @@ async function pollHockeyState() {
             let iconHtml = '';
             if (!p.is_bot && p.avatar && p.avatar.startsWith('http')) { iconHtml = `<img src="${p.avatar}" style="width:20px; height:20px; border-radius:50%; margin-right:5px; vertical-align:middle;">`; }
             else { const letter = p.name ? p.name[0].toUpperCase() : '?'; iconHtml = `<span style="display:inline-flex; justify-content:center; align-items:center; width:20px; height:20px; border-radius:50%; background:${p.color}; color:white; font-size:10px; font-weight:bold; margin-right:5px;">${letter}</span>`; }
-            div.innerHTML = `<div class="name"><span>#${i+1}</span>${iconHtml}<span>${p.name}</span></div><div class="stats">${width.toFixed(1)}% | ${p.bet} 🪙</div>`;
+            div.innerHTML = `<div class="name"><span>#${i+1}</span>${iconHtml}<span>${p.name}${p.is_bot ? ' 🤖' : ''}</span></div><div class="stats">${width.toFixed(1)}% | ${p.bet} 🪙</div>`;
             list.appendChild(div);
         });
     } catch (e) { console.error(e); }
 }
 
 function startHockeyPolling() { if (hockeyInterval) clearInterval(hockeyInterval); pollHockeyState(); hockeyInterval = setInterval(pollHockeyState, 200); }
-function stopHockeyPolling() { if (hockeyInterval) clearInterval(hockeyInterval); hockeyInterval = null; if (ball.animationId) cancelAnimationFrame(ball.animationId); }
+function stopHockeyPolling() {
+    if (hockeyInterval) clearInterval(hockeyInterval);
+    hockeyInterval = null;
+    ball.active = false;
+    ball.hasStartedAnim = false;
+    if (ball.animationId) cancelAnimationFrame(ball.animationId);
+    ball.animationId = null;
+}
 function closeWinnerModal() { document.getElementById('winner-modal').classList.remove('active'); }
 
 // ================= РАКЕТА =================
