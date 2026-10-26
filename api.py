@@ -27,6 +27,7 @@ BOT_COLORS = ["#ff3b30", "#ff9500", "#ffcc00", "#34c759", "#007aff", "#5856d6", 
 WHALE_NAMES = ["KingPin", "MrMoney", "WhaleGod", "BigBoss", "RichMan", "GoldFinger"]
 WHALE_COLORS = ["#ffd700", "#c0c0c0", "#b8860b", "#ff8c00", "#8b0000", "#daa520"]
 
+# === АРЕНА ===
 game_state = {
     "status": "waiting", "timer": 15, "bank": 0, "players": [], "winner": None,
     "last_update": time.time(), "last_bot_added": 0, "target_bots": 0, "is_paid": False,
@@ -34,6 +35,7 @@ game_state = {
 }
 history = []
 
+# === РАКЕТА (CRASH) ===
 CRASH_WAIT = 10
 CRASH_READY = 3
 CRASH_CRASHED = 5
@@ -97,7 +99,7 @@ class CrashBet(BaseModel): initData: str; amount: int
 class CrashCashout(BaseModel): initData: str
 
 
-# ==================== ХОККЕЙ ====================
+# ==================== АРЕНА (ХОККЕЙ) ====================
 @app.get("/api/hockey_state")
 async def get_hockey_state():
     global game_state, history
@@ -166,7 +168,6 @@ async def get_hockey_state():
                 if len(history) > 10: history.pop()
 
     elif game_state["status"] == "finished":
-        # Выплата сервером (а не клиентом)
         if now - game_state["last_update"] > 5:
             if game_state["winner"] and not game_state["is_paid"]:
                 game_state["is_paid"] = True
@@ -241,6 +242,8 @@ async def finish_hockey(data: FinishHockey):
     if game_state["status"] != "rolling": return {"success": False}
     total_bank = game_state["bank"]
     if total_bank == 0 or not game_state["players"]: return {"success": False}
+    if game_state["is_paid"]: return {"success": False}
+
     current_x = 0.0
     winner = None
     for p in game_state["players"]:
@@ -255,7 +258,6 @@ async def finish_hockey(data: FinishHockey):
     game_state["status"] = "finished"
     game_state["last_update"] = time.time()
 
-    # Выплата прямо здесь, чтобы даже если клиент вылетел — деньги пришли
     if winner and not game_state["is_paid"]:
         game_state["is_paid"] = True
         winner_id = winner["id"]
@@ -350,15 +352,9 @@ async def get_crash_state(initData: str = ""):
                 crash_state["is_paid"] = True
                 for p in crash_state["players"]:
                     if p["cashout_mult"] > 0 and not p["is_bot"]:
-                        win_amount = int(p["bet"] * p["cashout_mult"])
-                        try:
-                            res = supabase.table("users").select("coins").eq("user_id", int(p["id"])).execute()
-                            if res.data:
-                                new_coins = int(res.data[0].get("coins", 0)) + win_amount
-                                supabase.table("users").update({"coins": new_coins}).eq("user_id",
-                                                                                        int(p["id"])).execute()
-                        except:
-                            pass
+                        pass  # УЖЕ ЗАБРАЛ - НЕ ПЛАТИМ ПОВТОРНО
+                    elif p["cashout_mult"] == 0 and not p["is_bot"]:
+                        pass  # ПРОИГРАЛ - НЕ ПЛАТИМ
 
             crash_history.insert(0, {"round_id": crash_state["round_id"],
                                      "crash_point": round(crash_state["crash_point"], 2), "players": [

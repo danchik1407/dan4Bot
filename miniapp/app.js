@@ -23,11 +23,10 @@ let currentCrashData = null;
 let animFrameId = null;
 let isAnimatingFlight = false;
 let flightStartTime = 0;
-let targetMult = 1.0;
-let displayMult = 1.0;
 
 let lbTimerEnd = Date.now() + (30 * 24 * 3600 * 1000);
 
+// ================= ЗВУКИ =================
 const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
 function playSound(type) {
     try {
@@ -63,6 +62,7 @@ function playSound(type) {
     } catch(e) {}
 }
 
+// ================= ОБЩИЕ =================
 function updateUI() {
     document.getElementById('user-balance').innerText = balance;
     document.getElementById('profile-coins').innerText = balance;
@@ -71,8 +71,9 @@ function updateUI() {
     const inv = document.getElementById('inventory');
     let capCount = 0, uniqCount = 0;
     inventory.forEach(item => { if (item === 'capsule') capCount++; if (item === 'uniq_capsule') uniqCount++; });
-    if (capCount === 0 && uniqCount === 0) inv.innerHTML = `<div class="inv-item">📦<br><span>Пусто</span></div>`;
-    else {
+    if (capCount === 0 && uniqCount === 0) {
+        inv.innerHTML = `<div class="inv-item">📦<br><span>Пусто</span></div>`;
+    } else {
         let html = '';
         if (capCount > 0) html += `<div class="inv-item" onclick="tg.showAlert('Скоро...')">💊<br><span>Капсула x${capCount}</span></div>`;
         if (uniqCount > 0) html += `<div class="inv-item" onclick="tg.showAlert('Скоро...')">⚱️<br><span>Уник. Капсула x${uniqCount}</span></div>`;
@@ -117,13 +118,14 @@ function checkChestCooldown() {
     else { btn.disabled = false; btn.innerText = 'Открыть (Бесплатно)'; }
 }
 
+// ================= НАВИГАЦИЯ =================
 function switchTab(tabId, element) {
     const popup = document.getElementById('win-popup'); if (popup) popup.classList.remove('show');
     document.querySelectorAll('.tab').forEach(tab => tab.classList.remove('active'));
     document.getElementById('tab-' + tabId).classList.add('active');
     document.querySelectorAll('.nav-item').forEach(nav => nav.classList.remove('active'));
     if (element) element.classList.add('active');
-    if (tabId === 'top') loadGlobalTop();
+    if (tabId === 'top') { loadGlobalTop(); }
 }
 
 function openGame(game) {
@@ -132,7 +134,7 @@ function openGame(game) {
     document.getElementById('main-nav').style.display = 'none';
     document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
     document.getElementById('screen-' + game).classList.add('active');
-    if (game === 'hockey') startHockeyPolling();
+    if (game === 'hockey') { startHockeyPolling(); }
     if (game === 'crash') { lastCrashStatus = null; startCrashPolling(); }
 }
 
@@ -148,6 +150,7 @@ function closeGame() {
 function addBet(game, amount) { const input = document.getElementById(game + '-bet'); if (!input) return; let current = parseInt(input.value) || 10; current += amount; if (current > 100000) current = 100000; input.value = current; }
 function getBet(game) { const input = document.getElementById(game + '-bet'); if (!input) return 10; let val = parseInt(input.value) || 10; if (val < 1) val = 1; if (val > 100000) val = 100000; return val; }
 
+// ================= ЛИДЕРБОРД =================
 function toggleLbInfo() { document.getElementById('lb-info-modal').classList.toggle('active'); }
 
 async function initLbTimer() {
@@ -155,7 +158,7 @@ async function initLbTimer() {
         const res = await fetch(`${API_URL}/api/season_end`);
         const data = await res.json();
         lbTimerEnd = data.end_timestamp * 1000;
-    } catch(e) {}
+    } catch(e) { console.error("Не удалось получить время окончания сезона", e); }
     updateLbTimer();
     setInterval(updateLbTimer, 1000);
 }
@@ -206,6 +209,7 @@ async function loadGlobalTop() {
     } catch (e) { list.innerHTML = '<p style="text-align: center; color: #888;">Ошибка загрузки</p>'; }
 }
 
+// ================= СУНДУКИ =================
 let pendingChestReward = 0, pendingChestIsKey = false, pendingChestIsGold = false;
 async function openChest(type) {
     if (isProcessing) return;
@@ -213,8 +217,9 @@ async function openChest(type) {
     if (isGold && keys <= 0) return tg.showAlert("У вас нет ключей!");
     isProcessing = true;
     let res;
-    try { res = await fetch(`${API_URL}/api/open_chest`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ initData: tg.initData }) }); }
-    catch(e) { isProcessing = false; return tg.showAlert("Ошибка соединения"); }
+    try {
+        res = await fetch(`${API_URL}/api/open_chest`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ initData: tg.initData }) });
+    } catch(e) { isProcessing = false; return tg.showAlert("Ошибка соединения"); }
     isProcessing = false;
     if (!isGold && !res.ok) { const err = await res.json().catch(()=>({})); return tg.showAlert(err.detail || "Сундук перезаряжается!"); }
     document.getElementById('chest-buttons').style.display = 'none';
@@ -242,7 +247,7 @@ async function openChest(type) {
         if (!start) start = timestamp;
         const progress = timestamp - start; const easeOut = 1 - Math.pow(1 - Math.min(progress / duration, 1), 4); const currentScroll = targetScroll * easeOut;
         track.style.transform = `translateX(-${currentScroll}px)`;
-        if (progress < duration) requestAnimationFrame(step);
+        if (progress < duration) { requestAnimationFrame(step); }
         else {
             track.style.transform = `translateX(-${targetScroll}px)`;
             pendingChestReward = finalAmount; pendingChestIsKey = isKey; pendingChestIsGold = isGold;
@@ -266,6 +271,7 @@ async function claimChestReward() {
     pendingChestReward = 0; pendingChestIsKey = false; pendingChestIsGold = false; isProcessing = false;
 }
 
+// ================= МАГАЗИН =================
 async function buyItem(itemId, price) {
     if (isProcessing) return; if (balance < price) return tg.showAlert("Недостаточно коинов!");
     isProcessing = true;
@@ -277,6 +283,7 @@ async function buyItem(itemId, price) {
     isProcessing = false;
 }
 
+// ================= МИНЫ =================
 let minesActive = false, minesCoef = 1.0, minesSafeOpened = 0, selectedMines = 1;
 const board = document.getElementById('mines-board');
 if (board) {
@@ -340,6 +347,7 @@ function clickMineCell(cell) {
     }, 200);
 }
 
+// ================= АРЕНА (ХОККЕЙ) =================
 async function placeHockeyBet() {
     if (isProcessing) return;
     if (hasBetThisRound) return tg.showAlert("Вы уже сделали ставку в этом раунде!");
@@ -379,6 +387,7 @@ function startBallPhysics() {
         if (elapsed > zoomStartTime) { scale += (maxScale - scale) * 0.02; arena.style.transform = `scale(${scale})`; arena.style.transformOrigin = `${ball.x}% ${ball.y}%`; }
         if (Math.abs(ball.vx) < 0.05 && Math.abs(ball.vy) < 0.05) {
             ball.active = false;
+            // ОТПРАВЛЯЕМ ФИНИШ НА СЕРВЕР, ЧТОБЫ ОН ЗАПЛАТИЛ
             fetch(`${API_URL}/api/finish_hockey`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ initData: tg.initData, x: ball.x, y: ball.y }) });
             return;
         }
@@ -474,6 +483,7 @@ function startHockeyPolling() { if (hockeyInterval) clearInterval(hockeyInterval
 function stopHockeyPolling() { if (hockeyInterval) clearInterval(hockeyInterval); hockeyInterval = null; if (ball.animationId) cancelAnimationFrame(ball.animationId); }
 function closeWinnerModal() { document.getElementById('winner-modal').classList.remove('active'); }
 
+// ================= РАКЕТА =================
 async function startCrashPolling() {
     if (crashInterval) clearInterval(crashInterval);
     await pollCrashState();
@@ -523,7 +533,7 @@ async function crashAction() {
     isProcessing = false;
 }
 
-// ИСПРАВЛЕННАЯ ПЛАВНАЯ АНИМАЦИЯ (работает на iOS и ПК)
+// ИДЕАЛЬНО ПЛАВНАЯ АНИМАЦИЯ
 function animateFlight() {
     if (!currentCrashData || currentCrashData.status !== 'flying') {
         isAnimatingFlight = false;
@@ -542,36 +552,34 @@ function animateFlight() {
 
     const elapsed = (Date.now() / 1000) - flightStartTime;
 
-    let calculatedMult = 1.0;
+    let smoothMult = 1.0;
     if (elapsed <= 2.0) {
         const t = elapsed / 2.0;
-        calculatedMult = 1.0 + (t ** 2) * 0.2;
+        smoothMult = 1.0 + (t ** 2) * 0.2;
     } else {
-        calculatedMult = 1.2 + (elapsed - 2.0) * 0.15 + Math.pow(elapsed - 2.0, 1.2) * 0.05;
+        smoothMult = 1.2 + (elapsed - 2.0) * 0.15 + Math.pow(elapsed - 2.0, 1.2) * 0.05;
     }
 
-    if (calculatedMult > currentCrashData.multiplier) calculatedMult = currentCrashData.multiplier;
-
-    // Линейная интерполяция (Lerp) для идеальной плавности
-    displayMult += (calculatedMult - displayMult) * 0.2;
+    if (smoothMult > currentCrashData.multiplier) {
+        smoothMult = currentCrashData.multiplier;
+    }
 
     if (multEl) {
-        multEl.innerText = `x${displayMult.toFixed(2)}`;
-        multEl.style.color = displayMult > 2 ? '#ffcc00' : '#fff';
+        multEl.innerText = `x${smoothMult.toFixed(2)}`;
+        multEl.style.color = smoothMult > 2 ? '#ffcc00' : '#fff';
     }
 
     const btn = el('crash-btn');
     if (btn && currentCrashData.my_status === 'bet') {
-        btn.innerText = `Забрать (x${displayMult.toFixed(2)})`;
-        if (displayMult > 2) btn.classList.add('pulse'); else btn.classList.remove('pulse');
+        btn.innerText = `Забрать (x${smoothMult.toFixed(2)})`;
+        if (smoothMult > 2) btn.classList.add('pulse'); else btn.classList.remove('pulse');
     }
 
     if (field && rocketEl) {
         const w = field.offsetWidth, h = field.offsetHeight;
-        const t = Math.min((displayMult - 1) / 15, 1);
+        const t = Math.min((smoothMult - 1) / 15, 1);
         const x = 40 + Math.pow(t, 1.2) * (w - 100);
         const y = 40 + Math.pow(t, 1.2) * (h - 100);
-        // Убираем CSS transition, чтобы избежать рывков на Safari (iOS)
         rocketEl.style.transition = 'none';
         rocketEl.style.left = x + 'px';
         rocketEl.style.bottom = y + 'px';
@@ -625,7 +633,6 @@ async function pollCrashState() {
             if (!isAnimatingFlight) {
                 isAnimatingFlight = true;
                 flightStartTime = state.status_start;
-                displayMult = 1.0;
                 animateFlight();
             }
 
@@ -703,6 +710,7 @@ async function pollCrashState() {
     } catch(e) { console.error(e); }
 }
 
+// ================= СТАРТ =================
 window.addEventListener('load', async () => {
     try { await loadUserData(); } catch(e) {}
     initLbTimer();
