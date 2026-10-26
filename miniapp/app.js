@@ -13,7 +13,7 @@ if (user) {
 
 const API_URL = "https://aura-api-mptt.onrender.com";
 let balance = 0, keys = 0, currentBet = 10, inventory = [], lastChestTime = 0, isProcessing = false, userDataLoaded = false;
-let hockeyInterval = null, hasBetThisRound = false, hasShownWinner = false;
+let hockeyInterval = null, hasShownWinner = false;
 let ball = { x: 50, y: 50, active: false, animationId: null, hasStartedAnim: false, roundId: null, path: null };
 let hockeyServerOffsetMs = 0, hockeyClockSynced = false;
 
@@ -393,7 +393,6 @@ function clickMineCell(cell) {
 // ================= АРЕНА (ХОККЕЙ) =================
 async function placeHockeyBet() {
     if (isProcessing) return;
-    if (hasBetThisRound) return tg.showAlert("Вы уже сделали ставку в этом раунде!");
     const bet = parseInt(document.getElementById('hockey-bet').value) || 10;
     if (balance < bet) return tg.showAlert("Недостаточно коинов!");
     if (user && user.id && ![6338018270, 5184813347, 8890834384].includes(Number(user.id)) && bet > 10000) return tg.showAlert("Максимальная ставка 10 000 🪙");
@@ -403,8 +402,7 @@ async function placeHockeyBet() {
         const res = await fetch(`${API_URL}/api/place_bet`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ initData: tg.initData, amount: bet }) });
         if (!res.ok) { isProcessing = false; const e = await res.json().catch(()=>({})); return tg.showAlert(e.detail || "Ставки закрыты!"); }
         const data = await res.json();
-        balance = data.new_balance; updateUI(); hasBetThisRound = true; playSound('click');
-        document.getElementById('hockey-controls').style.display = 'none';
+        balance = data.new_balance; updateUI(); playSound('click');
     } catch(e) { tg.showAlert("Ошибка соединения"); }
     isProcessing = false;
 }
@@ -439,11 +437,11 @@ function renderHockeyFinal(rollData) {
     ball.x = Number(rollData.final_x);
     ball.y = Number(rollData.final_y);
     const ballEl = document.getElementById('hockey-ball');
-    const arena = document.getElementById('hockey-arena');
+    const scene = document.getElementById('hockey-scene');
     if (ballEl) { ballEl.style.left = `${ball.x}%`; ballEl.style.top = `${ball.y}%`; }
-    if (arena) {
-        arena.style.transform = 'scale(1.25)';
-        arena.style.transformOrigin = `${ball.x}% ${ball.y}%`;
+    if (scene) {
+        scene.style.transform = 'scale(1.25)';
+        scene.style.transformOrigin = `${ball.x}% ${ball.y}%`;
     }
 }
 
@@ -458,13 +456,13 @@ function renderHockeyBall(elapsedSeconds) {
     ball.y = points[frame].y + (points[next].y - points[frame].y) * fraction;
 
     const ballEl = document.getElementById('hockey-ball');
-    const arena = document.getElementById('hockey-arena');
+    const scene = document.getElementById('hockey-scene');
     if (ballEl) { ballEl.style.left = `${ball.x}%`; ballEl.style.top = `${ball.y}%`; }
-    if (arena) {
+    if (scene) {
         const zoomProgress = Math.max(0, Math.min(1, (elapsedSeconds - 6.0) / 3.0));
         const easedZoom = zoomProgress * zoomProgress * (3 - 2 * zoomProgress);
-        arena.style.transform = `scale(${1 + 0.25 * easedZoom})`;
-        arena.style.transformOrigin = `${ball.x}% ${ball.y}%`;
+        scene.style.transform = `scale(${1 + 0.25 * easedZoom})`;
+        scene.style.transformOrigin = `${ball.x}% ${ball.y}%`;
     }
 }
 
@@ -514,17 +512,17 @@ async function pollHockeyState() {
         const statusEl = document.getElementById('hockey-status');
         const bankEl = document.getElementById('hockey-bank');
         const arena = document.getElementById('hockey-arena');
+        const scene = document.getElementById('hockey-scene');
 
         if (state.status === 'waiting') {
             statusEl.innerText = `Ставки: ${state.timer} сек`; statusEl.style.color = '#ffcc00';
             document.getElementById('hockey-controls').style.display = 'block';
-            if (hasBetThisRound) hasBetThisRound = false;
             hasShownWinner = false; ball.active = false; ball.hasStartedAnim = false;
             ball.roundId = null; ball.path = null;
             if (ball.animationId) cancelAnimationFrame(ball.animationId);
             const ballEl = document.getElementById('hockey-ball');
             if (ballEl) { ballEl.style.left = '50%'; ballEl.style.top = '50%'; }
-            if (arena) { arena.style.transform = 'scale(1)'; arena.style.transformOrigin = 'center center'; arena.querySelectorAll('.hockey-sector').forEach(s => s.style.boxShadow = 'none'); }
+            if (scene) { scene.style.transform = 'scale(1)'; scene.style.transformOrigin = 'center center'; scene.querySelectorAll('.hockey-sector').forEach(s => s.style.boxShadow = 'none'); }
             document.getElementById('winner-modal').classList.remove('active');
         } else if (state.status === 'rolling') {
             statusEl.innerText = 'Идёт бросок...'; statusEl.style.color = '#007aff'; document.getElementById('hockey-controls').style.display = 'none';
@@ -553,7 +551,7 @@ async function pollHockeyState() {
             }
         }
         bankEl.innerText = `Банк: ${state.bank} 🪙`;
-        arena.querySelectorAll('.hockey-sector').forEach(el => el.remove());
+        scene.querySelectorAll('.hockey-sector').forEach(el => el.remove());
         let totalWidth = 0;
         state.players.forEach((p, index) => {
             const sector = document.createElement('div');
@@ -574,10 +572,10 @@ async function pollHockeyState() {
                 shape.innerHTML = `<span style="color:white; font-weight:900; font-size:${size*0.5}px; text-shadow: 0 2px 4px rgba(0,0,0,0.5);">${letter}</span>`;
                 shape.style.backgroundColor = p.color; shape.style.border = '2px solid rgba(255,255,255,0.5)';
             }
-            shapeWrap.appendChild(shape); sector.appendChild(shapeWrap); arena.appendChild(sector);
+            shapeWrap.appendChild(shape); sector.appendChild(shapeWrap); scene.appendChild(sector);
         });
         if (!document.getElementById('hockey-ball')) {
-            const ballEl = document.createElement('div'); ballEl.className = 'hockey-ball'; ballEl.id = 'hockey-ball'; arena.appendChild(ballEl);
+            const ballEl = document.createElement('div'); ballEl.className = 'hockey-ball'; ballEl.id = 'hockey-ball'; scene.appendChild(ballEl);
         }
         const list = document.getElementById('hockey-participants'); list.innerHTML = '';
         state.players.forEach((p, i) => {
