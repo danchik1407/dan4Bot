@@ -166,7 +166,20 @@ async def get_hockey_state():
                 if len(history) > 10: history.pop()
 
     elif game_state["status"] == "finished":
+        # Выплата сервером (а не клиентом)
         if now - game_state["last_update"] > 5:
+            if game_state["winner"] and not game_state["is_paid"]:
+                game_state["is_paid"] = True
+                winner_id = game_state["winner"]["id"]
+                bank_amount = game_state["bank"]
+                try:
+                    res = supabase.table("users").select("coins").eq("user_id", int(winner_id)).execute()
+                    if res.data:
+                        new_coins = int(res.data[0].get("coins", 0)) + bank_amount
+                        supabase.table("users").update({"coins": new_coins}).eq("user_id", int(winner_id)).execute()
+                except Exception as e:
+                    print(f"❌ Ошибка выплаты: {e}")
+
             game_state = {"status": "waiting", "timer": 15, "bank": 0, "players": [], "winner": None,
                           "last_update": now, "last_bot_added": 0, "target_bots": 0, "is_paid": False,
                           "round_id": str(int(time.time())), "whales_added": 0, "whale_chance": random.random() < 0.07}
@@ -242,6 +255,7 @@ async def finish_hockey(data: FinishHockey):
     game_state["status"] = "finished"
     game_state["last_update"] = time.time()
 
+    # Выплата прямо здесь, чтобы даже если клиент вылетел — деньги пришли
     if winner and not game_state["is_paid"]:
         game_state["is_paid"] = True
         winner_id = winner["id"]
@@ -450,7 +464,6 @@ async def crash_cashout(data: CrashCashout):
     if not player: raise HTTPException(status_code=400, detail="Вы не участвуете")
     if player["cashout_mult"] > 0: raise HTTPException(status_code=400, detail="Вы уже забрали")
 
-    # Считаем выигрыш (ставка уже списана при /crash_bet)
     player["cashout_mult"] = crash_state["multiplier"]
     win_amount = int(player["bet"] * player["cashout_mult"])
 
@@ -458,8 +471,6 @@ async def crash_cashout(data: CrashCashout):
     try:
         res = supabase.table("users").select("coins").eq("user_id", int(user_id)).execute()
         current_coins = int(res.data[0].get("coins", 0)) if res.data else 0
-
-        # Прибавляем к текущему балансу
         new_coins = current_coins + win_amount
         supabase.table("users").update({"coins": new_coins}).eq("user_id", int(user_id)).execute()
     except Exception as e:
