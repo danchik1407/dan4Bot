@@ -85,22 +85,24 @@ def _prepare_hockey_roll(now):
 
 def _hockey_winner_at_x(x):
     """Resolve a final ball x-coordinate to the bet-weighted arena sector."""
-    total_bank = game_state["bank"]
+    players = [player for player in game_state["players"] if not player.get("is_bot")]
+    total_bank = sum(int(player["bet"]) for player in players)
     if total_bank <= 0:
         return None
 
     current_x = 0.0
-    for player in game_state["players"]:
+    for player in players:
         sector_width = player["bet"] / total_bank * 100.0
         if current_x <= x <= current_x + sector_width + 0.0001:
             return player
         current_x += sector_width
-    return game_state["players"][-1] if game_state["players"] else None
+    return players[-1] if players else None
 
 
 def _payout_hockey_winner():
-    """Credit a resolved round once; this runs on the server, not in the Mini App."""
-    if game_state["is_paid"] or not game_state["winner"]:
+    """Credit only the real winner once; bots and clients never receive or trigger payouts."""
+    winner = game_state["winner"]
+    if game_state["is_paid"] or not winner or winner.get("is_bot"):
         return
 
     # Mark first so simultaneous state requests cannot credit the same round twice.
@@ -123,6 +125,9 @@ def _finish_hockey_round():
     """Resolve from the server-simulated final x and pay exactly once."""
     if game_state["status"] != "rolling":
         return False
+    # Recompute the pot from charged human bets before both winner selection and payout.
+    game_state["players"] = [player for player in game_state["players"] if not player.get("is_bot")]
+    game_state["bank"] = sum(int(player["bet"]) for player in game_state["players"])
     roll_data = game_state.get("roll_data") or {}
     if not game_state["players"] or game_state["bank"] <= 0 or "final_x" not in roll_data:
         game_state["winner"] = None
@@ -229,47 +234,11 @@ async def get_hockey_state():
 
     if game_state["status"] == "waiting":
         time_left = 15 - (now - game_state["last_update"])
-        if time_left <= 10 and game_state["target_bots"] == 0: game_state["target_bots"] = random.randint(1, 5)
-        if time_left <= 10 and game_state["target_bots"] > 0:
-            current_bots = sum(1 for p in game_state["players"] if p["is_bot"] and p["bet"] < 500)
-            current_whales = sum(1 for p in game_state["players"] if p["is_bot"] and p["bet"] >= 500)
-            bot_delay = random.uniform(1.0, 4.0)
-
-            if current_bots < game_state["target_bots"] and len(game_state["players"]) < 20 and (
-                    now - game_state["last_bot_added"]) > bot_delay:
-                bot_bet = random.randint(10, 100)
-                bot_name = random.choice(BOT_NAMES) + str(random.randint(1, 99))
-                bot_color = random.choice(BOT_COLORS)
-                while any(p["color"] == bot_color for p in game_state["players"]): bot_color = random.choice(BOT_COLORS)
-                game_state["players"].append(
-                    {"id": str(random.randint(10000, 99999)), "name": bot_name, "avatar": "", "bet": bot_bet,
-                     "color": bot_color, "is_bot": True})
-                game_state["bank"] += bot_bet
-                game_state["last_bot_added"] = now
-                game_state["target_bots"] = random.randint(1, 5)
-                total_bank = game_state["bank"]
-                if total_bank > 0:
-                    for p in game_state["players"]: p["percent"] = (p["bet"] / total_bank) * 100
-
-            if game_state["whale_chance"] and game_state["whales_added"] < 2 and current_whales < 2 and len(
-                    game_state["players"]) < 20 and (now - game_state["last_bot_added"]) > bot_delay:
-                if random.random() < 0.3:
-                    whale_bet = random.randint(500, 1000)
-                    whale_name = random.choice(WHALE_NAMES) + str(random.randint(1, 99))
-                    whale_color = random.choice(WHALE_COLORS)
-                    while any(p["color"] == whale_color for p in game_state["players"]): whale_color = random.choice(
-                        WHALE_COLORS)
-                    game_state["players"].append(
-                        {"id": str(random.randint(10000, 99999)), "name": whale_name, "avatar": "", "bet": whale_bet,
-                         "color": whale_color, "is_bot": True})
-                    game_state["bank"] += whale_bet
-                    game_state["whales_added"] += 1
-                    game_state["last_bot_added"] = now
-                    total_bank = game_state["bank"]
-                    if total_bank > 0:
-                        for p in game_state["players"]: p["percent"] = (p["bet"] / total_bank) * 100
-
         if time_left <= 0:
+            # Arena stakes must belong to real users; virtual bots cannot add money to the pot.
+            game_state["players"] = [player for player in game_state["players"] if not player.get("is_bot")]
+            # Freeze a pot made exclusively from stakes charged to real users.
+            game_state["bank"] = sum(int(player["bet"]) for player in game_state["players"])
             game_state["status"] = "rolling"
             game_state["last_update"] = now
             _prepare_hockey_roll(now)
@@ -309,13 +278,16 @@ async def place_bet(data: PlaceBet):
 
     check_ban(user_id)
 
+    if data.amount <= 0:
+        raise HTTPException(status_code=400, detail="Ставка должна быть больше нуля")
     if int(user_id) not in ADMIN_IDS and data.amount > MAX_BET:
         raise HTTPException(status_code=400, detail=f"Максимальная ставка {MAX_BET} 🪙")
-
-    if game_state["status"] != "waiting": raise HTTPException(status_code=400, detail="Ставки закрыты")
+    if game_state["status"] != "waiting":
+        raise HTTPException(status_code=400, detail="Ставки закрыты")
+    if any(p["id"] == user_id for p in game_state["players"]):
+        raise HTTPException(status_code=400, detail="Вы уже сделали ставку в этом раунде")
     if len(game_state["players"]) >= 20:
-        existing = next((p for p in game_state["players"] if p["id"] == user_id), None)
-        if not existing: raise HTTPException(status_code=400, detail="Комната заполнена")
+        raise HTTPException(status_code=400, detail="Комната заполнена")
 
     res = supabase.table("users").select("coins").eq("user_id", int(user_id)).execute()
     if not res.data: raise HTTPException(status_code=404, detail="User not found")
@@ -327,19 +299,14 @@ async def place_bet(data: PlaceBet):
 
     name = user.get("username", user.get("first_name", f"id{user_id}"))
     avatar = user.get("photo_url", "")
-    existing_player = next((p for p in game_state["players"] if p["id"] == user_id), None)
+    player_color = "#007aff"
+    while any(p["color"] == player_color for p in game_state["players"]):
+        player_color = f"hsl({random.randint(0, 360)}, 80%, 50%)"
+    game_state["players"].append(
+        {"id": user_id, "name": name, "avatar": avatar, "bet": data.amount, "color": player_color, "is_bot": False})
 
-    if existing_player:
-        existing_player["bet"] += data.amount
-        game_state["bank"] += data.amount
-    else:
-        player_color = "#007aff"
-        while any(p["color"] == player_color for p in
-                  game_state["players"]): player_color = f"hsl({random.randint(0, 360)}, 80%, 50%)"
-        game_state["players"].append(
-            {"id": user_id, "name": name, "avatar": avatar, "bet": data.amount, "color": player_color, "is_bot": False})
-        game_state["bank"] += data.amount
-
+    # Bank is always the sum of actual, charged player stakes; never add virtual bot bets.
+    game_state["bank"] = sum(int(player["bet"]) for player in game_state["players"])
     total_bank = game_state["bank"]
     if total_bank > 0:
         for p in game_state["players"]: p["percent"] = (p["bet"] / total_bank) * 100

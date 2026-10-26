@@ -410,7 +410,7 @@ function renderHockeyBall(elapsedSeconds) {
     if (arena) {
         const zoomProgress = Math.max(0, Math.min(1, (elapsedSeconds - 11.5) / 4));
         const easedZoom = zoomProgress * zoomProgress * (3 - 2 * zoomProgress);
-        arena.style.transform = `scale(${1 + 1.5 * easedZoom})`;
+        arena.style.transform = `scale(${1 + 0.25 * easedZoom})`;
         arena.style.transformOrigin = `${ball.x}% ${ball.y}%`;
     }
 }
@@ -481,12 +481,8 @@ async function pollHockeyState() {
                     document.getElementById('winner-modal-amount').innerText = `+${state.bank} 🪙`;
                     modal.classList.add('active');
 
-                    if (state.winner.id === String(user.id)) {
-                        balance += state.bank;
-                        updateUI();
-                    }
-
-                    setTimeout(async () => { await loadUserData(); }, 1500);
+                    // The database is the only balance source; never optimistically add the pot here.
+                    loadUserData();
                     if (state.winner.id === String(user.id)) { playSound('win'); } else { playSound('lose'); }
                 }, 1000);
             }
