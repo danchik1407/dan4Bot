@@ -14,7 +14,8 @@ if (user) {
 const API_URL = "https://aura-api-mptt.onrender.com";
 let balance = 0, keys = 0, currentBet = 10, inventory = [], lastChestTime = 0, isProcessing = false;
 let hockeyInterval = null, hasBetThisRound = false, hasShownWinner = false;
-let ball = { x: 50, y: 50, vx: 0, vy: 0, active: false, animationId: null, hasStartedAnim: false };
+let ball = { x: 50, y: 50, active: false, animationId: null, hasStartedAnim: false, roundId: null, path: null };
+let hockeyServerOffsetMs = 0, hockeyClockSynced = false;
 
 let crashInterval = null;
 let lastCrashStatus = null;
@@ -366,29 +367,85 @@ async function placeHockeyBet() {
     isProcessing = false;
 }
 
-function startBallPhysics() {
-    if (ball.active || ball.hasStartedAnim) return;
-    ball.hasStartedAnim = true; ball.x = 50; ball.y = 50;
-    let angle = Math.random() * Math.PI * 2;
-    let speed = 8.0; ball.vx = Math.cos(angle) * speed; ball.vy = Math.sin(angle) * speed; ball.active = true;
-    const arena = document.getElementById('hockey-arena');
+const HOCKEY_ROLL_DURATION = 15.5;
+const HOCKEY_SIMULATION_FPS = 60;
+
+function buildHockeyPath(seed, targetX) {
+    let state = (Number(seed) >>> 0) || 1;
+    const random = () => {
+        state ^= state << 13; state ^= state >>> 17; state ^= state << 5;
+        return (state >>> 0) / 4294967296;
+    };
+    const angle = random() * Math.PI * 2;
+    let vx = Math.cos(angle) * (6.5 + random() * 2.5);
+    let vy = Math.sin(angle) * (6.5 + random() * 2.5);
+    let x = 50, y = 50;
+    const frames = Math.round(HOCKEY_ROLL_DURATION * HOCKEY_SIMULATION_FPS);
+    const points = [{ x, y }];
+
+    // Simulate at a fixed 60 Hz, independently of each device's display refresh rate.
+    for (let frame = 1; frame <= frames; frame++) {
+        x += vx; y += vy;
+        if (x < 2 || x > 98) { vx *= -1; x = Math.max(2, Math.min(98, x)); }
+        if (y < 2 || y > 98) { vy *= -1; y = Math.max(2, Math.min(98, y)); }
+        vx *= 0.995; vy *= 0.995;
+        points.push({ x, y });
+    }
+
+    // Guide the last two seconds to the server-selected winning sector.
+    const settleFrames = 120;
+    const settleStart = frames - settleFrames;
+    const from = points[settleStart];
+    const wiggleX = (random() - 0.5) * 5;
+    const wiggleY = (random() - 0.5) * 12;
+    for (let i = 0; i <= settleFrames; i++) {
+        const t = i / settleFrames;
+        const eased = t * t * (3 - 2 * t);
+        points[settleStart + i] = {
+            x: Math.max(2, Math.min(98, from.x + (targetX - from.x) * eased + Math.sin(Math.PI * t) * wiggleX)),
+            y: Math.max(2, Math.min(98, from.y + (50 - from.y) * eased + Math.sin(Math.PI * t) * wiggleY))
+        };
+    }
+    points[frames] = { x: targetX, y: 50 };
+    return points;
+}
+
+function renderHockeyBall(elapsedSeconds) {
+    const points = ball.path;
+    if (!points) return;
+    const framePosition = Math.max(0, Math.min(points.length - 1, elapsedSeconds * HOCKEY_SIMULATION_FPS));
+    const frame = Math.floor(framePosition);
+    const next = Math.min(points.length - 1, frame + 1);
+    const fraction = framePosition - frame;
+    ball.x = points[frame].x + (points[next].x - points[frame].x) * fraction;
+    ball.y = points[frame].y + (points[next].y - points[frame].y) * fraction;
+
     const ballEl = document.getElementById('hockey-ball');
-    arena.style.transform = 'scale(1)'; arena.style.transformOrigin = 'center center';
-    let scale = 1; const maxScale = 2.5; const startTime = performance.now();
-    const duration = 15000; const zoomStartTime = duration - 4000;
+    const arena = document.getElementById('hockey-arena');
+    if (ballEl) { ballEl.style.left = `${ball.x}%`; ballEl.style.top = `${ball.y}%`; }
+    if (arena) {
+        const zoomProgress = Math.max(0, Math.min(1, (elapsedSeconds - 11.5) / 4));
+        const easedZoom = zoomProgress * zoomProgress * (3 - 2 * zoomProgress);
+        arena.style.transform = `scale(${1 + 1.5 * easedZoom})`;
+        arena.style.transformOrigin = `${ball.x}% ${ball.y}%`;
+    }
+}
+
+function startBallPhysics(state) {
+    if (ball.active && ball.roundId === state.round_id) return;
+    if (ball.animationId) cancelAnimationFrame(ball.animationId);
+    ball.roundId = state.round_id;
+    ball.path = buildHockeyPath(state.roll_seed, state.target_x ?? 50);
+    ball.hasStartedAnim = true;
+    ball.active = true;
+
     const step = () => {
         if (!ball.active) return;
-        const elapsed = performance.now() - startTime;
-        ball.x += ball.vx; ball.y += ball.vy;
-        if (ball.x <= 0 || ball.x >= 100) { ball.vx *= -1; ball.x = Math.max(0, Math.min(100, ball.x)); playSound('click'); }
-        if (ball.y <= 0 || ball.y >= 100) { ball.vy *= -1; ball.y = Math.max(0, Math.min(100, ball.y)); playSound('click'); }
-        ball.vx *= 0.985; ball.vy *= 0.985;
-        if (ballEl) { ballEl.style.left = ball.x + '%'; ballEl.style.top = ball.y + '%'; }
-        if (elapsed > zoomStartTime) { scale += (maxScale - scale) * 0.02; arena.style.transform = `scale(${scale})`; arena.style.transformOrigin = `${ball.x}% ${ball.y}%`; }
-        if (Math.abs(ball.vx) < 0.05 && Math.abs(ball.vy) < 0.05) {
+        const serverNowMs = performance.now() + hockeyServerOffsetMs;
+        const elapsed = Math.max(0, (serverNowMs - Number(state.rolling_started_at) * 1000) / 1000);
+        renderHockeyBall(Math.min(HOCKEY_ROLL_DURATION, elapsed));
+        if (elapsed >= HOCKEY_ROLL_DURATION) {
             ball.active = false;
-            // ОТПРАВЛЯЕМ ФИНИШ НА СЕРВЕР, ЧТОБЫ ОН ЗАПЛАТИЛ
-            fetch(`${API_URL}/api/finish_hockey`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ initData: tg.initData, x: ball.x, y: ball.y }) });
             return;
         }
         ball.animationId = requestAnimationFrame(step);
@@ -399,8 +456,15 @@ function startBallPhysics() {
 async function pollHockeyState() {
     if (!document.getElementById('screen-hockey').classList.contains('active')) return;
     try {
+        const requestStartedAt = performance.now();
         const res = await fetch(`${API_URL}/api/hockey_state`);
         const state = await res.json();
+        const requestFinishedAt = performance.now();
+        if (Number.isFinite(Number(state.server_time))) {
+            const estimatedOffset = Number(state.server_time) * 1000 - (requestStartedAt + requestFinishedAt) / 2;
+            hockeyServerOffsetMs = hockeyClockSynced ? hockeyServerOffsetMs * 0.8 + estimatedOffset * 0.2 : estimatedOffset;
+            hockeyClockSynced = true;
+        }
         const statusEl = document.getElementById('hockey-status');
         const bankEl = document.getElementById('hockey-bank');
         const arena = document.getElementById('hockey-arena');
@@ -410,6 +474,7 @@ async function pollHockeyState() {
             document.getElementById('hockey-controls').style.display = 'block';
             if (hasBetThisRound) hasBetThisRound = false;
             hasShownWinner = false; ball.active = false; ball.hasStartedAnim = false;
+            ball.roundId = null; ball.path = null;
             if (ball.animationId) cancelAnimationFrame(ball.animationId);
             const ballEl = document.getElementById('hockey-ball');
             if (ballEl) { ballEl.style.left = '50%'; ballEl.style.top = '50%'; }
@@ -417,10 +482,13 @@ async function pollHockeyState() {
             document.getElementById('winner-modal').classList.remove('active');
         } else if (state.status === 'rolling') {
             statusEl.innerText = 'Идёт бросок...'; statusEl.style.color = '#007aff'; document.getElementById('hockey-controls').style.display = 'none';
-            if (!ball.hasStartedAnim) startBallPhysics();
+            if (!ball.active || ball.roundId !== state.round_id) startBallPhysics(state);
         } else if (state.status === 'finished') {
             statusEl.innerText = 'Раунд окончен!'; statusEl.style.color = '#ff3b30'; ball.active = false;
             if (ball.animationId) cancelAnimationFrame(ball.animationId);
+            ball.roundId = state.round_id;
+            ball.path = ball.path || buildHockeyPath(state.roll_seed, state.target_x ?? 50);
+            renderHockeyBall(HOCKEY_ROLL_DURATION);
             const modal = document.getElementById('winner-modal');
             if (state.winner && !hasShownWinner) {
                 hasShownWinner = true;
@@ -480,7 +548,14 @@ async function pollHockeyState() {
 }
 
 function startHockeyPolling() { if (hockeyInterval) clearInterval(hockeyInterval); pollHockeyState(); hockeyInterval = setInterval(pollHockeyState, 200); }
-function stopHockeyPolling() { if (hockeyInterval) clearInterval(hockeyInterval); hockeyInterval = null; if (ball.animationId) cancelAnimationFrame(ball.animationId); }
+function stopHockeyPolling() {
+    if (hockeyInterval) clearInterval(hockeyInterval);
+    hockeyInterval = null;
+    ball.active = false;
+    ball.hasStartedAnim = false;
+    if (ball.animationId) cancelAnimationFrame(ball.animationId);
+    ball.animationId = null;
+}
 function closeWinnerModal() { document.getElementById('winner-modal').classList.remove('active'); }
 
 // ================= РАКЕТА =================
