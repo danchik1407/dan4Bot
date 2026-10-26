@@ -510,7 +510,7 @@ async function pollHockeyState() {
                 }, 1000);
             }
         }
-        bankEl.innerText = `Реальный банк: ${state.bank} 🪙`;
+        bankEl.innerText = `Банк: ${state.bank} 🪙`;
         arena.querySelectorAll('.hockey-sector').forEach(el => el.remove());
         let totalWidth = 0;
         state.players.forEach((p, index) => {
@@ -544,7 +544,7 @@ async function pollHockeyState() {
             let iconHtml = '';
             if (!p.is_bot && p.avatar && p.avatar.startsWith('http')) { iconHtml = `<img src="${p.avatar}" style="width:20px; height:20px; border-radius:50%; margin-right:5px; vertical-align:middle;">`; }
             else { const letter = p.name ? p.name[0].toUpperCase() : '?'; iconHtml = `<span style="display:inline-flex; justify-content:center; align-items:center; width:20px; height:20px; border-radius:50%; background:${p.color}; color:white; font-size:10px; font-weight:bold; margin-right:5px;">${letter}</span>`; }
-            div.innerHTML = `<div class="name"><span>#${i+1}</span>${iconHtml}<span>${p.name}${p.is_bot ? ' 🤖' : ''}</span></div><div class="stats">${width.toFixed(1)}% | ${p.bet} 🪙</div>`;
+            div.innerHTML = `<div class="name"><span>#${i+1}</span>${iconHtml}<span>${p.name}</span></div><div class="stats">${width.toFixed(1)}% | ${p.bet} 🪙</div>`;
             list.appendChild(div);
         });
     } catch (e) { console.error(e); }

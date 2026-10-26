@@ -40,6 +40,8 @@ history = []
 
 
 HOCKEY_ROLL_DURATION = 15.5
+HOCKEY_WAIT_DURATION = 15.0
+HOCKEY_ROUND_PERIOD = HOCKEY_WAIT_DURATION + HOCKEY_ROLL_DURATION + 5.0
 HOCKEY_SIMULATION_STEP = 0.05
 HOCKEY_DAMPING = 0.985
 
@@ -69,8 +71,12 @@ def _simulate_hockey_roll(start_angle, speed, start_x=50.0, start_y=50.0):
 
 
 def _prepare_hockey_roll(now):
-    """Create shared ball parameters and the server-authoritative final position."""
-    start_angle = random.uniform(0.0, 2 * math.pi)
+    """Create a deterministic-per-round path shared even across API workers."""
+    # All workers use the same time-slot round id and RNG seed, rather than process-local randomness.
+    round_slot = int(now // HOCKEY_ROUND_PERIOD)
+    game_state["round_id"] = str(round_slot)
+    round_rng = random.Random(round_slot)
+    start_angle = round_rng.uniform(0.0, 2 * math.pi)
     speed = 8.0
     start_x, start_y = 50.0, 50.0
     path = _simulate_hockey_roll(start_angle, speed, start_x, start_y)
