@@ -31,9 +31,10 @@ WHALE_COLORS = ["#ffd700", "#c0c0c0", "#b8860b", "#ff8c00", "#8b0000", "#daa520"
 # === АРЕНА ===
 game_state = {
     "status": "waiting", "timer": 15, "bank": 0, "players": [], "winner": None,
-    "last_update": time.time(), "last_bot_added": 0, "target_bots": 0, "is_paid": False,
-    "round_id": str(int(time.time())), "whales_added": 0, "whale_chance": random.random() < 0.07,
-    "roll_data": None, "rolling_started_at": None
+    "last_update": time.time(), "last_bot_added": time.time(), "target_bots": random.randint(1, 10), "is_paid": False,
+    "round_id": str(int(time.time())), "whales_added": 0,
+    "roll_data": None, "rolling_started_at": None, "whale_decided": False,
+    "whale_join": False, "whale_trigger_at": None
 }
 history = []
 
@@ -83,16 +84,67 @@ def _prepare_hockey_roll(now):
     }
 
 
+def _update_hockey_percentages():
+    total = sum(max(0, int(player.get("bet", 0))) for player in game_state["players"])
+    for player in game_state["players"]:
+        player["percent"] = (max(0, int(player.get("bet", 0))) / total * 100) if total else 0
+
+
+def _unique_hockey_color(palette):
+    used = {player.get("color") for player in game_state["players"]}
+    available = [color for color in palette if color not in used]
+    if available:
+        return random.choice(available)
+    return f"hsl({random.randint(0, 360)}, 80%, 50%)"
+
+
+def _add_hockey_bot(is_whale=False):
+    if len(game_state["players"]) >= 20:
+        return False
+
+    if is_whale:
+        name = "Лудик" + str(random.randint(1, 99))
+        bet = random.randint(500, 2000)
+        color = _unique_hockey_color(WHALE_COLORS)
+    else:
+        name = random.choice(BOT_NAMES) + str(random.randint(1, 99))
+        bet = random.randint(10, 100)
+        color = _unique_hockey_color(BOT_COLORS)
+
+    game_state["players"].append({
+        "id": f"bot_{random.randint(10000, 99999)}", "name": name, "avatar": "",
+        "bet": bet, "color": color, "is_bot": True,
+    })
+    _update_hockey_percentages()
+    return True
+
+
+def _maybe_add_hockey_bots(now, time_left):
+    if time_left <= 0:
+        return
+
+    current_bots = sum(1 for player in game_state["players"] if player.get("is_bot") and player.get("bet", 0) < 500)
+    if (current_bots < game_state["target_bots"] and len(game_state["players"]) < 20
+            and now - game_state["last_bot_added"] >= random.uniform(0.6, 1.5)):
+        if _add_hockey_bot():
+            game_state["last_bot_added"] = now
+
+    if (game_state["whale_join"] and not game_state["whales_added"]
+            and time_left <= game_state["whale_trigger_at"] and len(game_state["players"]) < 20):
+        if _add_hockey_bot(is_whale=True):
+            game_state["whales_added"] = 1
+
+
 def _hockey_winner_at_x(x):
     """Resolve a final ball x-coordinate to the bet-weighted arena sector."""
-    players = [player for player in game_state["players"] if not player.get("is_bot")]
-    total_bank = sum(int(player["bet"]) for player in players)
-    if total_bank <= 0:
+    players = game_state["players"]
+    total_bets = sum(max(0, int(player.get("bet", 0))) for player in players)
+    if total_bets <= 0:
         return None
 
     current_x = 0.0
     for player in players:
-        sector_width = player["bet"] / total_bank * 100.0
+        sector_width = max(0, int(player.get("bet", 0))) / total_bets * 100.0
         if current_x <= x <= current_x + sector_width + 0.0001:
             return player
         current_x += sector_width
@@ -102,7 +154,10 @@ def _hockey_winner_at_x(x):
 def _payout_hockey_winner():
     """Credit only the real winner once; bots and clients never receive or trigger payouts."""
     winner = game_state["winner"]
-    if game_state["is_paid"] or not winner or winner.get("is_bot"):
+    if game_state["is_paid"] or not winner:
+        return
+    if winner.get("is_bot"):
+        game_state["is_paid"] = True
         return
 
     # Mark first so simultaneous state requests cannot credit the same round twice.
@@ -125,9 +180,8 @@ def _finish_hockey_round():
     """Resolve from the server-simulated final x and pay exactly once."""
     if game_state["status"] != "rolling":
         return False
-    # Recompute the pot from charged human bets before both winner selection and payout.
-    game_state["players"] = [player for player in game_state["players"] if not player.get("is_bot")]
-    game_state["bank"] = sum(int(player["bet"]) for player in game_state["players"])
+    # Virtual bot bets affect sector odds only; the payout pot contains charged human stakes.
+    game_state["bank"] = sum(int(player["bet"]) for player in game_state["players"] if not player.get("is_bot"))
     roll_data = game_state.get("roll_data") or {}
     if not game_state["players"] or game_state["bank"] <= 0 or "final_x" not in roll_data:
         game_state["winner"] = None
@@ -234,19 +288,14 @@ async def get_hockey_state():
 
     if game_state["status"] == "waiting":
         time_left = 15 - (now - game_state["last_update"])
+        _maybe_add_hockey_bots(now, time_left)
         if time_left <= 0:
-            # Arena stakes must belong to real users; virtual bots cannot add money to the pot.
-            game_state["players"] = [player for player in game_state["players"] if not player.get("is_bot")]
-            # Freeze a pot made exclusively from stakes charged to real users.
-            game_state["bank"] = sum(int(player["bet"]) for player in game_state["players"])
+            # Freeze the real pot; bot stakes only define their visible sector odds.
+            game_state["bank"] = sum(int(player["bet"]) for player in game_state["players"] if not player.get("is_bot"))
             game_state["status"] = "rolling"
             game_state["last_update"] = now
+            _update_hockey_percentages()
             _prepare_hockey_roll(now)
-            total_bank = game_state["bank"]
-            if total_bank > 0:
-                for p in game_state["players"]: p["percent"] = (p["bet"] / total_bank) * 100
-            else:
-                for p in game_state["players"]: p["percent"] = 0
 
     elif game_state["status"] == "rolling":
         if now - game_state["last_update"] >= 15.5:
@@ -256,9 +305,10 @@ async def get_hockey_state():
     elif game_state["status"] == "finished":
         if now - game_state["last_update"] > 5:
             game_state = {"status": "waiting", "timer": 15, "bank": 0, "players": [], "winner": None,
-                          "last_update": now, "last_bot_added": 0, "target_bots": 0, "is_paid": False,
-                          "round_id": str(int(time.time())), "whales_added": 0, "whale_chance": random.random() < 0.07,
-                          "roll_data": None, "rolling_started_at": None}
+                          "last_update": now, "last_bot_added": now, "target_bots": random.randint(1, 10),
+                          "is_paid": False, "round_id": str(int(time.time())), "whales_added": 0,
+                          "roll_data": None, "rolling_started_at": None, "whale_decided": False,
+                          "whale_join": False, "whale_trigger_at": None}
             response = game_state.copy()
             response["server_time"] = time.time()
             return response
@@ -282,9 +332,10 @@ async def place_bet(data: PlaceBet):
         raise HTTPException(status_code=400, detail="Ставка должна быть больше нуля")
     if int(user_id) not in ADMIN_IDS and data.amount > MAX_BET:
         raise HTTPException(status_code=400, detail=f"Максимальная ставка {MAX_BET} 🪙")
-    if game_state["status"] != "waiting":
+    if (game_state["status"] != "waiting"
+            or time.time() - game_state["last_update"] >= 15):
         raise HTTPException(status_code=400, detail="Ставки закрыты")
-    if any(p["id"] == user_id for p in game_state["players"]):
+    if any(p["id"] == user_id and not p.get("is_bot") for p in game_state["players"]):
         raise HTTPException(status_code=400, detail="Вы уже сделали ставку в этом раунде")
     if len(game_state["players"]) >= 20:
         raise HTTPException(status_code=400, detail="Комната заполнена")
@@ -305,11 +356,16 @@ async def place_bet(data: PlaceBet):
     game_state["players"].append(
         {"id": user_id, "name": name, "avatar": avatar, "bet": data.amount, "color": player_color, "is_bot": False})
 
-    # Bank is always the sum of actual, charged player stakes; never add virtual bot bets.
-    game_state["bank"] = sum(int(player["bet"]) for player in game_state["players"])
-    total_bank = game_state["bank"]
-    if total_bank > 0:
-        for p in game_state["players"]: p["percent"] = (p["bet"] / total_bank) * 100
+    # One 40% chance per round to add a whale shortly before closing, triggered by a 1,000+ human bet.
+    if data.amount >= 1000 and not game_state["whale_decided"]:
+        game_state["whale_decided"] = True
+        game_state["whale_join"] = random.random() < 0.40
+        if game_state["whale_join"]:
+            game_state["whale_trigger_at"] = random.uniform(1.0, 2.0)
+
+    # Only charged human stakes go into the payout pot. Bot bets affect sectors, not balances.
+    game_state["bank"] = sum(int(player["bet"]) for player in game_state["players"] if not player.get("is_bot"))
+    _update_hockey_percentages()
     return {"success": True, "new_balance": new_coins}
 
 
