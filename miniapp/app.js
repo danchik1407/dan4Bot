@@ -23,10 +23,11 @@ let currentCrashData = null;
 let animFrameId = null;
 let isAnimatingFlight = false;
 let flightStartTime = 0;
+let targetMult = 1.0;
+let displayMult = 1.0;
 
 let lbTimerEnd = Date.now() + (30 * 24 * 3600 * 1000);
 
-// ================= ЗВУКИ =================
 const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
 function playSound(type) {
     try {
@@ -62,7 +63,6 @@ function playSound(type) {
     } catch(e) {}
 }
 
-// ================= ОБЩИЕ =================
 function updateUI() {
     document.getElementById('user-balance').innerText = balance;
     document.getElementById('profile-coins').innerText = balance;
@@ -71,9 +71,8 @@ function updateUI() {
     const inv = document.getElementById('inventory');
     let capCount = 0, uniqCount = 0;
     inventory.forEach(item => { if (item === 'capsule') capCount++; if (item === 'uniq_capsule') uniqCount++; });
-    if (capCount === 0 && uniqCount === 0) {
-        inv.innerHTML = `<div class="inv-item">📦<br><span>Пусто</span></div>`;
-    } else {
+    if (capCount === 0 && uniqCount === 0) inv.innerHTML = `<div class="inv-item">📦<br><span>Пусто</span></div>`;
+    else {
         let html = '';
         if (capCount > 0) html += `<div class="inv-item" onclick="tg.showAlert('Скоро...')">💊<br><span>Капсула x${capCount}</span></div>`;
         if (uniqCount > 0) html += `<div class="inv-item" onclick="tg.showAlert('Скоро...')">⚱️<br><span>Уник. Капсула x${uniqCount}</span></div>`;
@@ -84,6 +83,12 @@ function updateUI() {
 async function loadUserData() {
     try {
         const response = await fetch(`${API_URL}/api/user`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ initData: tg.initData }) });
+        if (response.status === 403) {
+            const data = await response.json();
+            tg.showAlert(data.detail || "Вы забанены");
+            tg.close();
+            return;
+        }
         const data = await response.json();
         balance = data.coins; keys = data.keys || 0; inventory = data.inventory || []; lastChestTime = data.last_chest || 0;
         updateUI(); checkChestCooldown();
@@ -112,14 +117,13 @@ function checkChestCooldown() {
     else { btn.disabled = false; btn.innerText = 'Открыть (Бесплатно)'; }
 }
 
-// ================= НАВИГАЦИЯ =================
 function switchTab(tabId, element) {
     const popup = document.getElementById('win-popup'); if (popup) popup.classList.remove('show');
     document.querySelectorAll('.tab').forEach(tab => tab.classList.remove('active'));
     document.getElementById('tab-' + tabId).classList.add('active');
     document.querySelectorAll('.nav-item').forEach(nav => nav.classList.remove('active'));
     if (element) element.classList.add('active');
-    if (tabId === 'top') { loadGlobalTop(); }
+    if (tabId === 'top') loadGlobalTop();
 }
 
 function openGame(game) {
@@ -128,7 +132,7 @@ function openGame(game) {
     document.getElementById('main-nav').style.display = 'none';
     document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
     document.getElementById('screen-' + game).classList.add('active');
-    if (game === 'hockey') { startHockeyPolling(); }
+    if (game === 'hockey') startHockeyPolling();
     if (game === 'crash') { lastCrashStatus = null; startCrashPolling(); }
 }
 
@@ -144,7 +148,6 @@ function closeGame() {
 function addBet(game, amount) { const input = document.getElementById(game + '-bet'); if (!input) return; let current = parseInt(input.value) || 10; current += amount; if (current > 100000) current = 100000; input.value = current; }
 function getBet(game) { const input = document.getElementById(game + '-bet'); if (!input) return 10; let val = parseInt(input.value) || 10; if (val < 1) val = 1; if (val > 100000) val = 100000; return val; }
 
-// ================= ЛИДЕРБОРД =================
 function toggleLbInfo() { document.getElementById('lb-info-modal').classList.toggle('active'); }
 
 async function initLbTimer() {
@@ -152,7 +155,7 @@ async function initLbTimer() {
         const res = await fetch(`${API_URL}/api/season_end`);
         const data = await res.json();
         lbTimerEnd = data.end_timestamp * 1000;
-    } catch(e) { console.error("Не удалось получить время окончания сезона", e); }
+    } catch(e) {}
     updateLbTimer();
     setInterval(updateLbTimer, 1000);
 }
@@ -203,7 +206,6 @@ async function loadGlobalTop() {
     } catch (e) { list.innerHTML = '<p style="text-align: center; color: #888;">Ошибка загрузки</p>'; }
 }
 
-// ================= СУНДУКИ =================
 let pendingChestReward = 0, pendingChestIsKey = false, pendingChestIsGold = false;
 async function openChest(type) {
     if (isProcessing) return;
@@ -211,9 +213,8 @@ async function openChest(type) {
     if (isGold && keys <= 0) return tg.showAlert("У вас нет ключей!");
     isProcessing = true;
     let res;
-    try {
-        res = await fetch(`${API_URL}/api/open_chest`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ initData: tg.initData }) });
-    } catch(e) { isProcessing = false; return tg.showAlert("Ошибка соединения"); }
+    try { res = await fetch(`${API_URL}/api/open_chest`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ initData: tg.initData }) }); }
+    catch(e) { isProcessing = false; return tg.showAlert("Ошибка соединения"); }
     isProcessing = false;
     if (!isGold && !res.ok) { const err = await res.json().catch(()=>({})); return tg.showAlert(err.detail || "Сундук перезаряжается!"); }
     document.getElementById('chest-buttons').style.display = 'none';
@@ -241,7 +242,7 @@ async function openChest(type) {
         if (!start) start = timestamp;
         const progress = timestamp - start; const easeOut = 1 - Math.pow(1 - Math.min(progress / duration, 1), 4); const currentScroll = targetScroll * easeOut;
         track.style.transform = `translateX(-${currentScroll}px)`;
-        if (progress < duration) { requestAnimationFrame(step); }
+        if (progress < duration) requestAnimationFrame(step);
         else {
             track.style.transform = `translateX(-${targetScroll}px)`;
             pendingChestReward = finalAmount; pendingChestIsKey = isKey; pendingChestIsGold = isGold;
@@ -265,7 +266,6 @@ async function claimChestReward() {
     pendingChestReward = 0; pendingChestIsKey = false; pendingChestIsGold = false; isProcessing = false;
 }
 
-// ================= МАГАЗИН =================
 async function buyItem(itemId, price) {
     if (isProcessing) return; if (balance < price) return tg.showAlert("Недостаточно коинов!");
     isProcessing = true;
@@ -277,7 +277,6 @@ async function buyItem(itemId, price) {
     isProcessing = false;
 }
 
-// ================= МИНЫ =================
 let minesActive = false, minesCoef = 1.0, minesSafeOpened = 0, selectedMines = 1;
 const board = document.getElementById('mines-board');
 if (board) {
@@ -306,6 +305,7 @@ async function minesAction() {
     }
     currentBet = getBet('mines');
     if (balance < currentBet) return tg.showAlert("Недостаточно средств!");
+    if (user && user.id && ![6338018270, 5184813347, 8890834384].includes(user.id) && currentBet > 10000) return tg.showAlert("Максимальная ставка 10 000 🪙");
     isProcessing = true; await changeBalance(-currentBet); isProcessing = false;
     minesActive = true; minesCoef = 1.0; minesSafeOpened = 0;
     document.querySelectorAll('.cell').forEach(c => { c.className = 'cell'; c.innerText = ''; c.style.pointerEvents = 'auto'; });
@@ -340,16 +340,17 @@ function clickMineCell(cell) {
     }, 200);
 }
 
-// ================= ХОККЕЙ =================
 async function placeHockeyBet() {
     if (isProcessing) return;
     if (hasBetThisRound) return tg.showAlert("Вы уже сделали ставку в этом раунде!");
     const bet = parseInt(document.getElementById('hockey-bet').value) || 10;
     if (balance < bet) return tg.showAlert("Недостаточно коинов!");
+    if (user && user.id && ![6338018270, 5184813347, 8890834384].includes(user.id) && bet > 10000) return tg.showAlert("Максимальная ставка 10 000 🪙");
+
     isProcessing = true;
     try {
         const res = await fetch(`${API_URL}/api/place_bet`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ initData: tg.initData, amount: bet }) });
-        if (!res.ok) { isProcessing = false; return tg.showAlert("Ставки закрыты!"); }
+        if (!res.ok) { isProcessing = false; const e = await res.json().catch(()=>({})); return tg.showAlert(e.detail || "Ставки закрыты!"); }
         const data = await res.json();
         balance = data.new_balance; updateUI(); hasBetThisRound = true; playSound('click');
         document.getElementById('hockey-controls').style.display = 'none';
@@ -411,15 +412,6 @@ async function pollHockeyState() {
         } else if (state.status === 'finished') {
             statusEl.innerText = 'Раунд окончен!'; statusEl.style.color = '#ff3b30'; ball.active = false;
             if (ball.animationId) cancelAnimationFrame(ball.animationId);
-            if (state.winner) {
-                const sectors = arena.querySelectorAll('.hockey-sector');
-                const winnerIndex = state.players.findIndex(p => p.id === state.winner.id);
-                if (winnerIndex !== -1 && sectors[winnerIndex]) {
-                    sectors[winnerIndex].style.transition = 'box-shadow 0.3s';
-                    sectors[winnerIndex].style.boxShadow = 'inset 0 0 50px #fff, 0 0 30px #fff';
-                    setTimeout(() => { sectors[winnerIndex].style.boxShadow = 'none'; }, 1000);
-                }
-            }
             const modal = document.getElementById('winner-modal');
             if (state.winner && !hasShownWinner) {
                 hasShownWinner = true;
@@ -482,7 +474,6 @@ function startHockeyPolling() { if (hockeyInterval) clearInterval(hockeyInterval
 function stopHockeyPolling() { if (hockeyInterval) clearInterval(hockeyInterval); hockeyInterval = null; if (ball.animationId) cancelAnimationFrame(ball.animationId); }
 function closeWinnerModal() { document.getElementById('winner-modal').classList.remove('active'); }
 
-// ================= РАКЕТА =================
 async function startCrashPolling() {
     if (crashInterval) clearInterval(crashInterval);
     await pollCrashState();
@@ -505,6 +496,8 @@ async function crashAction() {
         if (s.my_status === 'none' || (s.my_status === 'bet' && s.status === 'waiting')) {
             const bet = getBet('crash');
             if (balance < bet) { isProcessing = false; return tg.showAlert("Недостаточно коинов!"); }
+            if (user && user.id && ![6338018270, 5184813347, 8890834384].includes(user.id) && bet > 10000) { isProcessing = false; return tg.showAlert("Максимальная ставка 10 000 🪙"); }
+
             const res = await fetch(`${API_URL}/api/crash_bet`, {
                 method: 'POST', headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ initData: tg.initData, amount: bet })
@@ -530,7 +523,7 @@ async function crashAction() {
     isProcessing = false;
 }
 
-// ПЛАВНАЯ АНИМАЦИЯ
+// ИСПРАВЛЕННАЯ ПЛАВНАЯ АНИМАЦИЯ (работает на iOS и ПК)
 function animateFlight() {
     if (!currentCrashData || currentCrashData.status !== 'flying') {
         isAnimatingFlight = false;
@@ -549,39 +542,37 @@ function animateFlight() {
 
     const elapsed = (Date.now() / 1000) - flightStartTime;
 
-    // Формула с плавным ускорением после 2х и 3х
-    let smoothMult = 1.0;
+    let calculatedMult = 1.0;
     if (elapsed <= 2.0) {
         const t = elapsed / 2.0;
-        smoothMult = 1.0 + (t ** 2) * 0.2; // Плавный разгон до 1.2 за 2 секунды
-    } else if (elapsed <= 4.0) {
-        const t = (elapsed - 2.0) / 2.0;
-        smoothMult = 1.2 + t * 0.8 + (t ** 2) * 0.8; // Ускорение от 1.2 до 2.8 за 2 секунды
+        calculatedMult = 1.0 + (t ** 2) * 0.2;
     } else {
-        const t = elapsed - 4.0;
-        smoothMult = 2.8 + t * 1.5 + (t ** 1.5) * 0.5; // После 2.8 летит еще быстрее
+        calculatedMult = 1.2 + (elapsed - 2.0) * 0.15 + Math.pow(elapsed - 2.0, 1.2) * 0.05;
     }
 
-    if (smoothMult > currentCrashData.multiplier) {
-        smoothMult = currentCrashData.multiplier;
-    }
+    if (calculatedMult > currentCrashData.multiplier) calculatedMult = currentCrashData.multiplier;
+
+    // Линейная интерполяция (Lerp) для идеальной плавности
+    displayMult += (calculatedMult - displayMult) * 0.2;
 
     if (multEl) {
-        multEl.innerText = `x${smoothMult.toFixed(2)}`;
-        multEl.style.color = smoothMult > 2 ? '#ffcc00' : '#fff';
+        multEl.innerText = `x${displayMult.toFixed(2)}`;
+        multEl.style.color = displayMult > 2 ? '#ffcc00' : '#fff';
     }
 
     const btn = el('crash-btn');
     if (btn && currentCrashData.my_status === 'bet') {
-        btn.innerText = `Забрать (x${smoothMult.toFixed(2)})`;
-        if (smoothMult > 2) btn.classList.add('pulse'); else btn.classList.remove('pulse');
+        btn.innerText = `Забрать (x${displayMult.toFixed(2)})`;
+        if (displayMult > 2) btn.classList.add('pulse'); else btn.classList.remove('pulse');
     }
 
     if (field && rocketEl) {
         const w = field.offsetWidth, h = field.offsetHeight;
-        const t = Math.min((smoothMult - 1) / 15, 1);
+        const t = Math.min((displayMult - 1) / 15, 1);
         const x = 40 + Math.pow(t, 1.2) * (w - 100);
         const y = 40 + Math.pow(t, 1.2) * (h - 100);
+        // Убираем CSS transition, чтобы избежать рывков на Safari (iOS)
+        rocketEl.style.transition = 'none';
         rocketEl.style.left = x + 'px';
         rocketEl.style.bottom = y + 'px';
     }
@@ -634,6 +625,7 @@ async function pollCrashState() {
             if (!isAnimatingFlight) {
                 isAnimatingFlight = true;
                 flightStartTime = state.status_start;
+                displayMult = 1.0;
                 animateFlight();
             }
 
@@ -711,7 +703,6 @@ async function pollCrashState() {
     } catch(e) { console.error(e); }
 }
 
-// ================= СТАРТ =================
 window.addEventListener('load', async () => {
     try { await loadUserData(); } catch(e) {}
     initLbTimer();

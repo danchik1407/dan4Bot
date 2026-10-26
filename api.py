@@ -19,6 +19,7 @@ supabase: Client = create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
 ADMIN_IDS = [6338018270, 5184813347, 8890834384]
+MAX_BET = 10000
 
 BOT_NAMES = ["Shark_V", "LuckyFox", "NeonWolf", "GhostByte", "PixelKing", "CyberCat", "IronFist", "VoidWalker",
              "ShadowAce", "RogueOne", "Toxic", "Viper", "Sniper", "ProGamer", "NoobMaster", "Killer", "Dragon"]
@@ -92,9 +93,6 @@ class CrashBet(BaseModel): initData: str; amount: int
 
 
 class CrashCashout(BaseModel): initData: str
-
-
-class PromocodeActivate(BaseModel): initData: str; code: str
 
 
 # ==================== ХОККЕЙ ====================
@@ -183,6 +181,10 @@ async def place_bet(data: PlaceBet):
     user = verify_telegram_data(data.initData)
     if not user: raise HTTPException(status_code=401, detail="Invalid auth data")
     user_id = str(user["id"])
+
+    if int(user_id) not in ADMIN_IDS and data.amount > MAX_BET:
+        raise HTTPException(status_code=400, detail=f"Максимальная ставка {MAX_BET} 🪙")
+
     if game_state["status"] != "waiting": raise HTTPException(status_code=400, detail="Ставки закрыты")
     if len(game_state["players"]) >= 20:
         existing = next((p for p in game_state["players"] if p["id"] == user_id), None)
@@ -258,16 +260,17 @@ async def get_hockey_history(): return history
 
 # ==================== РАКЕТА (CRASH) ====================
 def get_crash_point_by_chance():
-    # ШАНСЫ: 1% сотка, 15% выше х4, 30% выше х2
     rv = random.random()
-    if rv < 0.01:
-        return 100.0
-    elif rv < 0.16:
-        return random.uniform(4.0, 99.9)
+    if rv < 0.30:
+        return random.uniform(1.00, 1.05)
     elif rv < 0.46:
+        return random.uniform(1.05, 2.0)
+    elif rv < 0.85:
         return random.uniform(2.0, 4.0)
+    elif rv < 0.99:
+        return random.uniform(4.0, 50.0)
     else:
-        return random.uniform(1.0, 2.0)
+        return 100.0
 
 
 @app.get("/api/crash_state")
@@ -312,16 +315,11 @@ async def get_crash_state(initData: str = ""):
     elif crash_state["status"] == "flying":
         elapsed = now - crash_state["status_start"]
 
-        # Формула: плавно до 2х, ускорение после 2х, сильное ускорение после 3х
         if elapsed <= 2.0:
             t = elapsed / 2.0
-            current_mult = 1.0 + (t ** 2) * 0.2  # До 1.2
-        elif elapsed <= 4.0:
-            t = (elapsed - 2.0) / 2.0
-            current_mult = 1.2 + t * 0.8 + (t ** 2) * 0.8  # До 2.8
+            current_mult = 1.0 + (t ** 2) * 0.2
         else:
-            t = elapsed - 4.0
-            current_mult = 2.8 + t * 1.5 + (t ** 1.5) * 0.5  # После 3х летит быстро
+            current_mult = 1.2 + (elapsed - 2.0) * 0.15 + math.pow(elapsed - 2.0, 1.2) * 0.05
 
         crash_state["multiplier"] = current_mult
 
@@ -409,6 +407,10 @@ async def crash_bet(data: CrashBet):
     user = verify_telegram_data(data.initData)
     if not user: raise HTTPException(status_code=401, detail="Invalid auth data")
     user_id = str(user["id"])
+
+    if int(user_id) not in ADMIN_IDS and data.amount > MAX_BET:
+        raise HTTPException(status_code=400, detail=f"Максимальная ставка {MAX_BET} 🪙")
+
     if crash_state["status"] != "waiting": raise HTTPException(status_code=400,
                                                                detail="Ставки принимаются только в фазе ожидания")
 
@@ -464,6 +466,11 @@ async def get_user(auth: UserAuth):
     user = verify_telegram_data(auth.initData)
     if not user: raise HTTPException(status_code=401, detail="Invalid auth data")
     user_id = user["id"]
+
+    ban_res = supabase.table("bans").select("*").eq("user_id", user_id).execute()
+    if ban_res.data:
+        raise HTTPException(status_code=403, detail="Вы забанены за багоюз или нарушение правил.")
+
     if user_id in ADMIN_IDS and user_id != user.get("id"): return {"coins": -1, "keys": 0, "inventory": [],
                                                                    "last_chest": 0, "hidden": True}
     res = supabase.table("users").select("*").eq("user_id", user_id).execute()
@@ -541,35 +548,6 @@ async def get_global_top():
 async def get_season_end():
     end_date = datetime.datetime(2026, 11, 1, 15, 0, 0)
     return {"end_timestamp": int(end_date.timestamp())}
-
-
-# ==================== ПРОМОКОДЫ ====================
-@app.post("/api/activate_promocode")
-async def activate_promocode(data: PromocodeActivate):
-    user = verify_telegram_data(data.initData)
-    if not user: raise HTTPException(status_code=401, detail="Invalid auth data")
-    user_id = str(user["id"])
-
-    res = supabase.table("promocodes").select("*").eq("code", data.code).execute()
-    if not res.data: raise HTTPException(status_code=400, detail="Промокод не найден")
-
-    promo = res.data[0]
-    if promo["uses"] <= 0: raise HTTPException(status_code=400, detail="Промокод закончился")
-
-    used_res = supabase.table("promocode_uses").select("*").eq("code", data.code).eq("user_id", user_id).execute()
-    if used_res.data: raise HTTPException(status_code=400, detail="Вы уже активировали этот промокод")
-
-    new_uses = promo["uses"] - 1
-    supabase.table("promocodes").update({"uses": new_uses}).eq("code", data.code).execute()
-
-    user_res = supabase.table("users").select("coins").eq("user_id", int(user_id)).execute()
-    current_coins = int(user_res.data[0].get("coins", 0)) if user_res.data else 0
-    new_coins = current_coins + promo["amount"]
-    supabase.table("users").update({"coins": new_coins}).eq("user_id", int(user_id)).execute()
-
-    supabase.table("promocode_uses").insert({"code": data.code, "user_id": user_id}).execute()
-
-    return {"success": True, "reward": promo["amount"], "new_balance": new_coins}
 
 
 if __name__ == "__main__":
