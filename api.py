@@ -38,7 +38,7 @@ def _random_arena_bot_count():
 game_state = {
     "status": "waiting", "timer": 15, "bank": 0, "players": [], "winner": None,
     "last_update": time.time(), "last_bot_added": time.time(), "target_bots": _random_arena_bot_count(), "is_paid": False,
-    "round_id": str(int(time.time())), "whales_added": 0,
+    "payout_attempt_at": 0, "round_id": str(int(time.time())), "whales_added": 0,
     "roll_data": None, "rolling_started_at": None, "whale_decided": False,
     "whale_join": False, "whale_trigger_at": None
 }
@@ -105,6 +105,7 @@ def _prepare_hockey_roll(now):
 
 def _update_hockey_percentages():
     total = sum(max(0, int(player.get("bet", 0))) for player in game_state["players"])
+    game_state["bank"] = total
     for player in game_state["players"]:
         player["percent"] = (max(0, int(player.get("bet", 0))) / total * 100) if total else 0
 
@@ -171,7 +172,7 @@ def _hockey_winner_at_x(x):
 
 
 def _payout_hockey_winner():
-    """Credit only the real winner once; bots and clients never receive or trigger payouts."""
+    """Credit the full displayed pot to a real winner, retrying failed DB writes."""
     winner = game_state["winner"]
     if game_state["is_paid"] or not winner:
         return
@@ -179,19 +180,29 @@ def _payout_hockey_winner():
         game_state["is_paid"] = True
         return
 
-    # Mark first so simultaneous state requests cannot credit the same round twice.
-    game_state["is_paid"] = True
-    winner_id = game_state["winner"]["id"]
+    now = time.time()
+    if now - game_state.get("payout_attempt_at", 0) < 2:
+        return
+    game_state["payout_attempt_at"] = now
     try:
-        numeric_winner_id = int(winner_id)
-        res = supabase.table("users").select("coins").eq("user_id", numeric_winner_id).execute()
-        if res.data:
-            new_coins = int(res.data[0].get("coins", 0)) + int(game_state["bank"])
-            supabase.table("users").update({"coins": new_coins}).eq("user_id", numeric_winner_id).execute()
+        numeric_winner_id = int(winner["id"])
     except (TypeError, ValueError):
-        # Arena bots do not have user accounts and must never receive coins.
-        pass
+        # Non-numeric IDs belong to synthetic participants, never to user accounts.
+        game_state["is_paid"] = True
+        return
+
+    try:
+        res = supabase.table("users").select("coins").eq("user_id", numeric_winner_id).execute()
+        if not res.data:
+            raise RuntimeError("Победитель Арены не найден в таблице users")
+        new_coins = int(res.data[0].get("coins", 0)) + int(game_state["bank"])
+        updated = supabase.table("users").update({"coins": new_coins}).eq(
+            "user_id", numeric_winner_id).select("user_id").execute()
+        if not updated.data:
+            raise RuntimeError("Supabase не подтвердил выплату победителю Арены")
+        game_state["is_paid"] = True
     except Exception as e:
+        # Keep the round unsettled so the background worker can retry instead of losing the payout.
         print(f"❌ Ошибка выплаты Арены: {e}")
 
 
@@ -199,8 +210,8 @@ def _finish_hockey_round():
     """Resolve from the server-simulated final x and pay exactly once."""
     if game_state["status"] != "rolling":
         return False
-    # Virtual bot bets affect sector odds only; the payout pot contains charged human stakes.
-    game_state["bank"] = sum(int(player["bet"]) for player in game_state["players"] if not player.get("is_bot"))
+    # The winner receives the entire displayed pot, including bot wagers.
+    game_state["bank"] = sum(int(player["bet"]) for player in game_state["players"])
     roll_data = game_state.get("roll_data") or {}
     if not game_state["players"] or game_state["bank"] <= 0 or "final_x" not in roll_data:
         game_state["winner"] = None
@@ -231,6 +242,8 @@ async def start_hockey_settlement_worker():
             await asyncio.sleep(0.2)
             if game_state["status"] == "rolling" and time.time() - game_state["last_update"] >= HOCKEY_ROLL_DURATION:
                 _finish_hockey_round()
+            elif game_state["status"] == "finished" and game_state.get("winner") and not game_state["is_paid"]:
+                _payout_hockey_winner()
 
     asyncio.create_task(settle_expired_rounds())
 
@@ -302,6 +315,8 @@ class CrashCashout(BaseModel): initData: str
 # ==================== АРЕНА (ХОККЕЙ) ====================
 def _hockey_state_response():
     response = game_state.copy()
+    # Derive the public pot from the same participants shown in the arena, including bots.
+    response["bank"] = sum(max(0, int(player.get("bet", 0))) for player in response["players"])
     if response.get("roll_data"):
         response["roll_data"] = {key: value for key, value in response["roll_data"].items() if key != "path"}
     response["server_time"] = time.time()
@@ -317,8 +332,8 @@ async def get_hockey_state():
         time_left = 15 - (now - game_state["last_update"])
         _maybe_add_hockey_bots(now, time_left)
         if time_left <= 0:
-            # Freeze the real pot; bot stakes only define their visible sector odds.
-            game_state["bank"] = sum(int(player["bet"]) for player in game_state["players"] if not player.get("is_bot"))
+            # Freeze the full pot, including bot wagers.
+            game_state["bank"] = sum(int(player["bet"]) for player in game_state["players"])
             game_state["status"] = "rolling"
             game_state["last_update"] = now
             _update_hockey_percentages()
@@ -330,10 +345,12 @@ async def get_hockey_state():
             _finish_hockey_round()
 
     elif game_state["status"] == "finished":
-        if now - game_state["last_update"] > 5:
+        if game_state.get("winner") and not game_state["is_paid"]:
+            _payout_hockey_winner()
+        if now - game_state["last_update"] > 5 and (not game_state.get("winner") or game_state["is_paid"]):
             game_state = {"status": "waiting", "timer": 15, "bank": 0, "players": [], "winner": None,
                           "last_update": now, "last_bot_added": now, "target_bots": _random_arena_bot_count(),
-                          "is_paid": False, "round_id": str(int(time.time())), "whales_added": 0,
+                          "is_paid": False, "payout_attempt_at": 0, "round_id": str(int(time.time())), "whales_added": 0,
                           "roll_data": None, "rolling_started_at": None, "whale_decided": False,
                           "whale_join": False, "whale_trigger_at": None}
             return _hockey_state_response()
@@ -378,7 +395,9 @@ async def place_bet(data: PlaceBet):
     if current_coins < data.amount: raise HTTPException(status_code=400, detail="Not enough coins")
 
     new_coins = current_coins - data.amount
-    supabase.table("users").update({"coins": new_coins}).eq("user_id", int(user_id)).execute()
+    updated = supabase.table("users").update({"coins": new_coins}).eq("user_id", int(user_id)).select("user_id").execute()
+    if not updated.data:
+        raise HTTPException(status_code=500, detail="Не удалось списать ставку")
 
     name = user.get("username", user.get("first_name", f"id{user_id}"))
     avatar = user.get("photo_url", "")
@@ -388,15 +407,15 @@ async def place_bet(data: PlaceBet):
     game_state["players"].append(
         {"id": user_id, "name": name, "avatar": avatar, "bet": data.amount, "color": player_color, "is_bot": False})
 
-    # One 40% chance per round to add a whale shortly before closing, triggered by a 1,000+ human bet.
+    # One 10% chance per round to add a whale shortly before closing, triggered by a 1,000+ human bet.
     if data.amount >= 1000 and not game_state["whale_decided"]:
         game_state["whale_decided"] = True
         game_state["whale_join"] = random.random() < 0.10
         if game_state["whale_join"]:
             game_state["whale_trigger_at"] = random.uniform(1.0, 2.0)
 
-    # Only charged human stakes go into the payout pot. Bot bets affect sectors, not balances.
-    game_state["bank"] = sum(int(player["bet"]) for player in game_state["players"] if not player.get("is_bot"))
+    # The displayed bank and payout use the same full pot.
+    game_state["bank"] = sum(int(player["bet"]) for player in game_state["players"])
     _update_hockey_percentages()
     return {"success": True, "new_balance": new_coins}
 
@@ -563,6 +582,8 @@ async def crash_bet(data: CrashBet):
 
     check_ban(user_id)
 
+    if data.amount <= 0:
+        raise HTTPException(status_code=400, detail="Ставка должна быть больше нуля")
     if int(user_id) not in ADMIN_IDS and data.amount > MAX_BET:
         raise HTTPException(status_code=400, detail=f"Максимальная ставка {MAX_BET} 🪙")
 
@@ -575,7 +596,10 @@ async def crash_bet(data: CrashBet):
     current_coins = int(res.data[0].get("coins", 0))
     if current_coins < data.amount: raise HTTPException(status_code=400, detail="Недостаточно коинов")
 
-    supabase.table("users").update({"coins": current_coins - data.amount}).eq("user_id", int(user_id)).execute()
+    updated = supabase.table("users").update({"coins": current_coins - data.amount}).eq(
+        "user_id", int(user_id)).select("user_id").execute()
+    if not updated.data:
+        raise HTTPException(status_code=500, detail="Не удалось списать ставку")
     if existing:
         existing["bet"] += data.amount
     else:
@@ -600,18 +624,18 @@ async def crash_cashout(data: CrashCashout):
     if not player: raise HTTPException(status_code=400, detail="Вы не участвуете")
     if player["cashout_mult"] > 0: raise HTTPException(status_code=400, detail="Вы уже забрали")
 
-    player["cashout_mult"] = crash_state["multiplier"]
-    win_amount = int(player["bet"] * player["cashout_mult"])
-
-    new_coins = 0
-    try:
-        res = supabase.table("users").select("coins").eq("user_id", int(user_id)).execute()
-        current_coins = int(res.data[0].get("coins", 0)) if res.data else 0
-        new_coins = current_coins + win_amount
-        supabase.table("users").update({"coins": new_coins}).eq("user_id", int(user_id)).execute()
-    except Exception as e:
-        print(f"❌ cashout: {e}")
-    return {"success": True, "win_amount": win_amount, "mult": player["cashout_mult"], "new_balance": new_coins}
+    cashout_mult = crash_state["multiplier"]
+    win_amount = int(player["bet"] * cashout_mult)
+    res = supabase.table("users").select("coins").eq("user_id", int(user_id)).execute()
+    if not res.data:
+        raise HTTPException(status_code=404, detail="Пользователь не найден")
+    new_coins = int(res.data[0].get("coins", 0)) + win_amount
+    updated = supabase.table("users").update({"coins": new_coins}).eq(
+        "user_id", int(user_id)).select("user_id").execute()
+    if not updated.data:
+        raise HTTPException(status_code=500, detail="Не удалось зачислить выигрыш")
+    player["cashout_mult"] = cashout_mult
+    return {"success": True, "win_amount": win_amount, "mult": cashout_mult, "new_balance": new_coins}
 
 
 @app.get("/api/crash_history")
@@ -684,8 +708,13 @@ async def update_balance(data: UpdateBalance):
 
     res = supabase.table("users").select("coins").eq("user_id", user_id).execute()
     current_coins = int(res.data[0].get("coins", 0))
-    new_coins = max(0, current_coins + data.amount)
-    supabase.table("users").update({"coins": new_coins}).eq("user_id", user_id).execute()
+    new_coins = current_coins + data.amount
+    if new_coins < 0:
+        raise HTTPException(status_code=400, detail="Недостаточно коинов")
+    updated = supabase.table("users").update({"coins": new_coins}).eq(
+        "user_id", user_id).select("user_id").execute()
+    if not updated.data:
+        raise HTTPException(status_code=500, detail="Не удалось обновить баланс")
     return {"success": True, "new_balance": new_coins}
 
 

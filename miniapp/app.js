@@ -12,7 +12,7 @@ if (user) {
 }
 
 const API_URL = "https://aura-api-mptt.onrender.com";
-let balance = 0, keys = 0, currentBet = 10, inventory = [], lastChestTime = 0, isProcessing = false;
+let balance = 0, keys = 0, currentBet = 10, inventory = [], lastChestTime = 0, isProcessing = false, userDataLoaded = false;
 let hockeyInterval = null, hasBetThisRound = false, hasShownWinner = false;
 let ball = { x: 50, y: 50, active: false, animationId: null, hasStartedAnim: false, roundId: null, path: null };
 let hockeyServerOffsetMs = 0, hockeyClockSynced = false;
@@ -20,6 +20,8 @@ let hockeyServerOffsetMs = 0, hockeyClockSynced = false;
 let crashInterval = null;
 let lastCrashStatus = null;
 let currentCrashData = null;
+let crashPollPromise = null;
+let crashStateUpdatedAt = 0;
 
 let animFrameId = null;
 let isAnimatingFlight = false;
@@ -28,9 +30,11 @@ let flightStartTime = 0;
 let lbTimerEnd = Date.now() + (30 * 24 * 3600 * 1000);
 
 // ================= ЗВУКИ =================
-const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+const audioCtx = AudioContextClass ? new AudioContextClass() : null;
 function playSound(type) {
     try {
+        if (!audioCtx) return;
         if (audioCtx.state === 'suspended') audioCtx.resume();
         const osc = audioCtx.createOscillator();
         const gain = audioCtx.createGain();
@@ -85,14 +89,15 @@ function updateUI() {
 async function loadUserData() {
     try {
         const response = await fetch(`${API_URL}/api/user`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ initData: tg.initData }) });
+        const data = await response.json().catch(() => ({}));
         if (response.status === 403) {
-            const data = await response.json();
             tg.showAlert(data.detail || "Вы забанены");
             tg.close();
             return;
         }
-        const data = await response.json();
-        balance = data.coins; keys = data.keys || 0; inventory = data.inventory || []; lastChestTime = data.last_chest || 0;
+        if (!response.ok) throw new Error(data.detail || "Не удалось загрузить профиль");
+        balance = Number(data.coins) || 0; keys = data.keys || 0; inventory = data.inventory || []; lastChestTime = data.last_chest || 0;
+        userDataLoaded = true;
         updateUI(); checkChestCooldown();
     } catch (e) { console.error("Ошибка загрузки профиля", e); }
 }
@@ -100,15 +105,37 @@ async function loadUserData() {
 async function changeBalance(amount) {
     try {
         const response = await fetch(`${API_URL}/api/update_balance`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ initData: tg.initData, amount: amount }) });
-        const data = await response.json(); balance = data.new_balance; updateUI();
-    } catch(e) {}
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) {
+            tg.showAlert(data.detail || "Не удалось обновить баланс. Попробуйте ещё раз.");
+            return false;
+        }
+        const newBalance = Number(data.new_balance);
+        if (!Number.isFinite(newBalance)) throw new Error("Некорректный ответ сервера");
+        balance = newBalance; updateUI();
+        return true;
+    } catch(e) {
+        console.error("Ошибка обновления баланса", e);
+        tg.showAlert("Ошибка соединения. Ставка не принята, попробуйте ещё раз.");
+        return false;
+    }
 }
 
 async function changeKeys(amount) {
     try {
         const response = await fetch(`${API_URL}/api/update_keys`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ initData: tg.initData, amount: amount }) });
-        const data = await response.json(); keys = data.new_keys; updateUI();
-    } catch(e) {}
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok || !Number.isFinite(Number(data.new_keys))) {
+            tg.showAlert(data.detail || "Не удалось обновить ключи. Попробуйте ещё раз.");
+            return false;
+        }
+        keys = Number(data.new_keys); updateUI();
+        return true;
+    } catch(e) {
+        console.error("Ошибка обновления ключей", e);
+        tg.showAlert("Ошибка соединения. Попробуйте ещё раз.");
+        return false;
+    }
 }
 
 function showWin(text) { const popup = document.getElementById('win-popup'); popup.querySelector('.win-text').innerText = text; popup.classList.add('show'); setTimeout(() => popup.classList.remove('show'), 1500); }
@@ -263,10 +290,15 @@ async function openChest(type) {
 
 async function claimChestReward() {
     if (isProcessing) return; isProcessing = true; document.getElementById('chest-win-modal').classList.remove('active');
-    try {
-        if (pendingChestIsGold) await changeKeys(-1);
-        if (pendingChestIsKey) await changeKeys(1); else if (pendingChestReward > 0) await changeBalance(pendingChestReward);
-    } catch(e) {}
+    let rewardApplied = true;
+    if (pendingChestIsGold) rewardApplied = await changeKeys(-1);
+    if (rewardApplied && pendingChestIsKey) rewardApplied = await changeKeys(1);
+    else if (rewardApplied && pendingChestReward > 0) rewardApplied = await changeBalance(pendingChestReward);
+    if (!rewardApplied) {
+        document.getElementById('chest-win-modal').classList.add('active');
+        isProcessing = false;
+        return;
+    }
     if (!pendingChestIsGold) lastChestTime = Math.floor(Date.now() / 1000);
     document.getElementById('roulette-container').style.display = 'none'; document.getElementById('chest-buttons').style.display = 'flex'; checkChestCooldown();
     pendingChestReward = 0; pendingChestIsKey = false; pendingChestIsGold = false; isProcessing = false;
@@ -301,20 +333,30 @@ function selectMines(count, element) { if (minesActive) return; selectedMines = 
 
 async function minesAction() {
     if (isProcessing) return;
+    if (!userDataLoaded) {
+        await loadUserData();
+        if (!userDataLoaded) return tg.showAlert("Не удалось загрузить баланс. Проверьте соединение и попробуйте снова.");
+    }
     if (minesActive) {
-        isProcessing = true; minesActive = false;
+        isProcessing = true;
         const cashout = Math.floor(currentBet * minesCoef);
+        const credited = await changeBalance(cashout);
+        if (!credited) { isProcessing = false; return; }
+        minesActive = false;
         const btn = document.getElementById('mines-btn');
         btn.disabled = true; btn.innerText = 'Забрано!'; btn.style.background = '#555';
-        await changeBalance(cashout); showWin(cashout); playSound('win');
+        showWin(cashout); playSound('win');
         document.querySelectorAll('.cell').forEach(c => c.style.pointerEvents = 'none');
         btn.disabled = false; btn.innerText = 'Сделать ставку'; btn.style.background = '#007aff';
         isProcessing = false; return;
     }
     currentBet = getBet('mines');
     if (balance < currentBet) return tg.showAlert("Недостаточно средств!");
-    if (user && user.id && ![6338018270, 5184813347, 8890834384].includes(user.id) && currentBet > 10000) return tg.showAlert("Максимальная ставка 10 000 🪙");
-    isProcessing = true; await changeBalance(-currentBet); isProcessing = false;
+    if (user && user.id && ![6338018270, 5184813347, 8890834384].includes(Number(user.id)) && currentBet > 10000) return tg.showAlert("Максимальная ставка 10 000 🪙");
+    isProcessing = true;
+    const debited = await changeBalance(-currentBet);
+    if (!debited) { isProcessing = false; return; }
+    isProcessing = false;
     minesActive = true; minesCoef = 1.0; minesSafeOpened = 0;
     document.querySelectorAll('.cell').forEach(c => { c.className = 'cell'; c.innerText = ''; c.style.pointerEvents = 'auto'; });
     document.getElementById('mines-btn').innerText = 'Забрать (0 🪙)'; document.getElementById('mines-btn').style.background = '#34c759';
@@ -354,7 +396,7 @@ async function placeHockeyBet() {
     if (hasBetThisRound) return tg.showAlert("Вы уже сделали ставку в этом раунде!");
     const bet = parseInt(document.getElementById('hockey-bet').value) || 10;
     if (balance < bet) return tg.showAlert("Недостаточно коинов!");
-    if (user && user.id && ![6338018270, 5184813347, 8890834384].includes(user.id) && bet > 10000) return tg.showAlert("Максимальная ставка 10 000 🪙");
+    if (user && user.id && ![6338018270, 5184813347, 8890834384].includes(Number(user.id)) && bet > 10000) return tg.showAlert("Максимальная ставка 10 000 🪙");
 
     isProcessing = true;
     try {
@@ -578,19 +620,32 @@ async function crashAction() {
     if (isProcessing) return;
     isProcessing = true;
     try {
+        if (!userDataLoaded) {
+            await loadUserData();
+            if (!userDataLoaded) { isProcessing = false; return tg.showAlert("Не удалось загрузить баланс. Проверьте соединение и попробуйте снова."); }
+        }
+        await pollCrashState();
         const s = currentCrashData;
-        if (!s) { isProcessing = false; return; }
+        if (!s || Date.now() - crashStateUpdatedAt > 5000) {
+            isProcessing = false;
+            return tg.showAlert("Загружаем состояние игры. Попробуйте ещё раз через секунду.");
+        }
 
         if (s.my_status === 'none' || (s.my_status === 'bet' && s.status === 'waiting')) {
             const bet = getBet('crash');
             if (balance < bet) { isProcessing = false; return tg.showAlert("Недостаточно коинов!"); }
-            if (user && user.id && ![6338018270, 5184813347, 8890834384].includes(user.id) && bet > 10000) { isProcessing = false; return tg.showAlert("Максимальная ставка 10 000 🪙"); }
+            if (user && user.id && ![6338018270, 5184813347, 8890834384].includes(Number(user.id)) && bet > 10000) { isProcessing = false; return tg.showAlert("Максимальная ставка 10 000 🪙"); }
 
             const res = await fetch(`${API_URL}/api/crash_bet`, {
                 method: 'POST', headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ initData: tg.initData, amount: bet })
             });
-            if (!res.ok) { const e = await res.json().catch(()=>({})); isProcessing = false; return tg.showAlert(e.detail || "Ошибка"); }
+            if (!res.ok) {
+                const e = await res.json().catch(() => ({}));
+                if (res.status >= 500) { await loadUserData(); await pollCrashState(); }
+                isProcessing = false;
+                return tg.showAlert(e.detail || "Ошибка");
+            }
             const data = await res.json();
             balance = data.new_balance; updateUI();
             playSound('click');
@@ -601,13 +656,22 @@ async function crashAction() {
                 body: JSON.stringify({ initData: tg.initData })
             });
             const data = await res.json().catch(()=>({}));
-            if (!res.ok) { isProcessing = false; return tg.showAlert(data.detail || "Не успели забрать 😢"); }
+            if (!res.ok) {
+                if (res.status >= 500) { await loadUserData(); await pollCrashState(); }
+                isProcessing = false;
+                return tg.showAlert(data.detail || "Не успели забрать 😢");
+            }
             balance = data.new_balance; updateUI();
             showWin(`+${data.win_amount} 🪙`);
             playSound('win');
             await pollCrashState();
         }
-    } catch(e) { tg.showAlert("Ошибка соединения"); }
+    } catch(e) {
+        console.error("Ошибка действия в Краше", e);
+        await loadUserData();
+        await pollCrashState();
+        tg.showAlert("Не удалось подтвердить действие. Баланс и состояние игры обновлены.");
+    }
     isProcessing = false;
 }
 
@@ -669,12 +733,21 @@ function animateFlight() {
 }
 
 async function pollCrashState() {
+    if (crashPollPromise) return crashPollPromise;
+    crashPollPromise = pollCrashStateOnce();
+    try { return await crashPollPromise; }
+    finally { crashPollPromise = null; }
+}
+
+async function pollCrashStateOnce() {
     if (!document.getElementById('screen-crash').classList.contains('active')) return;
     try {
         const url = `${API_URL}/api/crash_state?initData=${encodeURIComponent(tg.initData || '')}`;
         const res = await fetch(url);
-        const state = await res.json();
+        const state = await res.json().catch(() => ({}));
+        if (!res.ok || !state.status) throw new Error(state.detail || "Не удалось получить состояние игры");
         currentCrashData = state;
+        crashStateUpdatedAt = Date.now();
 
         const statusEl = document.getElementById('crash-status');
         const multEl = document.getElementById('crash-multiplier');
@@ -789,7 +862,7 @@ async function pollCrashState() {
 }
 
 // ================= СТАРТ =================
-window.addEventListener('load', async () => {
+document.addEventListener('DOMContentLoaded', async () => {
     try { await loadUserData(); } catch(e) {}
     initLbTimer();
     document.querySelectorAll('.winner-modal, .chest-win-modal').forEach(m => m.classList.remove('active'));
