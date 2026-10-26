@@ -367,7 +367,7 @@ async function placeHockeyBet() {
     isProcessing = false;
 }
 
-const HOCKEY_ROLL_DURATION = 15.5;
+const HOCKEY_ROLL_DURATION = 9.0;
 const HOCKEY_SIMULATION_STEP = 0.05;
 let hockeyPathCache = { roundId: null, path: null, pending: null };
 
@@ -419,7 +419,7 @@ function renderHockeyBall(elapsedSeconds) {
     const arena = document.getElementById('hockey-arena');
     if (ballEl) { ballEl.style.left = `${ball.x}%`; ballEl.style.top = `${ball.y}%`; }
     if (arena) {
-        const zoomProgress = Math.max(0, Math.min(1, (elapsedSeconds - 11.5) / 4));
+        const zoomProgress = Math.max(0, Math.min(1, (elapsedSeconds - 6.0) / 3.0));
         const easedZoom = zoomProgress * zoomProgress * (3 - 2 * zoomProgress);
         arena.style.transform = `scale(${1 + 0.25 * easedZoom})`;
         arena.style.transformOrigin = `${ball.x}% ${ball.y}%`;
@@ -500,7 +500,7 @@ async function pollHockeyState() {
                 setTimeout(() => {
                     document.getElementById('winner-modal-name').innerText = state.winner.name;
                     document.getElementById('winner-modal-amount').innerText = state.winner.is_bot
-                        ? `Бот забрал банк ${state.bank} 🪙`
+                        ? ''
                         : `+${state.bank} 🪙`;
                     modal.classList.add('active');
 
