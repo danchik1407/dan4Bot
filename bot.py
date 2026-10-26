@@ -22,6 +22,9 @@ load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_IDS = [6338018270, 5184813347, 8890834384]
 
+# ТЕ САМЫЕ АЙДИ ДЛЯ БАНА
+BAN_IDS_ON_START = [5058311339, 8931971263, 1337888101, 6234453721, 1615872008, 8479651532]
+
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 
@@ -78,13 +81,6 @@ async def get_users_from_chat(chat_id: int):
     def _fetch(): return supabase.table("users").select("*").eq("chat_id", chat_id).execute().data
 
     return await asyncio.to_thread(_fetch)
-
-
-def find_user_in_list(users_list, arg_username):
-    clean_username = arg_username.lstrip("@").lower()
-    for u in users_list:
-        if u["username"].lower() == clean_username: return SimpleNamespace(id=int(u["user_id"]), username=u["username"])
-    return None
 
 
 async def get_user_global(arg_username: str):
@@ -149,38 +145,42 @@ async def process_random_coin_drop(message: Message):
         pass
 
 
-# ================= ИСПРАВЛЕННЫЙ ПЕРЕВОД =================
+# ================= ИСПРАВЛЕННЫЙ ПЕРЕВОД (С ЛИМИТОМ И БЕЗ БАГА С ЦИФРОЙ) =================
 @dp.message(F.text.startswith("!перевод"))
 async def cmd_transfer(message: Message):
     user = await get_user(message.from_user.id, message.from_user.username)
     parts = message.text.strip().split(maxsplit=2)
-    comment = ""
-    if len(parts) >= 3:
-        comment = parts[2]
-    elif len(parts) >= 2 and not parts[1].startswith("@"):
-        comment = parts[1]
+
     amount = 0
     target = None
+    comment = ""
+
     if message.reply_to_message and message.reply_to_message.from_user:
         target = message.reply_to_message.from_user
         if len(parts) >= 2:
             try:
-                amount = int(parts[1].split()[0])
+                amount = int(parts[1])
             except:
                 pass
+        if len(parts) >= 3:
+            # Если третье слово - не число, то это комментарий
+            if not parts[2].isdigit(): comment = parts[2]
     else:
-        if len(parts) >= 2:
-            if parts[1].startswith("@"):
-                target = await get_user_global(parts[1].split()[0])
-                if not target: return await message.answer("❌ Пользователь не найден в базе (даже глобально).")
-                if len(parts) >= 3:
-                    try:
-                        amount = int(parts[2].split()[0])
-                    except:
-                        pass
-            else:
-                return await message.answer("❌ Формат: <code>!перевод @user 500 Комментарий</code> (или ответом)",
-                                            parse_mode="HTML")
+        if len(parts) >= 2 and parts[1].startswith("@"):
+            target = await get_user_global(parts[1])
+            if not target: return await message.answer("❌ Пользователь не найден в базе (даже глобально).")
+            if len(parts) >= 3:
+                try:
+                    amount = int(parts[2].split()[0])
+                except:
+                    pass
+                # Берем всё, что после суммы как комментарий
+                remaining_parts = parts[2].split(maxsplit=1)
+                if len(remaining_parts) > 1: comment = remaining_parts[1]
+        else:
+            return await message.answer("❌ Формат: <code>!перевод @user 500 Комментарий</code> (или ответом)",
+                                        parse_mode="HTML")
+
     if amount <= 0: return await message.answer("❌ Сумма перевода должна быть больше 0.")
     if target.id == message.from_user.id: return await message.answer("❌ Нельзя переводить себе.")
 
@@ -198,16 +198,22 @@ async def cmd_transfer(message: Message):
     if user["coins"] < amount: return await message.answer(f"❌ Недостаточно коинов. У тебя: {user['coins']} 🪙")
 
     target_user = await get_user(target.id, target.username)
-    await update_user(message.from_user.id, coins=user["coins"] - amount, daily_transfers=daily_sent + amount,
+    new_daily_sent = daily_sent + amount
+    await update_user(message.from_user.id, coins=user["coins"] - amount, daily_transfers=new_daily_sent,
                       last_transfer_reset=today)
     await update_user(target.id, coins=target_user["coins"] + amount)
 
     text = f"✅ <b>Перевод выполнен!</b>\n👤 Кому: @{target.username}\n💸 Сумма: <b>{amount}</b> 🪙"
     if comment: text += f"\n💬 Комментарий к переводу: <i>{safe_text(comment)}</i>"
+
+    # ВЫВОДИМ ЛИМИТ
+    if int(message.from_user.id) not in ADMIN_IDS:
+        text += f"\n📊 Лимит: {new_daily_sent}/{DAILY_TRANSFER_LIMIT}"
+
     await message.answer(text, parse_mode="HTML")
 
 
-# ================= ОСТАЛЬНЫЕ КОМАНДЫ =================
+# ================= БАНЫ И ВСЯКИЕ ПРИКОЛЫ =================
 @dp.message(F.text.startswith("!бан") | F.text.startswith("!разбан"))
 async def cmd_admin_ban_unban(message: Message):
     if not is_admin(message.from_user.id): return await message.answer("❌ Только для админов бота.")
@@ -225,30 +231,37 @@ async def cmd_admin_ban_unban(message: Message):
             if len(parts) >= 3: reason = parts[2]
         else:
             return await message.answer("❌ Формат: <code>!бан @user Причина</code>", parse_mode="HTML")
-    if text_lower.startswith("!бан"):
-        await asyncio.to_thread(
-            lambda: supabase.table("bans").upsert({"user_id": target.id, "reason": reason}).execute())
-        await update_user(target.id, coins=0, keys=0, inventory="[]")
+    try:
+        if text_lower.startswith("!бан"):
+            await asyncio.to_thread(
+                lambda: supabase.table("bans").upsert({"user_id": target.id, "reason": reason}).execute())
+            await update_user(target.id, coins=0, keys=0, inventory="[]")
+            await message.answer(
+                f"✅ Пользователь <b>@{target.username}</b> забанен.\nПричина: <i>{reason}</i>\nБаланс обнулен, капсулы удалены.",
+                parse_mode="HTML")
+        elif text_lower.startswith("!разбан"):
+            await asyncio.to_thread(lambda: supabase.table("bans").delete().eq("user_id", target.id).execute())
+            await message.answer(f"✅ Пользователь <b>@{target.username}</b> разбанен.", parse_mode="HTML")
+    except Exception as e:
         await message.answer(
-            f"✅ Пользователь <b>@{target.username}</b> забанен.\nПричина: <i>{reason}</i>\nБаланс обнулен, капсулы удалены.",
+            f"❌ Ошибка базы данных: <code>{str(e)}</code>\n\nУбедись, что таблица <code>bans</code> создана в Supabase.",
             parse_mode="HTML")
-    elif text_lower.startswith("!разбан"):
-        await asyncio.to_thread(lambda: supabase.table("bans").delete().eq("user_id", target.id).execute())
-        await message.answer(f"✅ Пользователь <b>@{target.username}</b> разбанен.", parse_mode="HTML")
 
 
 @dp.message(F.text.startswith("!список банов"))
 async def cmd_admin_banlist(message: Message):
     if not is_admin(message.from_user.id): return
+    try:
+        def _fetch():
+            return supabase.table("bans").select("*").execute().data
 
-    def _fetch():
-        return supabase.table("bans").select("*").execute().data
-
-    bans = await asyncio.to_thread(_fetch)
-    if not bans: return await message.answer("Список банов пуст.")
-    text = "🚫 <b>Список забаненных:</b>\n\n"
-    for b in bans: text += f"ID: <code>{b['user_id']}</code> | Причина: {b['reason']}\n"
-    await message.answer(text, parse_mode="HTML")
+        bans = await asyncio.to_thread(_fetch)
+        if not bans: return await message.answer("Список банов пуст.")
+        text = "🚫 <b>Список забаненных:</b>\n\n"
+        for b in bans: text += f"ID: <code>{b['user_id']}</code> | Причина: {b['reason']}\n"
+        await message.answer(text, parse_mode="HTML")
+    except Exception as e:
+        await message.answer(f"❌ Ошибка: {e}")
 
 
 @dp.message(F.text.startswith("!забрать капсулы"))
@@ -671,6 +684,7 @@ async def cmd_apka(message: Message):
     await message.answer(text, parse_mode="HTML")
 
 
+# ================= СКРЫТЫЕ КОМАНДЫ =================
 @dp.message(F.text.startswith("!all") | F.text.startswith("!стоп") | F.text.startswith("!admins") | F.text.startswith(
     "!админы") | F.text.startswith("!setme") | F.text.startswith("!changeme") | F.text.startswith(
     "!me") | F.text.startswith("!позывной"))
@@ -773,6 +787,17 @@ async def start_fake_website():
 
 async def main():
     await start_fake_website()
+
+    # ПРИНУДИТЕЛЬНЫЙ БАН ТЕХ САМЫХ ID ПРИ ЗАПУСКЕ
+    for uid in BAN_IDS_ON_START:
+        try:
+            await asyncio.to_thread(
+                lambda: supabase.table("bans").upsert({"user_id": uid, "reason": "Багоюз (автобан)"}).execute())
+            await update_user(uid, coins=0, keys=0, inventory="[]")
+            logger.info(f"🔨 Автобан для ID {uid} применен.")
+        except Exception as e:
+            logger.error(f"Ошибка автобана {uid}: {e}")
+
     me = await bot.get_me()
     logger.info(f"🤖 Бот: @{me.username}")
     await dp.start_polling(bot)
