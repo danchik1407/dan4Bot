@@ -22,8 +22,13 @@ let upgradeFrom = 'coin';                                   // 'coin' | 'capsule
 let upgradeFromAmount = 100;                                // коины или количество капсул
 let upgradeToTab = 'coin';                                  // вкладка правой панели
 let upgradeTarget = { kind: 'mult', value: 2 };             // mult | chance | item
-let upgradeBusy = false, upgradeStartedAt = 0, upgradeTicker = null;
+let upgradeBusy = false, upgradeStartedAt = 0;
+// Белая стрелка: угол в градусах (0 = вверх), rAF-цикл и «поколение» прогона,
+// чтобы запоздавшие колбэки от прошлого спина не перетирали новый результат.
+let upgradeArrowAngle = 0, upgradeArrowRaf = null, upgradeSpinToken = 0;
 const UPGRADE_DURATION = 3000;
+const UPGRADE_ARROW_SPEED = 900;      // градусов в секунду в фазе ожидания ответа сервера
+const UPGRADE_ARROW_MIN_LAND = 650;   // минимум времени на торможение, мс
 const UPGRADE_MIN_COINS = 50, UPGRADE_MAX_COINS = 5000, UPGRADE_MAX_CAPSULES = 50;
 const UPGRADE_MAX_CHANCE = 95;
 const UPGRADE_MULTS = [2, 4, 5, 8, 10];
@@ -491,7 +496,6 @@ function upgradeAmountLimits() {
 }
 
 function upgradeCanStart() {
-    if (upgradeBusy) return false;
     const value = upgradeSourceValue();
     if (value <= 0) return false;
     if (upgradeFrom === 'coin') {
@@ -528,7 +532,11 @@ function setUpgradeResult(text, state) {
 
 function clearUpgradeResult() {
     const circle = document.getElementById('up-circle');
-    if (circle) circle.classList.remove('win', 'lose', 'spinning');
+    if (circle) circle.classList.remove('win', 'lose');
+    if (!upgradeBusy) {
+        stopUpgradeArrow();
+        resetUpgradeArrow();
+    }
     const btn = document.getElementById('upgrade-btn');
     if (btn) btn.classList.remove('win', 'lose');
     setUpgradeResult('Выбери предмет и цель', '');
@@ -599,9 +607,13 @@ function renderUpgrade() {
 
     // --- кнопка ---
     const btn = document.getElementById('upgrade-btn');
-    if (btn && !upgradeBusy) {
-        btn.disabled = !upgradeCanStart();
-        btn.innerText = 'АПГРЕЙД';
+    if (btn) {
+        if (upgradeBusy) {
+            btn.disabled = true;
+        } else {
+            btn.disabled = !upgradeCanStart();
+            btn.innerText = 'АПГРЕЙД';
+        }
     }
     updateUpgradeStatsUI();
 }
@@ -750,6 +762,13 @@ function syncUpgradeAmountFromInput() {
     renderUpgrade();
 }
 
+// Профиль может ещё грузиться — тогда isAdmin ещё false, и админ зря увидел бы «Скоро...».
+async function ensureUserLoaded() {
+    if (userDataLoaded) return true;
+    try { await loadUserData(); } catch (e) { console.error('Не удалось загрузить профиль', e); }
+    return userDataLoaded;
+}
+
 function updateUpgradeAccess() {
     const card = document.getElementById('game-card-upgrade');
     if (card) card.classList.toggle('locked', !isAdmin);
@@ -766,43 +785,139 @@ function updateUpgradeStatsUI() {
     setText('upg-stat-best', upgradeStats.best > 0 ? formatCoins(upgradeStats.best) : '—');
 }
 
-function openUpgrade() {
+async function openUpgrade() {
+    const loaded = await ensureUserLoaded();
+    if (!loaded) return tg.showAlert('Не удалось загрузить профиль. Проверьте соединение.');
     if (!isAdmin) return tg.showAlert('Скоро...');
+    upgradeSpinToken++;          // отменяем возможную недоигранную анимацию
+    resetUpgradeArrow();
     openGame('upgrade');
     clearUpgradeResult();
     renderUpgrade();
 }
 
-function startUpgradeTicker() {
-    const chanceEl = document.getElementById('up-chance');
-    if (!chanceEl) return;
-    if (upgradeTicker) clearInterval(upgradeTicker);
-    upgradeTicker = setInterval(() => {
-        chanceEl.innerText = (Math.random() * 95).toFixed(2) + '%';
-    }, 70);
+// ================= БЕЛАЯ СТРЕЛКА =================
+function setUpgradeArrowAngle(deg) {
+    upgradeArrowAngle = deg;
+    const arrow = document.getElementById('up-arrow');
+    if (arrow) arrow.style.transform = `rotate(${deg}deg)`;
 }
 
-function stopUpgradeTicker() {
-    if (upgradeTicker) clearInterval(upgradeTicker);
-    upgradeTicker = null;
+function stopUpgradeArrow() {
+    if (upgradeArrowRaf !== null && typeof cancelAnimationFrame === 'function') cancelAnimationFrame(upgradeArrowRaf);
+    upgradeArrowRaf = null;
+}
+
+function resetUpgradeArrow() {
+    stopUpgradeArrow();
+    setUpgradeArrowAngle(0);
+}
+
+// Фаза 1: пока ждём ответ сервера — стрелка просто ровно крутится.
+function startUpgradeArrowSpin(token) {
+    stopUpgradeArrow();
+    const nowMs = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
+    let last = nowMs();
+    const step = () => {
+        if (token !== upgradeSpinToken) return;
+        const now = nowMs();
+        const dt = Math.max(0, Math.min(now - last, 120));
+        last = now;
+        setUpgradeArrowAngle(upgradeArrowAngle + UPGRADE_ARROW_SPEED * dt / 1000);
+        upgradeArrowRaf = typeof requestAnimationFrame === 'function'
+            ? requestAnimationFrame(step)
+            : setTimeout(() => step(), 16);
+    };
+    upgradeArrowRaf = typeof requestAnimationFrame === 'function'
+        ? requestAnimationFrame(step)
+        : setTimeout(() => step(), 16);
+}
+
+// Фаза 2: плавно тормозим и останавливаемся ровно на нужном секторе.
+function landUpgradeArrow(won, chance, duration, token, onDone) {
+    stopUpgradeArrow();
+    const arc = Math.max(0.5, Math.min(360, (Number(chance) || 0) * 3.6));
+    let desired;
+    if (won) {
+        // Внутри синей дуги (шанс), с отступом от краёв.
+        const margin = Math.min(arc * 0.18, Math.max(arc * 0.1, 2));
+        desired = margin + Math.random() * Math.max(arc - margin * 2, arc * 0.25);
+    } else {
+        // Снаружи дуги — там, где сектор проигрыша.
+        const free = Math.max(360 - arc, 4);
+        desired = arc + free * 0.18 + Math.random() * free * 0.64;
+    }
+    desired = ((desired % 360) + 360) % 360;
+
+    const current = ((upgradeArrowAngle % 360) + 360) % 360;
+    const delta = ((desired - current) % 360 + 360) % 360;
+    const turns = duration >= 2500 ? 4 : duration >= 1200 ? 3 : 1;
+    const target = upgradeArrowAngle + turns * 360 + delta;
+
+    const startAngle = upgradeArrowAngle;
+    const startTime = typeof performance !== 'undefined' ? performance.now() : Date.now();
+    const total = Math.max(0, duration);
+    let finished = false;
+
+    const complete = () => {
+        if (finished) return;
+        finished = true;
+        stopUpgradeArrow();
+        setUpgradeArrowAngle(desired);   // фиксируем точное положение
+        if (token === upgradeSpinToken && typeof onDone === 'function') onDone();
+    };
+
+    // easeOutQuint: быстро в начале, ощутимое торможение в конце.
+    const ease = (t) => 1 - Math.pow(1 - t, 5);
+    const step = () => {
+        if (token !== upgradeSpinToken) { finished = true; return; }
+        const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
+        const progress = total > 0 ? Math.min(1, (now - startTime) / total) : 1;
+        setUpgradeArrowAngle(startAngle + (target - startAngle) * ease(progress));
+        if (progress >= 1) { complete(); return; }
+        upgradeArrowRaf = typeof requestAnimationFrame === 'function'
+            ? requestAnimationFrame(step)
+            : setTimeout(() => step(), 16);
+    };
+    upgradeArrowRaf = typeof requestAnimationFrame === 'function'
+        ? requestAnimationFrame(step)
+        : setTimeout(() => step(), 16);
+    // Страховка: если вкладка была свёрнута и rAF «замёрз», завершаем по таймеру.
+    setTimeout(complete, total + 260);
 }
 
 async function startUpgrade() {
     if (upgradeBusy) return;
-    if (!isAdmin) return tg.showAlert('Скоро...');
-    if (!userDataLoaded) {
-        await loadUserData();
-        if (!userDataLoaded) return tg.showAlert('Не удалось загрузить баланс. Проверьте соединение.');
-    }
-    if (!upgradeCanStart()) {
-        if (!upgradeChanceIsValid(upgradeChance())) {
-            return tg.showAlert(upgradeChance() > UPGRADE_MAX_CHANCE
-                ? 'Шанс выше 95% — выбери цель подороже'
-                : 'Шанс слишком низкий — выбери цель подешевле');
+
+    // Блокировка ставится до любых await: иначе двойной клик во время загрузки
+    // профиля отправил бы две ставки.
+    upgradeBusy = true;
+
+    try {
+        const loaded = await ensureUserLoaded();
+        if (!loaded) {
+            upgradeBusy = false;
+            return tg.showAlert('Не удалось загрузить баланс. Проверьте соединение.');
         }
-        if (upgradeFrom === 'coin' && balance < upgradeFromAmount) return tg.showAlert('Недостаточно коинов!');
-        if (upgradeFrom !== 'coin' && countItem(upgradeFrom) < upgradeFromAmount) return tg.showAlert('Недостаточно капсул!');
-        return tg.showAlert('Такой апгрейд сейчас невозможен');
+        if (!isAdmin) {
+            upgradeBusy = false;
+            return tg.showAlert('Скоро...');
+        }
+        if (!upgradeCanStart()) {
+            upgradeBusy = false;
+            if (!upgradeChanceIsValid(upgradeChance())) {
+                return tg.showAlert(upgradeChance() > UPGRADE_MAX_CHANCE
+                    ? 'Шанс выше 95% — выбери цель подороже'
+                    : 'Шанс слишком низкий — выбери цель подешевле');
+            }
+            if (upgradeFrom === 'coin' && balance < upgradeFromAmount) return tg.showAlert('Недостаточно коинов!');
+            if (upgradeFrom !== 'coin' && countItem(upgradeFrom) < upgradeFromAmount) return tg.showAlert('Недостаточно капсул!');
+            return tg.showAlert('Такой апгрейд сейчас невозможен');
+        }
+    } catch (e) {
+        upgradeBusy = false;
+        console.error('Ошибка подготовки апгрейда', e);
+        return tg.showAlert('Не удалось подготовить апгрейд');
     }
 
     const payload = {
@@ -815,61 +930,80 @@ async function startUpgrade() {
     if (upgradeTarget.kind === 'chance') payload.target_chance = Number(upgradeTarget.value);
 
     const chance = upgradeChance();
-    upgradeBusy = true;
     upgradeStartedAt = Date.now();
+    const token = ++upgradeSpinToken;   // всё, что прилетит от прошлых прогонов, игнорируем
 
     const circle = document.getElementById('up-circle');
     if (circle) { circle.classList.remove('win', 'lose'); circle.classList.add('spinning'); }
     const btn = document.getElementById('upgrade-btn');
     if (btn) { btn.disabled = true; btn.classList.remove('win', 'lose'); btn.innerText = 'КРУТИМ...'; }
     setUpgradeResult('Крутим...', 'spinning');
-    startUpgradeTicker();
+    startUpgradeArrowSpin(token);
     playSound('click');
 
     let data = null;
     let errorText = '';
     let unauthorized = false;
+    let timedOut = false;
+    const controller = (typeof AbortController === 'function') ? new AbortController() : null;
+    const abortTimer = controller ? setTimeout(() => { timedOut = true; controller.abort(); }, 8000) : null;
     try {
-        const res = await fetch(`${API_URL}/api/upgrade_action`, {
+        const options = {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(payload)
-        });
+        };
+        if (controller) options.signal = controller.signal;
+        const res = await fetch(`${API_URL}/api/upgrade_action`, options);
         data = await res.json().catch(() => ({}));
         if (!res.ok) {
             errorText = data.detail || 'Не удалось запустить апгрейд';
             unauthorized = res.status === 403;
+            data = null;
         }
     } catch (e) {
         console.error('Ошибка апгрейда', e);
-        errorText = 'Ошибка соединения';
+        errorText = timedOut ? 'Сервер не ответил. Проверьте соединение' : 'Ошибка соединения';
+    } finally {
+        if (abortTimer) clearTimeout(abortTimer);
     }
 
-    // Анимация всегда длится ровно 3 секунды, даже если сервер ответил мгновенно.
+    if (token !== upgradeSpinToken) return;   // за это время запустили новый спин
+
+    // Общая длительность анимации — 3 секунды: остаток времени уходит на торможение стрелки.
     const elapsed = Date.now() - upgradeStartedAt;
-    const remaining = Math.max(0, UPGRADE_DURATION - elapsed);
-    setTimeout(() => {
-        stopUpgradeTicker();
+    const remaining = Math.max(UPGRADE_ARROW_MIN_LAND, UPGRADE_DURATION - elapsed);
+
+    if (errorText || !data) {
+        stopUpgradeArrow();
         if (circle) circle.classList.remove('spinning');
-        if (errorText || !data) {
-            upgradeBusy = false;
-            setUpgradeResult(errorText || 'Не удалось запустить апгрейд', 'lose');
-            if (btn) { btn.disabled = false; btn.innerText = 'АПГРЕЙД'; }
-            if (unauthorized) { isAdmin = false; updateUpgradeAccess(); }
-            if (circle) circle.classList.add('lose');
-            tg.showAlert(errorText || 'Не удалось запустить апгрейд');
-            renderUpgrade();
-            return;
-        }
+        upgradeBusy = false;
+        if (circle) circle.classList.add('lose');
+        setUpgradeResult(errorText || 'Не удалось запустить апгрейд', 'lose');
+        if (btn) { btn.disabled = false; btn.innerText = 'АПГРЕЙД'; }
+        if (unauthorized) { isAdmin = false; updateUpgradeAccess(); }
+        tg.showAlert(errorText || 'Не удалось запустить апгрейд');
+        renderUpgrade();
+        // Ставка могла уйти на сервер, даже если ответ потерялся — сверяем баланс.
+        if (!unauthorized) { try { await loadUserData(); } catch (e) {} }
+        return;
+    }
+
+    const won = Boolean(data.success || data.won);
+    landUpgradeArrow(won, chance, remaining, token, () => {
+        if (circle) circle.classList.remove('spinning');
+        if (token !== upgradeSpinToken) return;
         finishUpgradeAnimation(data, chance);
-    }, remaining);
+    });
 }
 
+// Результат уже посчитан сервером: здесь только показываем его игроку.
 function finishUpgradeAnimation(data, chance) {
+    if (!data) return;
     upgradeBusy = false;
     const circle = document.getElementById('up-circle');
     const btn = document.getElementById('upgrade-btn');
-    const won = Boolean(data && (data.success || data.won));
+    const won = Boolean(data.success || data.won);
 
     balance = Number.isFinite(Number(data.new_balance)) ? Number(data.new_balance) : balance;
     inventory = Array.isArray(data.new_inventory) ? data.new_inventory
@@ -883,7 +1017,7 @@ function finishUpgradeAnimation(data, chance) {
     if (won && rewardValue > upgradeStats.best) upgradeStats.best = rewardValue;
 
     if (circle) {
-        circle.classList.remove('win', 'lose');
+        circle.classList.remove('spinning', 'win', 'lose');
         circle.classList.add(won ? 'win' : 'lose');
         circle.style.setProperty('--p', ((Number(chance) || 0) * 3.6).toFixed(2) + 'deg');
     }
@@ -906,7 +1040,8 @@ function finishUpgradeAnimation(data, chance) {
         playSound('win');
         try { tg.HapticFeedback.notificationOccurred('success'); } catch (e) {}
     } else {
-        setUpgradeResult(upgradeFrom === 'coin' ? '❌ Не повезло. Ставка сгорела' : '❌ Не повезло. Капсулы сгорели', 'lose');
+        const lostSource = data.item_from || upgradeFrom;
+        setUpgradeResult(lostSource === 'coin' ? '❌ Не повезло. Ставка сгорела' : '❌ Не повезло. Капсулы сгорели', 'lose');
         playSound('lose');
         try { tg.HapticFeedback.notificationOccurred('error'); } catch (e) {}
     }
@@ -914,7 +1049,7 @@ function finishUpgradeAnimation(data, chance) {
     updateUI();
 }
 
-// ================= МИНЫ =================// ================= МИНЫ =================
+// ================= МИНЫ =================
 let minesActive = false, minesCoef = 1.0, minesSafeOpened = 0, selectedMines = 1;
 const board = document.getElementById('mines-board');
 if (board) {
