@@ -22,7 +22,7 @@ SHOP_ITEMS = {
         "emoji": "⚱️",
         "price": 1000,
         "daily_limit": 30,
-        "admin_only": True,
+        "admin_only": False,
         "shop_image": "uniq_capsule.png",
         "inventory_image": "inv_uniq_capsule.png",
     },

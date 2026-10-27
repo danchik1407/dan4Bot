@@ -162,6 +162,7 @@ async def cmd_admin_help(message: Message):
         "• <code>разбан @user</code> — разбанить\n"
         "• <code>список банов</code> — список всех забаненных\n"
         "• <code>забрать капсулы @user</code> — удалить все капсулы\n"
+        "• <code>апгрейд</code> — ссылка на игру «Апгрейд»\n"
         "• <code>забрать всё @user</code> — полностью очистить инвентарь и баланс\n\n"
         "💰 <b>Экономика:</b>\n"
         "• <code>+пополнить карман @user 500</code> — выдать коины\n"
@@ -580,6 +581,27 @@ async def cmd_shop(message: Message):
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
     )
+
+
+# ================= АПГРЕЙД (АДМИНЫ) =================
+MINIAPP_URL = "https://t.me/Auragameplay_bot/Auragame"
+
+
+@dp.message(F.text.func(lambda t: strip_prefix(t).lower().startswith("апгрейд")))
+async def cmd_upgrade(message: Message):
+    if not is_admin(message.from_user.id):
+        return await message.answer("❌ Команда доступна только администраторам бота.")
+    text = (
+        "🛠️ <b>Апгрейд</b>\n\n"
+        "Улучшай коины и капсулы с шансом на крупный кэф.\n"
+        "Коины: от 50 до 5 000 🪙 · кэфы x1.5, x2, x3, x5, x10\n"
+        "Обычная капсула 💊 → Уникальная ⚱️ · Уникальная ⚱️ → 2 000 🪙\n\n"
+        "Открывай мини-аппку 👇"
+    )
+    kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="🛠️ Открыть Апгрейд", url=MINIAPP_URL)
+    ]])
+    await message.answer(text, parse_mode="HTML", reply_markup=kb, disable_web_page_preview=True)
 
 
 # ================= ВЫДАТЬ КЛЮЧИ =================
