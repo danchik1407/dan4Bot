@@ -25,16 +25,22 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_IDS = [6338018270, 5184813347, 8890834384]
 MAX_BET = 10000
 
-# ==================== АПГРЕЙД ====================
-UPGRADE_MIN_BET = 50
-UPGRADE_MAX_BET = 5000
-UPGRADE_MAX_CAPSULES = 50
-UPGRADE_COIN_MULTIPLIERS = [1.5, 2.0, 3.0, 5.0, 10.0]
-# Капсульные апгрейды: обычная -> уникальная, уникальная -> коины.
-UPGRADE_CAPSULE_RULES = {
-    "capsule": {"reward_item": "uniq_capsule", "reward_coins": 0, "multiplier": 2.0},
-    "uniq_capsule": {"reward_item": None, "reward_coins": 2000, "multiplier": 2.0},
-}
+# ==================== АПГРЕЙД (TONGRADER) ====================
+# Шанс = (стоимость предмета слева / стоимость цели справа) * 100.
+UPGRADE_MIN_BET = 50            # минимум коинов на левой панели
+UPGRADE_MAX_BET = 5000          # максимум коинов на левой панели
+UPGRADE_MAX_CAPSULES = 50       # максимум капсул за один апгрейд
+UPGRADE_MIN_CHANCE = 0.5        # ниже 0.5% цель считается недостижимой
+UPGRADE_MAX_CHANCE = 95.0       # 100% и выше не выдаём
+UPGRADE_MAX_REWARD = 100000     # предохранитель по выплате
+UPGRADE_COIN_MULTIPLIERS = [2, 4, 5, 8, 10]
+UPGRADE_QUICK_CHANCES = [35, 55, 75]
+UPGRADE_ITEM_PRICES = {"capsule": 500, "uniq_capsule": 1000}
+UPGRADE_SOURCES = ("coin", "capsule", "uniq_capsule")
+UPGRADE_TARGETS = ("coin", "capsule", "uniq_capsule")
+# Пока играют только админы — шанс честный. Когда откроем для всех,
+# реальный шанс = визуальный / этот делитель (то есть x2 = 25%).
+UPGRADE_NON_ADMIN_DIVIDER = 2
 
 BOT_NAMES = ["Shark_V", "LuckyFox", "NeonWolf", "GhostByte", "PixelKing", "CyberCat", "IronFist", "VoidWalker",
              "ShadowAce", "RogueOne", "Toxic", "Viper", "Sniper", "ProGamer", "NoobMaster", "Killer", "Dragon"]
@@ -341,10 +347,16 @@ class CrashCashout(BaseModel): initData: str
 
 class UpgradeAction(BaseModel):
     initData: str
-    bet_type: str
+    # Новый контракт: что ставим (item_from) и что хотим получить (item_to).
+    item_from: Optional[str] = None
+    amount_from: Optional[int] = None
+    item_to: Optional[str] = None
+    target_multiplier: Optional[float] = None
+    target_chance: Optional[float] = None
+    # Запасной вариант для старого закешированного клиента (bet_type/amount/quantity).
+    bet_type: Optional[str] = None
     amount: Optional[int] = None
     quantity: Optional[int] = None
-    target_multiplier: Optional[float] = None
 
 
 # ==================== АРЕНА (ХОККЕЙ) ====================
@@ -752,14 +764,81 @@ async def buy_item(data: BuyItem):
     except ShopPurchaseError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
 
-# ==================== АПГРЕЙД ====================
-def _upgrade_coin_chance(multiplier: float) -> float:
-    """Secret house edge: x2 looks like 50% but actually wins 25% of the time."""
-    return 100.0 / float(multiplier) / 2.0
+# ==================== АПГРЕЙД (TONGRADER) ====================
+def _upgrade_normalize_request(data: "UpgradeAction") -> tuple[str, int, str, str]:
+    """Приводим новый и старый контракт к (source, amount, target, extra).
+
+    Новый клиент присылает item_from / amount_from / item_to (+ target_*),
+    старый закешированный — bet_type / amount|quantity / target_multiplier.
+    """
+    source = (data.item_from or data.bet_type or "").strip().lower()
+    if source not in UPGRADE_SOURCES:
+        raise HTTPException(status_code=400, detail="Неизвестный предмет для апгрейда")
+
+    raw_amount = data.amount_from if data.amount_from is not None else (
+        data.amount if data.amount is not None else data.quantity)
+    try:
+        amount = int(raw_amount or 0)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="Некорректное количество")
+
+    target = (data.item_to or "").strip().lower()
+    if not target:
+        # старый контракт: bet_type=capsule подразумевал апгрейд в уникальную капсулу
+        target = "uniq_capsule" if source == "capsule" else "coin"
+
+    if target not in UPGRADE_TARGETS:
+        raise HTTPException(status_code=400, detail="Неизвестная цель апгрейда")
+    return source, amount, target, source
+
+
+def _upgrade_source_value(source: str, amount: int) -> int:
+    if source == "coin":
+        return amount
+    return UPGRADE_ITEM_PRICES[source] * amount
+
+
+def _upgrade_target_value(source: str, amount: int, target: str,
+                          multiplier: Optional[float], chance: Optional[float]) -> tuple[int, float]:
+    """Возвращает (стоимость цели, визуальный шанс успеха в процентах)."""
+    from_value = _upgrade_source_value(source, amount)
+
+    if target == "coin":
+        if chance is not None:
+            if chance <= 0 or chance > UPGRADE_MAX_CHANCE:
+                raise HTTPException(status_code=400, detail=f"Шанс должен быть от 0 до {int(UPGRADE_MAX_CHANCE)}%")
+            to_value = int(round(from_value / (chance / 100.0)))
+        else:
+            try:
+                multiplier = float(multiplier or 0)
+            except (TypeError, ValueError):
+                raise HTTPException(status_code=400, detail="Некорректный коэффициент")
+            if multiplier <= 1:
+                raise HTTPException(status_code=400, detail="Коэффициент должен быть больше x1")
+            to_value = int(round(from_value * multiplier))
+        win_amount = to_value
+    else:
+        # Цель — капсула: за успех выдаём ровно одну штуку.
+        to_value = UPGRADE_ITEM_PRICES[target]
+        win_amount = 1
+
+    if to_value <= 0:
+        raise HTTPException(status_code=400, detail="Некорректная цель апгрейда")
+    if to_value > UPGRADE_MAX_REWARD:
+        raise HTTPException(status_code=400, detail="Слишком большой апгрейд за один раз")
+
+    visual_chance = from_value / to_value * 100.0
+    if visual_chance > UPGRADE_MAX_CHANCE:
+        raise HTTPException(status_code=400,
+                            detail=f"Шанс {visual_chance:.2f}% слишком высокий — выбери цель подороже")
+    if visual_chance < UPGRADE_MIN_CHANCE:
+        raise HTTPException(status_code=400,
+                            detail=f"Шанс {visual_chance:.2f}% слишком низкий — выбери цель подешевле")
+    return win_amount, visual_chance
 
 
 def _upgrade_read_user(user_id: int):
-    """Read the fields the upgrader needs. Only coins/inventory, so no PGRST204 on missing columns."""
+    """Читаем только нужные поля — никаких обращений к несуществующим колонкам (PGRST204)."""
     response = (
         supabase.table("users")
         .select("coins, inventory")
@@ -778,7 +857,7 @@ def _upgrade_read_user(user_id: int):
 
 
 def _upgrade_write_user(user_id: int, raw_coins: int, raw_inventory, coins: int, inventory: list) -> bool:
-    """Optimistic write: only applies if balance/inventory are still what we validated."""
+    """Оптимистичная запись: применяется, только если баланс/инвентарь не изменились."""
     update_values = {"coins": coins, "inventory": json.dumps(inventory, ensure_ascii=False)}
     query = supabase.table("users").update(update_values).eq("user_id", user_id).eq("coins", raw_coins)
     if raw_inventory is not None:
@@ -789,99 +868,85 @@ def _upgrade_write_user(user_id: int, raw_coins: int, raw_inventory, coins: int,
 
 @app.post("/api/upgrade_action")
 async def upgrade_action(data: UpgradeAction):
+    """Апгрейд предмета: слева ставка, справа цель. Шанс = стоимость слева / стоимость справа."""
     user = verify_telegram_data(data.initData)
     if not user:
         raise HTTPException(status_code=401, detail="Invalid auth data")
 
     user_id = int(user["id"])
-    if not is_admin_id(user_id, ADMIN_IDS):
+    admin = is_admin_id(user_id, ADMIN_IDS)
+    if not admin:
+        # Игра пока открыта только администраторам.
         raise HTTPException(status_code=403, detail="Апгрейд доступен только администраторам")
 
     check_ban(str(user_id))
 
-    bet_type = (data.bet_type or "").strip().lower()
-    if bet_type not in ("coin", "capsule", "uniq_capsule"):
-        raise HTTPException(status_code=400, detail="Неизвестный тип ставки")
+    source, amount, target, _ = _upgrade_normalize_request(data)
 
-    amount = 0
-    quantity = 0
-    target_multiplier = 0.0
-
-    if bet_type == "coin":
-        try:
-            amount = int(data.amount or 0)
-        except (TypeError, ValueError):
-            raise HTTPException(status_code=400, detail="Некорректная сумма ставки")
+    if source == "coin":
         if amount < UPGRADE_MIN_BET:
             raise HTTPException(status_code=400, detail=f"Минимальная ставка {UPGRADE_MIN_BET} 🪙")
         if amount > UPGRADE_MAX_BET:
             raise HTTPException(status_code=400, detail=f"Максимальная ставка {UPGRADE_MAX_BET} 🪙")
-        try:
-            target_multiplier = float(data.target_multiplier or 0)
-        except (TypeError, ValueError):
-            raise HTTPException(status_code=400, detail="Некорректный коэффициент")
-        if target_multiplier not in UPGRADE_COIN_MULTIPLIERS:
-            raise HTTPException(status_code=400, detail="Такого коэффициента нет")
-        chance = _upgrade_coin_chance(target_multiplier)
     else:
-        try:
-            quantity = int(data.quantity or 0)
-        except (TypeError, ValueError):
-            raise HTTPException(status_code=400, detail="Некорректное количество капсул")
-        if quantity < 1:
+        if amount < 1:
             raise HTTPException(status_code=400, detail="Минимум 1 капсула")
-        if quantity > UPGRADE_MAX_CAPSULES:
+        if amount > UPGRADE_MAX_CAPSULES:
             raise HTTPException(status_code=400, detail=f"Максимум {UPGRADE_MAX_CAPSULES} капсул за раз")
-        target_multiplier = UPGRADE_CAPSULE_RULES[bet_type]["multiplier"]
-        chance = _upgrade_coin_chance(target_multiplier)
 
-    # Списываем сразу и зачисляем выигрыш одной атомарной записью: параллельные
-    # нажатия не могут ни увести баланс в минус, ни выдать двойной приз.
+    win_amount, visual_chance = _upgrade_target_value(
+        source, amount, target, data.target_multiplier, data.target_chance
+    )
+    # Пока играют только админы — шанс честный. Для обычных игроков (в будущем)
+    # реальный шанс будет в UPGRADE_NON_ADMIN_DIVIDER раз меньше визуального.
+    real_chance = visual_chance if admin else visual_chance / UPGRADE_NON_ADMIN_DIVIDER
+
     for _attempt in range(5):
         raw_coins, raw_inventory = _upgrade_read_user(user_id)
         inventory = parse_inventory(raw_inventory)
 
-        if bet_type == "coin":
+        # Списание сразу — до броска, чтобы ставку нельзя было абузить.
+        if source == "coin":
             if raw_coins < amount:
                 raise HTTPException(status_code=400, detail="Недостаточно коинов")
-            total_units = 1
-            won_units = 1 if random.random() * 100.0 < chance else 0
-            payout = int(round(amount * target_multiplier)) if won_units else 0
-            new_coins = raw_coins - amount + payout
-            new_inventory = list(inventory)
-            won_items = {}
+            new_coins = raw_coins - amount
         else:
-            owned = inventory.count(bet_type)
-            if owned < quantity:
+            owned = inventory.count(source)
+            if owned < amount:
                 raise HTTPException(status_code=400, detail="Недостаточно капсул")
-            total_units = quantity
-            won_units = sum(1 for _ in range(quantity) if random.random() * 100.0 < chance)
-            rule = UPGRADE_CAPSULE_RULES[bet_type]
+            for _ in range(amount):
+                inventory.remove(source)
+            new_coins = raw_coins
+
+        won = random.random() * 100.0 < real_chance
+        win_item = None
+        if won:
             new_inventory = list(inventory)
-            for _ in range(quantity):
-                new_inventory.remove(bet_type)
-            payout = 0
-            won_items = {}
-            if won_units:
-                if rule["reward_item"]:
-                    new_inventory.extend([rule["reward_item"]] * won_units)
-                    won_items = {rule["reward_item"]: won_units}
-                else:
-                    payout = int(rule["reward_coins"]) * won_units
-            new_coins = raw_coins + payout
+            if target == "coin":
+                new_coins += win_amount
+                win_item = "coin"
+            else:
+                new_inventory.append(target)
+                win_item = target
+            if new_coins > UPGRADE_MAX_REWARD * 10:
+                new_coins = min(new_coins, UPGRADE_MAX_REWARD * 10)
+        else:
+            new_inventory = list(inventory)
+            win_amount = 0
 
         if _upgrade_write_user(user_id, raw_coins, raw_inventory, new_coins, new_inventory):
             return {
-                "success": True,
-                "bet_type": bet_type,
-                "won": won_units > 0,
-                "win_units": won_units,
-                "total_units": total_units,
-                "target_multiplier": target_multiplier,
-                "payout": payout,
-                "won_items": won_items,
+                "success": won,
+                "won": won,
+                "item_from": source,
+                "amount_from": amount,
+                "item_to": target,
+                "chance": round(visual_chance, 2),
+                "win_item": win_item,
+                "win_amount": win_amount,
                 "new_balance": new_coins,
                 "inventory": new_inventory,
+                "new_inventory": new_inventory,
             }
 
     raise HTTPException(status_code=409, detail="Апгрейд уже обрабатывается. Попробуйте ещё раз.")

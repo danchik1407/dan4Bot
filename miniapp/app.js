@@ -18,8 +18,16 @@ let shopItemsLoaded = false;
 let balance = 0, keys = 0, currentBet = 10, inventory = [], lastChestTime = 0, isProcessing = false, userDataLoaded = false;
 let isAdmin = false;
 // Апгрейд — только для админов (ADMIN_IDS на сервере). Флаг приходит из /api/user.
-let upgradeType = 'coin', upgradeMultiplier = 2, upgradeDuration = 3, upgradeBusy = false, wheelRotation = 0;
+let upgradeFrom = 'coin';                                   // 'coin' | 'capsule' | 'uniq_capsule'
+let upgradeFromAmount = 100;                                // коины или количество капсул
+let upgradeToTab = 'coin';                                  // вкладка правой панели
+let upgradeTarget = { kind: 'mult', value: 2 };             // mult | chance | item
+let upgradeBusy = false, upgradeStartedAt = 0, upgradeTicker = null;
+const UPGRADE_DURATION = 3000;
 const UPGRADE_MIN_COINS = 50, UPGRADE_MAX_COINS = 5000, UPGRADE_MAX_CAPSULES = 50;
+const UPGRADE_MAX_CHANCE = 95;
+const UPGRADE_MULTS = [2, 4, 5, 8, 10];
+const UPGRADE_FALLBACK_PRICES = { capsule: 500, uniq_capsule: 1000 };
 const upgradeStats = { total: 0, wins: 0, best: 0 };
 let hockeyInterval = null, hasShownWinner = false;
 let ball = { x: 50, y: 50, active: false, animationId: null, hasStartedAnim: false, roundId: null, path: null };
@@ -95,7 +103,7 @@ function updateUI() {
             </div>
         `).join('');
     }
-    refreshUpgradeUI();
+    renderUpgrade();
     updateUpgradeStatsUI();
 }
 
@@ -404,27 +412,111 @@ async function buyItem(itemId) {
     }
 }
 
-// ================= АПГРЕЙД =================
-function countItem(itemId) { return inventory.filter(item => item === itemId).length; }
-
-function formatMultiplier(value) { return Number.isInteger(value) ? String(value) : value.toFixed(1); }
-
-function updateUpgradeAccess() {
-    const card = document.getElementById('game-card-upgrade');
-    if (card) card.classList.toggle('locked', !isAdmin);
-    const lock = document.getElementById('upgrade-lock-icon');
-    if (lock) lock.style.display = isAdmin ? 'none' : 'inline';
-    const sub = document.getElementById('upgrade-card-sub');
-    if (sub) sub.innerText = isAdmin ? 'Улучшай капсулы' : 'Скоро...';
-    const statsBlock = document.getElementById('upgrade-stats-block');
-    if (statsBlock) statsBlock.style.display = isAdmin ? 'block' : 'none';
+// ================= АПГРЕЙД (TONGRADER style) =================
+function upgradePrice(itemId) {
+    const item = SHOP_ITEMS[itemId];
+    const price = Number(item && item.price);
+    return Number.isFinite(price) && price > 0 ? price : (UPGRADE_FALLBACK_PRICES[itemId] || 500);
 }
 
-function openUpgrade() {
-    if (!isAdmin) return tg.showAlert('Скоро...');
-    openGame('upgrade');
-    refreshUpgradeUI();
-    setUpgradeResult('Выбери предмет, кэф и запускай', '');
+function upgradeItemName(itemId) {
+    const item = SHOP_ITEMS[itemId];
+    if (item && item.name) return item.name;
+    if (itemId === 'uniq_capsule') return 'Уникальная капсула';
+    if (itemId === 'capsule') return 'Обычная капсула';
+    return 'Коины';
+}
+
+function upgradeItemEmoji(itemId) {
+    const item = SHOP_ITEMS[itemId];
+    if (item && item.emoji) return item.emoji;
+    if (itemId === 'uniq_capsule') return '⚱️';
+    if (itemId === 'capsule') return '💊';
+    return '🪙';
+}
+
+function formatCoins(value) {
+    const number = Math.max(0, Math.round(Number(value) || 0));
+    return number.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ' ');
+}
+
+function countItem(itemId) { return inventory.filter(item => item === itemId).length; }
+
+function upgradeSourceValue() {
+    const amount = Math.max(0, Number(upgradeFromAmount) || 0);
+    return upgradeFrom === 'coin' ? Math.round(amount) : upgradePrice(upgradeFrom) * Math.round(amount);
+}
+
+function upgradeTargetValue(fromValue) {
+    const base = fromValue === undefined ? upgradeSourceValue() : fromValue;
+    if (upgradeTarget.kind === 'item') return upgradePrice(upgradeTarget.value);
+    if (upgradeTarget.kind === 'chance') {
+        const chance = Number(upgradeTarget.value) / 100;
+        return chance > 0 ? base / chance : 0;
+    }
+    return base * Number(upgradeTarget.value);
+}
+
+// Сырой шанс = стоимость слева / стоимость цели. Не обрезаем: если он больше 95%,
+// цель недостижима, и это должно быть видно и в круге, и в плитке.
+function upgradeRawChance(fromValue, toValue) {
+    if (!(fromValue > 0) || !(toValue > 0)) return 0;
+    return (fromValue / toValue) * 100;
+}
+
+function upgradeChanceFor(fromValue, toValue) {
+    return Math.min(UPGRADE_MAX_CHANCE, upgradeRawChance(fromValue, toValue));
+}
+
+function upgradeChance() { return upgradeRawChance(upgradeSourceValue(), upgradeTargetValue()); }
+
+function upgradeChanceIsValid(chance) {
+    return chance >= 0.5 && chance <= UPGRADE_MAX_CHANCE;
+}
+
+function upgradeRewardText(fromValue) {
+    const base = fromValue === undefined ? upgradeSourceValue() : fromValue;
+    if (upgradeTarget.kind === 'item') {
+        return `${upgradeItemEmoji(upgradeTarget.value)} ${formatCoins(upgradePrice(upgradeTarget.value))} 🪙`;
+    }
+    return `${formatCoins(upgradeTargetValue(base))} 🪙`;
+}
+
+function upgradeOwned(itemId) { return itemId === 'coin' ? balance : countItem(itemId); }
+
+function upgradeAmountLimits() {
+    if (upgradeFrom === 'coin') return { min: UPGRADE_MIN_COINS, max: UPGRADE_MAX_COINS, step: 50 };
+    const owned = Math.max(1, countItem(upgradeFrom));
+    return { min: 1, max: Math.min(UPGRADE_MAX_CAPSULES, owned), step: 1 };
+}
+
+function upgradeCanStart() {
+    if (upgradeBusy) return false;
+    const value = upgradeSourceValue();
+    if (value <= 0) return false;
+    if (upgradeFrom === 'coin') {
+        if (upgradeFromAmount < UPGRADE_MIN_COINS || upgradeFromAmount > UPGRADE_MAX_COINS) return false;
+        if (balance < upgradeFromAmount) return false;
+    } else if (countItem(upgradeFrom) < upgradeFromAmount) {
+        return false;
+    }
+    return upgradeChanceIsValid(upgradeChance());
+}
+
+// Если капсул выбранного типа не осталось (например, после апгрейда) — уходим на коины.
+function ensureUpgradeSourceValid() {
+    if (upgradeFrom === 'coin') {
+        upgradeFromAmount = Math.min(UPGRADE_MAX_COINS, Math.max(upgradeFromAmount, UPGRADE_MIN_COINS));
+        return;
+    }
+    const owned = countItem(upgradeFrom);
+    if (owned <= 0) {
+        upgradeFrom = 'coin';
+        upgradeFromAmount = Math.min(UPGRADE_MAX_COINS, Math.max(upgradeFromAmount, UPGRADE_MIN_COINS));
+        document.querySelectorAll('.up-from-tab').forEach(tab => tab.classList.toggle('active', tab.dataset.from === 'coin'));
+        return;
+    }
+    upgradeFromAmount = Math.min(owned, UPGRADE_MAX_CAPSULES, Math.max(1, upgradeFromAmount));
 }
 
 function setUpgradeResult(text, state) {
@@ -434,115 +526,265 @@ function setUpgradeResult(text, state) {
     el.className = 'up-result' + (state ? ' ' + state : '');
 }
 
-function refreshUpgradeUI() {
-    const capsules = countItem('capsule');
-    const uniq = countItem('uniq_capsule');
-    const setText = (id, value) => { const el = document.getElementById(id); if (el) el.innerText = value; };
-    setText('up-count-capsule', capsules);
-    setText('up-count-uniq_capsule', uniq);
-
-    const capsuleBtn = document.getElementById('up-type-capsule');
-    const uniqBtn = document.getElementById('up-type-uniq_capsule');
-    if (capsuleBtn) capsuleBtn.classList.toggle('empty', capsules === 0);
-    if (uniqBtn) uniqBtn.classList.toggle('empty', uniq === 0);
-
+function clearUpgradeResult() {
+    const circle = document.getElementById('up-circle');
+    if (circle) circle.classList.remove('win', 'lose', 'spinning');
     const btn = document.getElementById('upgrade-btn');
-    if (btn) {
-        const suffix = upgradeType === 'coin' ? ` x${formatMultiplier(upgradeMultiplier)}` : '';
-        btn.innerText = upgradeBusy ? '🛠️ Крутим...' : `🛠️ Апгрейд${suffix}`;
-    }
-
-    const hint = document.getElementById('up-capsule-hint');
-    if (hint) {
-        hint.innerText = upgradeType === 'uniq_capsule'
-            ? 'Уникальная капсула ⚱️ → 2 000 🪙'
-            : 'Обычная капсула 💊 → Уникальная ⚱️';
-    }
+    if (btn) btn.classList.remove('win', 'lose');
+    setUpgradeResult('Выбери предмет и цель', '');
 }
 
-function selectUpgradeType(type, element) {
+function renderUpgrade() {
+    const setText = (id, value) => { const el = document.getElementById(id); if (el) el.innerText = value; };
+
+    ensureUpgradeSourceValid();
+
+    // --- левая панель ---
+    const fromValue = upgradeSourceValue();
+    if (document.getElementById('up-from-icon')) {
+        const icon = document.getElementById('up-from-icon');
+        icon.innerText = upgradeFrom === 'coin' ? '💰' : upgradeItemEmoji(upgradeFrom);
+    }
+    setText('up-from-name', upgradeFrom === 'coin' ? 'Коины' : upgradeItemName(upgradeFrom));
+    setText('up-from-value', upgradeFrom === 'coin'
+        ? `${formatCoins(upgradeFromAmount)} 🪙`
+        : `${upgradeFromAmount} шт. · ${formatCoins(fromValue)} 🪙`);
+
+    setText('up-owned-capsule', countItem('capsule'));
+    setText('up-owned-uniq', countItem('uniq_capsule'));
+    const capsuleTab = document.querySelector('.up-from-tab[data-from="capsule"]');
+    const uniqTab = document.querySelector('.up-from-tab[data-from="uniq_capsule"]');
+    if (capsuleTab) capsuleTab.classList.toggle('empty', countItem('capsule') === 0);
+    if (uniqTab) uniqTab.classList.toggle('empty', countItem('uniq_capsule') === 0);
+
+    // --- поле ввода и ползунок ---
+    const limits = upgradeAmountLimits();
+    const amountInput = document.getElementById('upgrade-amount');
+    if (amountInput) {
+        amountInput.min = limits.min; amountInput.max = limits.max; amountInput.step = limits.step;
+        if (String(amountInput.value) !== String(upgradeFromAmount)) amountInput.value = upgradeFromAmount;
+    }
+    const slider = document.getElementById('upgrade-slider');
+    if (slider) {
+        slider.min = limits.min; slider.max = limits.max; slider.step = limits.step;
+        if (String(slider.value) !== String(upgradeFromAmount)) slider.value = upgradeFromAmount;
+    }
+    setText('up-amount-label', upgradeFrom === 'coin' ? 'Сколько ставим?' : 'Сколько капсул?');
+    setText('up-amount-min', upgradeFrom === 'coin' ? formatCoins(limits.min) : String(limits.min));
+    setText('up-amount-max', upgradeFrom === 'coin' ? formatCoins(limits.max) : String(limits.max));
+
+    // --- круг и шанс ---
+    const chance = upgradeChance();
+    const circle = document.getElementById('up-circle');
+    if (circle) {
+        circle.style.setProperty('--p', (Math.min(chance, 100) * 3.6).toFixed(2) + 'deg');
+        circle.classList.toggle('invalid', !upgradeChanceIsValid(chance));
+    }
+    if (!upgradeBusy) setText('up-chance', chance.toFixed(2) + '%');
+    const outcome = document.getElementById('up-outcome');
+    if (outcome) {
+        outcome.innerHTML = `Выигрыш: <b>${upgradeRewardText()}</b>`;
+    }
+
+    // --- правая панель ---
+    renderUpgradeTargets();
+
+    // --- быстрые кнопки ---
+    document.querySelectorAll('.up-chip').forEach(chip => {
+        const target = chip.dataset.target || '';
+        const active = (upgradeTarget.kind === 'mult' && target === `mult:${upgradeTarget.value}`)
+            || (upgradeTarget.kind === 'chance' && target === `chance:${upgradeTarget.value}`);
+        chip.classList.toggle('active', active);
+    });
+
+    // --- кнопка ---
+    const btn = document.getElementById('upgrade-btn');
+    if (btn && !upgradeBusy) {
+        btn.disabled = !upgradeCanStart();
+        btn.innerText = 'АПГРЕЙД';
+    }
+    updateUpgradeStatsUI();
+}
+
+function renderUpgradeTargets() {
+    const grid = document.getElementById('up-to-grid');
+    if (!grid) return;
+    const fromValue = upgradeSourceValue();
+    const tiles = [];
+
+    if (upgradeToTab === 'coin') {
+        UPGRADE_MULTS.forEach(mult => {
+            const toValue = fromValue * mult;
+            const chance = upgradeRawChance(fromValue, toValue);
+            const active = upgradeTarget.kind === 'mult' && Number(upgradeTarget.value) === mult;
+            tiles.push({
+                key: `mult:${mult}`,
+                active,
+                disabled: !upgradeChanceIsValid(chance),
+                html: `<div class="up-to-tile-icon">🪙</div>
+                       <div class="up-to-tile-name">x${mult}</div>
+                       <div class="up-to-tile-value">${formatCoins(toValue)} 🪙</div>
+                       <div class="up-to-tile-chance">${chance.toFixed(2)}%</div>`
+            });
+        });
+        if (upgradeTarget.kind === 'chance') {
+            const toValue = upgradeTargetValue(fromValue);
+            const chance = upgradeRawChance(fromValue, toValue);
+            tiles.push({
+                key: `chance:${upgradeTarget.value}`,
+                active: true,
+                html: `<div class="up-to-tile-icon">🎯</div>
+                       <div class="up-to-tile-name">${Number(upgradeTarget.value).toFixed(0)}%</div>
+                       <div class="up-to-tile-value">${formatCoins(toValue)} 🪙</div>
+                       <div class="up-to-tile-chance">${chance.toFixed(2)}%</div>`
+            });
+        }
+    } else {
+        ['capsule', 'uniq_capsule'].forEach(itemId => {
+            const toValue = upgradePrice(itemId);
+            const chance = upgradeRawChance(fromValue, toValue);
+            const active = upgradeTarget.kind === 'item' && upgradeTarget.value === itemId;
+            const disabled = !upgradeChanceIsValid(chance);
+            tiles.push({
+                key: `item:${itemId}`,
+                active,
+                disabled,
+                html: `<div class="up-to-tile-icon">${upgradeItemEmoji(itemId)}</div>
+                       <div class="up-to-tile-name">${itemId === 'uniq_capsule' ? 'Уник.' : 'Обычная'}</div>
+                       <div class="up-to-tile-value">${formatCoins(toValue)} 🪙</div>
+                       <div class="up-to-tile-chance">${disabled ? '—' : chance.toFixed(2) + '%'}</div>`
+            });
+        });
+    }
+
+    grid.innerHTML = tiles.map(tile => `
+        <button class="up-to-tile${tile.active ? ' active' : ''}${tile.disabled ? ' disabled' : ''}"
+                data-target="${tile.key}" ${tile.disabled ? 'disabled' : ''}>${tile.html}</button>
+    `).join('');
+
+    grid.querySelectorAll('.up-to-tile').forEach(button => {
+        if (button.disabled) return;
+        button.addEventListener('click', () => {
+            const raw = button.dataset.target || '';
+            const [kind, value] = raw.split(':');
+            if (kind === 'item') selectUpgradeTarget('item', value);
+            else selectUpgradeTarget(kind, Number(value));
+        });
+    });
+}
+
+function selectUpgradeFrom(type, element) {
     if (upgradeBusy) return;
     if (!['coin', 'capsule', 'uniq_capsule'].includes(type)) return;
-    upgradeType = type;
-    document.querySelectorAll('.up-type-btn').forEach(btn => btn.classList.remove('active'));
+    if (type !== 'coin' && countItem(type) === 0) {
+        tg.showAlert(type === 'uniq_capsule' ? 'У тебя нет уникальных капсул' : 'У тебя нет обычных капсул');
+        return;
+    }
+    upgradeFrom = type;
+    upgradeFromAmount = type === 'coin'
+        ? Math.min(UPGRADE_MAX_COINS, Math.max(UPGRADE_MIN_COINS, upgradeFromAmount))
+        : Math.min(countItem(type), UPGRADE_MAX_CAPSULES, Math.max(1, upgradeFromAmount));
+    document.querySelectorAll('.up-from-tab').forEach(tab => tab.classList.toggle('active', tab.dataset.from === type));
     if (element) element.classList.add('active');
-    const isCoin = type === 'coin';
-    const amountBlock = document.getElementById('up-amount-block');
-    const quantityBlock = document.getElementById('up-quantity-block');
-    const multipliers = document.getElementById('up-multipliers');
-    if (amountBlock) amountBlock.style.display = isCoin ? 'block' : 'none';
-    if (quantityBlock) quantityBlock.style.display = isCoin ? 'none' : 'block';
-    if (multipliers) multipliers.style.display = isCoin ? 'grid' : 'none';
+    clearUpgradeResult();
     playSound('click');
-    refreshUpgradeUI();
+    renderUpgrade();
 }
 
-function selectUpgradeMultiplier(value, element) {
+function selectUpgradeToTab(tab, element) {
     if (upgradeBusy) return;
-    upgradeMultiplier = Number(value);
-    document.querySelectorAll('.up-mult-btn').forEach(btn => btn.classList.remove('active'));
+    upgradeToTab = tab === 'capsule' ? 'capsule' : 'coin';
+    document.querySelectorAll('.up-to-tab').forEach(btn => btn.classList.remove('active'));
     if (element) element.classList.add('active');
+    if (upgradeToTab === 'coin' && upgradeTarget.kind === 'item') upgradeTarget = { kind: 'mult', value: 2 };
+    if (upgradeToTab === 'capsule' && upgradeTarget.kind !== 'item') upgradeTarget = { kind: 'item', value: 'capsule' };
+    clearUpgradeResult();
     playSound('click');
-    refreshUpgradeUI();
+    renderUpgrade();
 }
 
-function selectUpgradeSpeed(seconds) {
-    upgradeDuration = seconds === 8 ? 8 : 3;
-    const fast = document.getElementById('up-speed-fast');
-    const slow = document.getElementById('up-speed-slow');
-    if (fast) fast.classList.toggle('active', upgradeDuration === 3);
-    if (slow) slow.classList.toggle('active', upgradeDuration === 8);
+function selectUpgradeTarget(kind, value) {
+    if (upgradeBusy) return;
+    upgradeToTab = kind === 'item' ? 'capsule' : 'coin';
+    document.querySelectorAll('.up-to-tab').forEach(btn => btn.classList.toggle('active', btn.id === 'up-to-tab-' + upgradeToTab));
+    upgradeTarget = { kind, value };
+    clearUpgradeResult();
     playSound('click');
+    renderUpgrade();
+}
+
+function selectUpgradeQuick(kind, value, element) {
+    if (upgradeBusy) return;
+    upgradeToTab = 'coin';
+    document.querySelectorAll('.up-to-tab').forEach(btn => btn.classList.toggle('active', btn.id === 'up-to-tab-coin'));
+    upgradeTarget = { kind, value: Number(value) };
+    if (element) {
+        document.querySelectorAll('.up-chip').forEach(chip => chip.classList.remove('active'));
+        element.classList.add('active');
+    }
+    clearUpgradeResult();
+    playSound('click');
+    renderUpgrade();
 }
 
 function setUpgradeAmount(value) {
+    if (upgradeBusy) return;
+    const limits = upgradeAmountLimits();
+    let next = value === 'max' ? limits.max : Number(value);
+    if (!Number.isFinite(next)) return;
+    next = Math.min(limits.max, Math.max(limits.min, Math.round(next)));
+    upgradeFromAmount = next;
+    clearUpgradeResult();
+    renderUpgrade();
+}
+
+function syncUpgradeAmountFromInput() {
     const input = document.getElementById('upgrade-amount');
-    if (input) input.value = value;
-}
-
-function setUpgradeQuantity(value) {
-    const input = document.getElementById('upgrade-quantity');
     if (!input) return;
-    if (value === 'max') {
-        const owned = countItem(upgradeType);
-        input.value = Math.max(1, Math.min(UPGRADE_MAX_CAPSULES, owned));
-        return;
-    }
-    input.value = value;
+    const limits = upgradeAmountLimits();
+    let value = Math.round(Number(input.value));
+    if (!Number.isFinite(value)) value = limits.min;
+    value = Math.min(limits.max, Math.max(limits.min, value));
+    upgradeFromAmount = value;
+    clearUpgradeResult();
+    renderUpgrade();
 }
 
-// Крутим ровно до нужного сектора: чётные секторы — победа, нечётные — проигрыш.
-function spinUpgradeWheel(won, durationMs) {
-    const wheel = document.getElementById('upgrade-wheel');
-    const wrap = document.getElementById('upgrade-wheel-wrap');
-    if (!wheel) return;
-    const segmentCenter = (won ? 0 : 1) * 45 + 22.5;
-    const targetBase = (360 - segmentCenter) % 360;
-    const current = ((wheelRotation % 360) + 360) % 360;
-    const delta = ((targetBase - current) % 360 + 360) % 360;
-    const fullTurns = upgradeDuration >= 8 ? 7 : 4;
-    wheelRotation += fullTurns * 360 + delta;
-    wheel.style.transition = 'none';
-    void wheel.offsetWidth;
-    wheel.style.transition = `transform ${durationMs}ms cubic-bezier(0.15, 0.85, 0.15, 1)`;
-    wheel.style.transform = `rotate(${wheelRotation}deg)`;
-    if (wrap) wrap.classList.add('spinning');
-    const hub = document.getElementById('upgrade-wheel-hub');
-    if (hub) hub.innerText = '🛠️';
-}
-
-function stopUpgradeWheel(state) {
-    const wrap = document.getElementById('upgrade-wheel-wrap');
-    if (wrap) wrap.classList.remove('spinning');
-    const hub = document.getElementById('upgrade-wheel-hub');
-    if (hub) hub.innerText = state === 'win' ? '✅' : '❌';
+function updateUpgradeAccess() {
+    const card = document.getElementById('game-card-upgrade');
+    if (card) card.classList.toggle('locked', !isAdmin);
+    const lock = document.getElementById('upgrade-lock-icon');
+    if (lock) lock.style.display = isAdmin ? 'none' : 'inline';
+    const sub = document.getElementById('upgrade-card-sub');
+    if (sub) sub.innerText = isAdmin ? 'Улучшай капсулы' : 'Скоро...';
 }
 
 function updateUpgradeStatsUI() {
     const setText = (id, value) => { const el = document.getElementById(id); if (el) el.innerText = value; };
     setText('upg-stat-total', upgradeStats.total);
     setText('upg-stat-wins', upgradeStats.wins);
-    setText('upg-stat-best', upgradeStats.best > 0 ? upgradeStats.best : '—');
+    setText('upg-stat-best', upgradeStats.best > 0 ? formatCoins(upgradeStats.best) : '—');
+}
+
+function openUpgrade() {
+    if (!isAdmin) return tg.showAlert('Скоро...');
+    openGame('upgrade');
+    clearUpgradeResult();
+    renderUpgrade();
+}
+
+function startUpgradeTicker() {
+    const chanceEl = document.getElementById('up-chance');
+    if (!chanceEl) return;
+    if (upgradeTicker) clearInterval(upgradeTicker);
+    upgradeTicker = setInterval(() => {
+        chanceEl.innerText = (Math.random() * 95).toFixed(2) + '%';
+    }, 70);
+}
+
+function stopUpgradeTicker() {
+    if (upgradeTicker) clearInterval(upgradeTicker);
+    upgradeTicker = null;
 }
 
 async function startUpgrade() {
@@ -552,33 +794,41 @@ async function startUpgrade() {
         await loadUserData();
         if (!userDataLoaded) return tg.showAlert('Не удалось загрузить баланс. Проверьте соединение.');
     }
-
-    const payload = { initData: tg.initData, bet_type: upgradeType };
-    if (upgradeType === 'coin') {
-        const amount = parseInt(document.getElementById('upgrade-amount').value, 10) || 0;
-        if (amount < UPGRADE_MIN_COINS) return tg.showAlert(`Минимальная ставка ${UPGRADE_MIN_COINS} 🪙`);
-        if (amount > UPGRADE_MAX_COINS) return tg.showAlert(`Максимальная ставка ${UPGRADE_MAX_COINS} 🪙`);
-        if (balance < amount) return tg.showAlert('Недостаточно коинов!');
-        payload.amount = amount;
-        payload.target_multiplier = upgradeMultiplier;
-    } else {
-        const quantity = parseInt(document.getElementById('upgrade-quantity').value, 10) || 0;
-        const owned = countItem(upgradeType);
-        if (quantity < 1) return tg.showAlert('Минимум 1 капсула');
-        if (quantity > UPGRADE_MAX_CAPSULES) return tg.showAlert(`Максимум ${UPGRADE_MAX_CAPSULES} капсул за раз`);
-        if (quantity > owned) return tg.showAlert(`У тебя только ${owned} капсул(а)`);
-        payload.quantity = quantity;
+    if (!upgradeCanStart()) {
+        if (!upgradeChanceIsValid(upgradeChance())) {
+            return tg.showAlert(upgradeChance() > UPGRADE_MAX_CHANCE
+                ? 'Шанс выше 95% — выбери цель подороже'
+                : 'Шанс слишком низкий — выбери цель подешевле');
+        }
+        if (upgradeFrom === 'coin' && balance < upgradeFromAmount) return tg.showAlert('Недостаточно коинов!');
+        if (upgradeFrom !== 'coin' && countItem(upgradeFrom) < upgradeFromAmount) return tg.showAlert('Недостаточно капсул!');
+        return tg.showAlert('Такой апгрейд сейчас невозможен');
     }
 
+    const payload = {
+        initData: tg.initData,
+        item_from: upgradeFrom,
+        amount_from: Math.round(upgradeFromAmount),
+        item_to: upgradeTarget.kind === 'item' ? upgradeTarget.value : 'coin'
+    };
+    if (upgradeTarget.kind === 'mult') payload.target_multiplier = Number(upgradeTarget.value);
+    if (upgradeTarget.kind === 'chance') payload.target_chance = Number(upgradeTarget.value);
+
+    const chance = upgradeChance();
     upgradeBusy = true;
+    upgradeStartedAt = Date.now();
+
+    const circle = document.getElementById('up-circle');
+    if (circle) { circle.classList.remove('win', 'lose'); circle.classList.add('spinning'); }
     const btn = document.getElementById('upgrade-btn');
-    if (btn) btn.disabled = true;
+    if (btn) { btn.disabled = true; btn.classList.remove('win', 'lose'); btn.innerText = 'КРУТИМ...'; }
     setUpgradeResult('Крутим...', 'spinning');
-    refreshUpgradeUI();
+    startUpgradeTicker();
     playSound('click');
 
     let data = null;
     let errorText = '';
+    let unauthorized = false;
     try {
         const res = await fetch(`${API_URL}/api/upgrade_action`, {
             method: 'POST',
@@ -586,67 +836,85 @@ async function startUpgrade() {
             body: JSON.stringify(payload)
         });
         data = await res.json().catch(() => ({}));
-        if (!res.ok) errorText = data.detail || 'Не удалось запустить апгрейд';
+        if (!res.ok) {
+            errorText = data.detail || 'Не удалось запустить апгрейд';
+            unauthorized = res.status === 403;
+        }
     } catch (e) {
         console.error('Ошибка апгрейда', e);
         errorText = 'Ошибка соединения';
     }
 
-    if (errorText || !data) {
-        upgradeBusy = false;
-        if (btn) btn.disabled = false;
-        setUpgradeResult(errorText || 'Не удалось запустить апгрейд', 'lose');
-        tg.showAlert(errorText || 'Не удалось запустить апгрейд');
-        refreshUpgradeUI();
-        if (errorText && errorText.toLowerCase().includes('администратор')) { isAdmin = false; updateUpgradeAccess(); }
-        return;
-    }
-
-    // Результат уже посчитан на сервере — анимация только показывает его игроку.
-    spinUpgradeWheel(Boolean(data.won), upgradeDuration * 1000);
-    setTimeout(() => finishUpgradeAnimation(data), upgradeDuration * 1000 + 120);
+    // Анимация всегда длится ровно 3 секунды, даже если сервер ответил мгновенно.
+    const elapsed = Date.now() - upgradeStartedAt;
+    const remaining = Math.max(0, UPGRADE_DURATION - elapsed);
+    setTimeout(() => {
+        stopUpgradeTicker();
+        if (circle) circle.classList.remove('spinning');
+        if (errorText || !data) {
+            upgradeBusy = false;
+            setUpgradeResult(errorText || 'Не удалось запустить апгрейд', 'lose');
+            if (btn) { btn.disabled = false; btn.innerText = 'АПГРЕЙД'; }
+            if (unauthorized) { isAdmin = false; updateUpgradeAccess(); }
+            if (circle) circle.classList.add('lose');
+            tg.showAlert(errorText || 'Не удалось запустить апгрейд');
+            renderUpgrade();
+            return;
+        }
+        finishUpgradeAnimation(data, chance);
+    }, remaining);
 }
 
-function finishUpgradeAnimation(data) {
+function finishUpgradeAnimation(data, chance) {
     upgradeBusy = false;
+    const circle = document.getElementById('up-circle');
     const btn = document.getElementById('upgrade-btn');
-    if (btn) btn.disabled = false;
+    const won = Boolean(data && (data.success || data.won));
 
-    balance = Number(data.new_balance) >= 0 ? Number(data.new_balance) : balance;
-    inventory = Array.isArray(data.inventory) ? data.inventory : inventory;
+    balance = Number.isFinite(Number(data.new_balance)) ? Number(data.new_balance) : balance;
+    inventory = Array.isArray(data.new_inventory) ? data.new_inventory
+        : (Array.isArray(data.inventory) ? data.inventory : inventory);
 
     upgradeStats.total += 1;
-    if (data.won) upgradeStats.wins += 1;
-    const payout = Number(data.payout) || 0;
-    if (payout > upgradeStats.best) upgradeStats.best = payout;
+    if (won) upgradeStats.wins += 1;
+    const rewardCoins = data.win_item === 'coin' ? Number(data.win_amount) || 0 : 0;
+    const rewardItems = data.win_item && data.win_item !== 'coin' ? Number(data.win_amount) || 0 : 0;
+    const rewardValue = rewardCoins || (rewardItems ? upgradePrice(data.win_item) * rewardItems : 0);
+    if (won && rewardValue > upgradeStats.best) upgradeStats.best = rewardValue;
 
-    const wonItems = data.won_items || {};
-    const itemsText = Object.entries(wonItems).map(([itemId, count]) => {
-        const item = SHOP_ITEMS[itemId];
-        return `${item ? item.emoji : '⚱️'} ${item ? item.name : 'Уникальная капсула'} x${count}`;
-    }).join(', ');
+    if (circle) {
+        circle.classList.remove('win', 'lose');
+        circle.classList.add(won ? 'win' : 'lose');
+        circle.style.setProperty('--p', ((Number(chance) || 0) * 3.6).toFixed(2) + 'deg');
+    }
+    const chanceEl = document.getElementById('up-chance');
+    if (chanceEl) chanceEl.innerText = (Number(chance) || 0).toFixed(2) + '%';
 
-    stopUpgradeWheel(data.won ? 'win' : 'lose');
-    updateUI();
-    refreshUpgradeUI();
+    if (btn) {
+        btn.disabled = false;
+        btn.classList.remove('win', 'lose');
+        btn.classList.add(won ? 'win' : 'lose');
+        btn.innerText = won ? 'ПОБЕДА' : 'ПРОИГРЫШ';
+    }
 
-    if (data.won) {
-        const text = payout > 0 ? `✅ Успех! +${payout} 🪙` : `✅ Успех! Получено: ${itemsText}`;
+    if (won) {
+        const text = data.win_item === 'coin'
+            ? `✅ Успех! +${formatCoins(data.win_amount)} 🪙`
+            : `✅ Успех! Получено: ${upgradeItemEmoji(data.win_item)} ${upgradeItemName(data.win_item)} x${data.win_amount}`;
         setUpgradeResult(text, 'win');
-        showWin(payout > 0 ? `+ ${payout} 🪙` : `✅ ${itemsText}`);
+        showWin(data.win_item === 'coin' ? `+ ${formatCoins(data.win_amount)} 🪙` : `✅ ${upgradeItemName(data.win_item)}`);
         playSound('win');
         try { tg.HapticFeedback.notificationOccurred('success'); } catch (e) {}
     } else {
-        const lostText = data.bet_type === 'coin'
-            ? '❌ Не повезло. Ставка сгорела'
-            : '❌ Не повезло. Капсулы сгорели';
-        setUpgradeResult(lostText, 'lose');
+        setUpgradeResult(upgradeFrom === 'coin' ? '❌ Не повезло. Ставка сгорела' : '❌ Не повезло. Капсулы сгорели', 'lose');
         playSound('lose');
         try { tg.HapticFeedback.notificationOccurred('error'); } catch (e) {}
     }
+
+    updateUI();
 }
 
-// ================= МИНЫ =================
+// ================= МИНЫ =================// ================= МИНЫ =================
 let minesActive = false, minesCoef = 1.0, minesSafeOpened = 0, selectedMines = 1;
 const board = document.getElementById('mines-board');
 if (board) {
@@ -1192,6 +1460,22 @@ async function pollCrashStateOnce() {
 // ================= СТАРТ =================
 document.addEventListener('DOMContentLoaded', async () => {
     try { await Promise.all([loadUserData(), loadShopItems()]); } catch(e) {}
+    // Апгрейд: синхронизация поля ввода, ползунка и быстрых кнопок.
+    const upgradeAmountInput = document.getElementById('upgrade-amount');
+    if (upgradeAmountInput) {
+        upgradeAmountInput.addEventListener('change', syncUpgradeAmountFromInput);
+        upgradeAmountInput.addEventListener('blur', syncUpgradeAmountFromInput);
+    }
+    const upgradeSlider = document.getElementById('upgrade-slider');
+    if (upgradeSlider) {
+        upgradeSlider.addEventListener('input', () => {
+            if (upgradeBusy) return;
+            upgradeFromAmount = Number(upgradeSlider.value) || upgradeAmountLimits().min;
+            clearUpgradeResult();
+            renderUpgrade();
+        });
+    }
+    renderUpgrade();
     initLbTimer();
     document.querySelectorAll('.winner-modal, .chest-win-modal').forEach(m => m.classList.remove('active'));
 });
