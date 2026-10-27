@@ -13,7 +13,7 @@ from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKe
 from aiogram.enums import ChatMemberStatus
 from aiohttp import web
 from supabase import create_client, Client
-from shop_catalog import SHOP_ITEMS, ShopPurchaseError, parse_inventory, purchase_shop_item
+from shop_catalog import ShopPurchaseError, parse_inventory, purchase_shop_item, visible_shop_items
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -514,12 +514,13 @@ async def cmd_pocket(message: Message):
     name = f"@{safe_text(target.username)}" if getattr(target, 'username', None) else f"id{target.id}"
     text = f"💰 <b>Карман {name}</b>\n\n💎 Баланс: <b>{user['coins']}</b> 🪙\n"
     if user.get("keys", 0) > 0: text += f"🔑 Ключи: <b>{user['keys']}</b>\n"
-    if inv:
-        text += "\n🎒 <b>Инвентарь:</b>\n"
-        for item_id, item in SHOP_ITEMS.items():
-            count = inv.count(item_id)
-            if count:
-                text += f"{item['emoji']} {item['short_name']}: <b>{count} шт.</b>\n"
+    inventory_lines = []
+    for item_id, item in visible_shop_items(is_admin(message.from_user.id)).items():
+        count = inv.count(item_id)
+        if count:
+            inventory_lines.append(f"{item['emoji']} {item['short_name']}: <b>{count} шт.</b>\n")
+    if inventory_lines:
+        text += "\n🎒 <b>Инвентарь:</b>\n" + "".join(inventory_lines)
     else:
         text += "\n🎒 <b>Инвентарь:</b> Пусто\n"
     await message.answer(text, parse_mode="HTML")
@@ -565,7 +566,7 @@ async def cmd_open(message: Message):
 async def cmd_shop(message: Message):
     lines = ["🛍️ <b>Магазин AURA</b>", "", "Выбери капсулу — покупка появится в кармане:"]
     buttons = []
-    for item_id, item in SHOP_ITEMS.items():
+    for item_id, item in visible_shop_items(is_admin(message.from_user.id)).items():
         limit_text = f" · лимит {item['daily_limit']}/день" if item["daily_limit"] is not None else ""
         price_text = f"{item['price']:,}".replace(",", " ")
         lines.append(f"{item['emoji']} <b>{item['name']}</b> — <b>{price_text}</b> 🪙{limit_text}")
@@ -705,7 +706,7 @@ async def cb_dice_decline(callback: CallbackQuery):
 
 
 async def _complete_shop_purchase(callback: CallbackQuery, item_id: str):
-    item = SHOP_ITEMS.get(item_id)
+    item = visible_shop_items(is_admin(callback.from_user.id)).get(item_id)
     if item is None:
         return await callback.answer("❌ Неизвестный товар", show_alert=True)
     try:

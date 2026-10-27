@@ -12,13 +12,9 @@ if (user) {
 }
 
 const API_URL = "https://aura-api-mptt.onrender.com";
-const SHOP_ITEMS = {
-    capsule: { name: 'Обычная капсула', price: 500, shopImage: 'capsule.png', inventoryImage: 'inv_capsule.png', dailyLimit: null },
-    uniq_capsule: { name: 'Уникальная капсула', price: 1000, shopImage: 'uniq_capsule.png', inventoryImage: 'inv_uniq_capsule.png', dailyLimit: 30 },
-    malachite: { name: 'Малахитовая капсула', price: 3000, shopImage: 'malachite.png', inventoryImage: 'inv_malachite.png', dailyLimit: 15 },
-    emerald: { name: 'Изумрудная капсула', price: 5000, shopImage: 'emerald.png', inventoryImage: 'inv_emerald.png', dailyLimit: 10 },
-    diamond: { name: 'Алмазная капсула', price: 10000, shopImage: 'diamond.png', inventoryImage: 'inv_diamond.png', dailyLimit: 5 }
-};
+// Каталог приходит с сервера и уже отфильтрован: капсулы для админов не попадают в ответ обычным игрокам.
+let SHOP_ITEMS = {};
+let shopItemsLoaded = false;
 let balance = 0, keys = 0, currentBet = 10, inventory = [], lastChestTime = 0, isProcessing = false, userDataLoaded = false;
 let hockeyInterval = null, hasShownWinner = false;
 let ball = { x: 50, y: 50, active: false, animationId: null, hasStartedAnim: false, roundId: null, path: null };
@@ -315,6 +311,59 @@ async function claimChestReward() {
 }
 
 // ================= МАГАЗИН =================
+async function loadShopItems() {
+    try {
+        const response = await fetch(`${API_URL}/api/shop_items`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ initData: tg.initData })
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(data.detail || "Не удалось загрузить магазин");
+        SHOP_ITEMS = {};
+        (data.items || []).forEach(item => {
+            SHOP_ITEMS[item.id] = {
+                name: item.name,
+                shortName: item.short_name,
+                emoji: item.emoji,
+                price: Number(item.price),
+                shopImage: item.shop_image,
+                inventoryImage: item.inventory_image,
+                dailyLimit: item.daily_limit
+            };
+        });
+        shopItemsLoaded = true;
+    } catch (e) {
+        console.error("Ошибка загрузки магазина", e);
+        shopItemsLoaded = false;
+    }
+    renderShop();
+    updateUI();
+}
+
+function renderShop() {
+    const grid = document.getElementById('shop-grid');
+    if (!grid) return;
+    const ids = Object.keys(SHOP_ITEMS);
+    if (ids.length === 0) {
+        grid.innerHTML = `<div class="inv-empty">${shopItemsLoaded ? "Магазин пуст" : "Магазин недоступен"}</div>`;
+        return;
+    }
+    grid.innerHTML = ids.map(itemId => {
+        const item = SHOP_ITEMS[itemId];
+        const limitText = item.dailyLimit != null ? `До ${item.dailyLimit} шт. в день` : '';
+        return `
+            <article class="shop-item">
+                <img class="shop-item-image" src="${item.shopImage}" alt="${item.name}">
+                <h3>${item.name}</h3>
+                <p>${item.price} 🪙</p>
+                <small class="shop-limit">${limitText}</small>
+                <button class="buy-btn" onclick="buyItem('${itemId}')">Купить</button>
+            </article>
+        `;
+    }).join('');
+}
+
 async function buyItem(itemId) {
     if (isProcessing) return;
     const item = SHOP_ITEMS[itemId];
@@ -330,6 +379,7 @@ async function buyItem(itemId) {
         const data = await res.json().catch(() => ({}));
         if (!res.ok) {
             tg.showAlert(data.detail || "Не удалось купить предмет");
+            if (res.status === 400 || res.status === 403) loadShopItems();
             return;
         }
         balance = data.new_balance;
@@ -890,7 +940,7 @@ async function pollCrashStateOnce() {
 
 // ================= СТАРТ =================
 document.addEventListener('DOMContentLoaded', async () => {
-    try { await loadUserData(); } catch(e) {}
+    try { await Promise.all([loadUserData(), loadShopItems()]); } catch(e) {}
     initLbTimer();
     document.querySelectorAll('.winner-modal, .chest-win-modal').forEach(m => m.classList.remove('active'));
 });
