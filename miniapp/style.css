@@ -268,15 +268,21 @@ main { padding: 0 16px; }
 
 /* --- центр: круг --- */
 .up-circle { position: relative; width: min(58vw, 200px); aspect-ratio: 1; display: grid; place-items: center; margin-top: 2px; }
-.up-circle-ring, .up-circle-sweep { position: absolute; inset: 0; border-radius: 50%; -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 13px), #000 calc(100% - 12px)); mask: radial-gradient(farthest-side, transparent calc(100% - 13px), #000 calc(100% - 12px)); }
-.up-circle-ring { background: conic-gradient(from -90deg, #3b82f6 0 var(--p, 0deg), rgba(59, 130, 246, 0.12) var(--p, 0deg) 360deg); filter: drop-shadow(0 0 12px rgba(59, 130, 246, 0.5)); transition: background 0.3s linear, filter 0.3s; }
-.up-circle-sweep { background: conic-gradient(from 0deg, rgba(88, 166, 255, 0) 0deg, rgba(88, 166, 255, 0.9) 70deg, rgba(88, 166, 255, 0) 140deg); opacity: 0; transition: opacity 0.2s; }
-.up-circle.spinning .up-circle-sweep { opacity: 1; animation: upSweep 0.7s linear infinite; }
-@keyframes upSweep { to { transform: rotate(360deg); } }
+.up-circle-ring { position: absolute; inset: 0; border-radius: 50%; -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 13px), #000 calc(100% - 12px)); mask: radial-gradient(farthest-side, transparent calc(100% - 13px), #000 calc(100% - 12px)); }
+.up-circle-ring { background: conic-gradient(from -90deg, #3b82f6 0 var(--p, 0deg), rgba(59, 130, 246, 0.12) var(--p, 0deg) 360deg); filter: drop-shadow(0 0 12px rgba(59, 130, 246, 0.5)); transition: filter 0.3s, background 0.3s; }
+/* Белая стрелка: вращается через JS, в конце плавно замедляется и замирает на результате. */
+.up-arrow-wrap { position: absolute; inset: 0; z-index: 2; transform: rotate(0deg); will-change: transform; pointer-events: none; }
+.up-arrow { position: absolute; left: 50%; bottom: 50%; width: 3px; height: 43%; transform: translateX(-50%); border-radius: 3px; background: linear-gradient(to top, rgba(255, 255, 255, 0.1), #ffffff 40%, #ffffff); box-shadow: 0 0 10px rgba(255, 255, 255, 0.75); }
+.up-arrow::before { content: ''; position: absolute; top: -11px; left: 50%; transform: translateX(-50%); border-left: 6px solid transparent; border-right: 6px solid transparent; border-bottom: 13px solid #ffffff; filter: drop-shadow(0 0 6px rgba(255, 255, 255, 0.9)); }
+.up-circle.spinning .up-arrow { box-shadow: 0 0 16px rgba(255, 255, 255, 0.95); }
+.up-circle.win .up-arrow::before { border-bottom-color: #6ee7a0; }
+.up-circle.lose .up-arrow::before { border-bottom-color: #fca5a5; }
+.up-circle.win .up-arrow { box-shadow: 0 0 16px rgba(110, 231, 160, 0.85); }
+.up-circle.lose .up-arrow { box-shadow: 0 0 16px rgba(252, 165, 165, 0.8); }
 .up-circle.win .up-circle-ring { background: conic-gradient(from -90deg, #22c55e 0 var(--p, 0deg), rgba(34, 197, 94, 0.12) var(--p, 0deg) 360deg); filter: drop-shadow(0 0 18px rgba(34, 197, 94, 0.65)); }
 .up-circle.lose .up-circle-ring { background: conic-gradient(from -90deg, #ef4444 0 var(--p, 0deg), rgba(239, 68, 68, 0.12) var(--p, 0deg) 360deg); filter: drop-shadow(0 0 18px rgba(239, 68, 68, 0.6)); }
-.up-circle-inner { position: relative; z-index: 2; text-align: center; }
-.up-chance { font-size: 30px; font-weight: 900; color: #eaf3ff; font-variant-numeric: tabular-nums; letter-spacing: 0.5px; text-shadow: 0 0 18px rgba(59, 130, 246, 0.55); }
+.up-circle-inner { position: relative; z-index: 3; width: 68%; height: 68%; border-radius: 50%; background: radial-gradient(circle, #0c1520 62%, rgba(10, 17, 25, 0.9) 100%); border: 1px solid rgba(59, 130, 246, 0.18); display: grid; place-content: center; text-align: center; box-shadow: inset 0 0 18px rgba(0, 0, 0, 0.55); }
+.up-chance { font-size: 23px; font-weight: 900; color: #eaf3ff; font-variant-numeric: tabular-nums; letter-spacing: 0.5px; text-shadow: 0 0 18px rgba(59, 130, 246, 0.55); }
 .up-chance-label { font-size: 9px; font-weight: 800; letter-spacing: 1.2px; text-transform: uppercase; color: #6f8bb5; margin-top: 2px; }
 .up-circle.invalid .up-chance { color: #fbbf24; text-shadow: 0 0 18px rgba(251, 191, 36, 0.5); }
 .up-circle.win .up-chance { color: #6ee7a0; text-shadow: 0 0 18px rgba(34, 197, 94, 0.6); }
