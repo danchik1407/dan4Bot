@@ -8,7 +8,8 @@ from urllib.parse import parse_qsl
 from dotenv import load_dotenv
 from supabase import create_client, Client
 from typing import Optional
-from shop_catalog import SHOP_ITEMS, ShopPurchaseError, is_admin_id, purchase_shop_item, serialize_shop_items
+from shop_catalog import SHOP_ITEMS, ShopPurchaseError, is_admin_id, parse_inventory, purchase_shop_item, \
+    serialize_shop_items
 
 load_dotenv()
 app = FastAPI()
@@ -23,6 +24,17 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 
 ADMIN_IDS = [6338018270, 5184813347, 8890834384]
 MAX_BET = 10000
+
+# ==================== АПГРЕЙД ====================
+UPGRADE_MIN_BET = 50
+UPGRADE_MAX_BET = 5000
+UPGRADE_MAX_CAPSULES = 50
+UPGRADE_COIN_MULTIPLIERS = [1.5, 2.0, 3.0, 5.0, 10.0]
+# Капсульные апгрейды: обычная -> уникальная, уникальная -> коины.
+UPGRADE_CAPSULE_RULES = {
+    "capsule": {"reward_item": "uniq_capsule", "reward_coins": 0, "multiplier": 2.0},
+    "uniq_capsule": {"reward_item": None, "reward_coins": 2000, "multiplier": 2.0},
+}
 
 BOT_NAMES = ["Shark_V", "LuckyFox", "NeonWolf", "GhostByte", "PixelKing", "CyberCat", "IronFist", "VoidWalker",
              "ShadowAce", "RogueOne", "Toxic", "Viper", "Sniper", "ProGamer", "NoobMaster", "Killer", "Dragon"]
@@ -325,6 +337,14 @@ class CrashBet(BaseModel): initData: str; amount: int
 
 
 class CrashCashout(BaseModel): initData: str
+
+
+class UpgradeAction(BaseModel):
+    initData: str
+    bet_type: str
+    amount: Optional[int] = None
+    quantity: Optional[int] = None
+    target_multiplier: Optional[float] = None
 
 
 # ==================== АРЕНА (ХОККЕЙ) ====================
@@ -676,17 +696,19 @@ async def get_user(auth: UserAuth):
     if res_ban.data:
         raise HTTPException(status_code=403, detail="Вы забанены за багоюз или нарушение правил.")
 
+    is_admin = is_admin_id(user_id, ADMIN_IDS)
     if user_id in ADMIN_IDS and user_id != user.get("id"): return {"coins": -1, "keys": 0, "inventory": [],
-                                                                   "last_chest": 0, "hidden": True}
+                                                                   "last_chest": 0, "hidden": True, "is_admin": is_admin}
     res = supabase.table("users").select("*").eq("user_id", user_id).execute()
     if not res.data:
         new_user = {"user_id": user_id, "coins": 0, "keys": 0, "username": user.get("username", f"id{user_id}"),
                     "last_chest": 0, "chat_id": 0, "inventory": "[]"}
         supabase.table("users").insert(new_user).execute()
-        return {"coins": 0, "keys": 0, "inventory": [], "last_chest": 0}
+        return {"coins": 0, "keys": 0, "inventory": [], "last_chest": 0, "is_admin": is_admin}
     db_user = res.data[0]
     return {"coins": int(db_user.get("coins", 0)), "keys": int(db_user.get("keys", 0)),
-            "inventory": json.loads(db_user.get("inventory") or "[]"), "last_chest": int(db_user.get("last_chest", 0))}
+            "inventory": json.loads(db_user.get("inventory") or "[]"), "last_chest": int(db_user.get("last_chest", 0)),
+            "is_admin": is_admin}
 
 
 @app.post("/api/open_chest")
@@ -729,6 +751,141 @@ async def buy_item(data: BuyItem):
         return purchase_shop_item(supabase, user_id, data.item_id, ADMIN_IDS)
     except ShopPurchaseError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
+
+# ==================== АПГРЕЙД ====================
+def _upgrade_coin_chance(multiplier: float) -> float:
+    """Secret house edge: x2 looks like 50% but actually wins 25% of the time."""
+    return 100.0 / float(multiplier) / 2.0
+
+
+def _upgrade_read_user(user_id: int):
+    """Read the fields the upgrader needs. Only coins/inventory, so no PGRST204 on missing columns."""
+    response = (
+        supabase.table("users")
+        .select("coins, inventory")
+        .eq("user_id", user_id)
+        .execute()
+    )
+    if not response.data:
+        raise HTTPException(status_code=404, detail="Пользователь не найден")
+    row = response.data[0]
+    raw_coins = row.get("coins") or 0
+    try:
+        coins = int(raw_coins)
+    except (TypeError, ValueError):
+        coins = 0
+    return coins, row.get("inventory")
+
+
+def _upgrade_write_user(user_id: int, raw_coins: int, raw_inventory, coins: int, inventory: list) -> bool:
+    """Optimistic write: only applies if balance/inventory are still what we validated."""
+    update_values = {"coins": coins, "inventory": json.dumps(inventory, ensure_ascii=False)}
+    query = supabase.table("users").update(update_values).eq("user_id", user_id).eq("coins", raw_coins)
+    if raw_inventory is not None:
+        query = query.eq("inventory", raw_inventory)
+    updated = query.select("user_id").execute()
+    return bool(updated.data)
+
+
+@app.post("/api/upgrade_action")
+async def upgrade_action(data: UpgradeAction):
+    user = verify_telegram_data(data.initData)
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid auth data")
+
+    user_id = int(user["id"])
+    if not is_admin_id(user_id, ADMIN_IDS):
+        raise HTTPException(status_code=403, detail="Апгрейд доступен только администраторам")
+
+    check_ban(str(user_id))
+
+    bet_type = (data.bet_type or "").strip().lower()
+    if bet_type not in ("coin", "capsule", "uniq_capsule"):
+        raise HTTPException(status_code=400, detail="Неизвестный тип ставки")
+
+    amount = 0
+    quantity = 0
+    target_multiplier = 0.0
+
+    if bet_type == "coin":
+        try:
+            amount = int(data.amount or 0)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="Некорректная сумма ставки")
+        if amount < UPGRADE_MIN_BET:
+            raise HTTPException(status_code=400, detail=f"Минимальная ставка {UPGRADE_MIN_BET} 🪙")
+        if amount > UPGRADE_MAX_BET:
+            raise HTTPException(status_code=400, detail=f"Максимальная ставка {UPGRADE_MAX_BET} 🪙")
+        try:
+            target_multiplier = float(data.target_multiplier or 0)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="Некорректный коэффициент")
+        if target_multiplier not in UPGRADE_COIN_MULTIPLIERS:
+            raise HTTPException(status_code=400, detail="Такого коэффициента нет")
+        chance = _upgrade_coin_chance(target_multiplier)
+    else:
+        try:
+            quantity = int(data.quantity or 0)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="Некорректное количество капсул")
+        if quantity < 1:
+            raise HTTPException(status_code=400, detail="Минимум 1 капсула")
+        if quantity > UPGRADE_MAX_CAPSULES:
+            raise HTTPException(status_code=400, detail=f"Максимум {UPGRADE_MAX_CAPSULES} капсул за раз")
+        target_multiplier = UPGRADE_CAPSULE_RULES[bet_type]["multiplier"]
+        chance = _upgrade_coin_chance(target_multiplier)
+
+    # Списываем сразу и зачисляем выигрыш одной атомарной записью: параллельные
+    # нажатия не могут ни увести баланс в минус, ни выдать двойной приз.
+    for _attempt in range(5):
+        raw_coins, raw_inventory = _upgrade_read_user(user_id)
+        inventory = parse_inventory(raw_inventory)
+
+        if bet_type == "coin":
+            if raw_coins < amount:
+                raise HTTPException(status_code=400, detail="Недостаточно коинов")
+            total_units = 1
+            won_units = 1 if random.random() * 100.0 < chance else 0
+            payout = int(round(amount * target_multiplier)) if won_units else 0
+            new_coins = raw_coins - amount + payout
+            new_inventory = list(inventory)
+            won_items = {}
+        else:
+            owned = inventory.count(bet_type)
+            if owned < quantity:
+                raise HTTPException(status_code=400, detail="Недостаточно капсул")
+            total_units = quantity
+            won_units = sum(1 for _ in range(quantity) if random.random() * 100.0 < chance)
+            rule = UPGRADE_CAPSULE_RULES[bet_type]
+            new_inventory = list(inventory)
+            for _ in range(quantity):
+                new_inventory.remove(bet_type)
+            payout = 0
+            won_items = {}
+            if won_units:
+                if rule["reward_item"]:
+                    new_inventory.extend([rule["reward_item"]] * won_units)
+                    won_items = {rule["reward_item"]: won_units}
+                else:
+                    payout = int(rule["reward_coins"]) * won_units
+            new_coins = raw_coins + payout
+
+        if _upgrade_write_user(user_id, raw_coins, raw_inventory, new_coins, new_inventory):
+            return {
+                "success": True,
+                "bet_type": bet_type,
+                "won": won_units > 0,
+                "win_units": won_units,
+                "total_units": total_units,
+                "target_multiplier": target_multiplier,
+                "payout": payout,
+                "won_items": won_items,
+                "new_balance": new_coins,
+                "inventory": new_inventory,
+            }
+
+    raise HTTPException(status_code=409, detail="Апгрейд уже обрабатывается. Попробуйте ещё раз.")
+
 
 @app.post("/api/update_balance")
 async def update_balance(data: UpdateBalance):

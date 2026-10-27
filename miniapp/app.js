@@ -16,6 +16,11 @@ const API_URL = "https://aura-api-mptt.onrender.com";
 let SHOP_ITEMS = {};
 let shopItemsLoaded = false;
 let balance = 0, keys = 0, currentBet = 10, inventory = [], lastChestTime = 0, isProcessing = false, userDataLoaded = false;
+let isAdmin = false;
+// Апгрейд — только для админов (ADMIN_IDS на сервере). Флаг приходит из /api/user.
+let upgradeType = 'coin', upgradeMultiplier = 2, upgradeDuration = 3, upgradeBusy = false, wheelRotation = 0;
+const UPGRADE_MIN_COINS = 50, UPGRADE_MAX_COINS = 5000, UPGRADE_MAX_CAPSULES = 50;
+const upgradeStats = { total: 0, wins: 0, best: 0 };
 let hockeyInterval = null, hasShownWinner = false;
 let ball = { x: 50, y: 50, active: false, animationId: null, hasStartedAnim: false, roundId: null, path: null };
 let hockeyServerOffsetMs = 0, hockeyClockSynced = false;
@@ -90,6 +95,8 @@ function updateUI() {
             </div>
         `).join('');
     }
+    refreshUpgradeUI();
+    updateUpgradeStatsUI();
 }
 
 async function loadUserData() {
@@ -103,7 +110,9 @@ async function loadUserData() {
         }
         if (!response.ok) throw new Error(data.detail || "Не удалось загрузить профиль");
         balance = Number(data.coins) || 0; keys = data.keys || 0; inventory = data.inventory || []; lastChestTime = data.last_chest || 0;
+        isAdmin = Boolean(data.is_admin);
         userDataLoaded = true;
+        updateUpgradeAccess();
         updateUI(); checkChestCooldown();
     } catch (e) { console.error("Ошибка загрузки профиля", e); }
 }
@@ -354,7 +363,7 @@ function renderShop() {
         const limitText = item.dailyLimit != null ? `До ${item.dailyLimit} шт. в день` : '';
         return `
             <article class="shop-item">
-                <img class="shop-item-image" src="${item.shopImage}" alt="${item.name}">
+                <div class="item-icon">${item.emoji || '💊'}</div>
                 <h3>${item.name}</h3>
                 <p>${item.price} 🪙</p>
                 <small class="shop-limit">${limitText}</small>
@@ -392,6 +401,248 @@ async function buyItem(itemId) {
         tg.showAlert("Ошибка соединения");
     } finally {
         isProcessing = false;
+    }
+}
+
+// ================= АПГРЕЙД =================
+function countItem(itemId) { return inventory.filter(item => item === itemId).length; }
+
+function formatMultiplier(value) { return Number.isInteger(value) ? String(value) : value.toFixed(1); }
+
+function updateUpgradeAccess() {
+    const card = document.getElementById('game-card-upgrade');
+    if (card) card.classList.toggle('locked', !isAdmin);
+    const lock = document.getElementById('upgrade-lock-icon');
+    if (lock) lock.style.display = isAdmin ? 'none' : 'inline';
+    const sub = document.getElementById('upgrade-card-sub');
+    if (sub) sub.innerText = isAdmin ? 'Улучшай капсулы' : 'Скоро...';
+    const statsBlock = document.getElementById('upgrade-stats-block');
+    if (statsBlock) statsBlock.style.display = isAdmin ? 'block' : 'none';
+}
+
+function openUpgrade() {
+    if (!isAdmin) return tg.showAlert('Скоро...');
+    openGame('upgrade');
+    refreshUpgradeUI();
+    setUpgradeResult('Выбери предмет, кэф и запускай', '');
+}
+
+function setUpgradeResult(text, state) {
+    const el = document.getElementById('upgrade-result');
+    if (!el) return;
+    el.innerText = text;
+    el.className = 'up-result' + (state ? ' ' + state : '');
+}
+
+function refreshUpgradeUI() {
+    const capsules = countItem('capsule');
+    const uniq = countItem('uniq_capsule');
+    const setText = (id, value) => { const el = document.getElementById(id); if (el) el.innerText = value; };
+    setText('up-count-capsule', capsules);
+    setText('up-count-uniq_capsule', uniq);
+
+    const capsuleBtn = document.getElementById('up-type-capsule');
+    const uniqBtn = document.getElementById('up-type-uniq_capsule');
+    if (capsuleBtn) capsuleBtn.classList.toggle('empty', capsules === 0);
+    if (uniqBtn) uniqBtn.classList.toggle('empty', uniq === 0);
+
+    const btn = document.getElementById('upgrade-btn');
+    if (btn) {
+        const suffix = upgradeType === 'coin' ? ` x${formatMultiplier(upgradeMultiplier)}` : '';
+        btn.innerText = upgradeBusy ? '🛠️ Крутим...' : `🛠️ Апгрейд${suffix}`;
+    }
+
+    const hint = document.getElementById('up-capsule-hint');
+    if (hint) {
+        hint.innerText = upgradeType === 'uniq_capsule'
+            ? 'Уникальная капсула ⚱️ → 2 000 🪙'
+            : 'Обычная капсула 💊 → Уникальная ⚱️';
+    }
+}
+
+function selectUpgradeType(type, element) {
+    if (upgradeBusy) return;
+    if (!['coin', 'capsule', 'uniq_capsule'].includes(type)) return;
+    upgradeType = type;
+    document.querySelectorAll('.up-type-btn').forEach(btn => btn.classList.remove('active'));
+    if (element) element.classList.add('active');
+    const isCoin = type === 'coin';
+    const amountBlock = document.getElementById('up-amount-block');
+    const quantityBlock = document.getElementById('up-quantity-block');
+    const multipliers = document.getElementById('up-multipliers');
+    if (amountBlock) amountBlock.style.display = isCoin ? 'block' : 'none';
+    if (quantityBlock) quantityBlock.style.display = isCoin ? 'none' : 'block';
+    if (multipliers) multipliers.style.display = isCoin ? 'grid' : 'none';
+    playSound('click');
+    refreshUpgradeUI();
+}
+
+function selectUpgradeMultiplier(value, element) {
+    if (upgradeBusy) return;
+    upgradeMultiplier = Number(value);
+    document.querySelectorAll('.up-mult-btn').forEach(btn => btn.classList.remove('active'));
+    if (element) element.classList.add('active');
+    playSound('click');
+    refreshUpgradeUI();
+}
+
+function selectUpgradeSpeed(seconds) {
+    upgradeDuration = seconds === 8 ? 8 : 3;
+    const fast = document.getElementById('up-speed-fast');
+    const slow = document.getElementById('up-speed-slow');
+    if (fast) fast.classList.toggle('active', upgradeDuration === 3);
+    if (slow) slow.classList.toggle('active', upgradeDuration === 8);
+    playSound('click');
+}
+
+function setUpgradeAmount(value) {
+    const input = document.getElementById('upgrade-amount');
+    if (input) input.value = value;
+}
+
+function setUpgradeQuantity(value) {
+    const input = document.getElementById('upgrade-quantity');
+    if (!input) return;
+    if (value === 'max') {
+        const owned = countItem(upgradeType);
+        input.value = Math.max(1, Math.min(UPGRADE_MAX_CAPSULES, owned));
+        return;
+    }
+    input.value = value;
+}
+
+// Крутим ровно до нужного сектора: чётные секторы — победа, нечётные — проигрыш.
+function spinUpgradeWheel(won, durationMs) {
+    const wheel = document.getElementById('upgrade-wheel');
+    const wrap = document.getElementById('upgrade-wheel-wrap');
+    if (!wheel) return;
+    const segmentCenter = (won ? 0 : 1) * 45 + 22.5;
+    const targetBase = (360 - segmentCenter) % 360;
+    const current = ((wheelRotation % 360) + 360) % 360;
+    const delta = ((targetBase - current) % 360 + 360) % 360;
+    const fullTurns = upgradeDuration >= 8 ? 7 : 4;
+    wheelRotation += fullTurns * 360 + delta;
+    wheel.style.transition = 'none';
+    void wheel.offsetWidth;
+    wheel.style.transition = `transform ${durationMs}ms cubic-bezier(0.15, 0.85, 0.15, 1)`;
+    wheel.style.transform = `rotate(${wheelRotation}deg)`;
+    if (wrap) wrap.classList.add('spinning');
+    const hub = document.getElementById('upgrade-wheel-hub');
+    if (hub) hub.innerText = '🛠️';
+}
+
+function stopUpgradeWheel(state) {
+    const wrap = document.getElementById('upgrade-wheel-wrap');
+    if (wrap) wrap.classList.remove('spinning');
+    const hub = document.getElementById('upgrade-wheel-hub');
+    if (hub) hub.innerText = state === 'win' ? '✅' : '❌';
+}
+
+function updateUpgradeStatsUI() {
+    const setText = (id, value) => { const el = document.getElementById(id); if (el) el.innerText = value; };
+    setText('upg-stat-total', upgradeStats.total);
+    setText('upg-stat-wins', upgradeStats.wins);
+    setText('upg-stat-best', upgradeStats.best > 0 ? upgradeStats.best : '—');
+}
+
+async function startUpgrade() {
+    if (upgradeBusy) return;
+    if (!isAdmin) return tg.showAlert('Скоро...');
+    if (!userDataLoaded) {
+        await loadUserData();
+        if (!userDataLoaded) return tg.showAlert('Не удалось загрузить баланс. Проверьте соединение.');
+    }
+
+    const payload = { initData: tg.initData, bet_type: upgradeType };
+    if (upgradeType === 'coin') {
+        const amount = parseInt(document.getElementById('upgrade-amount').value, 10) || 0;
+        if (amount < UPGRADE_MIN_COINS) return tg.showAlert(`Минимальная ставка ${UPGRADE_MIN_COINS} 🪙`);
+        if (amount > UPGRADE_MAX_COINS) return tg.showAlert(`Максимальная ставка ${UPGRADE_MAX_COINS} 🪙`);
+        if (balance < amount) return tg.showAlert('Недостаточно коинов!');
+        payload.amount = amount;
+        payload.target_multiplier = upgradeMultiplier;
+    } else {
+        const quantity = parseInt(document.getElementById('upgrade-quantity').value, 10) || 0;
+        const owned = countItem(upgradeType);
+        if (quantity < 1) return tg.showAlert('Минимум 1 капсула');
+        if (quantity > UPGRADE_MAX_CAPSULES) return tg.showAlert(`Максимум ${UPGRADE_MAX_CAPSULES} капсул за раз`);
+        if (quantity > owned) return tg.showAlert(`У тебя только ${owned} капсул(а)`);
+        payload.quantity = quantity;
+    }
+
+    upgradeBusy = true;
+    const btn = document.getElementById('upgrade-btn');
+    if (btn) btn.disabled = true;
+    setUpgradeResult('Крутим...', 'spinning');
+    refreshUpgradeUI();
+    playSound('click');
+
+    let data = null;
+    let errorText = '';
+    try {
+        const res = await fetch(`${API_URL}/api/upgrade_action`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        });
+        data = await res.json().catch(() => ({}));
+        if (!res.ok) errorText = data.detail || 'Не удалось запустить апгрейд';
+    } catch (e) {
+        console.error('Ошибка апгрейда', e);
+        errorText = 'Ошибка соединения';
+    }
+
+    if (errorText || !data) {
+        upgradeBusy = false;
+        if (btn) btn.disabled = false;
+        setUpgradeResult(errorText || 'Не удалось запустить апгрейд', 'lose');
+        tg.showAlert(errorText || 'Не удалось запустить апгрейд');
+        refreshUpgradeUI();
+        if (errorText && errorText.toLowerCase().includes('администратор')) { isAdmin = false; updateUpgradeAccess(); }
+        return;
+    }
+
+    // Результат уже посчитан на сервере — анимация только показывает его игроку.
+    spinUpgradeWheel(Boolean(data.won), upgradeDuration * 1000);
+    setTimeout(() => finishUpgradeAnimation(data), upgradeDuration * 1000 + 120);
+}
+
+function finishUpgradeAnimation(data) {
+    upgradeBusy = false;
+    const btn = document.getElementById('upgrade-btn');
+    if (btn) btn.disabled = false;
+
+    balance = Number(data.new_balance) >= 0 ? Number(data.new_balance) : balance;
+    inventory = Array.isArray(data.inventory) ? data.inventory : inventory;
+
+    upgradeStats.total += 1;
+    if (data.won) upgradeStats.wins += 1;
+    const payout = Number(data.payout) || 0;
+    if (payout > upgradeStats.best) upgradeStats.best = payout;
+
+    const wonItems = data.won_items || {};
+    const itemsText = Object.entries(wonItems).map(([itemId, count]) => {
+        const item = SHOP_ITEMS[itemId];
+        return `${item ? item.emoji : '⚱️'} ${item ? item.name : 'Уникальная капсула'} x${count}`;
+    }).join(', ');
+
+    stopUpgradeWheel(data.won ? 'win' : 'lose');
+    updateUI();
+    refreshUpgradeUI();
+
+    if (data.won) {
+        const text = payout > 0 ? `✅ Успех! +${payout} 🪙` : `✅ Успех! Получено: ${itemsText}`;
+        setUpgradeResult(text, 'win');
+        showWin(payout > 0 ? `+ ${payout} 🪙` : `✅ ${itemsText}`);
+        playSound('win');
+        try { tg.HapticFeedback.notificationOccurred('success'); } catch (e) {}
+    } else {
+        const lostText = data.bet_type === 'coin'
+            ? '❌ Не повезло. Ставка сгорела'
+            : '❌ Не повезло. Капсулы сгорели';
+        setUpgradeResult(lostText, 'lose');
+        playSound('lose');
+        try { tg.HapticFeedback.notificationOccurred('error'); } catch (e) {}
     }
 }
 

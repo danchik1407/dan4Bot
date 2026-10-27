@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
     <title>AURA GAME</title>
-    <link rel="stylesheet" href="style.css?v=shop-admin-only-1">
+    <link rel="stylesheet" href="style.css?v=upgrade-game-1">
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
 </head>
 <body>
@@ -27,6 +27,10 @@
                 <div class="game-card" onclick="openGame('mines')"><div class="game-icon">💣</div><div class="game-info"><h3>Мины</h3><p>Разминируй поле</p></div></div>
                 <div class="game-card" onclick="openGame('hockey')"><div class="game-icon">🏒</div><div class="game-info"><h3>Арена</h3><p>Онлайн-рулетка</p></div></div>
                 <div class="game-card" onclick="openGame('crash')"><div class="game-icon">🚀</div><div class="game-info"><h3>Ракета</h3><p>Успей забрать</p></div></div>
+                <div class="game-card game-card-upgrade locked" id="game-card-upgrade" onclick="openUpgrade()">
+                    <div class="game-icon">🛠️</div>
+                    <div class="game-info"><h3>Апгрейд <span class="up-lock" id="upgrade-lock-icon">🔒</span></h3><p id="upgrade-card-sub">Скоро...</p></div>
+                </div>
             </div>
         </section>
 
@@ -81,6 +85,15 @@
                 </div>
                 <h3 style="margin-top: 25px; margin-bottom: 10px; text-align: left;">🎒 Инвентарь</h3>
                 <div class="inventory-grid" id="inventory"></div>
+
+                <div class="up-stats-block" id="upgrade-stats-block">
+                    <h3 style="margin-top: 25px; margin-bottom: 10px; text-align: left;">🛠️ Статистика Апгрейда</h3>
+                    <div class="stats-row">
+                        <div class="stat-box"><span class="stat-icon">🎯</span><span class="stat-value" id="upg-stat-total">0</span><span class="stat-label">Апгрейдов</span></div>
+                        <div class="stat-box"><span class="stat-icon">✅</span><span class="stat-value" id="upg-stat-wins">0</span><span class="stat-label">Успешных</span></div>
+                        <div class="stat-box"><span class="stat-icon">💰</span><span class="stat-value" id="upg-stat-best">—</span><span class="stat-label">Лучший выигрыш</span></div>
+                    </div>
+                </div>
             </div>
         </section>
 
@@ -135,6 +148,65 @@
                 <button class="action-btn" id="hockey-btn" onclick="placeHockeyBet()">Поставить ставку</button>
             </div>
             <div class="hockey-participants" id="hockey-participants"></div>
+        </section>
+
+        <section id="screen-upgrade" class="game-screen upgrade-screen">
+            <button class="back-btn" onclick="closeGame()">← Назад</button>
+            <div class="game-balance-badge">💎 <span class="game-balance-val">0</span></div>
+            <h2 class="game-title up-title">🛠️ Апгрейд</h2>
+
+            <div class="up-bet-types">
+                <button class="up-type-btn active" id="up-type-coin" onclick="selectUpgradeType('coin', this)">🪙 Коины</button>
+                <button class="up-type-btn" id="up-type-capsule" onclick="selectUpgradeType('capsule', this)">💊 Обычная <b id="up-count-capsule">0</b></button>
+                <button class="up-type-btn" id="up-type-uniq_capsule" onclick="selectUpgradeType('uniq_capsule', this)">⚱️ Уник. <b id="up-count-uniq_capsule">0</b></button>
+            </div>
+
+            <div class="up-block" id="up-amount-block">
+                <label class="up-label">Сколько ставим?</label>
+                <input type="number" id="upgrade-amount" class="bet-input up-input" value="100" min="50" max="5000" inputmode="numeric">
+                <div class="bet-buttons up-quick">
+                    <button onclick="setUpgradeAmount(50)">50</button>
+                    <button onclick="setUpgradeAmount(100)">100</button>
+                    <button onclick="setUpgradeAmount(500)">500</button>
+                    <button onclick="setUpgradeAmount(1000)">1 000</button>
+                </div>
+                <div class="up-hint">Мин. 50 · Макс. 5 000 🪙</div>
+            </div>
+
+            <div class="up-block" id="up-quantity-block" style="display: none;">
+                <label class="up-label">Сколько капсул?</label>
+                <input type="number" id="upgrade-quantity" class="bet-input up-input" value="1" min="1" max="50" inputmode="numeric">
+                <div class="bet-buttons up-quick">
+                    <button onclick="setUpgradeQuantity(1)">1</button>
+                    <button onclick="setUpgradeQuantity(5)">5</button>
+                    <button onclick="setUpgradeQuantity(10)">10</button>
+                    <button onclick="setUpgradeQuantity('max')">Макс</button>
+                </div>
+                <div class="up-hint" id="up-capsule-hint">Обычная капсула 💊 → Уникальная ⚱️</div>
+            </div>
+
+            <div class="up-multipliers" id="up-multipliers">
+                <button class="up-mult-btn" onclick="selectUpgradeMultiplier(1.5, this)">x1.5</button>
+                <button class="up-mult-btn active" onclick="selectUpgradeMultiplier(2, this)">x2</button>
+                <button class="up-mult-btn" onclick="selectUpgradeMultiplier(3, this)">x3</button>
+                <button class="up-mult-btn" onclick="selectUpgradeMultiplier(5, this)">x5</button>
+                <button class="up-mult-btn" onclick="selectUpgradeMultiplier(10, this)">x10</button>
+            </div>
+
+            <div class="up-speed">
+                <button class="up-speed-btn active" id="up-speed-fast" onclick="selectUpgradeSpeed(3)">⚡ Быстро (3 сек)</button>
+                <button class="up-speed-btn" id="up-speed-slow" onclick="selectUpgradeSpeed(8)">🐢 Медленно (8 сек)</button>
+            </div>
+
+            <div class="up-wheel-wrap" id="upgrade-wheel-wrap">
+                <div class="up-wheel-pointer">▼</div>
+                <div class="up-wheel" id="upgrade-wheel"></div>
+                <div class="up-wheel-hub" id="upgrade-wheel-hub">🛠️</div>
+            </div>
+
+            <div class="up-result" id="upgrade-result">Выбери предмет, кэф и запускай</div>
+
+            <button class="action-btn up-action-btn" id="upgrade-btn" onclick="startUpgrade()">🛠️ Апгрейд</button>
         </section>
 
         <section id="screen-crash" class="game-screen" style="padding: 10px;">
@@ -231,6 +303,6 @@
         <div class="nav-item" onclick="switchTab('profile', this)"><span class="nav-icon">👤</span> Профиль</div>
     </nav>
 
-    <script src="app.js?v=shop-admin-only-1" defer></script>
+    <script src="app.js?v=upgrade-game-1" defer></script>
 </body>
 </html>
