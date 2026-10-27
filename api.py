@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 import asyncio
+import logging
 import os, hashlib, hmac, json, time, random, uvicorn, datetime, math
 from urllib.parse import parse_qsl
 from dotenv import load_dotenv
@@ -12,6 +13,11 @@ from shop_catalog import SHOP_ITEMS, ShopPurchaseError, is_admin_id, parse_inven
     serialize_shop_items
 
 load_dotenv()
+
+logger = logging.getLogger("aura-api")
+if not logger.handlers:
+    logging.basicConfig(level=logging.INFO)
+
 app = FastAPI()
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"],
                    allow_headers=["*"])
@@ -79,14 +85,51 @@ def _random_arena_bot_count():
 
 
 # ==================== ОБЩИЕ ХЕЛПЕРЫ ЭКОНОМИКИ ====================
+def _safe_int(value, default=0):
+    """NULL / строка / float из базы не должны ронять эндпоинт в 500."""
+    if value is None or value == "":
+        return default
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return default
+
+
+def _row_matches_id(row, user_id):
+    raw = row.get("user_id")
+    if raw is None:
+        return False
+    return str(raw).strip() == str(user_id).strip()
+
+
+def _find_user_rows(user_id):
+    """Ищем строку и по int, и по строке: в старой базе user_id мог сохраниться текстом."""
+    uid = _safe_int(user_id, None)
+    if uid is None:
+        return []
+    rows = []
+    for key in (uid, str(uid)):
+        try:
+            res = supabase.table("users").select("*").eq("user_id", key).execute()
+        except Exception:
+            logger.exception("Не удалось прочитать users по user_id=%s", key)
+            continue
+        for row in res.data or []:
+            if _row_matches_id(row, uid):
+                rows.append(row)
+        # Второй, «строковый» запрос нужен только если обычный ничего не нашёл.
+        if rows:
+            break
+    unique = {}
+    for row in rows:
+        unique[str(row.get("id", "uid:%s" % row.get("user_id")))] = row
+    return list(unique.values())
+
+
 def _db_user(user_id):
     """Одна запись users или None. user_id приводим к int — в базе это bigint."""
-    try:
-        uid = int(user_id)
-    except (TypeError, ValueError):
-        return None
-    res = supabase.table("users").select("*").eq("user_id", uid).execute()
-    return res.data[0] if res.data else None
+    rows = _find_user_rows(user_id)
+    return rows[0] if rows else None
 
 
 def _db_update_user(user_id, **fields):
@@ -94,8 +137,43 @@ def _db_update_user(user_id, **fields):
     payload = {key: value for key, value in fields.items() if value is not None}
     if not payload:
         return False
-    updated = supabase.table("users").update(payload).eq("user_id", int(user_id)).select("user_id").execute()
-    return bool(updated.data)
+    uid = _safe_int(user_id, None)
+    if uid is None:
+        return False
+    # Строка могла быть сохранена как int, а могла — как текст (старые записи).
+    for key in (uid, str(uid)):
+        try:
+            updated = supabase.table("users").update(payload).eq("user_id", key).select("user_id").execute()
+        except Exception:
+            logger.exception("Не удалось обновить users по user_id=%s", key)
+            continue
+        if updated.data:
+            return True
+    return False
+
+
+def _user_payload(row, is_admin):
+    """Единый ответ профиля: любые NULL/строки из базы приводим к нормальным типам."""
+    created_at = row.get("created_at")
+    if isinstance(created_at, str):
+        created_text = created_at
+    elif created_at is not None:
+        try:
+            created_text = created_at.isoformat()
+        except AttributeError:
+            created_text = str(created_at)
+    else:
+        created_text = None
+    return {
+        "ok": True,
+        "coins": _safe_int(row.get("coins"), 0),
+        "keys": _safe_int(row.get("keys"), 0),
+        "inventory": parse_inventory(row.get("inventory")),
+        "last_chest": _safe_int(row.get("last_chest"), 0),
+        "is_admin": is_admin,
+        "created_at": created_text,
+        "days_in_game": _days_in_game(created_at),
+    }
 
 
 def _days_in_game(created_at):
@@ -105,10 +183,12 @@ def _days_in_game(created_at):
     if isinstance(created_at, str):
         try:
             created = datetime.datetime.fromisoformat(created_at.strip().replace("Z", "+00:00"))
-        except ValueError:
+        except (TypeError, ValueError):
             return 0
-    else:
+    elif isinstance(created_at, datetime.datetime):
         created = created_at
+    else:
+        return 0
     if created.tzinfo is None:
         created = created.replace(tzinfo=datetime.timezone.utc)
     delta = datetime.datetime.now(datetime.timezone.utc) - created
@@ -999,27 +1079,109 @@ async def mines_cashout(data: MinesCashout):
 async def get_user(auth: UserAuth):
     user = verify_telegram_data(auth.initData)
     if not user: raise HTTPException(status_code=401, detail="Invalid auth data")
-    user_id = user["id"]
+    raw_id = user.get("id")
+    user_id = _safe_int(raw_id, None)
+    if user_id is None:
+        raise HTTPException(status_code=400, detail="Некорректный id пользователя")
 
-    res_ban = supabase.table("bans").select("*").eq("user_id", user_id).execute()
-    if res_ban.data:
+    try:
+        res_ban = supabase.table("bans").select("*").eq("user_id", user_id).execute()
+        banned = bool(res_ban.data)
+    except Exception:
+        logger.exception("Не удалось проверить бан user_id=%s", user_id)
+        banned = False
+    if banned:
         raise HTTPException(status_code=403, detail="Вы забанены за багоюз или нарушение правил.")
 
     is_admin = is_admin_id(user_id, ADMIN_IDS)
-    if user_id in ADMIN_IDS and user_id != user.get("id"): return {"coins": -1, "keys": 0, "inventory": [],
-                                                                   "last_chest": 0, "hidden": True, "is_admin": is_admin}
-    res = supabase.table("users").select("*").eq("user_id", user_id).execute()
-    if not res.data:
-        new_user = {"user_id": user_id, "coins": 0, "keys": 0, "username": user.get("username", f"id{user_id}"),
+
+    try:
+        rows = _find_user_rows(user_id)
+    except Exception:
+        logger.exception("Ошибка чтения профиля user_id=%s", user_id)
+        raise HTTPException(status_code=503, detail="База временно недоступна, попробуйте ещё раз")
+
+    if not rows:
+        # Создаём профиль только если строки действительно нет ни в одном варианте id.
+        new_user = {"user_id": user_id, "coins": 0, "keys": 0,
+                    "username": user.get("username", f"id{user_id}"),
                     "last_chest": 0, "chat_id": 0, "inventory": "[]"}
-        supabase.table("users").insert(new_user).execute()
-        return {"coins": 0, "keys": 0, "inventory": [], "last_chest": 0, "is_admin": is_admin,
-                "created_at": None, "days_in_game": 0}
-    db_user = res.data[0]
-    created_at = db_user.get("created_at")
-    return {"coins": int(db_user.get("coins", 0)), "keys": int(db_user.get("keys", 0)),
-            "inventory": json.loads(db_user.get("inventory") or "[]"), "last_chest": int(db_user.get("last_chest", 0)),
-            "is_admin": is_admin, "created_at": created_at, "days_in_game": _days_in_game(created_at)}
+        try:
+            supabase.table("users").insert(new_user).execute()
+        except Exception:
+            logger.exception("Не удалось создать профиль user_id=%s", user_id)
+        rows = _find_user_rows(user_id)
+        if not rows:
+            raise HTTPException(status_code=503, detail="Профиль не найден в базе, попробуйте позже")
+
+    # Если в базе оказалось несколько строк (старые дубли), берём ту, где больше коинов —
+    # иначе игрок видит 0, хотя в «кармане» бота лежат его деньги.
+    row = max(rows, key=lambda item: _safe_int(item.get("coins"), 0))
+    if len(rows) > 1:
+        logger.warning("Дубли профиля user_id=%s: %s", user_id,
+                       [(_safe_int(item.get("id"), None), _safe_int(item.get("coins"), 0)) for item in rows])
+    return _user_payload(row, is_admin)
+
+
+@app.post("/api/self_check")
+async def self_check(auth: UserAuth):
+    """Диагностика для игрока: что именно видит сервер по его профилю.
+
+    Помогает отличить три ситуации: initData не проходит проверку, строки нет
+    в базе, или в базе лежит другая (нулевая) строка.
+    """
+    user = verify_telegram_data(auth.initData)
+    if not user:
+        return {"ok": False, "stage": "verify", "reason": "initData не прошёл проверку подписи",
+                "bot_token_set": bool(BOT_TOKEN)}
+
+    user_id = _safe_int(user.get("id"), None)
+    result = {
+        "ok": True, "stage": "row", "user_id": user_id,
+        "username": user.get("username") or user.get("first_name") or "",
+        "bot_token_set": bool(BOT_TOKEN),
+        "supabase_host": _supabase_host(),
+        "is_admin": is_admin_id(user_id, ADMIN_IDS) if user_id is not None else False,
+        "rows_found": 0, "row": None, "created_at_present": None, "error": None,
+    }
+    if user_id is None:
+        result.update({"ok": False, "reason": "в initData нет числового id"})
+        return result
+
+    try:
+        rows = _find_user_rows(user_id)
+    except Exception as exc:  # noqa: BLE001
+        result.update({"ok": False, "stage": "query", "reason": "ошибка запроса к базе",
+                       "error": f"{type(exc).__name__}: {exc}"[:300]})
+        return result
+
+    result["rows_found"] = len(rows)
+    if not rows:
+        result.update({"ok": False, "reason": "строки с таким user_id нет в таблице users"})
+        return result
+
+    row = max(rows, key=lambda item: _safe_int(item.get("coins"), 0))
+    result["created_at_present"] = "created_at" in row
+    result["row"] = {
+        "id": _safe_int(row.get("id"), None),
+        "user_id_raw": str(row.get("user_id")),
+        "coins_raw": repr(row.get("coins")),
+        "coins": _safe_int(row.get("coins"), 0),
+        "keys_raw": repr(row.get("keys")),
+        "last_chest_raw": repr(row.get("last_chest")),
+        "inventory_type": type(row.get("inventory")).__name__,
+    }
+    result["profile"] = _user_payload(row, result["is_admin"])
+    return result
+
+
+def _supabase_host():
+    url = os.getenv("SUPABASE_URL") or ""
+    try:
+        from urllib.parse import urlparse
+        return urlparse(url).hostname or ""
+    except Exception:
+        return ""
 
 
 @app.post("/api/open_chest")
