@@ -13,6 +13,7 @@ from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKe
 from aiogram.enums import ChatMemberStatus
 from aiohttp import web
 from supabase import create_client, Client
+from shop_catalog import SHOP_ITEMS, ShopPurchaseError, parse_inventory, purchase_shop_item
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -509,14 +510,16 @@ async def cmd_pocket(message: Message):
         return await message.answer(f"💰 <b>Карман @{safe_text(target.username)}</b>\n\n💎 Баланс: <b>Скрыто</b> 🔒",
                                     parse_mode="HTML")
 
-    inv = json.loads(user.get("inventory") or "[]")
+    inv = parse_inventory(user.get("inventory"))
     name = f"@{safe_text(target.username)}" if getattr(target, 'username', None) else f"id{target.id}"
     text = f"💰 <b>Карман {name}</b>\n\n💎 Баланс: <b>{user['coins']}</b> 🪙\n"
     if user.get("keys", 0) > 0: text += f"🔑 Ключи: <b>{user['keys']}</b>\n"
     if inv:
         text += "\n🎒 <b>Инвентарь:</b>\n"
-        if 'capsule' in inv: text += f"💊 Капсула: {inv.count('capsule')} шт.\n"
-        if 'uniq_capsule' in inv: text += f"⚱️ Уник. Капсула: {inv.count('uniq_capsule')} шт.\n"
+        for item_id, item in SHOP_ITEMS.items():
+            count = inv.count(item_id)
+            if count:
+                text += f"{item['emoji']} {item['short_name']}: <b>{count} шт.</b>\n"
     else:
         text += "\n🎒 <b>Инвентарь:</b> Пусто\n"
     await message.answer(text, parse_mode="HTML")
@@ -560,13 +563,22 @@ async def cmd_open(message: Message):
 # ================= МАГАЗИН =================
 @dp.message(F.text.func(lambda t: strip_prefix(t).lower().startswith("магазин")))
 async def cmd_shop(message: Message):
-    text = (
-        "🛍️ <b>Магазин AURA</b>\n\n💊 <b>Капсула</b> — 100 🪙\n⚱️ <b>Уник. Капсула</b> — 500 🪙\n\nНажми на кнопку ниже, чтобы купить предмет. Он появится в твоем инвентаре.")
-    kb = InlineKeyboardMarkup(
-        inline_keyboard=[[InlineKeyboardButton(text="💊 Купить Капсулу (100 🪙)", callback_data="buy_capsule")],
-                         [InlineKeyboardButton(text="⚱️ Купить Уник. Капсулу (500 🪙)",
-                                               callback_data="buy_uniq_capsule")]])
-    await message.answer(text, parse_mode="HTML", reply_markup=kb)
+    lines = ["🛍️ <b>Магазин AURA</b>", "", "Выбери капсулу — покупка появится в кармане:"]
+    buttons = []
+    for item_id, item in SHOP_ITEMS.items():
+        limit_text = f" · лимит {item['daily_limit']}/день" if item["daily_limit"] is not None else ""
+        price_text = f"{item['price']:,}".replace(",", " ")
+        lines.append(f"{item['emoji']} <b>{item['name']}</b> — <b>{price_text}</b> 🪙{limit_text}")
+        buttons.append(InlineKeyboardButton(
+            text=f"{item['emoji']} {item['short_name']} · {price_text} 🪙",
+            callback_data=f"shop_buy|{item_id}",
+        ))
+    rows = [buttons[index:index + 2] for index in range(0, len(buttons), 2)]
+    await message.answer(
+        "\n".join(lines),
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
+    )
 
 
 # ================= ВЫДАТЬ КЛЮЧИ =================
@@ -692,25 +704,37 @@ async def cb_dice_decline(callback: CallbackQuery):
     await callback.answer()
 
 
+async def _complete_shop_purchase(callback: CallbackQuery, item_id: str):
+    item = SHOP_ITEMS.get(item_id)
+    if item is None:
+        return await callback.answer("❌ Неизвестный товар", show_alert=True)
+    try:
+        await get_user(callback.from_user.id, callback.from_user.username)
+        await asyncio.to_thread(purchase_shop_item, supabase, callback.from_user.id, item_id, ADMIN_IDS)
+    except ShopPurchaseError as exc:
+        logger.warning("Покупка %s пользователем %s отклонена: %s", item_id, callback.from_user.id, exc.message)
+        return await callback.answer(f"❌ {exc.message}", show_alert=True)
+    except Exception:
+        logger.exception("Не удалось обработать покупку %s пользователем %s", item_id, callback.from_user.id)
+        return await callback.answer("❌ Не удалось завершить покупку. Попробуйте позже.", show_alert=True)
+    await callback.answer(f"✅ {item['name']} куплена за {item['price']:,} 🪙", show_alert=True)
+
+
+@dp.callback_query(F.data.startswith("shop_buy|"))
+async def cb_buy_shop_item(callback: CallbackQuery):
+    item_id = callback.data.split("|", 1)[1]
+    await _complete_shop_purchase(callback, item_id)
+
+
+# Keep already-sent keyboards functional after updating the callback format.
 @dp.callback_query(F.data == "buy_capsule")
-async def cb_buy_capsule(callback: CallbackQuery):
-    user = await get_user(callback.from_user.id, callback.from_user.username)
-    if user["coins"] < 100: return await callback.answer("❌ Недостаточно коинов!", show_alert=True)
-    inv = json.loads(user.get("inventory") or "[]")
-    inv.append("capsule")
-    await update_user(callback.from_user.id, coins=user["coins"] - 100, inventory=json.dumps(inv))
-    await callback.answer("✅ Успешно куплено! Проверь карман", show_alert=True)
+async def cb_buy_capsule_legacy(callback: CallbackQuery):
+    await _complete_shop_purchase(callback, "capsule")
 
 
 @dp.callback_query(F.data == "buy_uniq_capsule")
-async def cb_buy_uniq_capsule(callback: CallbackQuery):
-    user = await get_user(callback.from_user.id, callback.from_user.username)
-    if user["coins"] < 500: return await callback.answer("❌ Недостаточно коинов!", show_alert=True)
-    inv = json.loads(user.get("inventory") or "[]")
-    inv.append("uniq_capsule")
-    await update_user(callback.from_user.id, coins=user["coins"] - 500, inventory=json.dumps(inv))
-    await callback.answer("✅ Успешно куплено! Проверь карман", show_alert=True)
-
+async def cb_buy_uniq_capsule_legacy(callback: CallbackQuery):
+    await _complete_shop_purchase(callback, "uniq_capsule")
 
 # ================= СТАТИСТИКА =================
 @dp.message(F.text.func(lambda t: strip_prefix(t).lower().startswith("стата бота")))
