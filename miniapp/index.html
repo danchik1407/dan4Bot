@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
     <title>AURA GAME</title>
-    <link rel="stylesheet" href="style.css?v=shop-capsules-limits-1">
+    <link rel="stylesheet" href="style.css?v=shop-admin-only-1">
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
 </head>
 <body>
@@ -67,42 +67,7 @@
 
         <section id="tab-shop" class="tab">
             <div class="page-header"><h2>🛒 Магазин</h2></div>
-            <div class="shop-grid">
-                <article class="shop-item">
-                    <img class="shop-item-image" src="capsule.png" alt="Обычная капсула">
-                    <h3>Обычная капсула</h3>
-                    <p>500 🪙</p>
-                    <button class="buy-btn" onclick="buyItem('capsule')">Купить</button>
-                </article>
-                <article class="shop-item">
-                    <img class="shop-item-image" src="uniq_capsule.png" alt="Уникальная капсула">
-                    <h3>Уникальная капсула</h3>
-                    <p>1000 🪙</p>
-                    <small class="shop-limit">До 30 шт. в день</small>
-                    <button class="buy-btn" onclick="buyItem('uniq_capsule')">Купить</button>
-                </article>
-                <article class="shop-item">
-                    <img class="shop-item-image" src="malachite.png" alt="Малахитовая капсула">
-                    <h3>Малахитовая капсула</h3>
-                    <p>3000 🪙</p>
-                    <small class="shop-limit">До 15 шт. в день</small>
-                    <button class="buy-btn" onclick="buyItem('malachite')">Купить</button>
-                </article>
-                <article class="shop-item">
-                    <img class="shop-item-image" src="emerald.png" alt="Изумрудная капсула">
-                    <h3>Изумрудная капсула</h3>
-                    <p>5000 🪙</p>
-                    <small class="shop-limit">До 10 шт. в день</small>
-                    <button class="buy-btn" onclick="buyItem('emerald')">Купить</button>
-                </article>
-                <article class="shop-item">
-                    <img class="shop-item-image" src="diamond.png" alt="Алмазная капсула">
-                    <h3>Алмазная капсула</h3>
-                    <p>10000 🪙</p>
-                    <small class="shop-limit">До 5 шт. в день</small>
-                    <button class="buy-btn" onclick="buyItem('diamond')">Купить</button>
-                </article>
-            </div>
+            <div class="shop-grid" id="shop-grid"><div class="inv-empty">Загрузка магазина…</div></div>
         </section>
 
         <section id="tab-profile" class="tab">
@@ -266,6 +231,6 @@
         <div class="nav-item" onclick="switchTab('profile', this)"><span class="nav-icon">👤</span> Профиль</div>
     </nav>
 
-    <script src="app.js?v=shop-capsules-limits-1" defer></script>
+    <script src="app.js?v=shop-admin-only-1" defer></script>
 </body>
 </html>

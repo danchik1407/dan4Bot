@@ -8,7 +8,7 @@ from urllib.parse import parse_qsl
 from dotenv import load_dotenv
 from supabase import create_client, Client
 from typing import Optional
-from shop_catalog import SHOP_ITEMS, ShopPurchaseError, purchase_shop_item
+from shop_catalog import SHOP_ITEMS, ShopPurchaseError, is_admin_id, purchase_shop_item, serialize_shop_items
 
 load_dotenv()
 app = FastAPI()
@@ -310,6 +310,9 @@ class UpdateKeys(BaseModel): initData: str; amount: int
 
 
 class BuyItem(BaseModel): initData: str; item_id: str; price: Optional[int] = None
+
+
+class ShopCatalogRequest(BaseModel): initData: str
 
 
 class PlaceBet(BaseModel): initData: str; amount: int
@@ -700,6 +703,17 @@ async def open_chest(auth: UserAuth):
     if (now - last_chest) < 18000: raise HTTPException(status_code=400, detail="Сундук перезаряжается")
     supabase.table("users").update({"last_chest": now}).eq("user_id", user_id).execute()
     return {"success": True}
+
+
+@app.post("/api/shop_items")
+async def get_shop_items(data: ShopCatalogRequest):
+    """Shop catalog for the current user. Admin-only capsules are never included for regular users."""
+    user = verify_telegram_data(data.initData)
+    if not user: raise HTTPException(status_code=401, detail="Invalid auth data")
+    user_id = int(user["id"])
+    check_ban(str(user_id))
+    is_admin = is_admin_id(user_id, ADMIN_IDS)
+    return {"is_admin": is_admin, "items": serialize_shop_items(is_admin)}
 
 
 @app.post("/api/buy_item")

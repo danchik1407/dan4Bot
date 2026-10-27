@@ -12,6 +12,7 @@ SHOP_ITEMS = {
         "emoji": "💊",
         "price": 500,
         "daily_limit": None,
+        "admin_only": False,
         "shop_image": "capsule.png",
         "inventory_image": "inv_capsule.png",
     },
@@ -21,6 +22,7 @@ SHOP_ITEMS = {
         "emoji": "⚱️",
         "price": 1000,
         "daily_limit": 30,
+        "admin_only": True,
         "shop_image": "uniq_capsule.png",
         "inventory_image": "inv_uniq_capsule.png",
     },
@@ -30,6 +32,7 @@ SHOP_ITEMS = {
         "emoji": "🟢",
         "price": 3000,
         "daily_limit": 15,
+        "admin_only": True,
         "shop_image": "malachite.png",
         "inventory_image": "inv_malachite.png",
     },
@@ -39,6 +42,7 @@ SHOP_ITEMS = {
         "emoji": "💚",
         "price": 5000,
         "daily_limit": 10,
+        "admin_only": True,
         "shop_image": "emerald.png",
         "inventory_image": "inv_emerald.png",
     },
@@ -48,15 +52,61 @@ SHOP_ITEMS = {
         "emoji": "💎",
         "price": 10000,
         "daily_limit": 5,
+        "admin_only": True,
         "shop_image": "diamond.png",
         "inventory_image": "inv_diamond.png",
     },
 }
 
 DAILY_LIMIT_ERROR = "Вы исчерпали дневной лимит на этот предмет"
+UNKNOWN_ITEM_ERROR = "Неизвестный предмет магазина"
 SCHEMA_ERROR = (
     "Магазин временно недоступен: примените миграцию daily_buys и last_shop_reset в Supabase"
 )
+
+
+def admin_id_set(admin_ids: Any) -> set[int]:
+    """Normalize an admin id list so string/int ids are compared reliably."""
+    result: set[int] = set()
+    for admin_id in admin_ids or []:
+        try:
+            result.add(int(admin_id))
+        except (TypeError, ValueError):
+            continue
+    return result
+
+
+def is_admin_id(user_id: Any, admin_ids: Any) -> bool:
+    try:
+        return int(user_id) in admin_id_set(admin_ids)
+    except (TypeError, ValueError):
+        return False
+
+
+def visible_shop_items(is_admin: bool) -> dict[str, dict]:
+    """Items a given viewer is allowed to see. Admin-only capsules stay hidden for everyone else."""
+    return {
+        item_id: item
+        for item_id, item in SHOP_ITEMS.items()
+        if is_admin or not item.get("admin_only")
+    }
+
+
+def serialize_shop_items(is_admin: bool) -> list[dict]:
+    """JSON-ready catalog for the Mini App, already filtered for the viewer."""
+    payload = []
+    for item_id, item in visible_shop_items(is_admin).items():
+        payload.append({
+            "id": item_id,
+            "name": item["name"],
+            "short_name": item["short_name"],
+            "emoji": item["emoji"],
+            "price": int(item["price"]),
+            "daily_limit": item["daily_limit"],
+            "shop_image": item["shop_image"],
+            "inventory_image": item["inventory_image"],
+        })
+    return payload
 
 
 class ShopPurchaseError(Exception):
@@ -105,11 +155,14 @@ def _schema_error(exc: Exception) -> bool:
 
 def purchase_shop_item(supabase_client, user_id: int, item_id: str, admin_ids: list[int]) -> dict:
     """Validate and persist one purchase with optimistic protection against concurrent clicks."""
-    item = SHOP_ITEMS.get(item_id)
-    if item is None:
-        raise ShopPurchaseError("Неизвестный предмет магазина")
-
     numeric_user_id = int(user_id)
+    is_admin = is_admin_id(numeric_user_id, admin_ids)
+
+    item = SHOP_ITEMS.get(item_id)
+    # Admin-only capsules must look non-existent to everyone else, so the store cannot be probed.
+    if item is None or (item.get("admin_only") and not is_admin):
+        raise ShopPurchaseError(UNKNOWN_ITEM_ERROR)
+
     price = int(item["price"])
     daily_limit = item["daily_limit"]
 
@@ -143,7 +196,7 @@ def purchase_shop_item(supabase_client, user_id: int, item_id: str, admin_ids: l
         daily_buys = _parse_daily_buys(raw_daily_buys) if last_reset == today else {}
 
         current_count = daily_buys.get(item_id, 0)
-        if numeric_user_id not in admin_ids and daily_limit is not None and current_count >= daily_limit:
+        if not is_admin and daily_limit is not None and current_count >= daily_limit:
             raise ShopPurchaseError(DAILY_LIMIT_ERROR)
         if current_coins < price:
             raise ShopPurchaseError("Недостаточно коинов")
