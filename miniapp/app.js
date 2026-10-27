@@ -516,7 +516,7 @@ async function pollHockeyState() {
 
         if (state.status === 'waiting') {
             statusEl.innerText = `Ставки: ${state.timer} сек`; statusEl.style.color = '#ffcc00';
-            document.getElementById('hockey-controls').style.display = 'block';
+            document.getElementById('hockey-controls').style.display = 'flex';
             hasShownWinner = false; ball.active = false; ball.hasStartedAnim = false;
             ball.roundId = null; ball.path = null;
             if (ball.animationId) cancelAnimationFrame(ball.animationId);
