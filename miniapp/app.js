@@ -27,6 +27,19 @@ const COIN_IMG = `<img class="coin-img" src="${COIN_IMG_SRC}" alt="монета"
 const ADMIN_UI_IDS = [6338018270, 5184813347, 8890834384];
 function isAdminId(id) { return Boolean(id) && ADMIN_UI_IDS.includes(Number(id)); }
 function coinAmount(value) { return `${formatCoins(value)} ${COIN_IMG}`; }
+// Ник приходит от пользователя: экранируем, чтобы он не ломал вёрстку и не тащил HTML.
+function escapeHtml(text) {
+    return String(text === undefined || text === null ? '' : text)
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+const NAME_MAX_CHARS = 16;
+function shortName(name, max = NAME_MAX_CHARS) {
+    const text = String(name === undefined || name === null ? '' : name).trim() || 'Игрок';
+    const chars = Array.from(text);
+    return chars.length > max ? `${chars.slice(0, max - 1).join('')}…` : text;
+}
+function nameHtml(name) { return `<span class="lb-name" title="${escapeHtml(name)}">${escapeHtml(shortName(name))}</span>`; }
 // Апгрейд — только для админов (ADMIN_IDS на сервере). Флаг приходит из /api/user.
 let upgradeFrom = 'coin';                                   // 'coin' | 'capsule' | 'uniq_capsule'
 let upgradeFromAmount = 100;                                // коины или количество капсул
@@ -370,19 +383,20 @@ async function loadGlobalTop() {
         const prizes = ["NFT", coinAmount(10000), coinAmount(5000), coinAmount(1000), coinAmount(250), coinAmount(250), coinAmount(250)];
         users.forEach((u, i) => {
             const div = document.createElement('div');
-            div.className = `lb-item top-${i + 1}`;
-            if (i >= 3) div.className = 'lb-item';
+            div.className = i < 3 ? `lb-item top-${i + 1}` : 'lb-item';
             let rankHtml = `<span class="lb-rank">${i + 1}</span>`;
-            if (i === 0) rankHtml = `<span class="lb-rank" style="font-size: 24px;">🥇</span>`;
-            if (i === 1) rankHtml = `<span class="lb-rank" style="font-size: 24px;">🥈</span>`;
-            if (i === 2) rankHtml = `<span class="lb-rank" style="font-size: 24px;">🥉</span>`;
+            if (i === 0) rankHtml = '<span class="lb-rank lb-medal">🥇</span>';
+            if (i === 1) rankHtml = '<span class="lb-rank lb-medal">🥈</span>';
+            if (i === 2) rankHtml = '<span class="lb-rank lb-medal">🥉</span>';
             const prizeHtml = i < 7 ? `<span class="lb-prize">${prizes[i]}</span>` : '';
+            // Сетка «ранг | ник | (коины + приз)»: ник обрезается многоточием,
+            // коины и приз никогда не выходят за карточку.
             div.innerHTML = `
-                <div style="display: flex; align-items: center;">
+                <div class="lb-main">
                     ${rankHtml}
-                    <span class="lb-name">${u.username || 'Игрок'}</span>
+                    ${nameHtml(u.username)}
                 </div>
-                <div style="display: flex; align-items: center;">
+                <div class="lb-right">
                     <span class="lb-coins">${coinAmount(u.coins)}</span>
                     ${prizeHtml}
                 </div>
@@ -1550,10 +1564,18 @@ async function pollHockeyState() {
             if (state.winner && !hasShownWinner) {
                 hasShownWinner = true;
                 setTimeout(() => {
-                    document.getElementById('winner-modal-name').innerText = state.winner.name;
-                    document.getElementById('winner-modal-amount').innerText = state.winner.is_bot
-                        ? ''
-                        : `+${coinAmount(state.bank)}`;
+                    const nameEl = document.getElementById('winner-modal-name');
+                    const amountEl = document.getElementById('winner-modal-amount');
+                    // Ник — текстом (не HTML), сумма — innerHTML, потому что внутри картинка монеты.
+                    if (nameEl) { nameEl.innerText = shortName(state.winner.name, 18); nameEl.title = String(state.winner.name || ''); }
+                    if (amountEl) {
+                        // Ботам банк не выплачивается — им показываем «Банк», а не «+выигрыш».
+                        amountEl.classList.toggle('muted', Boolean(state.winner.is_bot));
+                        amountEl.innerHTML = state.winner.is_bot
+                            ? `Банк: ${coinAmount(state.bank)}`
+                            : `+${coinAmount(state.bank)}`;
+                        amountEl.style.display = '';
+                    }
                     modal.classList.add('active');
 
                     // The database is the only balance source; never optimistically add the pot here.
@@ -1596,7 +1618,7 @@ async function pollHockeyState() {
             let iconHtml = '';
             if (!p.is_bot && p.avatar && p.avatar.startsWith('http')) { iconHtml = `<img src="${p.avatar}" style="width:20px; height:20px; border-radius:50%; margin-right:5px; vertical-align:middle;">`; }
             else { const letter = p.name ? p.name[0].toUpperCase() : '?'; iconHtml = `<span style="display:inline-flex; justify-content:center; align-items:center; width:20px; height:20px; border-radius:50%; background:${p.color}; color:white; font-size:10px; font-weight:bold; margin-right:5px;">${letter}</span>`; }
-            div.innerHTML = `<div class="name"><span>#${i+1}</span>${iconHtml}<span>${p.name}</span></div><div class="stats">${width.toFixed(1)}% | ${coinAmount(p.bet)}</div>`;
+            div.innerHTML = `<div class="name"><span>#${i+1}</span>${iconHtml}<span title="${escapeHtml(p.name)}">${escapeHtml(shortName(p.name))}</span></div><div class="stats">${width.toFixed(1)}% | ${coinAmount(p.bet)}</div>`;
             list.appendChild(div);
         });
     } catch (e) { console.error(e); }
@@ -1861,7 +1883,7 @@ async function pollCrashStateOnce() {
                 if (lost) right = `<span style="color:#ff3b30;font-weight:800">💀 -${coinAmount(p.bet)}</span>`;
                 else if (cashed) { const win = Math.floor(p.bet * p.cashout_mult); right = `<span style="color:#34c759;font-weight:800">x${Number(p.cashout_mult).toFixed(2)} → +${coinAmount(win)}</span>`; }
                 else right = `<span>${coinAmount(p.bet)}</span>`;
-                d.innerHTML = `<span style="${isMe ? 'color:#007aff;font-weight:800' : ''}">${p.name}${isMe ? ' (вы)' : ''}</span>${right}`;
+                d.innerHTML = `<span style="${isMe ? 'color:#007aff;font-weight:800' : ''}" title="${escapeHtml(p.name)}">${escapeHtml(shortName(p.name))}${isMe ? ' (вы)' : ''}</span>${right}`;
                 if (lost) d.style.background = 'rgba(255,59,48,0.15)'; else if (cashed) d.style.background = 'rgba(52,199,89,0.10)';
                 if (isMe) d.style.border = '1px solid #007aff';
                 pl.appendChild(d);
