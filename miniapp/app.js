@@ -64,7 +64,12 @@ let upgradePlacedChance = null;
 // Состояние последнего результата: '' | 'spinning' | 'win' | 'lose'.
 // renderUpgrade() не должен перетирать кнопку и подпись, пока результат на экране.
 let upgradeResultState = '';
+// id результатов, которые уже показывали в этой сессии: если ack не дошёл,
+// один и тот же прошлый раунд не должен всплывать снова и снова.
+const upgradeShownLogIds = new Set();
 let hockeyInterval = null, hasShownWinner = false;
+// Счётчик подряд идущих неудачных опросов состояния Краша (для тихого лога).
+let crashPollFailures = 0;
 // Камера арены: плавный наезд на мяч в концовке. Арена обрезает сцену (overflow: hidden),
 // поэтому увеличенное поле не вылезает за экран.
 const HOCKEY_ZOOM_START = 4.5;      // с этой секунды начинаем приближать
@@ -336,7 +341,11 @@ function openGame(game) {
     document.getElementById('main-header').style.display = 'none';
     document.getElementById('main-nav').style.display = 'none';
     document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
-    document.getElementById('screen-' + game).classList.add('active');
+    // Экран может отсутствовать, если index.html и app.js разъехались по кэшу —
+    // тогда не роняем всё приложение, а тихо игнорируем клик.
+    const screen = document.getElementById('screen-' + game);
+    if (!screen) { console.warn('Нет экрана для игры:', game); return; }
+    screen.classList.add('active');
     if (game === 'hockey') { startHockeyPolling(); }
     if (game === 'crash') { lastCrashStatus = null; startCrashPolling(); }
 }
@@ -384,8 +393,11 @@ async function loadGlobalTop() {
     list.innerHTML = '<p style="text-align: center; color: #888;">Загрузка...</p>';
     try {
         const res = await fetch(`${API_URL}/api/global_top`);
-        const users = await res.json();
-        if (!users || users.length === 0) { list.innerHTML = '<p style="text-align: center; color: #888;">Топ пока пуст</p>'; return; }
+        const payload = await res.json().catch(() => null);
+        if (!res.ok) throw new Error((payload && payload.detail) || 'Топ недоступен');
+        // Сервер отдаёт массив; ответ-ошибка ({detail}) не должен попадать в forEach.
+        const users = Array.isArray(payload) ? payload : (Array.isArray(payload && payload.top) ? payload.top : []);
+        if (users.length === 0) { list.innerHTML = '<p style="text-align: center; color: #888;">Топ пока пуст</p>'; return; }
         list.innerHTML = '';
         const prizes = ["NFT", coinAmount(10000), coinAmount(5000), coinAmount(1000), coinAmount(250), coinAmount(250), coinAmount(250)];
         users.forEach((u, i) => {
@@ -709,6 +721,24 @@ function upgradeRingChance() {
     return upgradePlacedChance === null ? upgradeChance() : upgradePlacedChance;
 }
 
+// «Выпало 63.20 из 50.00 — вне сектора»: итог можно проверить глазами,
+// никаких «вроде зашло, а не засчитало».
+function setUpgradeRollText(roll, chance, won) {
+    const el = document.getElementById('up-roll');
+    if (!el) return;
+    const rollNumber = Number(roll);
+    const chanceNumber = Number(chance);
+    if (roll === null || roll === undefined || !Number.isFinite(rollNumber)) {
+        el.textContent = 'Стрелка встанет на выпавшее число';
+        el.className = 'up-roll';
+        return;
+    }
+    const chanceText = Number.isFinite(chanceNumber) ? chanceNumber.toFixed(2) : '—';
+    el.innerHTML = `Выпало <b>${rollNumber.toFixed(2)}</b> из ${chanceText} — `
+        + (won ? 'в секторе успеха' : 'вне сектора');
+    el.className = 'up-roll' + (won ? ' win' : ' lose');
+}
+
 function setUpgradeResult(text, state) {
     upgradeResultState = state || '';
     const el = document.getElementById('upgrade-result');
@@ -733,6 +763,7 @@ function clearUpgradeResult() {
     const btn = document.getElementById('upgrade-btn');
     if (btn) btn.classList.remove('win', 'lose');
     setUpgradeResult('Выбери предмет и цель', '');
+    setUpgradeRollText(null, null, false);
 }
 
 function renderUpgrade() {
@@ -1047,21 +1078,32 @@ function startUpgradeArrowSpin(token) {
         : setTimeout(() => step(), 16);
 }
 
-// Фаза 2: плавно тормозим и останавливаемся ровно на нужном секторе.
-function landUpgradeArrow(won, chance, duration, token, onDone) {
-    stopUpgradeArrow();
+// Куда встанет стрелка. Если сервер прислал выпавшее число (roll), стрелка
+// показывает ИМЕННО его: бросок 0..100 → угол 0..360. Раньше позиция выбиралась
+// случайно «внутри/вне сектора», поэтому стрелка и реальный бросок могли
+// разойтись — игрок видел «залетело», а приза не было.
+function upgradeArrowTargetFor(won, chance, rollValue) {
     const arc = Math.max(0.5, Math.min(360, (Number(chance) || 0) * 3.6));
-    let desired;
-    if (won) {
-        // Внутри синей дуги (шанс), с отступом от краёв.
-        const margin = Math.min(arc * 0.18, Math.max(arc * 0.1, 2));
-        desired = margin + Math.random() * Math.max(arc - margin * 2, arc * 0.25);
-    } else {
-        // Снаружи дуги — там, где сектор проигрыша.
-        const free = Math.max(360 - arc, 4);
-        desired = arc + free * 0.18 + Math.random() * free * 0.64;
+    const rollNumber = Number(rollValue);
+    if (Number.isFinite(rollNumber)) {
+        let desired = Math.max(0.4, Math.min(359.6, rollNumber * 3.6));
+        // Страховка на границе округления: стрелка обязана совпадать с итогом.
+        if (won && desired >= arc) desired = Math.max(0.4, Math.min(arc * 0.5, arc - 0.6));
+        if (!won && desired < arc) desired = Math.min(359.6, arc + 0.8);
+        return desired;
     }
-    desired = ((desired % 360) + 360) % 360;
+    if (won) {
+        const margin = Math.min(arc * 0.18, Math.max(arc * 0.1, 2));
+        return margin + Math.random() * Math.max(arc - margin * 2, arc * 0.25);
+    }
+    const free = Math.max(360 - arc, 4);
+    return arc + free * 0.18 + Math.random() * free * 0.64;
+}
+
+// Фаза 2: плавно тормозим и останавливаемся ровно на выпавшем числе.
+function landUpgradeArrow(won, chance, duration, token, onDone, rollValue) {
+    stopUpgradeArrow();
+    const desired = ((upgradeArrowTargetFor(won, chance, rollValue) % 360) + 360) % 360;
 
     const current = ((upgradeArrowAngle % 360) + 360) % 360;
     const delta = ((desired - current) % 360 + 360) % 360;
@@ -1236,7 +1278,7 @@ async function startUpgrade() {
         if (circle) circle.classList.remove('spinning');
         if (token !== upgradeSpinToken) return;
         finishUpgradeAnimation(data, roundChance);
-    });
+    }, data.roll);
 }
 
 // Единая точка применения ответа сервера: баланс и инвентарь берём только отсюда,
@@ -1256,13 +1298,21 @@ function applyUpgradeServerState(data) {
 
 async function ackUpgradeLog(logId) {
     if (!tg.initData) return;
-    try {
-        await fetch(`${API_URL}/api/upgrade_ack`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ initData: tg.initData, log_id: Number.isFinite(Number(logId)) ? Number(logId) : null })
-        });
-    } catch (e) { /* результат уже показан — молчание здесь безопасно */ }
+    const body = JSON.stringify({
+        initData: tg.initData,
+        log_id: Number.isFinite(Number(logId)) ? Number(logId) : null
+    });
+    // Две попытки: если отметка не дойдёт, тот же раунд снова всплывёт как
+    // «пропущенный», и игрок примет его за результат новой ставки.
+    for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+            const res = await fetch(`${API_URL}/api/upgrade_ack`, {
+                method: 'POST', headers: { 'Content-Type': 'application/json' }, body
+            });
+            if (res.ok) return;
+        } catch (e) { /* попробуем ещё раз */ }
+        if (attempt === 0) await new Promise(r => setTimeout(r, 1200));
+    }
 }
 
 // Статистика апгрейдов живёт на сервере: иначе счётчики сбрасывались при каждом открытии.
@@ -1292,6 +1342,11 @@ async function loadUpgradeHistory() {
 // (закрыл приложение, таймаут запроса, перезапуск анимации).
 function showMissedUpgradeResult(row) {
     if (!row || upgradeBusy) return false;
+    const rowId = Number(row.id);
+    if (Number.isFinite(rowId)) {
+        if (upgradeShownLogIds.has(rowId)) return false;
+        upgradeShownLogIds.add(rowId);
+    }
     const won = Boolean(row.won);
     const chance = Number(row.chance) || 0;
     lockUpgradeChance(chance);
@@ -1303,6 +1358,8 @@ function showMissedUpgradeResult(row) {
         circle.classList.add(won ? 'win' : 'lose');
         circle.style.setProperty('--p', (Math.min(chance, 100) * 3.6).toFixed(2) + 'deg');
     }
+    setUpgradeArrowAngle(((upgradeArrowTargetFor(won, chance, row.roll) % 360) + 360) % 360);
+    setUpgradeRollText(row.roll, chance, won);
     const chanceEl = document.getElementById('up-chance');
     if (chanceEl) chanceEl.innerText = chance.toFixed(2) + '%';
     const btn = document.getElementById('upgrade-btn');
@@ -1312,13 +1369,18 @@ function showMissedUpgradeResult(row) {
         btn.classList.add(won ? 'win' : 'lose');
         btn.innerText = won ? 'ПОБЕДА' : 'ПРОИГРЫШ';
     }
+    // Обязательная пометка: это НЕ результат текущей ставки, а прошлый раунд,
+    // который игрок не увидел. Без неё легко решить, что приз «не засчитали».
+    const prefix = '🕓 Прошлый раунд: ';
     if (won) {
         const text = row.win_item === 'coin'
-            ? `✅ Успех! +${coinAmount(row.win_amount)}`
-            : `✅ Успех! Получено: ${upgradeItemEmoji(row.win_item)} ${upgradeItemName(row.win_item)} x${row.win_amount}`;
+            ? `${prefix}✅ выплата ${coinAmount(row.win_amount)}`
+            : `${prefix}✅ ${upgradeItemEmoji(row.win_item)} ${upgradeItemName(row.win_item)} x${row.win_amount}`;
         setUpgradeResult(text, 'win');
     } else {
-        setUpgradeResult(row.item_from === 'coin' ? '❌ Не повезло. Ставка сгорела' : '❌ Не повезло. Капсулы сгорели', 'lose');
+        setUpgradeResult(row.item_from === 'coin'
+            ? `${prefix}❌ сгорело ${coinAmount(row.amount_from)}`
+            : `${prefix}❌ сгорело ${row.amount_from} шт.`, 'lose');
     }
     updateUI();
     ackUpgradeLog(row.id);
@@ -1365,17 +1427,38 @@ function finishUpgradeAnimation(data, chance) {
         btn.innerText = won ? 'ПОБЕДА' : 'ПРОИГРЫШ';
     }
 
+    setUpgradeRollText(data.roll, chance, won);
+
+    // Диагностика честности: вердикт сервера обязан совпадать с броском.
+    const rollNumber = Number(data.roll);
+    const chanceNumber = Number(chance);
+    if (Number.isFinite(rollNumber) && Number.isFinite(chanceNumber)
+        && won !== (rollNumber < chanceNumber)) {
+        console.warn('Апгрейд: бросок и вердикт расходятся', { roll: rollNumber, chance: chanceNumber, won });
+    }
+
     if (won) {
+        const payout = Number(data.win_amount) || 0;
+        const stake = Number(data.amount_from) || 0;
+        // Показываем и выплату, и чистую прибавку: ставка уходит до броска,
+        // поэтому баланс растёт на payout - ставка. Без этого игрок решает,
+        // что «приз не засчитали».
+        const netProfit = data.win_item === 'coin' && data.item_from === 'coin' ? payout - stake : null;
         const text = data.win_item === 'coin'
-            ? `✅ Успех! +${coinAmount(data.win_amount)}`
+            ? `✅ Успех! Выплата ${coinAmount(payout)}`
             : `✅ Успех! Получено: ${upgradeItemEmoji(data.win_item)} ${upgradeItemName(data.win_item)} x${data.win_amount}`;
-        setUpgradeResult(text, 'win');
-        showWin(data.win_item === 'coin' ? `+ ${coinAmount(data.win_amount)}` : `✅ ${upgradeItemName(data.win_item)}`);
+        setUpgradeResult(netProfit !== null && netProfit > 0 ? `${text} · чистыми +${coinAmount(netProfit)}` : text, 'win');
+        showWin(data.win_item === 'coin'
+            ? `+ ${coinAmount(netProfit !== null ? netProfit : payout)}`
+            : `✅ ${upgradeItemName(data.win_item)}`);
         playSound('win');
         try { tg.HapticFeedback.notificationOccurred('success'); } catch (e) {}
     } else {
         const lostSource = data.item_from || upgradeFrom;
-        setUpgradeResult(lostSource === 'coin' ? '❌ Не повезло. Ставка сгорела' : '❌ Не повезло. Капсулы сгорели', 'lose');
+        const stake = Number(data.amount_from) || 0;
+        setUpgradeResult(lostSource === 'coin'
+            ? `❌ Не повезло. Сгорело ${coinAmount(stake)}`
+            : `❌ Не повезло. Сгорело ${stake} шт.`, 'lose');
         playSound('lose');
         try { tg.HapticFeedback.notificationOccurred('error'); } catch (e) {}
     }
@@ -1693,8 +1776,13 @@ async function pollHockeyState() {
     try {
         const requestStartedAt = performance.now();
         const res = await fetch(`${API_URL}/api/hockey_state`);
-        const state = await res.json();
         const requestFinishedAt = performance.now();
+        // 5xx/429 от Render — не повод падать: держим последнее известное
+        // состояние. Раньше разбор ответа с ошибкой бросал TypeError каждые
+        // 200 мс, и экран Арены замирал.
+        if (!res.ok) return;
+        const state = await res.json().catch(() => null);
+        if (!state || !state.status) return;
         if (Number.isFinite(Number(state.server_time))) {
             const estimatedOffset = Number(state.server_time) * 1000 - (requestStartedAt + requestFinishedAt) / 2;
             hockeyServerOffsetMs = hockeyClockSynced ? hockeyServerOffsetMs * 0.8 + estimatedOffset * 0.2 : estimatedOffset;
@@ -1750,13 +1838,17 @@ async function pollHockeyState() {
             }
         }
         bankEl.innerHTML = `Банк: ${coinAmount(state.bank)}`;
+        // players может не прийти (старый сервер, частичный ответ) — тогда не
+        // стираем уже нарисованную арену.
+        const players = Array.isArray(state.players) ? state.players : [];
+        if (!players.length && scene.querySelectorAll('.hockey-sector').length) return;
         scene.querySelectorAll('.hockey-sector').forEach(el => el.remove());
         let totalWidth = 0;
-        state.players.forEach((p, index) => {
+        players.forEach((p, index) => {
             const sector = document.createElement('div');
             sector.className = 'hockey-sector';
             let width = Number(p.percent) || 0;
-            if (index === state.players.length - 1) { width = 100 - totalWidth; } else { totalWidth += width; }
+            if (index === players.length - 1) { width = 100 - totalWidth; } else { totalWidth += width; }
             sector.style.width = width + '%'; sector.style.background = p.color; sector.style.borderRight = '1px solid rgba(0,0,0,0.5)'; sector.style.overflow = 'hidden';
             const shapeWrap = document.createElement('div'); shapeWrap.className = 'player-shape-wrapper';
             const shape = document.createElement('div'); shape.className = `player-shape shape-circle`;
@@ -1776,10 +1868,11 @@ async function pollHockeyState() {
         if (!document.getElementById('hockey-ball')) {
             const ballEl = document.createElement('div'); ballEl.className = 'hockey-ball'; ballEl.id = 'hockey-ball'; scene.appendChild(ballEl);
         }
-        const list = document.getElementById('hockey-participants'); list.innerHTML = '';
-        state.players.forEach((p, i) => {
+        const list = document.getElementById('hockey-participants');
+        if (list) list.innerHTML = '';
+        players.forEach((p, i) => {
             const div = document.createElement('div'); div.className = 'part-item';
-            const width = p.percent || (p.bet / state.bank * 100);
+            const width = Number(p.percent) || (state.bank ? (Number(p.bet) || 0) / state.bank * 100 : 0);
             let iconHtml = '';
             if (!p.is_bot && p.avatar && p.avatar.startsWith('http')) { iconHtml = `<img src="${p.avatar}" style="width:20px; height:20px; border-radius:50%; margin-right:5px; vertical-align:middle;">`; }
             else { const letter = p.name ? p.name[0].toUpperCase() : '?'; iconHtml = `<span style="display:inline-flex; justify-content:center; align-items:center; width:20px; height:20px; border-radius:50%; background:${p.color}; color:white; font-size:10px; font-weight:bold; margin-right:5px;">${letter}</span>`; }
@@ -1942,7 +2035,16 @@ async function pollCrashStateOnce() {
         const url = `${API_URL}/api/crash_state?initData=${encodeURIComponent(tg.initData || '')}`;
         const res = await fetch(url);
         const state = await res.json().catch(() => ({}));
-        if (!res.ok || !state.status) throw new Error(state.detail || "Не удалось получить состояние игры");
+        // Тихий выход: кратковременные 5xx/429 от Render — это не ошибка игрока,
+        // а console.error каждые 400 мс забивал консоль и мешал искать настоящие баги.
+        if (!res.ok || !state.status) {
+            crashPollFailures = (crashPollFailures || 0) + 1;
+            if (crashPollFailures === 1 || crashPollFailures % 25 === 0) {
+                console.warn('Краш: состояние недоступно', state.detail || res.status, 'подряд:', crashPollFailures);
+            }
+            return;
+        }
+        crashPollFailures = 0;
         currentCrashData = state;
         crashStateUpdatedAt = Date.now();
 

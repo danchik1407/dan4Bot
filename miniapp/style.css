@@ -328,7 +328,10 @@ main { padding: 0 16px; }
 .up-circle.win .up-arrow { box-shadow: 0 0 16px rgba(110, 231, 160, 0.85); }
 .up-circle.lose .up-arrow { box-shadow: 0 0 16px rgba(252, 165, 165, 0.8); }
 .up-circle.win .up-circle-ring { background: conic-gradient(from -90deg, #22c55e 0 var(--p, 0deg), rgba(34, 197, 94, 0.12) var(--p, 0deg) 360deg); filter: drop-shadow(0 0 18px rgba(34, 197, 94, 0.65)); }
-.up-circle.lose .up-circle-ring { background: conic-gradient(from -90deg, #ef4444 0 var(--p, 0deg), rgba(239, 68, 68, 0.12) var(--p, 0deg) 360deg); filter: drop-shadow(0 0 18px rgba(239, 68, 68, 0.6)); }
+/* Проигрыш: сам СЕКТОР УСПЕХА остаётся подсвеченным, а зона промаха краснеет.
+   Раньше на проигрыш всё кольцо становилось красным, и было невозможно понять,
+   попала стрелка в сектор или нет — отсюда «залетело, но не засчитало». */
+.up-circle.lose .up-circle-ring { background: conic-gradient(from -90deg, rgba(59, 130, 246, 0.9) 0 var(--p, 0deg), rgba(239, 68, 68, 0.7) var(--p, 0deg) 360deg); filter: drop-shadow(0 0 16px rgba(239, 68, 68, 0.4)); }
 .up-circle-inner { position: relative; z-index: 3; width: 68%; height: 68%; border-radius: 50%; background: radial-gradient(circle, #0c1520 62%, rgba(10, 17, 25, 0.9) 100%); border: 1px solid rgba(59, 130, 246, 0.18); display: grid; place-content: center; text-align: center; box-shadow: inset 0 0 18px rgba(0, 0, 0, 0.55); }
 .up-chance { font-size: 23px; font-weight: 900; color: #eaf3ff; font-variant-numeric: tabular-nums; letter-spacing: 0.5px; text-shadow: 0 0 18px rgba(59, 130, 246, 0.55); }
 .up-chance-label { font-size: 9px; font-weight: 800; letter-spacing: 1.2px; text-transform: uppercase; color: #6f8bb5; margin-top: 2px; }
@@ -337,6 +340,13 @@ main { padding: 0 16px; }
 .up-circle.lose .up-chance { color: #fca5a5; text-shadow: 0 0 18px rgba(239, 68, 68, 0.6); }
 
 .up-outcome { text-align: center; font-size: 12px; font-weight: 800; color: #8fb4e0; }
+/* Выпавшее число: итог раунда можно проверить, не веря на слово. */
+.up-roll { text-align: center; font-size: 11px; font-weight: 700; color: #5d7899; font-variant-numeric: tabular-nums; padding: 0 6px; }
+.up-roll b { color: #a9c6e8; }
+.up-roll.win { color: #34d399; }
+.up-roll.win b { color: #6ee7a0; }
+.up-roll.lose { color: #f87171; }
+.up-roll.lose b { color: #fca5a5; }
 .up-outcome b { color: #58a6ff; }
 
 .up-quick-chances { display: grid; grid-template-columns: repeat(6, 1fr); gap: 4px; width: 100%; }
