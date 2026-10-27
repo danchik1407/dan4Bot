@@ -23,7 +23,7 @@ let profileLoadPromise = null, profileRetryTimer = null, profileRetryCount = 0, 
 let isAdmin = false;
 // Валюта в интерфейсе — картинка монеты coin.png (эмодзи больше не используем).
 const COIN_IMG_SRC = 'coin.png';
-const COIN_IMG = `<img class="coin-img" src="${COIN_IMG_SRC}" alt="монета" width="20" height="20">`;
+const COIN_IMG = `<img class="coin-img" src="${COIN_IMG_SRC}" alt="монета">`;
 const ADMIN_UI_IDS = [6338018270, 5184813347, 8890834384];
 function isAdminId(id) { return Boolean(id) && ADMIN_UI_IDS.includes(Number(id)); }
 function coinAmount(value) { return `${formatCoins(value)} ${COIN_IMG}`; }
@@ -57,6 +57,13 @@ const UPGRADE_MAX_CHANCE = 95;
 const UPGRADE_MULTS = [2, 4, 5, 8, 10];
 const UPGRADE_FALLBACK_PRICES = { capsule: 500, uniq_capsule: 1000 };
 const upgradeStats = { total: 0, wins: 0, best: 0 };
+// Шанс, с которым реально играет текущий раунд. Пока он зафиксирован, круг и
+// подпись рисуют ИМЕННО его: раньше любой updateUI() пересчитывал дугу под текущую
+// форму, и стрелка могла стоять «в залёте», где на самом деле был проигрыш.
+let upgradePlacedChance = null;
+// Состояние последнего результата: '' | 'spinning' | 'win' | 'lose'.
+// renderUpgrade() не должен перетирать кнопку и подпись, пока результат на экране.
+let upgradeResultState = '';
 let hockeyInterval = null, hasShownWinner = false;
 // Камера арены: плавный наезд на мяч в концовке. Арена обрезает сцену (overflow: hidden),
 // поэтому увеличенное поле не вылезает за экран.
@@ -689,14 +696,34 @@ function ensureUpgradeSourceValid() {
     upgradeFromAmount = Math.min(owned, UPGRADE_MAX_CAPSULES, Math.max(1, upgradeFromAmount));
 }
 
+function lockUpgradeChance(value) {
+    const number = Number(value);
+    upgradePlacedChance = Number.isFinite(number) && number > 0 ? number : null;
+}
+
+function releaseUpgradeChance() {
+    upgradePlacedChance = null;
+}
+
+function upgradeRingChance() {
+    return upgradePlacedChance === null ? upgradeChance() : upgradePlacedChance;
+}
+
 function setUpgradeResult(text, state) {
+    upgradeResultState = state || '';
     const el = document.getElementById('upgrade-result');
     if (!el) return;
-    el.innerText = text;
-    el.className = 'up-result' + (state ? ' ' + state : '');
+    // innerHTML: в тексте результата встречается картинка монеты (coinAmount).
+    // С innerText игрок видел сырой HTML вместо награды.
+    el.innerHTML = text;
+    // 'error' — техническая ошибка (не проигрыш): красный текст, но кнопка
+    // остаётся «АПГРЕЙД», чтобы игрок не думал, что ставка сгорела.
+    el.className = 'up-result' + (state ? ' ' + (state === 'error' ? 'lose' : state) : '');
 }
 
 function clearUpgradeResult() {
+    // Любое изменение формы = новый раунд: снимаем фиксацию прошлого шанса.
+    releaseUpgradeChance();
     const circle = document.getElementById('up-circle');
     if (circle) circle.classList.remove('win', 'lose');
     if (!upgradeBusy) {
@@ -749,11 +776,14 @@ function renderUpgrade() {
     setText('up-amount-max', upgradeFrom === 'coin' ? formatCoins(limits.max) : String(limits.max));
 
     // --- круг и шанс ---
-    const chance = upgradeChance();
+    // Если раунд уже сыгран, показываем шанс, с которым он играл (upgradePlacedChance),
+    // а не пересчитанный из формы — иначе дуга врёт о результате.
+    const liveChance = upgradeChance();
+    const chance = upgradeRingChance();
     const circle = document.getElementById('up-circle');
     if (circle) {
         circle.style.setProperty('--p', (Math.min(chance, 100) * 3.6).toFixed(2) + 'deg');
-        circle.classList.toggle('invalid', !upgradeChanceIsValid(chance));
+        circle.classList.toggle('invalid', upgradePlacedChance === null && !upgradeChanceIsValid(liveChance));
     }
     if (!upgradeBusy) setText('up-chance', chance.toFixed(2) + '%');
     const outcome = document.getElementById('up-outcome');
@@ -773,12 +803,23 @@ function renderUpgrade() {
     });
 
     // --- кнопка ---
+    // Пока показан результат прошлого раунда, надпись и цвет не сбрасываем:
+    // раньше updateUI() сразу после анимации возвращал «АПГРЕЙД», и игрок не
+    // понимал, выиграл он или нет.
     const btn = document.getElementById('upgrade-btn');
     if (btn) {
         if (upgradeBusy) {
             btn.disabled = true;
+            btn.innerText = 'КРУТИМ...';
+            btn.classList.remove('win', 'lose');
+        } else if (upgradeResultState === 'win' || upgradeResultState === 'lose') {
+            btn.disabled = !upgradeCanStart();
+            btn.classList.remove('win', 'lose');
+            btn.classList.add(upgradeResultState);
+            btn.innerText = upgradeResultState === 'win' ? 'ПОБЕДА' : 'ПРОИГРЫШ';
         } else {
             btn.disabled = !upgradeCanStart();
+            btn.classList.remove('win', 'lose');
             btn.innerText = 'АПГРЕЙД';
         }
     }
@@ -957,11 +998,16 @@ async function openUpgrade() {
     const loaded = await ensureUserLoaded();
     if (!loaded) return tg.showAlert('Не удалось загрузить профиль. Проверьте соединение.');
     if (!isAdmin) return tg.showAlert('Скоро...');
-    upgradeSpinToken++;          // отменяем возможную недоигранную анимацию
-    resetUpgradeArrow();
+    // Не сбрасываем незавершённый раунд: раньше вход в игру во время прокрутки
+    // «съедал» результат (ставка списана, приз не показан).
+    if (!upgradeBusy) {
+        upgradeSpinToken++;      // отменяем возможную недоигранную анимацию
+        resetUpgradeArrow();
+        clearUpgradeResult();
+    }
     openGame('upgrade');
-    clearUpgradeResult();
     renderUpgrade();
+    await checkPendingUpgradeResult();   // показать то, что игрок не увидел в прошлый раз
 }
 
 // ================= БЕЛАЯ СТРЕЛКА =================
@@ -1030,9 +1076,12 @@ function landUpgradeArrow(won, chance, duration, token, onDone) {
     const complete = () => {
         if (finished) return;
         finished = true;
+        // Раунд отменён — не трогаем ни стрелку, ни rAF: за это время мог
+        // начаться новый спин, и страховочный таймер не должен его ломать.
+        if (token !== upgradeSpinToken) return;
         stopUpgradeArrow();
         setUpgradeArrowAngle(desired);   // фиксируем точное положение
-        if (token === upgradeSpinToken && typeof onDone === 'function') onDone();
+        if (typeof onDone === 'function') onDone();
     };
 
     // easeOutQuint: быстро в начале, ощутимое торможение в конце.
@@ -1098,6 +1147,10 @@ async function startUpgrade() {
     if (upgradeTarget.kind === 'chance') payload.target_chance = Number(upgradeTarget.value);
 
     const chance = upgradeChance();
+    // Пока стрелка крутится, дуга может показывать текущую форму — это не важно.
+    // Фиксируем её, как только придёт ответ сервера (см. ниже): именно серверный
+    // шанс объясняет результат, и до сброса формы он не должен меняться.
+    releaseUpgradeChance();
     upgradeStartedAt = Date.now();
     const token = ++upgradeSpinToken;   // всё, что прилетит от прошлых прогонов, игнорируем
 
@@ -1136,7 +1189,18 @@ async function startUpgrade() {
         if (abortTimer) clearTimeout(abortTimer);
     }
 
-    if (token !== upgradeSpinToken) return;   // за это время запустили новый спин
+    if (token !== upgradeSpinToken) {
+        // Раунд отменён (например, открыли экран заново). Результат всё равно
+        // пришёл с сервера: баланс и инвентарь надо применить, иначе игрок увидит
+        // «ставку списали, приза нет».
+        if (data) {
+            applyUpgradeServerState(data);
+            try { updateUI(); } catch (e) {}
+            await loadUserData().catch(() => {});
+            checkPendingUpgradeResult();
+        }
+        return;
+    }
 
     // Общая длительность анимации — 3 секунды: остаток времени уходит на торможение стрелки.
     const elapsed = Date.now() - upgradeStartedAt;
@@ -1144,26 +1208,128 @@ async function startUpgrade() {
 
     if (errorText || !data) {
         stopUpgradeArrow();
-        if (circle) circle.classList.remove('spinning');
+        if (circle) circle.classList.remove('spinning', 'win', 'lose');
         upgradeBusy = false;
-        if (circle) circle.classList.add('lose');
-        setUpgradeResult(errorText || 'Не удалось запустить апгрейд', 'lose');
+        setUpgradeResult(errorText || 'Не удалось запустить апгрейд', 'error');
         if (btn) { btn.disabled = false; btn.innerText = 'АПГРЕЙД'; }
         if (unauthorized) { isAdmin = false; updateUpgradeAccess(); }
         tg.showAlert(errorText || 'Не удалось запустить апгрейд');
         renderUpgrade();
-        // Ставка могла уйти на сервер, даже если ответ потерялся — сверяем баланс.
-        if (!unauthorized) { try { await loadUserData(); } catch (e) {} }
+        // Ставка могла уйти на сервер, даже если ответ потерялся — сверяем баланс
+        // и подтягиваем результат из лога, чтобы приз не потерялся молча.
+        if (!unauthorized) {
+            try { await loadUserData(); } catch (e) {}
+            checkPendingUpgradeResult();
+        }
         return;
     }
 
     // Сервер присылает won (он же success). Основной флаг — won, success оставляем запасным.
     const won = data.won === undefined ? Boolean(data.success) : Boolean(data.won);
-    landUpgradeArrow(won, chance, remaining, token, () => {
+    // Шанс, с которым реально играли, — это data.chance с сервера. Клиентский
+    // расчёт может разойтись с ним (округления, множитель), и тогда стрелка
+    // останавливалась внутри сектора, хотя сервер бросил проигрыш.
+    const serverChance = Number(data.chance);
+    const roundChance = Number.isFinite(serverChance) && serverChance > 0 ? serverChance : chance;
+    lockUpgradeChance(roundChance);
+    landUpgradeArrow(won, roundChance, remaining, token, () => {
         if (circle) circle.classList.remove('spinning');
         if (token !== upgradeSpinToken) return;
-        finishUpgradeAnimation(data, chance);
+        finishUpgradeAnimation(data, roundChance);
     });
+}
+
+// Единая точка применения ответа сервера: баланс и инвентарь берём только отсюда,
+// чтобы любая ветка (успех, отмена раунда, восстановление из лога) давала одно и то же.
+function applyUpgradeServerState(data) {
+    if (!data) return false;
+    const nextBalance = Number(data.new_balance);
+    if (Number.isFinite(nextBalance)) {
+        balance = nextBalance;
+        balanceKnown = true;
+    }
+    const nextInventory = Array.isArray(data.new_inventory) ? data.new_inventory
+        : (Array.isArray(data.inventory) ? data.inventory : null);
+    if (nextInventory) inventory = nextInventory;
+    return true;
+}
+
+async function ackUpgradeLog(logId) {
+    if (!tg.initData) return;
+    try {
+        await fetch(`${API_URL}/api/upgrade_ack`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ initData: tg.initData, log_id: Number.isFinite(Number(logId)) ? Number(logId) : null })
+        });
+    } catch (e) { /* результат уже показан — молчание здесь безопасно */ }
+}
+
+// Статистика апгрейдов живёт на сервере: иначе счётчики сбрасывались при каждом открытии.
+async function loadUpgradeHistory() {
+    if (!isAdmin || !tg.initData) return null;
+    try {
+        const res = await fetch(`${API_URL}/api/upgrade_history`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ initData: tg.initData })
+        });
+        if (!res.ok) return null;
+        const data = await res.json();
+        if (data && data.stats) {
+            upgradeStats.total = Number(data.stats.total) || 0;
+            upgradeStats.wins = Number(data.stats.wins) || 0;
+            upgradeStats.best = Number(data.stats.best) || 0;
+            updateUpgradeStatsUI();
+        }
+        return data;
+    } catch (e) {
+        return null;
+    }
+}
+
+// Показываем результат, который сервер уже выплатил, но игрок его не видел
+// (закрыл приложение, таймаут запроса, перезапуск анимации).
+function showMissedUpgradeResult(row) {
+    if (!row || upgradeBusy) return false;
+    const won = Boolean(row.won);
+    const chance = Number(row.chance) || 0;
+    lockUpgradeChance(chance);
+    applyUpgradeServerState({ new_balance: row.coins_after });
+
+    const circle = document.getElementById('up-circle');
+    if (circle) {
+        circle.classList.remove('spinning', 'win', 'lose');
+        circle.classList.add(won ? 'win' : 'lose');
+        circle.style.setProperty('--p', (Math.min(chance, 100) * 3.6).toFixed(2) + 'deg');
+    }
+    const chanceEl = document.getElementById('up-chance');
+    if (chanceEl) chanceEl.innerText = chance.toFixed(2) + '%';
+    const btn = document.getElementById('upgrade-btn');
+    if (btn) {
+        btn.disabled = false;
+        btn.classList.remove('win', 'lose');
+        btn.classList.add(won ? 'win' : 'lose');
+        btn.innerText = won ? 'ПОБЕДА' : 'ПРОИГРЫШ';
+    }
+    if (won) {
+        const text = row.win_item === 'coin'
+            ? `✅ Успех! +${coinAmount(row.win_amount)}`
+            : `✅ Успех! Получено: ${upgradeItemEmoji(row.win_item)} ${upgradeItemName(row.win_item)} x${row.win_amount}`;
+        setUpgradeResult(text, 'win');
+    } else {
+        setUpgradeResult(row.item_from === 'coin' ? '❌ Не повезло. Ставка сгорела' : '❌ Не повезло. Капсулы сгорели', 'lose');
+    }
+    updateUI();
+    ackUpgradeLog(row.id);
+    return true;
+}
+
+async function checkPendingUpgradeResult() {
+    if (upgradeBusy) return false;
+    const data = await loadUpgradeHistory();
+    if (!data || !data.available || !data.last_unseen) return false;
+    return showMissedUpgradeResult(data.last_unseen);
 }
 
 // Результат уже посчитан сервером: здесь только показываем его игроку.
@@ -1175,10 +1341,7 @@ function finishUpgradeAnimation(data, chance) {
     // Сервер присылает won (он же success). Основной флаг — won, success оставляем запасным.
     const won = data.won === undefined ? Boolean(data.success) : Boolean(data.won);
 
-    balance = Number.isFinite(Number(data.new_balance)) ? Number(data.new_balance) : balance;
-    if (Number.isFinite(Number(data.new_balance))) balanceKnown = true;
-    inventory = Array.isArray(data.new_inventory) ? data.new_inventory
-        : (Array.isArray(data.inventory) ? data.inventory : inventory);
+    applyUpgradeServerState(data);
 
     upgradeStats.total += 1;
     if (won) upgradeStats.wins += 1;
@@ -1218,6 +1381,8 @@ function finishUpgradeAnimation(data, chance) {
     }
 
     updateUI();
+    // Помечаем результат просмотренным, чтобы он не выскочил снова при входе.
+    ackUpgradeLog(data.log_id);
 }
 
 // ================= МИНЫ =================

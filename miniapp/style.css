@@ -101,9 +101,7 @@ main { padding: 0 16px; }
     .lb-medal { font-size: 20px; }
     .lb-name { font-size: 14px; }
     .lb-coins { font-size: 14px; gap: 4px; }
-    .lb-coins .coin-img { width: 14px; height: 14px; }
     .lb-prize { font-size: 12px; padding: 4px 7px; }
-    .lb-prize .coin-img { width: 13px; height: 13px; }
 }
 @media (max-width: 340px) {
     .lb-prize { display: none; }   /* совсем узкий экран: приз смотрим в описании */
@@ -249,7 +247,6 @@ main { padding: 0 16px; }
     max-width: 100%; font-size: clamp(30px, 11vw, 48px); font-weight: 900; color: #34c759;
     margin-bottom: 20px; text-shadow: 0 0 20px rgba(52, 199, 89, 0.5); overflow-wrap: anywhere;
 }
-.winner-amount .coin-img { width: clamp(26px, 9vw, 36px); height: clamp(26px, 9vw, 36px); margin: 0; }
 /* Бот выиграл раунд: банк ему не выплачивается, поэтому сумма нейтральная, без «+». */
 .winner-amount.muted { color: #c7c7cc; text-shadow: none; font-size: clamp(22px, 7vw, 32px); }
 
@@ -267,7 +264,7 @@ main { padding: 0 16px; }
     max-width: 92vw; font-size: clamp(22px, 8vw, 32px); font-weight: 900; color: #34c759;
     text-align: center; text-shadow: 0 0 10px rgba(0,0,0,0.8);
 }
-.win-text .coin-img { width: clamp(20px, 7vw, 26px); height: clamp(20px, 7vw, 26px); }
+
 @keyframes popWin { 0% { opacity: 0; transform: scale(0.5); } 50% { opacity: 1; transform: scale(1.2); } 100% { opacity: 0; transform: scale(1); } }
 
 /* ================= АНИМАЦИИ И ЗАЩИТА ================= */
@@ -379,15 +376,28 @@ main { padding: 0 16px; }
 .up-stats-inline b { color: #8fb4e0; }
 
 /* ================= ВАЛЮТА-КАРТИНКА ================= */
-.coin-img { width: 20px; height: 20px; vertical-align: middle; margin: 0 2px; display: inline-block; object-fit: contain; }
-.coin-img-header { width: 22px; height: 22px; }
-.game-balance-badge .coin-img { width: 18px; height: 18px; }
-.stat-icon .coin-img { width: 24px; height: 24px; margin: 0; }
-.up-from-emoji .coin-img { width: 18px; height: 18px; margin: 0; }
-.up-to-tile-icon .coin-img { width: 26px; height: 26px; margin: 0; }
+/* Размер в em, а не в пикселях: монета всегда одного роста с цифрой и сама
+   увеличивается там, где крупнее шрифт (выигрыш, бейджи, модалки).
+   Источник coin.png — 512×512, поэтому на любом размере нет «зубцов». */
+.coin-img {
+    width: 1.12em; height: 1.12em;
+    vertical-align: -0.18em; margin: 0 0.14em;
+    display: inline-block; object-fit: contain;
+    image-rendering: auto;
+    flex: 0 0 auto;
+}
+/* Контекстные множители: icon-места чуть крупнее текста. */
+.balance-badge .coin-img { width: 1.15em; height: 1.15em; margin: 0 0.1em 0 0; }
+.game-balance-badge .coin-img { width: 1.1em; height: 1.1em; margin: 0; }
+.stat-icon .coin-img { width: 1.35em; height: 1.35em; margin: 0; }
+.up-from-emoji .coin-img { width: 1.1em; height: 1.1em; margin: 0; }
+.up-to-tile-icon .coin-img { width: 1.5em; height: 1.5em; margin: 0; }
+.up-outcome .coin-img, .up-to-tile-value .coin-img, .up-slot-value .coin-img { width: 1.05em; height: 1.05em; }
+.lb-coins .coin-img, .lb-prize .coin-img { width: 1.05em; height: 1.05em; margin: 0; }
+.win-text .coin-img { width: 1em; height: 1em; margin: 0; }
+.winner-amount .coin-img { width: 0.72em; height: 0.72em; margin: 0; }
 .chest-win-icon .coin-img { width: 80px; height: 80px; margin: 0; }
-.win-text .coin-img { width: 26px; height: 26px; }
-.lb-coins .coin-img { width: 16px; height: 16px; }
+.chest-win-text .coin-img { width: 1em; height: 1em; }
 
 /* ================= ЗАСТАВКА / ЗАГРУЗКА ================= */
 .app-loader {
