@@ -4,17 +4,24 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
     <title>AURA GAME</title>
-    <link rel="stylesheet" href="style.css?v=up-arrow-1">
+    <link rel="stylesheet" href="style.css?v=coin-1">
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
 </head>
 <body>
+    <!-- Заставка при входе в мини-аппку: пульсирующий логотип + прогресс. -->
+    <div id="app-loader" class="app-loader">
+        <div class="app-loader-logo">AURA<span>GAME</span></div>
+        <div class="app-loader-bar"><div class="app-loader-bar-fill"></div></div>
+        <div class="app-loader-text">Загружаем игру…</div>
+    </div>
+
     <header class="top-bar" id="main-header">
         <div class="profile-badge">
             <img id="user-avatar" src="https://via.placeholder.com/40" alt="Avatar">
             <span id="user-name">Загрузка...</span>
         </div>
         <div class="balance-badge">
-            <span class="coin-icon">💎</span>
+            <img class="coin-img" src="coin.png" alt="монета" width="20" height="20">
             <span id="user-balance">0</span>
             <button class="plus-btn" onclick="tg.showAlert('Пополнение скоро!')">+</button>
         </div>
@@ -57,7 +64,7 @@
                 <div class="chest-card">
                     <div class="chest-icon" id="normal-chest-icon">📦</div>
                     <h3>Обычный сундук</h3>
-                    <p>Шанс 1% на Золотой ключ!</p>
+                    <p>10–30 коинов или <b>20%</b> на Золотой ключ 🔑</p>
                     <button class="action-btn" id="normal-chest-btn" onclick="openChest('normal')">Открыть (Бесплатно)</button>
                 </div>
                 <div class="chest-card">
@@ -80,8 +87,9 @@
                 <div class="profile-avatar-large"><img id="profile-avatar-large" src="https://via.placeholder.com/100" alt="Avatar"></div>
                 <h2 class="profile-name" id="profile-name">Загрузка...</h2>
                 <div class="stats-row">
-                    <div class="stat-box"><span class="stat-icon">💎</span><span class="stat-value" id="profile-coins">0</span><span class="stat-label">Баланс</span></div>
+                    <div class="stat-box"><span class="stat-icon"><img class="coin-img" src="coin.png" alt="монета" width="20" height="20"></span><span class="stat-value" id="profile-coins">0</span><span class="stat-label">Баланс</span></div>
                     <div class="stat-box"><span class="stat-icon">🔑</span><span class="stat-value" id="profile-keys">0</span><span class="stat-label">Ключи</span></div>
+                    <div class="stat-box"><span class="stat-icon">📅</span><span class="stat-value" id="profile-days">0</span><span class="stat-label">Дней в игре</span></div>
                 </div>
                 <h3 style="margin-top: 25px; margin-bottom: 10px; text-align: left;">🎒 Инвентарь</h3>
                 <div class="inventory-grid" id="inventory"></div>
@@ -91,7 +99,7 @@
 
         <section id="screen-mines" class="game-screen">
             <button class="back-btn" onclick="closeGame()">← Назад</button>
-            <div class="game-balance-badge">💎 <span class="game-balance-val">0</span></div>
+            <div class="game-balance-badge"><img class="coin-img" src="coin.png" alt="монета" width="20" height="20"> <span class="game-balance-val">0</span></div>
             <h2 class="game-title">💣 Мины</h2>
             <div class="bet-input-container">
                 <input type="number" id="mines-bet" class="bet-input" value="10" min="10" max="10000">
@@ -109,17 +117,17 @@
                 <button class="mine-btn" onclick="selectMines(5, this)">5 💣</button>
             </div>
             <div class="mines-grid" id="mines-board"></div>
-            <div class="game-info-bar" id="mines-info"><span>Кэф: <b id="mines-current-coef">x1.00</b></span><span>Забрать: <b id="mines-cashout-amount">0</b> 🪙</span></div>
+            <div class="game-info-bar" id="mines-info"><span>Кэф: <b id="mines-current-coef">x1.00</b></span><span>Забрать: <b id="mines-cashout-amount">0</b> <img class="coin-img" src="coin.png" alt="монета" width="20" height="20"></span></div>
             <button class="action-btn" id="mines-btn" onclick="minesAction()">Сделать ставку</button>
         </section>
 
         <section id="screen-hockey" class="game-screen" style="padding: 10px;">
             <button class="back-btn" onclick="closeGame()">← Назад</button>
-            <div class="game-balance-badge">💎 <span class="game-balance-val">0</span></div>
+            <div class="game-balance-badge"><img class="coin-img" src="coin.png" alt="монета" width="20" height="20"> <span class="game-balance-val">0</span></div>
             <h2 class="game-title">🏒 Арена</h2>
             <div class="hockey-header">
                 <div id="hockey-status" style="color: #34c759; font-weight: bold;">Ожидание...</div>
-                <div id="hockey-bank" style="font-size: 20px; font-weight: 900;">Банк: 0 🪙</div>
+                <div id="hockey-bank" style="font-size: 20px; font-weight: 900;">Банк: 0 <img class="coin-img" src="coin.png" alt="монета" width="20" height="20"></div>
             </div>
             <div class="hockey-arena" id="hockey-arena">
                 <div class="hockey-scene" id="hockey-scene">
@@ -144,7 +152,7 @@
 
         <section id="screen-upgrade" class="game-screen upgrade-screen">
             <button class="back-btn" onclick="closeGame()">← Назад</button>
-            <div class="game-balance-badge">💎 <span class="game-balance-val">0</span></div>
+            <div class="game-balance-badge"><img class="coin-img" src="coin.png" alt="монета" width="20" height="20"> <span class="game-balance-val">0</span></div>
 
             <div class="up-header">
                 <h2 class="up-brand">🛠️ АПГРЕЙД</h2>
@@ -158,12 +166,12 @@
                     <div class="up-slot">
                         <div class="up-slot-icon" id="up-from-icon">💰</div>
                         <div class="up-slot-name" id="up-from-name">Коины</div>
-                        <div class="up-slot-value" id="up-from-value">100 🪙</div>
+                        <div class="up-slot-value" id="up-from-value">100 <img class="coin-img" src="coin.png" alt="монета" width="20" height="20"></div>
                     </div>
 
                     <div class="up-from-tabs">
                         <button class="up-from-tab active" data-from="coin" onclick="selectUpgradeFrom('coin', this)">
-                            <span class="up-from-emoji">🪙</span><span class="up-from-label">Коины</span>
+                            <span class="up-from-emoji"><img class="coin-img" src="coin.png" alt="монета" width="20" height="20"></span><span class="up-from-label">Коины</span>
                         </button>
                         <button class="up-from-tab" data-from="capsule" onclick="selectUpgradeFrom('capsule', this)">
                             <span class="up-from-emoji">💊</span><span class="up-from-label">Обычная <b id="up-owned-capsule">0</b></span>
@@ -199,7 +207,7 @@
                         </div>
                     </div>
 
-                    <div class="up-outcome" id="up-outcome">Выигрыш: 1 000 🪙</div>
+                    <div class="up-outcome" id="up-outcome">Выигрыш: 1 000 <img class="coin-img" src="coin.png" alt="монета" width="20" height="20"></div>
 
                     <div class="up-quick-chances">
                         <button class="up-chip" data-target="mult:2" onclick="selectUpgradeQuick('mult', 2, this)">x2</button>
@@ -235,7 +243,7 @@
 
         <section id="screen-crash" class="game-screen" style="padding: 10px;">
             <button class="back-btn" onclick="closeGame()">← Назад</button>
-            <div class="game-balance-badge">💎 <span class="game-balance-val">0</span></div>
+            <div class="game-balance-badge"><img class="coin-img" src="coin.png" alt="монета" width="20" height="20"> <span class="game-balance-val">0</span></div>
 
             <h2 class="game-title" style="margin-bottom: 5px;">🚀 Ракета</h2>
 
@@ -285,7 +293,7 @@
             <h2 style="color: #ffcc00; font-size: 22px; text-align: center; margin-bottom: 20px;">ЛИДЕРБОРД:<br>КАК ЭТО РАБОТАЕТ?</h2>
             <div style="margin-bottom: 20px;">
                 <h3 style="color: #fff; font-size: 16px; margin-bottom: 5px;">1. ЗАРАБАТЫВАЙТЕ КОИНЫ</h3>
-                <p style="color: #aaa; font-size: 13px; line-height: 1.4;">Играйте и копите как можно больше игровых коинов 💎, чтобы подняться выше в списке лучших игроков.</p>
+                <p style="color: #aaa; font-size: 13px; line-height: 1.4;">Играйте и копите как можно больше игровых коинов <img class="coin-img" src="coin.png" alt="монета" width="20" height="20">, чтобы подняться выше в списке лучших игроков.</p>
             </div>
             <div style="margin-bottom: 20px;">
                 <h3 style="color: #fff; font-size: 16px; margin-bottom: 5px;">2. СЛЕДИТЕ ЗА ТАЙМЕРОМ</h3>
@@ -293,7 +301,7 @@
             </div>
             <div style="margin-bottom: 25px;">
                 <h3 style="color: #fff; font-size: 16px; margin-bottom: 5px;">3. ПОЛУЧАЙТЕ НАГРАДЫ</h3>
-                <p style="color: #aaa; font-size: 13px; line-height: 1.4;">Когда время истечет, все игроки на призовых местах получат ценные призы 💎. А тот, кто займет 1-е место 🥇, заберет главный суперприз!</p>
+                <p style="color: #aaa; font-size: 13px; line-height: 1.4;">Когда время истечет, все игроки на призовых местах получат ценные призы — коины <img class="coin-img" src="coin.png" alt="монета" width="20" height="20">. А тот, кто займет 1-е место 🥇, заберет главный суперприз!</p>
             </div>
             <button class="action-btn" style="background: #333; margin: 0; width: 100%;" onclick="toggleLbInfo()">Понятно</button>
         </div>
@@ -311,13 +319,13 @@
 
     <div id="chest-win-modal" class="chest-win-modal">
         <div class="chest-win-content">
-            <div class="chest-win-icon" id="chest-win-icon">💎</div>
-            <h2 id="chest-win-text">Вы получили 50 🪙</h2>
+            <div class="chest-win-icon" id="chest-win-icon"><img class="coin-img" src="coin.png" alt="монета" width="20" height="20"></div>
+            <h2 id="chest-win-text">Вы получили 20 <img class="coin-img" src="coin.png" alt="монета" width="20" height="20"></h2>
             <button class="action-btn" onclick="claimChestReward()">Забрать</button>
         </div>
     </div>
 
-    <div id="win-popup" class="win-popup"><div class="win-text">+ 0 🪙</div></div>
+    <div id="win-popup" class="win-popup"><div class="win-text">+ 0 <img class="coin-img" src="coin.png" alt="монета" width="20" height="20"></div></div>
 
     <nav class="bottom-nav" id="main-nav">
         <div class="nav-item active" onclick="switchTab('play', this)"><span class="nav-icon">🎮</span> Играть</div>
@@ -327,6 +335,6 @@
         <div class="nav-item" onclick="switchTab('profile', this)"><span class="nav-icon">👤</span> Профиль</div>
     </nav>
 
-    <script src="app.js?v=up-arrow-1" defer></script>
+    <script src="app.js?v=coin-1" defer></script>
 </body>
 </html>
