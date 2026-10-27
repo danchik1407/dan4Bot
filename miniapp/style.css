@@ -376,3 +376,19 @@ main { padding: 0 16px; }
 .stats-row { flex-wrap: wrap; }
 .stats-row .stat-box { min-width: 88px; padding: 12px 8px; }
 .stats-row .stat-label { font-size: 11px; text-align: center; }
+
+/* ================= БАННЕР СИНХРОНИЗАЦИИ ================= */
+.sync-banner {
+    display: none;
+    align-items: center; justify-content: space-between; gap: 10px;
+    margin: 8px 12px 0; padding: 10px 12px;
+    background: rgba(255, 149, 0, 0.15); border: 1px solid rgba(255, 149, 0, 0.55);
+    border-radius: 12px; color: #ffcc80; font-size: 13px; line-height: 1.35;
+}
+.sync-banner.active { display: flex; }
+.sync-banner-text { flex: 1; }
+.sync-banner-btn {
+    flex: 0 0 auto; padding: 7px 12px; border: none; border-radius: 9px;
+    background: #ff9500; color: #101010; font-weight: 800; font-size: 12px;
+}
+#user-balance, #profile-coins { cursor: pointer; }

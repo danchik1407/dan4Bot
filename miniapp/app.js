@@ -17,6 +17,9 @@ let SHOP_ITEMS = {};
 let shopItemsLoaded = false;
 let balance = 0, keys = 0, currentBet = 10, inventory = [], lastChestTime = 0, isProcessing = false, userDataLoaded = false;
 let daysInGame = 0;
+// Баланс показываем только когда он реально пришёл с сервера, иначе «…» вместо ложного 0.
+let balanceKnown = false;
+let profileLoadPromise = null, profileRetryTimer = null, profileRetryCount = 0, profileFailure = '';
 let isAdmin = false;
 // Валюта в интерфейсе — картинка монеты coin.png (эмодзи больше не используем).
 const COIN_IMG_SRC = 'coin.png';
@@ -146,12 +149,13 @@ function playSound(type) {
 
 // ================= ОБЩИЕ =================
 function updateUI() {
-    document.getElementById('user-balance').innerText = balance;
-    document.getElementById('profile-coins').innerText = balance;
+    const shown = balanceKnown ? balance : '…';
+    document.getElementById('user-balance').innerText = shown;
+    document.getElementById('profile-coins').innerText = shown;
     document.getElementById('profile-keys').innerText = keys;
     const daysEl = document.getElementById('profile-days');
     if (daysEl) daysEl.innerText = daysInGame;
-    document.querySelectorAll('.game-balance-val').forEach(el => { el.innerText = balance; });
+    document.querySelectorAll('.game-balance-val').forEach(el => { el.innerText = shown; });
     const inv = document.getElementById('inventory');
     const inventoryCounts = {};
     inventory.forEach(itemId => { inventoryCounts[itemId] = (inventoryCounts[itemId] || 0) + 1; });
@@ -170,23 +174,123 @@ function updateUI() {
     updateUpgradeStatsUI();
 }
 
-async function loadUserData() {
+// ================= СИНХРОНИЗАЦИЯ ПРОФИЛЯ =================
+// Баланс и «карман» бота — одна и та же запись в базе. Если запрос упал
+// (холодный старт Render, 500 из-за NULL в базе, нет сети), раньше аппка молча
+// показывала 0. Теперь: ретраи, понятный баннер с причиной и кнопка «Повторить».
+function setSyncBanner(message) {
+    const banner = document.getElementById('sync-banner');
+    if (!banner) return;
+    if (message) {
+        const text = banner.querySelector('.sync-banner-text');
+        if (text) text.innerText = message;
+        banner.classList.add('active');
+    } else {
+        banner.classList.remove('active');
+    }
+}
+
+function applyProfile(data) {
+    balance = Number(data.coins) || 0;
+    keys = Number(data.keys) || 0;
+    inventory = Array.isArray(data.inventory) ? data.inventory : [];
+    lastChestTime = Number(data.last_chest) || 0;
+    daysInGame = Math.max(0, Number(data.days_in_game) || 0);
+    isAdmin = Boolean(data.is_admin);
+    userDataLoaded = true;
+    balanceKnown = true;
+    profileFailure = '';
+    profileRetryCount = 0;
+    setSyncBanner('');
+    updateUpgradeAccess();
+    updateUI();
+    try { checkChestCooldown(); } catch (e) { console.error(e); }
+}
+
+// Что именно не так — спрашиваем у сервера, чтобы в баннере была реальная причина.
+async function diagnoseProfile() {
     try {
-        const response = await fetch(`${API_URL}/api/user`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ initData: tg.initData }) });
-        const data = await response.json().catch(() => ({}));
-        if (response.status === 403) {
-            tg.showAlert(data.detail || "Вы забанены");
-            tg.close();
-            return;
+        const res = await fetch(`${API_URL}/api/self_check`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ initData: tg.initData })
+        });
+        if (!res.ok) return '';
+        const data = await res.json().catch(() => ({}));
+        if (data && data.ok && data.row) return `сервер видит ${data.row.coins} коинов`;
+        return (data && data.reason) ? String(data.reason) : '';
+    } catch (e) { return ''; }
+}
+
+function scheduleProfileRetry(delay = 5000) {
+    if (profileRetryTimer || profileRetryCount >= 20) return;
+    profileRetryTimer = setTimeout(async () => {
+        profileRetryTimer = null;
+        if (userDataLoaded) return;
+        if (document.visibilityState === 'hidden') { scheduleProfileRetry(8000); return; }
+        profileRetryCount += 1;
+        await loadUserData({ attempts: 2, retryDelay: 1500 });
+    }, delay);
+}
+
+async function loadUserData(options) {
+    const attempts = (options && options.attempts) || 3;
+    const retryDelay = (options && options.retryDelay) || 900;
+    if (profileLoadPromise) return profileLoadPromise;
+
+    profileLoadPromise = (async () => {
+        let lastError = 'Не удалось загрузить профиль';
+        let banned = false;
+        for (let attempt = 1; attempt <= attempts; attempt++) {
+            try {
+                const response = await fetch(`${API_URL}/api/user`, {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ initData: tg.initData })
+                });
+                const data = await response.json().catch(() => ({}));
+                if (response.status === 403) {
+                    banned = true;
+                    tg.showAlert(data.detail || "Вы забанены");
+                    try { tg.close(); } catch (e) {}
+                    return false;
+                }
+                if (response.ok && data && data.coins !== undefined) {
+                    applyProfile(data);
+                    return true;
+                }
+                lastError = data.detail
+                    ? `${data.detail} (код ${response.status})`
+                    : `Сервер ответил ошибкой ${response.status}`;
+            } catch (e) {
+                lastError = 'Нет связи с сервером';
+            }
+            if (attempt < attempts) await new Promise(r => setTimeout(r, retryDelay * attempt));
         }
-        if (!response.ok) throw new Error(data.detail || "Не удалось загрузить профиль");
-        balance = Number(data.coins) || 0; keys = data.keys || 0; inventory = data.inventory || []; lastChestTime = data.last_chest || 0;
-        daysInGame = Math.max(0, Number(data.days_in_game) || 0);
-        isAdmin = Boolean(data.is_admin);
-        userDataLoaded = true;
-        updateUpgradeAccess();
-        updateUI(); checkChestCooldown();
-    } catch (e) { console.error("Ошибка загрузки профиля", e); }
+
+        profileFailure = lastError;
+        balanceKnown = userDataLoaded;
+        updateUI();
+        const reason = await diagnoseProfile();
+        const hint = reason && reason !== '' ? ` — ${reason}` : '';
+        setSyncBanner(`Баланс не загрузился: ${lastError}${hint}`);
+        scheduleProfileRetry();
+        return false;
+    })();
+
+    try {
+        return await profileLoadPromise;
+    } finally {
+        profileLoadPromise = null;
+    }
+}
+
+// Ручная синхронизация: кнопка «Повторить» в баннере и тап по балансу.
+async function refreshProfile() {
+    if (profileRetryTimer) { clearTimeout(profileRetryTimer); profileRetryTimer = null; }
+    profileRetryCount = 0;
+    setSyncBanner('Обновляем баланс…');
+    const ok = await loadUserData({ attempts: 2, retryDelay: 700 });
+    if (!ok) setSyncBanner(profileFailure || 'Баланс не загрузился');
+    return ok;
 }
 
 function showWin(text) { const popup = document.getElementById('win-popup'); if (!popup) return; popup.querySelector('.win-text').innerHTML = text; popup.classList.add('show'); setTimeout(() => popup.classList.remove('show'), 1500); }
@@ -314,6 +418,7 @@ async function openChest(type) {
 
     // Награда уже начислена сервером — баланс просто синхронизируем.
     balance = Number(data.new_balance) || 0;
+    balanceKnown = true;
     keys = Number(data.new_keys) || 0;
     if (data.last_chest) lastChestTime = Number(data.last_chest);
     const rewardCoins = Number(data.reward_coins) || 0;
@@ -451,7 +556,7 @@ async function buyItem(itemId) {
             if (res.status === 400 || res.status === 403) loadShopItems();
             return;
         }
-        balance = data.new_balance;
+        balance = data.new_balance; balanceKnown = true;
         inventory = data.inventory || [];
         updateUI();
         showWin("✅ Успешно куплено!");
@@ -1057,6 +1162,7 @@ function finishUpgradeAnimation(data, chance) {
     const won = data.won === undefined ? Boolean(data.success) : Boolean(data.won);
 
     balance = Number.isFinite(Number(data.new_balance)) ? Number(data.new_balance) : balance;
+    if (Number.isFinite(Number(data.new_balance))) balanceKnown = true;
     inventory = Array.isArray(data.new_inventory) ? data.new_inventory
         : (Array.isArray(data.inventory) ? data.inventory : inventory);
 
@@ -1181,7 +1287,7 @@ async function startMines() {
         });
         const data = await res.json().catch(() => ({}));
         if (!res.ok) { tg.showAlert(data.detail || "Не удалось начать игру"); return; }
-        balance = Number(data.new_balance); updateUI();
+        balance = Number(data.new_balance); balanceKnown = true; updateUI();
         minesActive = true; minesCoef = 1.0; minesSafeOpened = 0; minesBet = bet;
         currentBet = bet;
         resetMinesCells();
@@ -1211,7 +1317,7 @@ async function cashoutMines() {
         if (!res.ok) {
             tg.showAlert(data.detail || "Не удалось забрать выигрыш");
         } else {
-            balance = Number(data.new_balance); updateUI();
+            balance = Number(data.new_balance); balanceKnown = true; updateUI();
             paid = true;
             showWin(`+ ${coinAmount(data.win_amount)}`);
             playSound('win');
@@ -1287,7 +1393,7 @@ async function placeHockeyBet() {
         const res = await fetch(`${API_URL}/api/place_bet`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ initData: tg.initData, amount: bet }) });
         if (!res.ok) { isProcessing = false; const e = await res.json().catch(()=>({})); return tg.showAlert(e.detail || "Ставки закрыты!"); }
         const data = await res.json();
-        balance = data.new_balance; updateUI(); playSound('click');
+        balance = data.new_balance; balanceKnown = true; updateUI(); playSound('click');
     } catch(e) { tg.showAlert("Ошибка соединения"); }
     isProcessing = false;
 }
@@ -1551,7 +1657,7 @@ async function crashAction() {
                 return tg.showAlert(e.detail || "Ошибка");
             }
             const data = await res.json();
-            balance = data.new_balance; updateUI();
+            balance = data.new_balance; balanceKnown = true; updateUI();
             playSound('click');
             await pollCrashState();
         } else if (s.my_status === 'bet' && s.status === 'flying') {
@@ -1565,7 +1671,7 @@ async function crashAction() {
                 isProcessing = false;
                 return tg.showAlert(data.detail || "Не успели забрать 😢");
             }
-            balance = data.new_balance; updateUI();
+            balance = data.new_balance; balanceKnown = true; updateUI();
             showWin(`+${coinAmount(data.win_amount)}`);
             playSound('win');
             await pollCrashState();
@@ -1799,6 +1905,17 @@ function startLoaderClock() {
 // ================= СТАРТ =================
 document.addEventListener('DOMContentLoaded', async () => {
     startLoaderClock();
+    // Тап по балансу — ручная синхронизация (полезно, если Render «просыпается»).
+    ['user-balance', 'profile-coins'].forEach(id => {
+        const el = document.getElementById(id);
+        if (el) el.addEventListener('click', () => refreshProfile());
+    });
+    document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'visible' && !userDataLoaded) refreshProfile();
+    });
+    if (!tg.initData) {
+        setSyncBanner('Откройте приложение через Telegram — без initData сервер не покажет баланс.');
+    }
     try { await Promise.all([loadUserData(), loadShopItems()]); } catch(e) {}
     hideLoader();
     // Апгрейд: синхронизация поля ввода, ползунка и быстрых кнопок.
