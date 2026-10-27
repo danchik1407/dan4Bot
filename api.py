@@ -7,6 +7,8 @@ import os, hashlib, hmac, json, time, random, uvicorn, datetime, math
 from urllib.parse import parse_qsl
 from dotenv import load_dotenv
 from supabase import create_client, Client
+from typing import Optional
+from shop_catalog import SHOP_ITEMS, ShopPurchaseError, purchase_shop_item
 
 load_dotenv()
 app = FastAPI()
@@ -307,7 +309,7 @@ class UpdateBalance(BaseModel): initData: str; amount: int
 class UpdateKeys(BaseModel): initData: str; amount: int
 
 
-class BuyItem(BaseModel): initData: str; item_id: str; price: int
+class BuyItem(BaseModel): initData: str; item_id: str; price: Optional[int] = None
 
 
 class PlaceBet(BaseModel): initData: str; amount: int
@@ -704,18 +706,15 @@ async def open_chest(auth: UserAuth):
 async def buy_item(data: BuyItem):
     user = verify_telegram_data(data.initData)
     if not user: raise HTTPException(status_code=401, detail="Invalid auth data")
-    user_id = user["id"]
-    check_ban(user_id)
+    user_id = int(user["id"])
+    check_ban(str(user_id))
+    if data.item_id not in SHOP_ITEMS:
+        raise HTTPException(status_code=400, detail="Неизвестный предмет магазина")
 
-    res = supabase.table("users").select("coins, inventory").eq("user_id", user_id).execute()
-    current_coins = int(res.data[0].get("coins", 0))
-    inventory = json.loads(res.data[0].get("inventory") or "[]")
-    if current_coins < data.price: raise HTTPException(status_code=400, detail="Недостаточно коинов")
-    inventory.append(data.item_id)
-    supabase.table("users").update({"coins": current_coins - data.price, "inventory": json.dumps(inventory)}).eq(
-        "user_id", user_id).execute()
-    return {"success": True, "new_balance": current_coins - data.price, "inventory": inventory}
-
+    try:
+        return purchase_shop_item(supabase, user_id, data.item_id, ADMIN_IDS)
+    except ShopPurchaseError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
 
 @app.post("/api/update_balance")
 async def update_balance(data: UpdateBalance):

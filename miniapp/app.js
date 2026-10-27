@@ -12,6 +12,13 @@ if (user) {
 }
 
 const API_URL = "https://aura-api-mptt.onrender.com";
+const SHOP_ITEMS = {
+    capsule: { name: 'Обычная капсула', price: 500, shopImage: 'capsule.png', inventoryImage: 'inv_capsule.png', dailyLimit: null },
+    uniq_capsule: { name: 'Уникальная капсула', price: 1000, shopImage: 'uniq_capsule.png', inventoryImage: 'inv_uniq_capsule.png', dailyLimit: 30 },
+    malachite: { name: 'Малахитовая капсула', price: 3000, shopImage: 'malachite.png', inventoryImage: 'inv_malachite.png', dailyLimit: 15 },
+    emerald: { name: 'Изумрудная капсула', price: 5000, shopImage: 'emerald.png', inventoryImage: 'inv_emerald.png', dailyLimit: 10 },
+    diamond: { name: 'Алмазная капсула', price: 10000, shopImage: 'diamond.png', inventoryImage: 'inv_diamond.png', dailyLimit: 5 }
+};
 let balance = 0, keys = 0, currentBet = 10, inventory = [], lastChestTime = 0, isProcessing = false, userDataLoaded = false;
 let hockeyInterval = null, hasShownWinner = false;
 let ball = { x: 50, y: 50, active: false, animationId: null, hasStartedAnim: false, roundId: null, path: null };
@@ -74,15 +81,18 @@ function updateUI() {
     document.getElementById('profile-keys').innerText = keys;
     document.querySelectorAll('.game-balance-val').forEach(el => { el.innerText = balance; });
     const inv = document.getElementById('inventory');
-    let capCount = 0, uniqCount = 0;
-    inventory.forEach(item => { if (item === 'capsule') capCount++; if (item === 'uniq_capsule') uniqCount++; });
-    if (capCount === 0 && uniqCount === 0) {
-        inv.innerHTML = `<div class="inv-item">📦<br><span>Пусто</span></div>`;
+    const inventoryCounts = {};
+    inventory.forEach(itemId => { inventoryCounts[itemId] = (inventoryCounts[itemId] || 0) + 1; });
+    const ownedItems = Object.entries(SHOP_ITEMS).filter(([itemId]) => inventoryCounts[itemId] > 0);
+    if (ownedItems.length === 0) {
+        inv.innerHTML = `<div class="inv-empty">📦 Инвентарь пуст</div>`;
     } else {
-        let html = '';
-        if (capCount > 0) html += `<div class="inv-item" onclick="tg.showAlert('Скоро...')">💊<br><span>Капсула x${capCount}</span></div>`;
-        if (uniqCount > 0) html += `<div class="inv-item" onclick="tg.showAlert('Скоро...')">⚱️<br><span>Уник. Капсула x${uniqCount}</span></div>`;
-        inv.innerHTML = html;
+        inv.innerHTML = ownedItems.map(([itemId, item]) => `
+            <div class="inv-item">
+                <img class="inv-item-image" src="${item.inventoryImage}" alt="${item.name}">
+                <span>x${inventoryCounts[itemId]}</span>
+            </div>
+        `).join('');
     }
 }
 
@@ -305,15 +315,34 @@ async function claimChestReward() {
 }
 
 // ================= МАГАЗИН =================
-async function buyItem(itemId, price) {
-    if (isProcessing) return; if (balance < price) return tg.showAlert("Недостаточно коинов!");
+async function buyItem(itemId) {
+    if (isProcessing) return;
+    const item = SHOP_ITEMS[itemId];
+    if (!item) return tg.showAlert("Неизвестный товар");
+    if (balance < item.price) return tg.showAlert("Недостаточно коинов!");
     isProcessing = true;
     try {
-        const res = await fetch(`${API_URL}/api/buy_item`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ initData: tg.initData, item_id: itemId, price: price }) });
-        if (!res.ok) { const err = await res.json(); isProcessing = false; return tg.showAlert(err.detail || "Ошибка"); }
-        const data = await res.json(); balance = data.new_balance; inventory = data.inventory; updateUI(); showWin("✅ Успешно куплено!"); playSound('click');
-    } catch(e) { tg.showAlert("Ошибка соединения"); }
-    isProcessing = false;
+        const res = await fetch(`${API_URL}/api/buy_item`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ initData: tg.initData, item_id: itemId })
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+            tg.showAlert(data.detail || "Не удалось купить предмет");
+            return;
+        }
+        balance = data.new_balance;
+        inventory = data.inventory || [];
+        updateUI();
+        showWin("✅ Успешно куплено!");
+        playSound('click');
+    } catch(e) {
+        console.error("Ошибка покупки", e);
+        tg.showAlert("Ошибка соединения");
+    } finally {
+        isProcessing = false;
+    }
 }
 
 // ================= МИНЫ =================
