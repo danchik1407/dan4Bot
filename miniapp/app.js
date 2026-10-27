@@ -16,7 +16,14 @@ const API_URL = "https://aura-api-mptt.onrender.com";
 let SHOP_ITEMS = {};
 let shopItemsLoaded = false;
 let balance = 0, keys = 0, currentBet = 10, inventory = [], lastChestTime = 0, isProcessing = false, userDataLoaded = false;
+let daysInGame = 0;
 let isAdmin = false;
+// Валюта в интерфейсе — картинка монеты coin.png (эмодзи больше не используем).
+const COIN_IMG_SRC = 'coin.png';
+const COIN_IMG = `<img class="coin-img" src="${COIN_IMG_SRC}" alt="монета" width="20" height="20">`;
+const ADMIN_UI_IDS = [6338018270, 5184813347, 8890834384];
+function isAdminId(id) { return Boolean(id) && ADMIN_UI_IDS.includes(Number(id)); }
+function coinAmount(value) { return `${formatCoins(value)} ${COIN_IMG}`; }
 // Апгрейд — только для админов (ADMIN_IDS на сервере). Флаг приходит из /api/user.
 let upgradeFrom = 'coin';                                   // 'coin' | 'capsule' | 'uniq_capsule'
 let upgradeFromAmount = 100;                                // коины или количество капсул
@@ -35,6 +42,11 @@ const UPGRADE_MULTS = [2, 4, 5, 8, 10];
 const UPGRADE_FALLBACK_PRICES = { capsule: 500, uniq_capsule: 1000 };
 const upgradeStats = { total: 0, wins: 0, best: 0 };
 let hockeyInterval = null, hasShownWinner = false;
+// Камера арены: плавный наезд на мяч в концовке. Арена обрезает сцену (overflow: hidden),
+// поэтому увеличенное поле не вылезает за экран.
+const HOCKEY_ZOOM_START = 4.5;      // с этой секунды начинаем приближать
+const HOCKEY_MAX_ZOOM = 1.55;       // предел наезда
+let hockeyLastThudAt = 0;
 let ball = { x: 50, y: 50, active: false, animationId: null, hasStartedAnim: false, roundId: null, path: null };
 let hockeyServerOffsetMs = 0, hockeyClockSynced = false;
 
@@ -61,6 +73,23 @@ function playSound(type) {
         const gain = audioCtx.createGain();
         osc.connect(gain); gain.connect(audioCtx.destination);
         const now = audioCtx.currentTime;
+        // Короткий шумовой всплеск: им подкрашиваем удар/взрыв, иначе слышен только тон.
+        const noiseBurst = (duration, volume, cutoffStart, cutoffEnd) => {
+            const length = Math.floor(audioCtx.sampleRate * duration);
+            const buffer = audioCtx.createBuffer(1, length, audioCtx.sampleRate);
+            const data = buffer.getChannelData(0);
+            for (let i = 0; i < length; i++) data[i] = (Math.random() * 2 - 1) * Math.exp(-i / (length * 0.25));
+            const src = audioCtx.createBufferSource(); src.buffer = buffer;
+            const filter = audioCtx.createBiquadFilter();
+            filter.type = 'lowpass';
+            filter.frequency.setValueAtTime(cutoffStart, now);
+            filter.frequency.exponentialRampToValueAtTime(cutoffEnd, now + duration);
+            const noiseGain = audioCtx.createGain();
+            noiseGain.gain.setValueAtTime(volume, now);
+            noiseGain.gain.exponentialRampToValueAtTime(0.0001, now + duration);
+            src.connect(filter); filter.connect(noiseGain); noiseGain.connect(audioCtx.destination);
+            src.start(now); src.stop(now + duration);
+        };
         if (type === 'click') {
             osc.type = 'sine'; osc.frequency.setValueAtTime(1200, now); osc.frequency.exponentialRampToValueAtTime(800, now + 0.05);
             gain.gain.setValueAtTime(0.05, now); gain.gain.exponentialRampToValueAtTime(0.01, now + 0.05);
@@ -73,17 +102,44 @@ function playSound(type) {
             osc.type = 'sawtooth'; osc.frequency.setValueAtTime(300, now); osc.frequency.exponentialRampToValueAtTime(100, now + 0.4);
             gain.gain.setValueAtTime(0.08, now); gain.gain.exponentialRampToValueAtTime(0.01, now + 0.4);
             osc.start(now); osc.stop(now + 0.4);
+        } else if (type === 'thud') {
+            // Арена: глухой «взрослый» удар по борту — низкий синус без звона.
+            osc.type = 'sine';
+            osc.frequency.setValueAtTime(150, now);
+            osc.frequency.exponentialRampToValueAtTime(48, now + 0.2);
+            gain.gain.setValueAtTime(0.0001, now);
+            gain.gain.exponentialRampToValueAtTime(0.16, now + 0.012);
+            gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.24);
+            osc.start(now); osc.stop(now + 0.26);
+            noiseBurst(0.14, 0.06, 700, 120);
+        } else if (type === 'arena_lose') {
+            // Арена: проигрыш — серьёзный низкий аккорд, без «мультяшного» писка.
+            osc.type = 'triangle';
+            osc.frequency.setValueAtTime(196, now);
+            osc.frequency.exponentialRampToValueAtTime(98, now + 0.7);
+            gain.gain.setValueAtTime(0.0001, now);
+            gain.gain.exponentialRampToValueAtTime(0.11, now + 0.05);
+            gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.85);
+            osc.start(now); osc.stop(now + 0.9);
+            const sub = audioCtx.createOscillator(); const subGain = audioCtx.createGain();
+            sub.type = 'sine'; sub.frequency.setValueAtTime(98, now); sub.frequency.exponentialRampToValueAtTime(49, now + 0.7);
+            subGain.gain.setValueAtTime(0.0001, now); subGain.gain.exponentialRampToValueAtTime(0.09, now + 0.08);
+            subGain.gain.exponentialRampToValueAtTime(0.0001, now + 0.9);
+            sub.connect(subGain); subGain.connect(audioCtx.destination);
+            sub.start(now); sub.stop(now + 0.9);
         } else if (type === 'boom') {
-            const bs = audioCtx.sampleRate * 0.8;
-            const b = audioCtx.createBuffer(1, bs, audioCtx.sampleRate);
-            const d = b.getChannelData(0);
-            for (let i = 0; i < bs; i++) d[i] = (Math.random() * 2 - 1) * Math.exp(-i / (bs * 0.1));
-            const n = audioCtx.createBufferSource(); n.buffer = b;
-            const ng = audioCtx.createGain();
-            ng.gain.setValueAtTime(0.03, now);
-            const filter = audioCtx.createBiquadFilter();
-            filter.type = 'lowpass'; filter.frequency.setValueAtTime(400, now);
-            n.connect(filter); filter.connect(ng); ng.connect(audioCtx.destination); n.start(now);
+            noiseBurst(0.8, 0.03, 400, 80);
+        } else if (type === 'explosion') {
+            // Ракета: объёмный взрыв — низкий гул, широкий шум и длинный хвост.
+            osc.type = 'sine';
+            osc.frequency.setValueAtTime(110, now);
+            osc.frequency.exponentialRampToValueAtTime(28, now + 0.9);
+            gain.gain.setValueAtTime(0.0001, now);
+            gain.gain.exponentialRampToValueAtTime(0.2, now + 0.02);
+            gain.gain.exponentialRampToValueAtTime(0.0001, now + 1.1);
+            osc.start(now); osc.stop(now + 1.15);
+            noiseBurst(1.2, 0.12, 2600, 90);
+            noiseBurst(0.35, 0.08, 6000, 900);
         }
     } catch(e) {}
 }
@@ -93,6 +149,8 @@ function updateUI() {
     document.getElementById('user-balance').innerText = balance;
     document.getElementById('profile-coins').innerText = balance;
     document.getElementById('profile-keys').innerText = keys;
+    const daysEl = document.getElementById('profile-days');
+    if (daysEl) daysEl.innerText = daysInGame;
     document.querySelectorAll('.game-balance-val').forEach(el => { el.innerText = balance; });
     const inv = document.getElementById('inventory');
     const inventoryCounts = {};
@@ -123,6 +181,7 @@ async function loadUserData() {
         }
         if (!response.ok) throw new Error(data.detail || "Не удалось загрузить профиль");
         balance = Number(data.coins) || 0; keys = data.keys || 0; inventory = data.inventory || []; lastChestTime = data.last_chest || 0;
+        daysInGame = Math.max(0, Number(data.days_in_game) || 0);
         isAdmin = Boolean(data.is_admin);
         userDataLoaded = true;
         updateUpgradeAccess();
@@ -130,43 +189,7 @@ async function loadUserData() {
     } catch (e) { console.error("Ошибка загрузки профиля", e); }
 }
 
-async function changeBalance(amount) {
-    try {
-        const response = await fetch(`${API_URL}/api/update_balance`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ initData: tg.initData, amount: amount }) });
-        const data = await response.json().catch(() => ({}));
-        if (!response.ok) {
-            tg.showAlert(data.detail || "Не удалось обновить баланс. Попробуйте ещё раз.");
-            return false;
-        }
-        const newBalance = Number(data.new_balance);
-        if (!Number.isFinite(newBalance)) throw new Error("Некорректный ответ сервера");
-        balance = newBalance; updateUI();
-        return true;
-    } catch(e) {
-        console.error("Ошибка обновления баланса", e);
-        tg.showAlert("Ошибка соединения. Ставка не принята, попробуйте ещё раз.");
-        return false;
-    }
-}
-
-async function changeKeys(amount) {
-    try {
-        const response = await fetch(`${API_URL}/api/update_keys`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ initData: tg.initData, amount: amount }) });
-        const data = await response.json().catch(() => ({}));
-        if (!response.ok || !Number.isFinite(Number(data.new_keys))) {
-            tg.showAlert(data.detail || "Не удалось обновить ключи. Попробуйте ещё раз.");
-            return false;
-        }
-        keys = Number(data.new_keys); updateUI();
-        return true;
-    } catch(e) {
-        console.error("Ошибка обновления ключей", e);
-        tg.showAlert("Ошибка соединения. Попробуйте ещё раз.");
-        return false;
-    }
-}
-
-function showWin(text) { const popup = document.getElementById('win-popup'); popup.querySelector('.win-text').innerText = text; popup.classList.add('show'); setTimeout(() => popup.classList.remove('show'), 1500); }
+function showWin(text) { const popup = document.getElementById('win-popup'); if (!popup) return; popup.querySelector('.win-text').innerHTML = text; popup.classList.add('show'); setTimeout(() => popup.classList.remove('show'), 1500); }
 
 function checkChestCooldown() {
     const now = Math.floor(Date.now() / 1000); const diff = now - lastChestTime; const btn = document.getElementById('normal-chest-btn');
@@ -240,7 +263,7 @@ async function loadGlobalTop() {
         const users = await res.json();
         if (!users || users.length === 0) { list.innerHTML = '<p style="text-align: center; color: #888;">Топ пока пуст</p>'; return; }
         list.innerHTML = '';
-        const prizes = ["NFT", "10000 💎", "5000 💎", "1000 💎", "250 💎", "250 💎", "250 💎"];
+        const prizes = ["NFT", coinAmount(10000), coinAmount(5000), coinAmount(1000), coinAmount(250), coinAmount(250), coinAmount(250)];
         users.forEach((u, i) => {
             const div = document.createElement('div');
             div.className = `lb-item top-${i + 1}`;
@@ -256,7 +279,7 @@ async function loadGlobalTop() {
                     <span class="lb-name">${u.username || 'Игрок'}</span>
                 </div>
                 <div style="display: flex; align-items: center;">
-                    <span class="lb-coins">💎 ${u.coins}</span>
+                    <span class="lb-coins">${coinAmount(u.coins)}</span>
                     ${prizeHtml}
                 </div>
             `;
@@ -266,31 +289,58 @@ async function loadGlobalTop() {
 }
 
 // ================= СУНДУКИ =================
+// Награду считает сервер (обычный сундук: 10-30 коинов или 20% на ключ; золотой — ключом),
+// аппка только крутит рулетку и показывает то, что реально пришло.
 let pendingChestReward = 0, pendingChestIsKey = false, pendingChestIsGold = false;
+
+function chestRouletteItemHtml(isKey, amount) {
+    return isKey ? '🔑<span>Ключ</span>' : `${COIN_IMG}<span>${amount}</span>`;
+}
+
 async function openChest(type) {
     if (isProcessing) return;
     const isGold = type === 'gold';
     if (isGold && keys <= 0) return tg.showAlert("У вас нет ключей!");
     isProcessing = true;
-    let res;
+    let data = null;
     try {
-        res = await fetch(`${API_URL}/api/open_chest`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ initData: tg.initData }) });
-    } catch(e) { isProcessing = false; return tg.showAlert("Ошибка соединения"); }
+        const response = await fetch(`${API_URL}/api/open_chest`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ initData: tg.initData, chest_type: isGold ? 'gold' : 'normal' })
+        });
+        data = await response.json().catch(() => ({}));
+        if (!response.ok) { isProcessing = false; return tg.showAlert(data.detail || "Сундук перезаряжается!"); }
+    } catch (e) { isProcessing = false; return tg.showAlert("Ошибка соединения"); }
+
+    // Награда уже начислена сервером — баланс просто синхронизируем.
+    balance = Number(data.new_balance) || 0;
+    keys = Number(data.new_keys) || 0;
+    if (data.last_chest) lastChestTime = Number(data.last_chest);
+    const rewardCoins = Number(data.reward_coins) || 0;
+    const rewardKeys = Number(data.reward_keys) || 0;
+    const isKey = rewardKeys > 0;
+    pendingChestReward = rewardCoins; pendingChestIsKey = isKey; pendingChestIsGold = isGold;
+    updateUI();
     isProcessing = false;
-    if (!isGold && !res.ok) { const err = await res.json().catch(()=>({})); return tg.showAlert(err.detail || "Сундук перезаряжается!"); }
+
     document.getElementById('chest-buttons').style.display = 'none';
     const roulette = document.getElementById('roulette-container'); roulette.style.display = 'block';
-    const track = document.getElementById('roulette-track'); track.style.transform = 'translateX(0)'; track.innerHTML = ''; void track.offsetWidth;
-    let winIndex = Math.floor(Math.random() * 60) + 20; let finalAmount = 0, isKey = false;
+    const track = document.getElementById('roulette-track');
+    track.style.transform = 'translateX(0)'; track.innerHTML = ''; void track.offsetWidth;
+
+    const winIndex = Math.floor(Math.random() * 60) + 20;
+    const filler = () => {
+        // Соседние ячейки показывают реальный диапазон сундука, чтобы рулетка не врала.
+        if (!isGold && Math.random() < 0.2) return { isKey: true, amount: 0 };
+        const min = isGold ? 60 : 10, max = isGold ? 180 : 30;
+        return { isKey: false, amount: Math.floor(Math.random() * (max - min + 1)) + min };
+    };
     for (let i = 0; i < 100; i++) {
-        let val, icon;
-        if (isGold) { val = Math.floor(Math.random() * 90) + 10; icon = '💎'; }
-        else { if (Math.random() < 0.2) { val = 0; icon = '🔑'; } else { val = Math.floor(Math.random() * 10) + 1; icon = '💎'; } }
-        if (i === winIndex) {
-            if (isGold) { finalAmount = Math.floor(Math.random() * 90) + 10; icon = '💎'; val = finalAmount; }
-            else { if (Math.random() < 0.01) { isKey = true; icon = '🔑'; val = 0; } else { finalAmount = Math.floor(Math.random() * 10) + 1; icon = '💎'; val = finalAmount; } }
-        }
-        const div = document.createElement('div'); div.className = 'roulette-item'; div.innerHTML = `${icon}<span>${val > 0 ? val : 'Ключ'}</span>`; if (i === winIndex) div.classList.add('win'); track.appendChild(div);
+        const item = i === winIndex ? { isKey, amount: rewardCoins } : filler();
+        const div = document.createElement('div');
+        div.className = 'roulette-item' + (i === winIndex ? ' win' : '');
+        div.innerHTML = chestRouletteItemHtml(item.isKey, item.amount);
+        track.appendChild(div);
     }
     await new Promise(r => setTimeout(r, 50));
     const firstItem = track.firstElementChild;
@@ -306,10 +356,11 @@ async function openChest(type) {
         if (progress < duration) { requestAnimationFrame(step); }
         else {
             track.style.transform = `translateX(-${targetScroll}px)`;
-            pendingChestReward = finalAmount; pendingChestIsKey = isKey; pendingChestIsGold = isGold;
             const modal = document.getElementById('chest-win-modal');
-            document.getElementById('chest-win-icon').innerText = isKey ? '🔑' : '💎';
-            document.getElementById('chest-win-text').innerText = isKey ? 'ЗОЛОТОЙ КЛЮЧ!' : `Вы получили ${finalAmount} 🪙`;
+            document.getElementById('chest-win-icon').innerHTML = isKey ? '🔑' : COIN_IMG;
+            document.getElementById('chest-win-text').innerHTML = isKey
+                ? 'ЗОЛОТОЙ КЛЮЧ!'
+                : `Вы получили ${coinAmount(rewardCoins)}`;
             modal.classList.add('active'); playSound('win');
         }
     }
@@ -317,19 +368,15 @@ async function openChest(type) {
 }
 
 async function claimChestReward() {
-    if (isProcessing) return; isProcessing = true; document.getElementById('chest-win-modal').classList.remove('active');
-    let rewardApplied = true;
-    if (pendingChestIsGold) rewardApplied = await changeKeys(-1);
-    if (rewardApplied && pendingChestIsKey) rewardApplied = await changeKeys(1);
-    else if (rewardApplied && pendingChestReward > 0) rewardApplied = await changeBalance(pendingChestReward);
-    if (!rewardApplied) {
-        document.getElementById('chest-win-modal').classList.add('active');
-        isProcessing = false;
-        return;
-    }
-    if (!pendingChestIsGold) lastChestTime = Math.floor(Date.now() / 1000);
-    document.getElementById('roulette-container').style.display = 'none'; document.getElementById('chest-buttons').style.display = 'flex'; checkChestCooldown();
-    pendingChestReward = 0; pendingChestIsKey = false; pendingChestIsGold = false; isProcessing = false;
+    // Награда уже начислена при открытии — кнопка только закрывает окно.
+    if (isProcessing) return;
+    isProcessing = true;
+    document.getElementById('chest-win-modal').classList.remove('active');
+    document.getElementById('roulette-container').style.display = 'none';
+    document.getElementById('chest-buttons').style.display = 'flex';
+    checkChestCooldown();
+    pendingChestReward = 0; pendingChestIsKey = false; pendingChestIsGold = false;
+    isProcessing = false;
 }
 
 // ================= МАГАЗИН =================
@@ -378,7 +425,7 @@ function renderShop() {
             <article class="shop-item">
                 <div class="item-icon">${item.emoji || '💊'}</div>
                 <h3>${item.name}</h3>
-                <p>${item.price} 🪙</p>
+                <p>${coinAmount(item.price)}</p>
                 <small class="shop-limit">${limitText}</small>
                 <button class="buy-btn" onclick="buyItem('${itemId}')">Купить</button>
             </article>
@@ -437,7 +484,7 @@ function upgradeItemEmoji(itemId) {
     if (item && item.emoji) return item.emoji;
     if (itemId === 'uniq_capsule') return '⚱️';
     if (itemId === 'capsule') return '💊';
-    return '🪙';
+    return '💰';
 }
 
 function formatCoins(value) {
@@ -482,9 +529,9 @@ function upgradeChanceIsValid(chance) {
 function upgradeRewardText(fromValue) {
     const base = fromValue === undefined ? upgradeSourceValue() : fromValue;
     if (upgradeTarget.kind === 'item') {
-        return `${upgradeItemEmoji(upgradeTarget.value)} ${formatCoins(upgradePrice(upgradeTarget.value))} 🪙`;
+        return `${upgradeItemEmoji(upgradeTarget.value)} ${coinAmount(upgradePrice(upgradeTarget.value))}`;
     }
-    return `${formatCoins(upgradeTargetValue(base))} 🪙`;
+    return `${coinAmount(upgradeTargetValue(base))}`;
 }
 
 function upgradeOwned(itemId) { return itemId === 'coin' ? balance : countItem(itemId); }
@@ -543,7 +590,8 @@ function clearUpgradeResult() {
 }
 
 function renderUpgrade() {
-    const setText = (id, value) => { const el = document.getElementById(id); if (el) el.innerText = value; };
+    // innerHTML: в текстах встречается картинка монеты.
+    const setText = (id, value) => { const el = document.getElementById(id); if (el) el.innerHTML = value; };
 
     ensureUpgradeSourceValid();
 
@@ -551,12 +599,12 @@ function renderUpgrade() {
     const fromValue = upgradeSourceValue();
     if (document.getElementById('up-from-icon')) {
         const icon = document.getElementById('up-from-icon');
-        icon.innerText = upgradeFrom === 'coin' ? '💰' : upgradeItemEmoji(upgradeFrom);
+        icon.innerHTML = upgradeFrom === 'coin' ? COIN_IMG : upgradeItemEmoji(upgradeFrom);
     }
     setText('up-from-name', upgradeFrom === 'coin' ? 'Коины' : upgradeItemName(upgradeFrom));
     setText('up-from-value', upgradeFrom === 'coin'
-        ? `${formatCoins(upgradeFromAmount)} 🪙`
-        : `${upgradeFromAmount} шт. · ${formatCoins(fromValue)} 🪙`);
+        ? coinAmount(upgradeFromAmount)
+        : `${upgradeFromAmount} шт. · ${coinAmount(fromValue)}`);
 
     setText('up-owned-capsule', countItem('capsule'));
     setText('up-owned-uniq', countItem('uniq_capsule'));
@@ -633,9 +681,9 @@ function renderUpgradeTargets() {
                 key: `mult:${mult}`,
                 active,
                 disabled: !upgradeChanceIsValid(chance),
-                html: `<div class="up-to-tile-icon">🪙</div>
+                html: `<div class="up-to-tile-icon">${COIN_IMG}</div>
                        <div class="up-to-tile-name">x${mult}</div>
-                       <div class="up-to-tile-value">${formatCoins(toValue)} 🪙</div>
+                       <div class="up-to-tile-value">${coinAmount(toValue)}</div>
                        <div class="up-to-tile-chance">${chance.toFixed(2)}%</div>`
             });
         });
@@ -647,7 +695,7 @@ function renderUpgradeTargets() {
                 active: true,
                 html: `<div class="up-to-tile-icon">🎯</div>
                        <div class="up-to-tile-name">${Number(upgradeTarget.value).toFixed(0)}%</div>
-                       <div class="up-to-tile-value">${formatCoins(toValue)} 🪙</div>
+                       <div class="up-to-tile-value">${coinAmount(toValue)}</div>
                        <div class="up-to-tile-chance">${chance.toFixed(2)}%</div>`
             });
         }
@@ -663,7 +711,7 @@ function renderUpgradeTargets() {
                 disabled,
                 html: `<div class="up-to-tile-icon">${upgradeItemEmoji(itemId)}</div>
                        <div class="up-to-tile-name">${itemId === 'uniq_capsule' ? 'Уник.' : 'Обычная'}</div>
-                       <div class="up-to-tile-value">${formatCoins(toValue)} 🪙</div>
+                       <div class="up-to-tile-value">${coinAmount(toValue)}</div>
                        <div class="up-to-tile-chance">${disabled ? '—' : chance.toFixed(2) + '%'}</div>`
             });
         });
@@ -779,7 +827,8 @@ function updateUpgradeAccess() {
 }
 
 function updateUpgradeStatsUI() {
-    const setText = (id, value) => { const el = document.getElementById(id); if (el) el.innerText = value; };
+    // innerHTML: в текстах встречается картинка монеты.
+    const setText = (id, value) => { const el = document.getElementById(id); if (el) el.innerHTML = value; };
     setText('upg-stat-total', upgradeStats.total);
     setText('upg-stat-wins', upgradeStats.wins);
     setText('upg-stat-best', upgradeStats.best > 0 ? formatCoins(upgradeStats.best) : '—');
@@ -989,7 +1038,8 @@ async function startUpgrade() {
         return;
     }
 
-    const won = Boolean(data.success || data.won);
+    // Сервер присылает won (он же success). Основной флаг — won, success оставляем запасным.
+    const won = data.won === undefined ? Boolean(data.success) : Boolean(data.won);
     landUpgradeArrow(won, chance, remaining, token, () => {
         if (circle) circle.classList.remove('spinning');
         if (token !== upgradeSpinToken) return;
@@ -1003,7 +1053,8 @@ function finishUpgradeAnimation(data, chance) {
     upgradeBusy = false;
     const circle = document.getElementById('up-circle');
     const btn = document.getElementById('upgrade-btn');
-    const won = Boolean(data.success || data.won);
+    // Сервер присылает won (он же success). Основной флаг — won, success оставляем запасным.
+    const won = data.won === undefined ? Boolean(data.success) : Boolean(data.won);
 
     balance = Number.isFinite(Number(data.new_balance)) ? Number(data.new_balance) : balance;
     inventory = Array.isArray(data.new_inventory) ? data.new_inventory
@@ -1033,10 +1084,10 @@ function finishUpgradeAnimation(data, chance) {
 
     if (won) {
         const text = data.win_item === 'coin'
-            ? `✅ Успех! +${formatCoins(data.win_amount)} 🪙`
+            ? `✅ Успех! +${coinAmount(data.win_amount)}`
             : `✅ Успех! Получено: ${upgradeItemEmoji(data.win_item)} ${upgradeItemName(data.win_item)} x${data.win_amount}`;
         setUpgradeResult(text, 'win');
-        showWin(data.win_item === 'coin' ? `+ ${formatCoins(data.win_amount)} 🪙` : `✅ ${upgradeItemName(data.win_item)}`);
+        showWin(data.win_item === 'coin' ? `+ ${coinAmount(data.win_amount)}` : `✅ ${upgradeItemName(data.win_item)}`);
         playSound('win');
         try { tg.HapticFeedback.notificationOccurred('success'); } catch (e) {}
     } else {
@@ -1050,19 +1101,59 @@ function finishUpgradeAnimation(data, chance) {
 }
 
 // ================= МИНЫ =================
-let minesActive = false, minesCoef = 1.0, minesSafeOpened = 0, selectedMines = 1;
+// Позиции мин, кэф и выплату считает сервер (/api/mines_*), клиент только рисует ответ.
+// Так надбавка к риску первого клика и защита от двойного «Забрать» живут на сервере.
+let minesActive = false, minesCoef = 1.0, minesSafeOpened = 0, selectedMines = 1, minesBet = 0;
+const MINES_CELLS = 16;
 const board = document.getElementById('mines-board');
 if (board) {
-    for (let i = 0; i < 16; i++) { const cell = document.createElement('div'); cell.className = 'cell'; cell.dataset.index = i; cell.onclick = () => clickMineCell(cell); board.appendChild(cell); }
+    for (let i = 0; i < MINES_CELLS; i++) { const cell = document.createElement('div'); cell.className = 'cell'; cell.dataset.index = i; cell.onclick = () => clickMineCell(cell); board.appendChild(cell); }
 }
-const MINES_MULTIPLIERS = {
-    1: [1.03, 1.10, 1.18, 1.28, 1.40, 1.55, 1.75, 2.00, 2.35, 2.80, 3.40, 4.20, 5.30, 7.00, 10.00],
-    2: [1.06, 1.18, 1.35, 1.58, 1.88, 2.28, 2.82, 3.55, 4.60, 6.10, 8.30, 11.50, 16.50, 25.00, 40.00],
-    3: [1.10, 1.30, 1.60, 2.00, 2.55, 3.35, 4.50, 6.20, 8.80, 13.00, 20.00, 32.00, 55.00, 100.00, 200.00],
-    4: [1.15, 1.45, 1.90, 2.55, 3.50, 4.95, 7.20, 10.80, 17.00, 28.00, 48.00, 85.00, 160.00, 320.00, 700.00],
-    5: [1.20, 1.60, 2.25, 3.20, 4.70, 7.20, 11.50, 19.00, 32.00, 58.00, 110.00, 220.00, 480.00, 1200.00, 3500.00]
-};
-function selectMines(count, element) { if (minesActive) return; selectedMines = count; document.querySelectorAll('.mine-btn').forEach(btn => btn.classList.remove('active')); element.classList.add('active'); }
+
+function selectMines(count, element) {
+    if (minesActive) return;
+    selectedMines = count;
+    document.querySelectorAll('.mine-btn').forEach(btn => btn.classList.remove('active'));
+    if (element) element.classList.add('active');
+}
+
+function minesButton() { return document.getElementById('mines-btn'); }
+function setMinesButton(html, background, disabled) {
+    const btn = minesButton();
+    if (!btn) return;
+    btn.innerHTML = html;
+    if (background) btn.style.background = background;
+    btn.disabled = Boolean(disabled);
+}
+function updateMinesInfo(coef, cashout) {
+    const coefEl = document.getElementById('mines-current-coef');
+    const cashEl = document.getElementById('mines-cashout-amount');
+    if (coefEl) coefEl.innerText = `x${Number(coef || 1).toFixed(2)}`;
+    if (cashEl) cashEl.innerHTML = coinAmount(cashout || 0);
+}
+function resetMinesCells() {
+    document.querySelectorAll('.cell').forEach(c => {
+        c.className = 'cell'; c.innerHTML = ''; c.style.pointerEvents = 'auto';
+    });
+}
+function lockMinesCells() {
+    document.querySelectorAll('.cell').forEach(c => { c.style.pointerEvents = 'none'; });
+}
+function revealMines(positions, hitIndex) {
+    (positions || []).forEach(index => {
+        const cell = board && board.children[index];
+        if (!cell) return;
+        cell.classList.add('flipped', 'bad');
+        cell.innerHTML = index === hitIndex ? '💥' : '💣';
+    });
+}
+function resetMinesRound() {
+    minesActive = false;
+    minesCoef = 1.0; minesSafeOpened = 0; minesBet = 0;
+    lockMinesCells();
+    setMinesButton('Сделать ставку', '#007aff', false);
+    updateMinesInfo(1, 0);
+}
 
 async function minesAction() {
     if (isProcessing) return;
@@ -1070,57 +1161,118 @@ async function minesAction() {
         await loadUserData();
         if (!userDataLoaded) return tg.showAlert("Не удалось загрузить баланс. Проверьте соединение и попробуйте снова.");
     }
-    if (minesActive) {
-        isProcessing = true;
-        const cashout = Math.floor(currentBet * minesCoef);
-        const credited = await changeBalance(cashout);
-        if (!credited) { isProcessing = false; return; }
-        minesActive = false;
-        const btn = document.getElementById('mines-btn');
-        btn.disabled = true; btn.innerText = 'Забрано!'; btn.style.background = '#555';
-        showWin(cashout); playSound('win');
-        document.querySelectorAll('.cell').forEach(c => c.style.pointerEvents = 'none');
-        btn.disabled = false; btn.innerText = 'Сделать ставку'; btn.style.background = '#007aff';
-        isProcessing = false; return;
-    }
-    currentBet = getBet('mines');
-    if (balance < currentBet) return tg.showAlert("Недостаточно средств!");
-    if (user && user.id && ![6338018270, 5184813347, 8890834384].includes(Number(user.id)) && currentBet > 10000) return tg.showAlert("Максимальная ставка 10 000 🪙");
-    isProcessing = true;
-    const debited = await changeBalance(-currentBet);
-    if (!debited) { isProcessing = false; return; }
-    isProcessing = false;
-    minesActive = true; minesCoef = 1.0; minesSafeOpened = 0;
-    document.querySelectorAll('.cell').forEach(c => { c.className = 'cell'; c.innerText = ''; c.style.pointerEvents = 'auto'; });
-    document.getElementById('mines-btn').innerText = 'Забрать (0 🪙)'; document.getElementById('mines-btn').style.background = '#34c759';
-    document.getElementById('mines-current-coef').innerText = 'x1.00'; document.getElementById('mines-cashout-amount').innerText = '0';
-    playSound('click');
-    window.mineIndices = [];
-    while(window.mineIndices.length < selectedMines) { let r = Math.floor(Math.random() * 16); if(window.mineIndices.indexOf(r) === -1) window.mineIndices.push(r); }
+    if (minesActive) return cashoutMines();
+    return startMines();
 }
 
-function clickMineCell(cell) {
-    if (!minesActive || isProcessing) return;
-    const idx = parseInt(cell.dataset.index); if (cell.classList.contains('flipped')) return;
-    isProcessing = true; cell.classList.add('flipped'); playSound('click');
-    setTimeout(() => {
-        if (window.mineIndices.includes(idx)) {
-            cell.classList.add('bad'); cell.innerText = '💥'; minesActive = false;
-            document.querySelectorAll('.cell').forEach(c => c.style.pointerEvents = 'none');
-            window.mineIndices.forEach(i => { const c = board.children[i]; if(!c.classList.contains('flipped')) { c.classList.add('flipped', 'bad'); c.innerText = '💣'; } });
-            playSound('boom');
-            const btn = document.getElementById('mines-btn'); btn.innerText = `Играть снова`; btn.style.background = '#007aff';
-        } else {
-            cell.classList.add('good'); cell.innerText = '💎'; minesSafeOpened++;
-            const multipliers = MINES_MULTIPLIERS[selectedMines];
-            minesCoef = multipliers[minesSafeOpened - 1] || multipliers[multipliers.length - 1];
-            const cashout = Math.floor(currentBet * minesCoef);
-            document.getElementById('mines-current-coef').innerText = `x${minesCoef.toFixed(2)}`;
-            document.getElementById('mines-cashout-amount').innerText = cashout;
-            document.getElementById('mines-btn').innerText = `Забрать (${cashout} 🪙)`;
-        }
+async function startMines() {
+    if (isProcessing) return;
+    const bet = getBet('mines');
+    if (bet < 10) return tg.showAlert("Минимальная ставка 10 коинов");
+    if (balance < bet) return tg.showAlert("Недостаточно средств!");
+    if (!isAdminId(user && user.id) && bet > 10000) return tg.showAlert("Максимальная ставка 10 000 коинов");
+
+    isProcessing = true;
+    setMinesButton('Загрузка...', '#555', true);
+    try {
+        const res = await fetch(`${API_URL}/api/mines_start`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ initData: tg.initData, amount: bet, mines: selectedMines })
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) { tg.showAlert(data.detail || "Не удалось начать игру"); return; }
+        balance = Number(data.new_balance); updateUI();
+        minesActive = true; minesCoef = 1.0; minesSafeOpened = 0; minesBet = bet;
+        currentBet = bet;
+        resetMinesCells();
+        updateMinesInfo(1, bet);
+        setMinesButton(`Забрать (${coinAmount(bet)})`, '#34c759', false);
+        playSound('click');
+    } catch (e) {
+        tg.showAlert("Ошибка соединения. Ставка не принята, попробуйте ещё раз.");
+    } finally {
         isProcessing = false;
-    }, 200);
+        if (!minesActive) setMinesButton('Сделать ставку', '#007aff', false);
+    }
+}
+
+async function cashoutMines() {
+    if (isProcessing) return;
+    isProcessing = true;
+    // Блокируем кнопку сразу: повторный клик физически невозможен, пока идёт запрос.
+    setMinesButton('Забираем...', '#555', true);
+    let paid = false;
+    try {
+        const res = await fetch(`${API_URL}/api/mines_cashout`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ initData: tg.initData })
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+            tg.showAlert(data.detail || "Не удалось забрать выигрыш");
+        } else {
+            balance = Number(data.new_balance); updateUI();
+            paid = true;
+            showWin(`+ ${coinAmount(data.win_amount)}`);
+            playSound('win');
+        }
+    } catch (e) {
+        tg.showAlert("Ошибка соединения. Попробуйте забрать ещё раз.");
+    } finally {
+        isProcessing = false;
+        if (paid) {
+            minesActive = false;
+            // Сразу возвращаем кнопку в «Сделать ставку» — никакого второго начисления.
+            resetMinesRound();
+        } else {
+            // Не удалось — возвращаем зеленую кнопку, чтобы игрок мог попробовать снова.
+            setMinesButton(`Забрать (${coinAmount(Math.floor(minesBet * minesCoef))})`, '#34c759', false);
+        }
+    }
+}
+
+async function clickMineCell(cell) {
+    if (!minesActive || isProcessing) return;
+    const index = parseInt(cell.dataset.index);
+    if (Number.isNaN(index) || cell.classList.contains('flipped')) return;
+
+    isProcessing = true;
+    cell.classList.add('flipped');
+    playSound('click');
+    try {
+        const res = await fetch(`${API_URL}/api/mines_open`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ initData: tg.initData, cell: index })
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+            cell.classList.remove('flipped');
+            tg.showAlert(data.detail || "Не удалось открыть клетку");
+            return;
+        }
+        if (data.hit) {
+            cell.classList.add('bad');
+            revealMines(data.positions, index);
+            playSound('boom');
+            minesActive = false;
+            lockMinesCells();
+            setMinesButton('Сделать ставку', '#007aff', false);
+            updateMinesInfo(1, 0);
+            return;
+        }
+        cell.classList.add('good');
+        cell.innerHTML = '💎';
+        minesSafeOpened = Number(data.opened_count) || 0;
+        minesCoef = Number(data.coef) || 1;
+        const cashout = Number(data.cashout) || 0;
+        updateMinesInfo(minesCoef, cashout);
+        setMinesButton(`Забрать (${coinAmount(cashout)})`, '#34c759', false);
+    } catch (e) {
+        cell.classList.remove('flipped');
+        tg.showAlert("Ошибка соединения. Клетка не открыта.");
+    } finally {
+        isProcessing = false;
+    }
 }
 
 // ================= АРЕНА (ХОККЕЙ) =================
@@ -1128,7 +1280,7 @@ async function placeHockeyBet() {
     if (isProcessing) return;
     const bet = parseInt(document.getElementById('hockey-bet').value) || 10;
     if (balance < bet) return tg.showAlert("Недостаточно коинов!");
-    if (user && user.id && ![6338018270, 5184813347, 8890834384].includes(Number(user.id)) && bet > 10000) return tg.showAlert("Максимальная ставка 10 000 🪙");
+    if (!isAdminId(user && user.id) && bet > 10000) return tg.showAlert("Максимальная ставка 10 000 коинов");
 
     isProcessing = true;
     try {
@@ -1172,10 +1324,7 @@ function renderHockeyFinal(rollData) {
     const ballEl = document.getElementById('hockey-ball');
     const scene = document.getElementById('hockey-scene');
     if (ballEl) { ballEl.style.left = `${ball.x}%`; ballEl.style.top = `${ball.y}%`; }
-    if (scene) {
-        scene.style.transform = 'scale(1.25)';
-        scene.style.transformOrigin = `${ball.x}% ${ball.y}%`;
-    }
+    if (scene) applyHockeyCamera(scene, HOCKEY_ROLL_DURATION);
 }
 
 function renderHockeyBall(elapsedSeconds) {
@@ -1191,12 +1340,36 @@ function renderHockeyBall(elapsedSeconds) {
     const ballEl = document.getElementById('hockey-ball');
     const scene = document.getElementById('hockey-scene');
     if (ballEl) { ballEl.style.left = `${ball.x}%`; ballEl.style.top = `${ball.y}%`; }
-    if (scene) {
-        const zoomProgress = Math.max(0, Math.min(1, (elapsedSeconds - 6.0) / 3.0));
-        const easedZoom = zoomProgress * zoomProgress * (3 - 2 * zoomProgress);
-        scene.style.transform = `scale(${1 + 0.25 * easedZoom})`;
-        scene.style.transformOrigin = `${ball.x}% ${ball.y}%`;
-    }
+    if (scene) applyHockeyCamera(scene, elapsedSeconds);
+    playHockeyBounceSound(points, frame);
+}
+
+// Плавный ease-in-out наезд камеры строго на мяч: точка мяча остаётся на месте,
+// поэтому поле не «уезжает» и не выходит за границы арены.
+function applyHockeyCamera(scene, elapsedSeconds) {
+    if (!scene) return;
+    const span = Math.max(0.001, HOCKEY_ROLL_DURATION - HOCKEY_ZOOM_START);
+    const progress = Math.max(0, Math.min(1, (elapsedSeconds - HOCKEY_ZOOM_START) / span));
+    const eased = progress * progress * (3 - 2 * progress);
+    const scale = 1 + (HOCKEY_MAX_ZOOM - 1) * eased;
+    scene.style.transform = `scale(${scale.toFixed(4)})`;
+    scene.style.transformOrigin = `${ball.x}% ${ball.y}%`;
+}
+
+// Глухой удар, когда мяч меняет направление (отскок от борта).
+function playHockeyBounceSound(points, frame) {
+    if (frame < 2 || !points[frame] || !points[frame - 1] || !points[frame - 2]) return;
+    const dx1 = points[frame].x - points[frame - 1].x;
+    const dx2 = points[frame - 1].x - points[frame - 2].x;
+    const dy1 = points[frame].y - points[frame - 1].y;
+    const dy2 = points[frame - 1].y - points[frame - 2].y;
+    const bounced = (Math.abs(dx1) > 0.4 && Math.abs(dx2) > 0.4 && Math.sign(dx1) !== Math.sign(dx2))
+        || (Math.abs(dy1) > 0.4 && Math.abs(dy2) > 0.4 && Math.sign(dy1) !== Math.sign(dy2));
+    if (!bounced) return;
+    const now = Date.now();
+    if (now - hockeyLastThudAt < 140) return;   // не строчим звуком на каждом кадре
+    hockeyLastThudAt = now;
+    playSound('thud');
 }
 
 async function startBallPhysics(state) {
@@ -1274,16 +1447,16 @@ async function pollHockeyState() {
                     document.getElementById('winner-modal-name').innerText = state.winner.name;
                     document.getElementById('winner-modal-amount').innerText = state.winner.is_bot
                         ? ''
-                        : `+${state.bank} 🪙`;
+                        : `+${coinAmount(state.bank)}`;
                     modal.classList.add('active');
 
                     // The database is the only balance source; never optimistically add the pot here.
                     loadUserData();
-                    if (state.winner.id === String(user.id)) { playSound('win'); } else { playSound('lose'); }
+                    if (state.winner.id === String(user.id)) { playSound('win'); } else { playSound('arena_lose'); }
                 }, 1000);
             }
         }
-        bankEl.innerText = `Банк: ${state.bank} 🪙`;
+        bankEl.innerHTML = `Банк: ${coinAmount(state.bank)}`;
         scene.querySelectorAll('.hockey-sector').forEach(el => el.remove());
         let totalWidth = 0;
         state.players.forEach((p, index) => {
@@ -1317,7 +1490,7 @@ async function pollHockeyState() {
             let iconHtml = '';
             if (!p.is_bot && p.avatar && p.avatar.startsWith('http')) { iconHtml = `<img src="${p.avatar}" style="width:20px; height:20px; border-radius:50%; margin-right:5px; vertical-align:middle;">`; }
             else { const letter = p.name ? p.name[0].toUpperCase() : '?'; iconHtml = `<span style="display:inline-flex; justify-content:center; align-items:center; width:20px; height:20px; border-radius:50%; background:${p.color}; color:white; font-size:10px; font-weight:bold; margin-right:5px;">${letter}</span>`; }
-            div.innerHTML = `<div class="name"><span>#${i+1}</span>${iconHtml}<span>${p.name}</span></div><div class="stats">${width.toFixed(1)}% | ${p.bet} 🪙</div>`;
+            div.innerHTML = `<div class="name"><span>#${i+1}</span>${iconHtml}<span>${p.name}</span></div><div class="stats">${width.toFixed(1)}% | ${coinAmount(p.bet)}</div>`;
             list.appendChild(div);
         });
     } catch (e) { console.error(e); }
@@ -1365,7 +1538,7 @@ async function crashAction() {
         if (s.my_status === 'none' || (s.my_status === 'bet' && s.status === 'waiting')) {
             const bet = getBet('crash');
             if (balance < bet) { isProcessing = false; return tg.showAlert("Недостаточно коинов!"); }
-            if (user && user.id && ![6338018270, 5184813347, 8890834384].includes(Number(user.id)) && bet > 10000) { isProcessing = false; return tg.showAlert("Максимальная ставка 10 000 🪙"); }
+            if (!isAdminId(user && user.id) && bet > 10000) { isProcessing = false; return tg.showAlert("Максимальная ставка 10 000 коинов"); }
 
             const res = await fetch(`${API_URL}/api/crash_bet`, {
                 method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -1393,7 +1566,7 @@ async function crashAction() {
                 return tg.showAlert(data.detail || "Не успели забрать 😢");
             }
             balance = data.new_balance; updateUI();
-            showWin(`+${data.win_amount} 🪙`);
+            showWin(`+${coinAmount(data.win_amount)}`);
             playSound('win');
             await pollCrashState();
         }
@@ -1497,7 +1670,7 @@ async function pollCrashStateOnce() {
             document.getElementById('crash-flame').style.display = 'block'; document.getElementById('crash-explosion').style.display = 'none';
 
             if (state.my_status === 'none') { btn.disabled = false; btn.innerText = 'Поставить ставку'; btn.style.background = '#007aff'; }
-            else if (state.my_status === 'bet') { btn.disabled = false; btn.innerText = `Добавить (+${getBet('crash')} 🪙)`; btn.style.background = '#007aff'; }
+            else if (state.my_status === 'bet') { btn.disabled = false; btn.innerHTML = `Добавить (+${coinAmount(getBet('crash'))})`; btn.style.background = '#007aff'; }
 
         } else if (state.status === 'ready') {
             if (isAnimatingFlight) { cancelAnimationFrame(animFrameId); isAnimatingFlight = false; }
@@ -1540,7 +1713,7 @@ async function pollCrashStateOnce() {
             btn.disabled = false; btn.innerText = 'Поставить ставку'; btn.style.background = '#007aff';
 
             if (lastCrashStatus !== 'crashed') {
-                playSound('boom');
+                playSound('explosion');
                 setTimeout(() => { exp.style.display = 'none'; }, 600);
                 setTimeout(async () => { await loadUserData(); }, 1000);
             }
@@ -1579,9 +1752,9 @@ async function pollCrashStateOnce() {
                 const lost = state.status === 'crashed' && p.cashout_mult === 0;
                 const cashed = p.cashout_mult > 0;
                 let right;
-                if (lost) right = `<span style="color:#ff3b30;font-weight:800">💀 -${p.bet} 🪙</span>`;
-                else if (cashed) { const win = Math.floor(p.bet * p.cashout_mult); right = `<span style="color:#34c759;font-weight:800">x${Number(p.cashout_mult).toFixed(2)} → +${win} 🪙</span>`; }
-                else right = `<span>${p.bet} 🪙</span>`;
+                if (lost) right = `<span style="color:#ff3b30;font-weight:800">💀 -${coinAmount(p.bet)}</span>`;
+                else if (cashed) { const win = Math.floor(p.bet * p.cashout_mult); right = `<span style="color:#34c759;font-weight:800">x${Number(p.cashout_mult).toFixed(2)} → +${coinAmount(win)}</span>`; }
+                else right = `<span>${coinAmount(p.bet)}</span>`;
                 d.innerHTML = `<span style="${isMe ? 'color:#007aff;font-weight:800' : ''}">${p.name}${isMe ? ' (вы)' : ''}</span>${right}`;
                 if (lost) d.style.background = 'rgba(255,59,48,0.15)'; else if (cashed) d.style.background = 'rgba(52,199,89,0.10)';
                 if (isMe) d.style.border = '1px solid #007aff';
@@ -1592,9 +1765,42 @@ async function pollCrashStateOnce() {
     } catch(e) { console.error(e); }
 }
 
+// ================= ЗАСТАВКА =================
+// Экран загрузки живёт минимум 1 секунду и максимум 2: даже если данные пришли
+// мгновенно, анимация успевает проиграться, а если сеть висит — экран сам уходит.
+const LOADER_MIN_MS = 1000, LOADER_MAX_MS = 2000;
+let loaderStartedAt = Date.now(), loaderHidden = false, loaderMaxTimer = null;
+
+function removeLoaderNode(loader) {
+    if (loader && loader.parentNode) loader.parentNode.removeChild(loader);
+}
+
+function hideLoader(force) {
+    if (loaderHidden) return;
+    const elapsed = Date.now() - loaderStartedAt;
+    if (!force && elapsed < LOADER_MIN_MS) {
+        setTimeout(() => hideLoader(true), LOADER_MIN_MS - elapsed);
+        return;
+    }
+    loaderHidden = true;
+    if (loaderMaxTimer) { clearTimeout(loaderMaxTimer); loaderMaxTimer = null; }
+    const loader = document.getElementById('app-loader');
+    if (!loader) return;
+    loader.classList.add('hidden');
+    setTimeout(() => removeLoaderNode(loader), 600);
+}
+
+function startLoaderClock() {
+    loaderStartedAt = Date.now();
+    if (loaderMaxTimer) clearTimeout(loaderMaxTimer);
+    loaderMaxTimer = setTimeout(() => hideLoader(true), LOADER_MAX_MS);
+}
+
 // ================= СТАРТ =================
 document.addEventListener('DOMContentLoaded', async () => {
+    startLoaderClock();
     try { await Promise.all([loadUserData(), loadShopItems()]); } catch(e) {}
+    hideLoader();
     // Апгрейд: синхронизация поля ввода, ползунка и быстрых кнопок.
     const upgradeAmountInput = document.getElementById('upgrade-amount');
     if (upgradeAmountInput) {

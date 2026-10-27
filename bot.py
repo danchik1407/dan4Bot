@@ -32,6 +32,7 @@ if not SUPABASE_URL or not SUPABASE_KEY: raise SystemExit("❌ ОШИБКА: Н�
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 COOLDOWN_SECONDS = 5 * 60 * 60
+MINIAPP_URL = "https://t.me/Auragameplay_bot/Auragame"
 CHALLENGE_TIMEOUT = 60
 COIN_DROP_CHANCE = 0.005
 COIN_DROP_MIN = 1
@@ -40,6 +41,21 @@ DROP_IMAGE = "drop.jpg"
 MIN_BET = 10
 MAX_BET = 10000
 DAILY_TRANSFER_LIMIT = 5000
+
+def coin_amount(amount) -> str:
+    """«1 коин», «2 коина», «5 коинов» — чтобы в сообщениях не было «1 коинов»."""
+    try:
+        number = int(amount)
+    except (TypeError, ValueError):
+        return f"{amount} коинов"
+    tail = abs(number) % 100
+    if 11 <= tail <= 19:
+        word = "коинов"
+    else:
+        tail %= 10
+        word = "коин" if tail == 1 else ("коина" if 2 <= tail <= 4 else "коинов")
+    return f"{number} {word}"
+
 
 active_summons: dict[int, bool] = {}
 active_challenges: dict[str, dict] = {}
@@ -137,7 +153,7 @@ async def process_random_coin_drop(message: Message):
     if random.random() > COIN_DROP_CHANCE: return
     amount = random.randint(COIN_DROP_MIN, COIN_DROP_MAX)
     await update_user(message.from_user.id, coins=user["coins"] + amount)
-    caption = f"🎉 <b>Поздравляю!</b>\n\n🎁 Ты выиграл(а) <b>{amount} 🪙</b>\n\n💬 Пиши сообщения в чате и получай коины!"
+    caption = f"🎉 <b>Поздравляю!</b>\n\n🎁 Ты выиграл(а) <b>{coin_amount(amount)}</b>\n\n💬 Пиши сообщения в чате и получай коины!"
     try:
         if os.path.exists(DROP_IMAGE):
             await message.answer_photo(photo=FSInputFile(DROP_IMAGE), caption=caption, parse_mode="HTML",
@@ -289,7 +305,7 @@ async def cmd_admin_wipe_all(message: Message):
     old_keys = user.get("keys", 0)
     await update_user(target.id, coins=0, keys=0, inventory="[]")
     await message.answer(
-        f"🧹 <b>Полная зачистка!</b>\n\n👤 Кому: @{target.username}\n➖ Снято коинов: <b>{old_coins}</b> 🪙\n➖ Удалено ключей: <b>{old_keys}</b> 🔑\n➖ Удалены капсулы.\n📊 Новый баланс: <b>0</b> 🪙",
+        f"🧹 <b>Полная зачистка!</b>\n\n👤 Кому: @{target.username}\n➖ Снято: <b>{old_coins}</b> коинов\n➖ Удалено ключей: <b>{old_keys}</b> 🔑\n➖ Удалены капсулы.\n📊 Новый баланс: <b>0</b> коинов",
         parse_mode="HTML")
 
 
@@ -315,10 +331,10 @@ async def cmd_admin_withdraw(message: Message):
     except:
         return await message.answer("❌ Укажи число.")
     user = await get_user(target.id, target.username)
-    if user["coins"] < amount: return await message.answer(f"❌ У пользователя только {user['coins']} 🪙")
+    if user["coins"] < amount: return await message.answer(f"❌ У пользователя только {user['coins']} коинов")
     await update_user(target.id, coins=user["coins"] - amount)
     await message.answer(
-        f"💸 <b>Коины списаны!</b>\n👤 У кого: @{target.username}\n➖ Снято: <b>{amount}</b> 🪙\nОстаток: <b>{user['coins'] - amount}</b> 🪙",
+        f"💸 <b>Коины списаны!</b>\n👤 У кого: @{target.username}\n➖ Снято: <b>{amount}</b> коинов\nОстаток: <b>{user['coins'] - amount}</b> коинов",
         parse_mode="HTML")
 
 
@@ -345,7 +361,7 @@ async def cmd_admin_add(message: Message):
     user = await get_user(target.id, target.username)
     await update_user(target.id, coins=user["coins"] + amount)
     await message.answer(
-        f"💰 <b>Карман пополнен!</b>\n👤 Кому: @{target.username}\n➕ Начислено: <b>{amount}</b> 🪙\n📊 Баланс: <b>{user['coins'] + amount}</b> 🪙",
+        f"💰 <b>Карман пополнен!</b>\n👤 Кому: @{target.username}\n➕ Начислено: <b>{amount}</b> коинов\n📊 Баланс: <b>{user['coins'] + amount}</b> коинов",
         parse_mode="HTML")
 
 
@@ -391,11 +407,11 @@ async def cmd_transfer(message: Message):
 
     if int(message.from_user.id) not in ADMIN_IDS:
         if amount > DAILY_TRANSFER_LIMIT: return await message.answer(
-            f"❌ Максимальная сумма перевода {DAILY_TRANSFER_LIMIT} 🪙")
+            f"❌ Максимальная сумма перевода {DAILY_TRANSFER_LIMIT} коинов")
         if daily_sent + amount > DAILY_TRANSFER_LIMIT: return await message.answer(
-            f"❌ Превышен дневной лимит переводов ({DAILY_TRANSFER_LIMIT} 🪙). Вы уже отправили сегодня: {daily_sent} 🪙")
+            f"❌ Превышен дневной лимит переводов ({DAILY_TRANSFER_LIMIT} коинов). Вы уже отправили сегодня: {daily_sent} коинов")
 
-    if user["coins"] < amount: return await message.answer(f"❌ Недостаточно коинов. У тебя: {user['coins']} 🪙")
+    if user["coins"] < amount: return await message.answer(f"❌ Недостаточно коинов. У тебя: {user['coins']} коинов")
 
     target_user = await get_user(target.id, target.username)
     new_daily_sent = daily_sent + amount
@@ -403,7 +419,7 @@ async def cmd_transfer(message: Message):
                       last_transfer_reset=today)
     await update_user(target.id, coins=target_user["coins"] + amount)
 
-    text = f"✅ <b>Перевод выполнен!</b>\n👤 Кому: @{target.username}\n💸 Сумма: <b>{amount}</b> 🪙"
+    text = f"✅ <b>Перевод выполнен!</b>\n👤 Кому: @{target.username}\n💸 Сумма: <b>{amount}</b> коинов"
     if comment: text += f"\n💬 Комментарий к переводу: <i>{safe_text(comment)}</i>"
 
     if int(message.from_user.id) not in ADMIN_IDS:
@@ -436,7 +452,7 @@ async def cmd_admin_promocode(message: Message):
             print(e)
 
     await asyncio.to_thread(_add)
-    await message.answer(f"✅ Промокод <code>{code}</code> создан!\nАктиваций: {uses}\nНаграда: {amount} 🪙",
+    await message.answer(f"✅ Промокод <code>{code}</code> создан!\nАктиваций: {uses}\nНаграда: {amount} коинов",
                          parse_mode="HTML")
 
 
@@ -486,7 +502,7 @@ async def cmd_promo(message: Message):
     await asyncio.to_thread(
         lambda: supabase.table("promocode_uses").insert({"code": code, "user_id": user_id}).execute())
     await message.answer(
-        f"🎉 <b>Промокод активирован!</b>\n\n🎁 Вы получили: <b>{promo['amount']}</b> 🪙\n💰 Новый баланс: <b>{user['coins'] + promo['amount']}</b> 🪙",
+        f"🎉 <b>Промокод активирован!</b>\n\n🎁 Вы получили: <b>{promo['amount']}</b> коинов\n💰 Новый баланс: <b>{user['coins'] + promo['amount']}</b> коинов",
         parse_mode="HTML")
 
 
@@ -508,12 +524,12 @@ async def cmd_pocket(message: Message):
     user = await get_user(target.id, getattr(target, 'username', None))
 
     if target.id in ADMIN_IDS and message.from_user.id != target.id:
-        return await message.answer(f"💰 <b>Карман @{safe_text(target.username)}</b>\n\n💎 Баланс: <b>Скрыто</b> 🔒",
+        return await message.answer(f"💰 <b>Карман @{safe_text(target.username)}</b>\n\n👛 Баланс: <b>Скрыто</b> 🔒",
                                     parse_mode="HTML")
 
     inv = parse_inventory(user.get("inventory"))
     name = f"@{safe_text(target.username)}" if getattr(target, 'username', None) else f"id{target.id}"
-    text = f"💰 <b>Карман {name}</b>\n\n💎 Баланс: <b>{user['coins']}</b> 🪙\n"
+    text = f"💰 <b>Карман {name}</b>\n\n👛 Баланс: <b>{user['coins']}</b> коинов\n"
     if user.get("keys", 0) > 0: text += f"🔑 Ключи: <b>{user['keys']}</b>\n"
     inventory_lines = []
     for item_id, item in visible_shop_items(is_admin(message.from_user.id)).items():
@@ -541,25 +557,22 @@ async def cmd_top(message: Message):
         prefix = medals[i] if i < 3 else f"{i + 1}."
         username = u.get("username", "Игрок")
         display_name = username if len(username) < 20 else username[:17] + "..."
-        msg += f"{prefix} {safe_text(display_name)} — <b>{u['coins']}</b> 🪙\n"
+        msg += f"{prefix} {safe_text(display_name)} — <b>{coin_amount(u['coins'])}</b>\n"
     await message.answer(msg, parse_mode="HTML")
 
 
 # ================= СУНДУКИ =================
+# Сундуки открываются только в мини-аппке: там награду считает сервер
+# (10-30 коинов или 20% на золотой ключ). Команда в боте просто объясняет это.
 @dp.message(F.text.func(lambda t: strip_prefix(t).lower().startswith("открыть")))
 async def cmd_open(message: Message):
-    user = await get_user(message.from_user.id, message.from_user.username, message.chat.id)
-    now = time.time()
-    last_chest = float(user.get("last_chest") or 0)
-    rem = COOLDOWN_SECONDS - (now - last_chest)
-    if rem > 0: return await message.answer(f"⏳ Открытие доступно через {format_time(rem)}")
-    is_gold = random.random() < 0.05
-    reward = random.randint(10, 100) if is_gold else random.randint(5, 25)
-    await update_user(message.from_user.id, coins=user["coins"] + reward, last_chest=now)
-    if is_gold:
-        await message.answer(f"✨ <b>ЗОЛОТОЙ СУНДУК!</b> 🔑\n🎉 Выпало: <b>{reward}</b> 🪙", parse_mode="HTML")
-    else:
-        await message.answer(f"🎁 <b>Сундук открыт!</b>\n🎉 Выпало: <b>{reward}</b> 🪙", parse_mode="HTML")
+    await message.answer(
+        "📦 <b>Сундуки теперь открываются только в нашем Mini App!</b>\n\n"
+        f"Переходи по ссылке: <a href='{MINIAPP_URL}'>{MINIAPP_URL}</a>\n\n"
+        "🎁 Там же крутятся Мины, Арена и Ракета с общим балансом.",
+        parse_mode="HTML",
+        disable_web_page_preview=True,
+    )
 
 
 # ================= МАГАЗИН =================
@@ -570,9 +583,9 @@ async def cmd_shop(message: Message):
     for item_id, item in visible_shop_items(is_admin(message.from_user.id)).items():
         limit_text = f" · лимит {item['daily_limit']}/день" if item["daily_limit"] is not None else ""
         price_text = f"{item['price']:,}".replace(",", " ")
-        lines.append(f"{item['emoji']} <b>{item['name']}</b> — <b>{price_text}</b> 🪙{limit_text}")
+        lines.append(f"{item['emoji']} <b>{item['name']}</b> — <b>{price_text}</b> коинов{limit_text}")
         buttons.append(InlineKeyboardButton(
-            text=f"{item['emoji']} {item['short_name']} · {price_text} 🪙",
+            text=f"{item['emoji']} {item['short_name']} · {price_text}",
             callback_data=f"shop_buy|{item_id}",
         ))
     rows = [buttons[index:index + 2] for index in range(0, len(buttons), 2)]
@@ -584,9 +597,6 @@ async def cmd_shop(message: Message):
 
 
 # ================= АПГРЕЙД (АДМИНЫ) =================
-MINIAPP_URL = "https://t.me/Auragameplay_bot/Auragame"
-
-
 @dp.message(F.text.func(lambda t: strip_prefix(t).lower().startswith("апгрейд")))
 async def cmd_upgrade(message: Message):
     if not is_admin(message.from_user.id):
@@ -594,8 +604,8 @@ async def cmd_upgrade(message: Message):
     text = (
         "🛠️ <b>Апгрейд</b>\n\n"
         "Кладёшь предмет слева, выбираешь цель справа — круг показывает шанс.\n"
-        "Коины: от 50 до 5 000 🪙 · кэфы x2, x4, x5, x8, x10 или готовый шанс 35/55/75%\n"
-        "Капсулы: обычная 💊 (500 🪙) → уникальная ⚱️ (1 000 🪙)\n\n"
+        "Коины: от 50 до 5 000 · кэфы x2, x4, x5, x8, x10 или готовый шанс 35/55/75%\n"
+        "Капсулы: обычная 💊 (500 коинов) → уникальная ⚱️ (1 000 коинов)\n\n"
         "Открывай мини-аппку 👇"
     )
     kb = InlineKeyboardMarkup(inline_keyboard=[[
@@ -660,11 +670,11 @@ async def cmd_dice(message: Message):
             amount = int(parts[2])
         except ValueError:
             return await message.answer("❌ Ставка должна быть числом.")
-    if amount < MIN_BET: return await message.answer(f"❌ Минимальная ставка: {MIN_BET} 🪙")
+    if amount < MIN_BET: return await message.answer(f"❌ Минимальная ставка: {MIN_BET} коинов")
     challenger = await get_user(message.from_user.id, message.from_user.username)
     if target.id == message.from_user.id: return await message.answer("❌ Нельзя играть сам с собой 😄")
     if challenger["coins"] < amount: return await message.answer(
-        f"❌ У тебя недостаточно коинов.\nНужно: <b>{amount}</b> 🪙", parse_mode="HTML")
+        f"❌ У тебя недостаточно коинов.\nНужно: <b>{amount}</b> коинов", parse_mode="HTML")
     challenged = await get_user(target.id, target.username)
     if challenged["coins"] < amount: return await message.answer(f"❌ У @{target.username} недостаточно коинов.",
                                                                  parse_mode="HTML")
@@ -675,7 +685,7 @@ async def cmd_dice(message: Message):
         [InlineKeyboardButton(text="✅ Принять", callback_data=f"dice_accept|{challenge_id}"),
          InlineKeyboardButton(text="❌ Отказ", callback_data=f"dice_decline|{challenge_id}")]])
     await message.answer(
-        f"🎲 <b>ВЫЗОВ НА ДУЭЛЬ!</b>\n\n👤 @{message.from_user.username} вызывает @{target.username}\n💰 Ставка: <b>{amount}</b> 🪙\n🎯 Победитель забирает: <b>{amount * 2}</b> 🪙\n\n⏳ Время на ответ: {CHALLENGE_TIMEOUT} секунд",
+        f"🎲 <b>ВЫЗОВ НА ДУЭЛЬ!</b>\n\n👤 @{message.from_user.username} вызывает @{target.username}\n💰 Ставка: <b>{amount}</b> коинов\n🎯 Победитель забирает: <b>{amount * 2}</b> коинов\n\n⏳ Время на ответ: {CHALLENGE_TIMEOUT} секунд",
         parse_mode="HTML", reply_markup=kb)
 
 
@@ -710,7 +720,7 @@ async def cb_dice_accept(callback: CallbackQuery):
         loser = await get_user(loser_id)
         await update_user(winner_id, coins=winner["coins"] + amount)
         await update_user(loser_id, coins=loser["coins"] - amount)
-        result = f"🏆 Победил @{winner['username']} ({r1} : {r2})\n💰 +{amount} 🪙"
+        result = f"🏆 Победил @{winner['username']} ({r1} : {r2})\n💰 +{amount} коинов"
     active_challenges.pop(challenge_id, None)
     await callback.message.answer(f"🎲 <b>Кубы брошены!</b>\n\n{result}", parse_mode="HTML")
     await callback.answer()
@@ -740,7 +750,7 @@ async def _complete_shop_purchase(callback: CallbackQuery, item_id: str):
     except Exception:
         logger.exception("Не удалось обработать покупку %s пользователем %s", item_id, callback.from_user.id)
         return await callback.answer("❌ Не удалось завершить покупку. Попробуйте позже.", show_alert=True)
-    await callback.answer(f"✅ {item['name']} куплена за {item['price']:,} 🪙", show_alert=True)
+    await callback.answer(f"✅ {item['name']} куплена за {item['price']:,} коинов", show_alert=True)
 
 
 @dp.callback_query(F.data.startswith("shop_buy|"))
@@ -774,7 +784,7 @@ async def cmd_bot_stats(message: Message):
         active_24h = sum(1 for u in users if u.get("last_chest") and (now - float(u.get("last_chest"))) < 86400)
         total_coins = sum(u.get("coins", 0) for u in users)
         text = (
-            f"📊 <b>СТАТИСТИКА БОТА</b>\n━━━━━━━━━━━━━━━━━━━━\n\n👥 Всего пользователей: <b>{total_users}</b>\n🔥 Активных за 24ч: <b>{active_24h}</b>\n💰 Всего коинов в системе: <b>{total_coins}</b> 🪙\n")
+            f"📊 <b>СТАТИСТИКА БОТА</b>\n━━━━━━━━━━━━━━━━━━━━\n\n👥 Всего пользователей: <b>{total_users}</b>\n🔥 Активных за 24ч: <b>{active_24h}</b>\n💰 Всего коинов в системе: <b>{total_coins}</b>\n")
         await message.answer(text, parse_mode="HTML")
     except Exception as e:
         logger.error(f"Ошибка при получении статистики: {e}")
@@ -786,7 +796,7 @@ async def cmd_bot_stats(message: Message):
     F.text.func(lambda t: strip_prefix(t).lower().startswith("помощь") or strip_prefix(t).lower().startswith("help")))
 async def cmd_help(message: Message):
     text = (
-        "📖 <b>СПИСОК КОМАНД БОТА</b>\n━━━━━━━━━━━━━━━━━━━━\n\n🎁 <b>Случайные коины:</b>\n• Просто пиши в чате — с шансом 0.5% получишь 1-5 🪙\n\n🎟️ <b>Промокоды:</b>\n• <code>промо код</code> — активировать промокод\n\n📦 <b>Сундуки:</b>\n• <code>открыть</code> — открыть сундук (КД 5 часов)\n\n💰 <b>Экономика:</b>\n• <code>карман</code> — твой баланс\n• <code>карман @user</code> — баланс другого\n• <code>перевод @user сумма</code> — перевести\n• <code>перевод сумма</code> (ответом) — быстрый перевод\n• <code>топ</code> — топ-10 богачей\n• <code>магазин</code> — магазин\n\n🎲 <b>Игры:</b>\n• <code>кубы @user ставка</code> — дуэль в кости\n• <code>кубы ставка</code> (ответом) — быстрый вызов\n\n📱 <b>Мини-приложение:</b>\n• <code>апка</code> — ссылка на наше казино\n\n• <code>тег</code> — проверка бота\n• <code>помощь</code> — эта справка")
+        "📖 <b>СПИСОК КОМАНД БОТА</b>\n━━━━━━━━━━━━━━━━━━━━\n\n🎁 <b>Случайные коины:</b>\n• Просто пиши в чате — с шансом 0.5% получишь 1-5 коинов\n\n🎟️ <b>Промокоды:</b>\n• <code>промо код</code> — активировать промокод\n\n📦 <b>Сундуки:</b>\n• <code>открыть</code> — сундуки открываются только в Mini App\n\n💰 <b>Экономика:</b>\n• <code>карман</code> — твой баланс\n• <code>карман @user</code> — баланс другого\n• <code>перевод @user сумма</code> — перевести\n• <code>перевод сумма</code> (ответом) — быстрый перевод\n• <code>топ</code> — топ-10 богачей\n• <code>магазин</code> — магазин\n\n🎲 <b>Игры:</b>\n• <code>кубы @user ставка</code> — дуэль в кости\n• <code>кубы ставка</code> (ответом) — быстрый вызов\n\n📱 <b>Мини-приложение:</b>\n• <code>апка</code> — ссылка на наше казино\n\n• <code>тег</code> — проверка бота\n• <code>помощь</code> — эта справка")
     await message.answer(text, parse_mode="HTML")
 
 

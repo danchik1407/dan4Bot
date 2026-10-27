@@ -25,6 +25,30 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_IDS = [6338018270, 5184813347, 8890834384]
 MAX_BET = 10000
 
+# ==================== СУНДУКИ ====================
+CHEST_COOLDOWN = 18000              # обычный сундук: 5 часов
+CHEST_MIN_COINS, CHEST_MAX_COINS = 10, 30      # обычный сундук: 10-30 коинов
+CHEST_KEY_CHANCE = 0.20             # 20% на золотой ключ вместо коинов
+GOLD_MIN_COINS, GOLD_MAX_COINS = 60, 180       # золотой сундук (открывается ключом)
+GOLD_KEY_BACK_CHANCE = 0.10         # 10% вернуть ключ
+
+# ==================== МИНЫ ====================
+MINES_CELLS = 16
+MINES_MAX_COUNT = 5
+MINES_MIN_BET = 10
+# Шанс взрыва на первом клике = честный (мины/16) + надбавка за крупную ставку/5 мин.
+MINES_RISKY_BET = 1000              # ставка выше 1000 коинов играет рискованнее
+MINES_RISKY_BET_BONUS = 0.15
+MINES_FIVE_MINES_BONUS = 0.10       # выбрано 5 мин
+MINES_MAX_FIRST_CHANCE = 0.75
+MINES_MULTIPLIERS = {
+    1: [1.03, 1.10, 1.18, 1.28, 1.40, 1.55, 1.75, 2.00, 2.35, 2.80, 3.40, 4.20, 5.30, 7.00, 10.00],
+    2: [1.06, 1.18, 1.35, 1.58, 1.88, 2.28, 2.82, 3.55, 4.60, 6.10, 8.30, 11.50, 16.50, 25.00, 40.00],
+    3: [1.10, 1.30, 1.60, 2.00, 2.55, 3.35, 4.50, 6.20, 8.80, 13.00, 20.00, 32.00, 55.00, 100.00, 200.00],
+    4: [1.15, 1.45, 1.90, 2.55, 3.50, 4.95, 7.20, 10.80, 17.00, 28.00, 48.00, 85.00, 160.00, 320.00, 700.00],
+    5: [1.20, 1.60, 2.25, 3.20, 4.70, 7.20, 11.50, 19.00, 32.00, 58.00, 110.00, 220.00, 480.00, 1200.00, 3500.00],
+}
+
 # ==================== АПГРЕЙД (TONGRADER) ====================
 # Шанс = (стоимость предмета слева / стоимость цели справа) * 100.
 UPGRADE_MIN_BET = 50            # минимум коинов на левой панели
@@ -54,6 +78,58 @@ def _random_arena_bot_count():
     return random.randint(1, 3) if random.random() < 0.85 else random.randint(4, 10)
 
 
+# ==================== ОБЩИЕ ХЕЛПЕРЫ ЭКОНОМИКИ ====================
+def _db_user(user_id):
+    """Одна запись users или None. user_id приводим к int — в базе это bigint."""
+    try:
+        uid = int(user_id)
+    except (TypeError, ValueError):
+        return None
+    res = supabase.table("users").select("*").eq("user_id", uid).execute()
+    return res.data[0] if res.data else None
+
+
+def _db_update_user(user_id, **fields):
+    """Обновляем только переданные колонки (никаких PGRST204 из-за лишних полей)."""
+    payload = {key: value for key, value in fields.items() if value is not None}
+    if not payload:
+        return False
+    updated = supabase.table("users").update(payload).eq("user_id", int(user_id)).select("user_id").execute()
+    return bool(updated.data)
+
+
+def _days_in_game(created_at):
+    """Сколько полных дней прошло с регистрации. Нет даты — 0 дней."""
+    if not created_at:
+        return 0
+    if isinstance(created_at, str):
+        try:
+            created = datetime.datetime.fromisoformat(created_at.strip().replace("Z", "+00:00"))
+        except ValueError:
+            return 0
+    else:
+        created = created_at
+    if created.tzinfo is None:
+        created = created.replace(tzinfo=datetime.timezone.utc)
+    delta = datetime.datetime.now(datetime.timezone.utc) - created
+    return max(0, int(delta.total_seconds() // 86400))
+
+
+def _is_admin_user(user_id):
+    try:
+        return int(user_id) in ADMIN_IDS
+    except (TypeError, ValueError):
+        return False
+
+
+def _enforce_bet_limit(user_id, total_bet):
+    """Строгая серверная проверка общей ставки: > MAX_BET запрещено всем, кроме админов."""
+    if _is_admin_user(user_id):
+        return
+    if int(total_bet) > MAX_BET:
+        raise HTTPException(status_code=400, detail=f"Максимальная ставка {MAX_BET} 🪙")
+
+
 # === АРЕНА ===
 game_state = {
     "status": "waiting", "timer": 15, "bank": 0, "players": [], "winner": None,
@@ -69,17 +145,13 @@ HOCKEY_ROLL_DURATION = 9.0
 HOCKEY_WAIT_DURATION = 15.0
 HOCKEY_ROUND_PERIOD = HOCKEY_WAIT_DURATION + HOCKEY_ROLL_DURATION + 5.0
 HOCKEY_SIMULATION_STEP = 0.05
-HOCKEY_SLOWDOWN_START = 6.0
+HOCKEY_SPEED_EASE_POWER = 1.7   # чем больше — тем резвее старт и мягче финиш
 
 
 def _hockey_speed_factor(elapsed_seconds):
-    """Keep speed steady, then ease smoothly to a stop over the final 3 seconds."""
-    if elapsed_seconds <= HOCKEY_SLOWDOWN_START:
-        return 1.0
-    progress = min(1.0, max(0.0, (elapsed_seconds - HOCKEY_SLOWDOWN_START) /
-                            (HOCKEY_ROLL_DURATION - HOCKEY_SLOWDOWN_START)))
-    eased = progress * progress * (3.0 - 2.0 * progress)
-    return 1.0 - eased
+    """Мяч стартует на полной скорости и плавно гаснет до нуля к концу раунда."""
+    progress = min(1.0, max(0.0, elapsed_seconds / HOCKEY_ROLL_DURATION))
+    return max(0.0, (1.0 - progress) ** HOCKEY_SPEED_EASE_POWER)
 
 
 def _simulate_hockey_roll(start_angle, speed, start_x=50.0, start_y=50.0):
@@ -117,7 +189,8 @@ def _prepare_hockey_roll(now):
     game_state["round_id"] = str(round_slot)
     round_rng = random.Random(round_slot)
     start_angle = round_rng.uniform(0.0, 2 * math.pi)
-    speed = 8.5
+    # Скорость подобрана под ease-out: суммарный путь примерно как у прежней модели.
+    speed = 18.0
     start_x, start_y = 50.0, 50.0
     path = _simulate_hockey_roll(start_angle, speed, start_x, start_y)
     game_state["winner"] = None
@@ -287,7 +360,65 @@ crash_state = {
     "crash_point": 0.0, "players": [], "bank": 0, "is_paid": False, "round_id": str(int(time.time())),
     "bots_added": 0, "target_bots": 0, "last_bot_added": 0, "status_start": time.time(),
 }
+# Глобальная история ракет: живёт в таблице crash_history, поэтому не сбрасывается,
+# когда из игры выходят игроки или перезапускается воркер. Локальный список — кэш.
+CRASH_HISTORY_LIMIT = 20
+CRASH_HISTORY_CACHE_TTL = 5.0
 crash_history = []
+crash_history_cache_at = 0.0
+
+
+def _crash_history_to_payload(row):
+    try:
+        crash_point = round(float(row.get("crash_point") or 0), 2)
+    except (TypeError, ValueError):
+        crash_point = 0.0
+    return {"round_id": row.get("round_id"), "crash_point": crash_point,
+            "created_at": row.get("created_at")}
+
+
+def _load_crash_history_from_db(limit=CRASH_HISTORY_LIMIT):
+    """None — база недоступна (миграция не применена), иначе список последних игр."""
+    try:
+        res = (supabase.table("crash_history")
+               .select("round_id, crash_point, created_at")
+               .order("id", desc=True)
+               .limit(limit)
+               .execute())
+    except Exception:
+        return None
+    return [_crash_history_to_payload(row) for row in (res.data or [])]
+
+
+def _refresh_crash_history(force=False):
+    global crash_history, crash_history_cache_at
+    now = time.time()
+    if not force and (now - crash_history_cache_at) < CRASH_HISTORY_CACHE_TTL:
+        return crash_history
+    rows = _load_crash_history_from_db()
+    if rows is not None:
+        crash_history = rows
+    crash_history_cache_at = now
+    return crash_history
+
+
+def _save_crash_history(entry):
+    """Пишем раунд в базу и сразу добавляем в кэш, чтобы история была видна всем."""
+    global crash_history, crash_history_cache_at
+    record = {"round_id": entry.get("round_id"),
+              "crash_point": round(float(entry.get("crash_point") or 0), 2),
+              "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat()}
+    crash_history.insert(0, record)
+    del crash_history[CRASH_HISTORY_LIMIT:]
+    crash_history_cache_at = time.time()
+    try:
+        supabase.table("crash_history").insert({
+            "round_id": record["round_id"], "crash_point": record["crash_point"],
+            "players": entry.get("players") or [],
+        }).execute()
+    except Exception:
+        # База недоступна — играть не мешаем, история останется в памяти процесса.
+        pass
 
 
 def verify_telegram_data(init_data: str):
@@ -343,6 +474,20 @@ class CrashBet(BaseModel): initData: str; amount: int
 
 
 class CrashCashout(BaseModel): initData: str
+
+
+class MinesStart(BaseModel): initData: str; amount: int; mines: int = 1
+
+
+class MinesOpen(BaseModel): initData: str; cell: int
+
+
+class MinesCashout(BaseModel): initData: str
+
+
+class OpenChestRequest(BaseModel):
+    initData: str
+    chest_type: str = "normal"
 
 
 class UpgradeAction(BaseModel):
@@ -426,8 +571,6 @@ async def place_bet(data: PlaceBet):
 
     if data.amount <= 0:
         raise HTTPException(status_code=400, detail="Ставка должна быть больше нуля")
-    if int(user_id) not in ADMIN_IDS and data.amount > MAX_BET:
-        raise HTTPException(status_code=400, detail=f"Максимальная ставка {MAX_BET} 🪙")
     if (game_state["status"] != "waiting"
             or time.time() - game_state["last_update"] >= 15):
         raise HTTPException(status_code=400, detail="Ставки закрыты")
@@ -435,6 +578,10 @@ async def place_bet(data: PlaceBet):
         (p for p in game_state["players"] if p["id"] == user_id and not p.get("is_bot")),
         None,
     )
+    # Лимит считается по ОБЩЕЙ ставке игрока в раунде, а не по одному запросу —
+    # иначе он обходится десятью ставками по 1 000.
+    total_after_bet = int(existing_player["bet"] if existing_player else 0) + int(data.amount)
+    _enforce_bet_limit(user_id, total_after_bet)
     if existing_player is None and len(game_state["players"]) >= 20:
         raise HTTPException(status_code=400, detail="Комната заполнена")
 
@@ -493,11 +640,12 @@ async def get_hockey_history(): return history
 
 # ==================== РАКЕТА (CRASH) ====================
 def get_crash_point_by_chance():
+    """Мгновенные краши x1.00-x1.06 выпадают редко (12%), а не в трети раундов."""
     rv = random.random()
-    if rv < 0.30:
-        return random.uniform(1.00, 1.05)
+    if rv < 0.12:
+        return random.uniform(1.00, 1.06)
     elif rv < 0.46:
-        return random.uniform(1.05, 2.0)
+        return random.uniform(1.06, 2.0)
     elif rv < 0.85:
         return random.uniform(2.0, 4.0)
     elif rv < 0.99:
@@ -508,7 +656,7 @@ def get_crash_point_by_chance():
 
 @app.get("/api/crash_state")
 async def get_crash_state(initData: str = ""):
-    global crash_state, crash_history
+    global crash_state
     now = time.time()
 
     if crash_state["status"] == "waiting":
@@ -570,11 +718,12 @@ async def get_crash_state(initData: str = ""):
                     elif p["cashout_mult"] == 0 and not p["is_bot"]:
                         pass  # ПРОИГРАЛ - НЕ ПЛАТИМ
 
-            crash_history.insert(0, {"round_id": crash_state["round_id"],
-                                     "crash_point": round(crash_state["crash_point"], 2), "players": [
-                    {"name": p["name"], "bet": p["bet"], "cashout": p["cashout_mult"], "is_bot": p["is_bot"]} for p in
-                    crash_state["players"]]})
-            if len(crash_history) > 20: crash_history.pop()
+            _save_crash_history({
+                "round_id": crash_state["round_id"],
+                "crash_point": round(crash_state["crash_point"], 2),
+                "players": [{"name": p["name"], "bet": p["bet"], "cashout": p["cashout_mult"],
+                             "is_bot": p["is_bot"]} for p in crash_state["players"]],
+            })
 
         for p in crash_state["players"]:
             if p["cashout_mult"] == 0 and p["is_bot"] and random.random() < 0.05:
@@ -592,13 +741,15 @@ async def get_crash_state(initData: str = ""):
 
 
 def _crash_response(initData: str):
+    # Значения по умолчанию выставляем сразу: если initData не передан ИЛИ не прошёл
+    # проверку подписи, ниже мы всё равно не должны упасть в UnboundLocalError.
     me = None
+    my_status, my_bet, my_cashout, my_win = "none", 0, 0, 0
     if initData:
         u = verify_telegram_data(initData)
         if u:
             uid = str(u["id"])
             me = next((p for p in crash_state["players"] if str(p["id"]) == uid), None)
-            my_status, my_bet, my_cashout, my_win = "none", 0, 0, 0
             if me:
                 my_bet = me["bet"]
                 if crash_state["status"] == "crashed" and me["cashout_mult"] == 0:
@@ -609,8 +760,6 @@ def _crash_response(initData: str):
                     my_win = int(me["bet"] * me["cashout_mult"])
                 else:
                     my_status = "bet"
-    else:
-        my_status, my_bet, my_cashout, my_win = "none", 0, 0, 0
 
     players_sorted = sorted(crash_state["players"], key=lambda p: p["bet"], reverse=True)
 
@@ -623,7 +772,7 @@ def _crash_response(initData: str):
         "multiplier": crash_state["multiplier"],
         "crash_point": crash_point_to_send,
         "bank": crash_state["bank"], "round_id": crash_state["round_id"],
-        "players": players_sorted, "history": crash_history[:10],
+        "players": players_sorted, "history": _refresh_crash_history()[:CRASH_HISTORY_LIMIT],
         "my_status": my_status, "my_bet": my_bet, "my_cashout_mult": my_cashout, "my_win": my_win,
         "status_start": crash_state["status_start"],
     }
@@ -639,13 +788,13 @@ async def crash_bet(data: CrashBet):
 
     if data.amount <= 0:
         raise HTTPException(status_code=400, detail="Ставка должна быть больше нуля")
-    if int(user_id) not in ADMIN_IDS and data.amount > MAX_BET:
-        raise HTTPException(status_code=400, detail=f"Максимальная ставка {MAX_BET} 🪙")
 
     if crash_state["status"] != "waiting": raise HTTPException(status_code=400,
                                                                detail="Ставки принимаются только в фазе ожидания")
 
     existing = next((p for p in crash_state["players"] if str(p["id"]) == user_id), None)
+    # Лимит по сумме всех ставок игрока в раунде (докрутки тоже считаются).
+    _enforce_bet_limit(user_id, int(existing["bet"] if existing else 0) + int(data.amount))
     res = supabase.table("users").select("coins").eq("user_id", int(user_id)).execute()
     if not res.data: raise HTTPException(status_code=404, detail="User not found")
     current_coins = int(res.data[0].get("coins", 0))
@@ -694,7 +843,155 @@ async def crash_cashout(data: CrashCashout):
 
 
 @app.get("/api/crash_history")
-async def get_crash_history(): return crash_history
+async def get_crash_history(): return _refresh_crash_history(force=True)
+
+
+# ==================== МИНЫ ====================
+# Поле и множители считает сервер: клиент только рисует ответ, поэтому
+# подкрутить «безопасную» клетку или выплату из браузера больше нельзя.
+mines_games = {}
+
+
+def _mines_multiplier(mines_count, opened):
+    table = MINES_MULTIPLIERS.get(int(mines_count)) or MINES_MULTIPLIERS[1]
+    if opened <= 0:
+        return 1.0
+    return table[min(opened, len(table)) - 1]
+
+
+def _mines_first_click_chance(bet, mines_count):
+    """Честный шанс (мины/16) плюс надбавка за крупную ставку и за 5 мин."""
+    chance = min(1.0, int(mines_count) / MINES_CELLS)
+    if int(bet) > MINES_RISKY_BET:
+        chance += MINES_RISKY_BET_BONUS
+    if int(mines_count) >= MINES_MAX_COUNT:
+        chance += MINES_FIVE_MINES_BONUS
+    return min(MINES_MAX_FIRST_CHANCE, chance)
+
+
+def _mines_cashout_value(game):
+    return int(game["bet"] * _mines_multiplier(game["mines"], len(game["opened"])))
+
+
+def _mines_game_active(user_id):
+    game = mines_games.get(str(user_id))
+    return game if game and game.get("status") == "active" else None
+
+
+@app.post("/api/mines_start")
+async def mines_start(data: MinesStart):
+    user = verify_telegram_data(data.initData)
+    if not user: raise HTTPException(status_code=401, detail="Invalid auth data")
+    user_id = str(user["id"])
+    check_ban(user_id)
+
+    try:
+        amount = int(data.amount)
+        mines_count = int(data.mines)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="Некорректная ставка")
+    if amount < MINES_MIN_BET:
+        raise HTTPException(status_code=400, detail=f"Минимальная ставка {MINES_MIN_BET} 🪙")
+    if mines_count < 1 or mines_count > MINES_MAX_COUNT:
+        raise HTTPException(status_code=400, detail="Можно выбрать от 1 до 5 мин")
+    _enforce_bet_limit(user_id, amount)
+
+    row = _db_user(user_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    coins = int(row.get("coins", 0) or 0)
+
+    # Незавершённая игра не должна «съедать» ставку: забираем её по текущему кэфу.
+    previous = _mines_game_active(user_id)
+    if previous:
+        coins += _mines_cashout_value(previous)
+        mines_games.pop(user_id, None)
+
+    if coins < amount:
+        raise HTTPException(status_code=400, detail="Недостаточно коинов")
+    coins -= amount
+    if not _db_update_user(user_id, coins=coins):
+        raise HTTPException(status_code=500, detail="Не удалось списать ставку")
+
+    mines_games[user_id] = {
+        "bet": amount, "mines": mines_count, "positions": None, "opened": [],
+        "first_click_chance": _mines_first_click_chance(amount, mines_count),
+        "started_at": time.time(), "status": "active",
+    }
+    return {"success": True, "new_balance": coins, "coef": 1.0, "cashout": amount,
+            "mines": mines_count, "bet": amount}
+
+
+@app.post("/api/mines_open")
+async def mines_open(data: MinesOpen):
+    user = verify_telegram_data(data.initData)
+    if not user: raise HTTPException(status_code=401, detail="Invalid auth data")
+    user_id = str(user["id"])
+    check_ban(user_id)
+
+    game = _mines_game_active(user_id)
+    if not game:
+        raise HTTPException(status_code=400, detail="Игра не найдена — сделайте ставку")
+
+    try:
+        cell = int(data.cell)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="Некорректная клетка")
+    if cell < 0 or cell >= MINES_CELLS:
+        raise HTTPException(status_code=400, detail="Некорректная клетка")
+    if cell in game["opened"]:
+        raise HTTPException(status_code=400, detail="Клетка уже открыта")
+
+    if game["positions"] is None:
+        # Позиции мин рождаются на первом клике: так работает надбавка к риску.
+        positions = set()
+        if random.random() < game["first_click_chance"]:
+            positions.add(cell)
+        need = game["mines"] - len(positions)
+        pool = [index for index in range(MINES_CELLS) if index not in positions]
+        positions.update(random.sample(pool, need))
+        game["positions"] = sorted(positions)
+
+    if cell in game["positions"]:
+        game["status"] = "lost"
+        mines_games.pop(user_id, None)
+        return {"success": True, "hit": True, "positions": list(game["positions"]),
+                "bet": game["bet"], "mines": game["mines"]}
+
+    game["opened"].append(cell)
+    opened_count = len(game["opened"])
+    coef = _mines_multiplier(game["mines"], opened_count)
+    return {
+        "success": True, "hit": False, "cell": cell,
+        "opened": list(game["opened"]), "opened_count": opened_count,
+        "coef": round(coef, 2), "cashout": int(game["bet"] * coef),
+        "bet": game["bet"], "mines": game["mines"],
+    }
+
+
+@app.post("/api/mines_cashout")
+async def mines_cashout(data: MinesCashout):
+    user = verify_telegram_data(data.initData)
+    if not user: raise HTTPException(status_code=401, detail="Invalid auth data")
+    user_id = str(user["id"])
+    check_ban(user_id)
+
+    # Снимаем игру из памяти ДО начисления: повторный клик по «Забрать»
+    # получит 400 и не сможет зачислить выигрыш второй раз.
+    game = mines_games.pop(user_id, None)
+    if not game or game.get("status") != "active":
+        raise HTTPException(status_code=400, detail="Игра не найдена — сделайте ставку")
+
+    game["status"] = "cashed"
+    win_amount = _mines_cashout_value(game)
+    row = _db_user(user_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    coins = int(row.get("coins", 0) or 0) + win_amount
+    if not _db_update_user(user_id, coins=coins):
+        raise HTTPException(status_code=500, detail="Не удалось зачислить выигрыш")
+    return {"success": True, "win_amount": win_amount, "new_balance": coins,
+            "coef": round(_mines_multiplier(game["mines"], len(game["opened"])), 2)}
 
 
 # ==================== ЮЗЕР И ЭКОНОМИКА ====================
@@ -716,27 +1013,60 @@ async def get_user(auth: UserAuth):
         new_user = {"user_id": user_id, "coins": 0, "keys": 0, "username": user.get("username", f"id{user_id}"),
                     "last_chest": 0, "chat_id": 0, "inventory": "[]"}
         supabase.table("users").insert(new_user).execute()
-        return {"coins": 0, "keys": 0, "inventory": [], "last_chest": 0, "is_admin": is_admin}
+        return {"coins": 0, "keys": 0, "inventory": [], "last_chest": 0, "is_admin": is_admin,
+                "created_at": None, "days_in_game": 0}
     db_user = res.data[0]
+    created_at = db_user.get("created_at")
     return {"coins": int(db_user.get("coins", 0)), "keys": int(db_user.get("keys", 0)),
             "inventory": json.loads(db_user.get("inventory") or "[]"), "last_chest": int(db_user.get("last_chest", 0)),
-            "is_admin": is_admin}
+            "is_admin": is_admin, "created_at": created_at, "days_in_game": _days_in_game(created_at)}
 
 
 @app.post("/api/open_chest")
-async def open_chest(auth: UserAuth):
+async def open_chest(auth: OpenChestRequest):
+    """Сундук открывает и награждает сервер: обычный 10-30 коинов или 20% на ключ."""
     user = verify_telegram_data(auth.initData)
     if not user: raise HTTPException(status_code=401, detail="Invalid auth data")
-    user_id = user["id"]
+    user_id = str(user["id"])
     check_ban(user_id)
 
+    chest_type = (auth.chest_type or "normal").strip().lower()
+    if chest_type not in ("normal", "gold"):
+        raise HTTPException(status_code=400, detail="Неизвестный тип сундука")
+
     now = int(time.time())
-    res = supabase.table("users").select("last_chest").eq("user_id", user_id).execute()
-    if not res.data: raise HTTPException(status_code=404, detail="User not found")
-    last_chest = int(res.data[0].get("last_chest", 0) or 0)
-    if (now - last_chest) < 18000: raise HTTPException(status_code=400, detail="Сундук перезаряжается")
-    supabase.table("users").update({"last_chest": now}).eq("user_id", user_id).execute()
-    return {"success": True}
+    row = _db_user(user_id)
+    if row is None: raise HTTPException(status_code=404, detail="User not found")
+
+    coins = int(row.get("coins", 0) or 0)
+    keys = int(row.get("keys", 0) or 0)
+    last_chest = int(row.get("last_chest", 0) or 0)
+
+    if chest_type == "gold":
+        if keys <= 0:
+            raise HTTPException(status_code=400, detail="У вас нет ключей!")
+        keys -= 1
+        reward_coins = 0 if random.random() < GOLD_KEY_BACK_CHANCE else random.randint(GOLD_MIN_COINS, GOLD_MAX_COINS)
+        reward_keys = 1 if reward_coins == 0 else 0
+    else:
+        if (now - last_chest) < CHEST_COOLDOWN:
+            raise HTTPException(status_code=400, detail="Сундук перезаряжается")
+        last_chest = now
+        if random.random() < CHEST_KEY_CHANCE:
+            reward_coins, reward_keys = 0, 1
+        else:
+            reward_coins, reward_keys = random.randint(CHEST_MIN_COINS, CHEST_MAX_COINS), 0
+
+    coins += reward_coins
+    keys += reward_keys
+    if not _db_update_user(user_id, coins=coins, keys=keys, last_chest=last_chest):
+        raise HTTPException(status_code=500, detail="Не удалось открыть сундук")
+
+    return {
+        "success": True, "chest_type": chest_type,
+        "reward_coins": reward_coins, "reward_keys": reward_keys,
+        "new_balance": coins, "new_keys": keys, "last_chest": last_chest,
+    }
 
 
 @app.post("/api/shop_items")
@@ -954,19 +1284,20 @@ async def upgrade_action(data: UpgradeAction):
 
 @app.post("/api/update_balance")
 async def update_balance(data: UpdateBalance):
+    """Служебный эндпоинт. Раньше любой клиент мог начислить себе сколько угодно
+    коинов — теперь все награды начисляет сервер, а прямой вызов закрыт."""
     user = verify_telegram_data(data.initData)
     if not user: raise HTTPException(status_code=401, detail="Invalid auth data")
     user_id = user["id"]
     check_ban(user_id)
+    if not is_admin_id(int(user_id), ADMIN_IDS):
+        raise HTTPException(status_code=403, detail="Операция недоступна")
 
     res = supabase.table("users").select("coins").eq("user_id", user_id).execute()
-    current_coins = int(res.data[0].get("coins", 0))
-    new_coins = current_coins + data.amount
-    if new_coins < 0:
-        raise HTTPException(status_code=400, detail="Недостаточно коинов")
-    updated = supabase.table("users").update({"coins": new_coins}).eq(
-        "user_id", user_id).select("user_id").execute()
-    if not updated.data:
+    if not res.data: raise HTTPException(status_code=404, detail="User not found")
+    current_coins = int(res.data[0].get("coins", 0) or 0)
+    new_coins = max(0, current_coins + data.amount)
+    if not _db_update_user(user_id, coins=new_coins):
         raise HTTPException(status_code=500, detail="Не удалось обновить баланс")
     return {"success": True, "new_balance": new_coins}
 
@@ -977,11 +1308,15 @@ async def update_keys(data: UpdateKeys):
     if not user: raise HTTPException(status_code=401, detail="Invalid auth data")
     user_id = user["id"]
     check_ban(user_id)
+    if not is_admin_id(int(user_id), ADMIN_IDS):
+        raise HTTPException(status_code=403, detail="Операция недоступна")
 
     res = supabase.table("users").select("keys").eq("user_id", user_id).execute()
+    if not res.data: raise HTTPException(status_code=404, detail="User not found")
     current_keys = int(res.data[0].get("keys", 0) or 0)
     new_keys = max(0, current_keys + data.amount)
-    supabase.table("users").update({"keys": new_keys}).eq("user_id", user_id).execute()
+    if not _db_update_user(user_id, keys=new_keys):
+        raise HTTPException(status_code=500, detail="Не удалось обновить ключи")
     return {"success": True, "new_keys": new_keys}
 
 
