@@ -114,11 +114,11 @@ main { padding: 0 16px; }
 .stat-icon { font-size: 20px; margin-bottom: 5px; }
 .stat-value { font-size: 18px; font-weight: 900; }
 .stat-label { font-size: 11px; color: var(--text-muted); margin-top: 5px; }
-.inventory-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
-.inv-item { min-width: 0; display: flex; flex-direction: column; justify-content: center; align-items: center; background: #252525; padding: 10px; border-radius: 12px; text-align: center; border: 1px solid #333; }
-.inv-item-image { display: block; width: 100%; height: 68px; object-fit: contain; }
-.inv-item span { font-size: 12px; color: var(--text-muted); display: block; margin-top: 5px; font-weight: 700; }
-.inv-empty { grid-column: 1 / -1; padding: 18px; color: var(--text-muted); background: #252525; border: 1px solid #333; border-radius: 12px; }
+.inventory-grid { display: flex; flex-wrap: wrap; gap: 10px; }
+.inv-item { flex: 1 1 72px; min-width: 0; background: #252525; padding: 15px 10px; border-radius: 10px; text-align: center; border: 1px solid #333; }
+.inv-emoji { font-size: 24px; line-height: 1.2; }
+.inv-item span { font-size: 10px; color: var(--text-muted); display: block; margin-top: 5px; }
+.inv-empty { flex: 1 1 100%; grid-column: 1 / -1; padding: 18px; color: var(--text-muted); background: #252525; border: 1px solid #333; border-radius: 12px; }
 
 /* ================= НАВИГАЦИЯ ================= */
 .bottom-nav { position: fixed; bottom: 0; left: 0; width: 100%; background: rgba(28, 28, 28, 0.95); backdrop-filter: blur(10px); display: flex; justify-content: space-around; padding: 12px 0 20px 0; border-top: 1px solid #333; z-index: 100; }

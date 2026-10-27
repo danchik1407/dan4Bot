@@ -90,8 +90,8 @@ function updateUI() {
     } else {
         inv.innerHTML = ownedItems.map(([itemId, item]) => `
             <div class="inv-item">
-                <img class="inv-item-image" src="${item.inventoryImage}" alt="${item.name}">
-                <span>x${inventoryCounts[itemId]}</span>
+                <div class="inv-emoji">${item.emoji || '💊'}</div>
+                <span>${item.shortName || item.name} x${inventoryCounts[itemId]}</span>
             </div>
         `).join('');
     }
