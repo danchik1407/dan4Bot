@@ -570,6 +570,14 @@ class OpenChestRequest(BaseModel):
     chest_type: str = "normal"
 
 
+class UpgradeLogRequest(BaseModel): initData: str
+
+
+class UpgradeAck(BaseModel):
+    initData: str
+    log_id: Optional[int] = None
+
+
 class UpgradeAction(BaseModel):
     initData: str
     # Новый контракт: что ставим (item_from) и что хотим получить (item_to).
@@ -1172,6 +1180,14 @@ async def self_check(auth: UserAuth):
         "inventory_type": type(row.get("inventory")).__name__,
     }
     result["profile"] = _user_payload(row, result["is_admin"])
+    if result["is_admin"]:
+        # Готовность лога апгрейдов: по нему видно, применена ли миграция.
+        try:
+            supabase.table("upgrade_log").select("id").limit(1).execute()
+            result["upgrade_log_ready"] = True
+        except Exception as exc:  # noqa: BLE001
+            result["upgrade_log_ready"] = False
+            result["upgrade_log_error"] = f"{type(exc).__name__}: {exc}"[:200]
     return result
 
 
@@ -1348,14 +1364,125 @@ def _upgrade_read_user(user_id: int):
     return coins, row.get("inventory")
 
 
+def _pg_filter_safe(value) -> bool:
+    """PostgREST ломает запрос, если в значении есть , : ( ) или кавычки.
+
+    Инвентарь — это JSON-строка вида ["capsule","capsule"]: запятые и кавычки там
+    обычное дело. Раньше такой фильтр уходил как есть, PostgREST не мог его
+    разобрать, и апгрейд падал с 500. Поэтому сверяем инвентарь только когда
+    значение безопасно передать (чаще всего — один предмет)."""
+    if not isinstance(value, str):
+        return False
+    return not any(char in value for char in ',:()"')
+
+
 def _upgrade_write_user(user_id: int, raw_coins: int, raw_inventory, coins: int, inventory: list) -> bool:
-    """Оптимистичная запись: применяется, только если баланс/инвентарь не изменились."""
+    """Оптимистичная запись: применяется, только если баланс (и по возможности
+    инвентарь) не изменились с момента чтения. Ошибка сети/PostgREST — это
+    False, а не 500: выше стоит повторное чтение и ещё одна попытка."""
     update_values = {"coins": coins, "inventory": json.dumps(inventory, ensure_ascii=False)}
     query = supabase.table("users").update(update_values).eq("user_id", user_id).eq("coins", raw_coins)
-    if raw_inventory is not None:
+    if raw_inventory is not None and _pg_filter_safe(raw_inventory):
         query = query.eq("inventory", raw_inventory)
-    updated = query.select("user_id").execute()
+    try:
+        updated = query.select("user_id").execute()
+    except Exception:
+        logger.warning("Не удалось записать результат апгрейда", exc_info=True)
+        return False
     return bool(updated.data)
+
+
+# ==================== ЛОГ АПГРЕЙДОВ ====================
+# Каждый розыгрыш пишется в upgrade_log: что ставили, какой был шанс, что выпало,
+# сколько стало коинов и капсул. Это и доказательство выплаты, и честная статистика
+# («Апгрейдов / Успешных / Лучший»), и восстановление результата, если игрок
+# закрыл аппку до конца анимации.
+UPGRADE_LOG_LIMIT = 1000
+
+
+def _upgrade_log_rows(user_id, limit: int = UPGRADE_LOG_LIMIT):
+    """None — таблицы нет (миграция не применена) или база недоступна."""
+    try:
+        res = (supabase.table("upgrade_log")
+               .select("*")
+               .eq("user_id", int(user_id))
+               .order("id", desc=True)
+               .limit(limit)
+               .execute())
+    except Exception:
+        logger.warning("upgrade_log недоступен — примените миграцию 20261029000000_upgrade_log.sql")
+        return None
+    return res.data or []
+
+
+def _upgrade_reward_value(row) -> int:
+    """Ценность приза в коинах — так «Лучший выигрыш» сравним для коинов и капсул."""
+    amount = _safe_int(row.get("win_amount"), 0)
+    win_item = (row.get("win_item") or "").strip()
+    if not win_item:
+        return 0
+    if win_item == "coin":
+        return amount
+    return UPGRADE_ITEM_PRICES.get(win_item, 0) * amount
+
+
+def _upgrade_stats_from_rows(rows) -> dict:
+    wins = sum(1 for row in rows if row.get("won"))
+    best = 0
+    for row in rows:
+        if row.get("won"):
+            best = max(best, _upgrade_reward_value(row))
+    return {"total": len(rows), "wins": wins, "best": best}
+
+
+def _upgrade_log_public(row) -> dict:
+    if not row:
+        return None
+    created = row.get("created_at")
+    return {
+        "id": _safe_int(row.get("id"), None),
+        "item_from": row.get("item_from"),
+        "amount_from": _safe_int(row.get("amount_from"), 0),
+        "item_to": row.get("item_to"),
+        "chance": round(float(row.get("chance") or 0), 2),
+        "roll": round(float(row.get("roll") or 0), 2),
+        "won": bool(row.get("won")),
+        "win_item": row.get("win_item"),
+        "win_amount": _safe_int(row.get("win_amount"), 0),
+        "coins_after": _safe_int(row.get("coins_after"), 0),
+        "created_at": created.isoformat() if hasattr(created, "isoformat") else created,
+        "seen": bool(row.get("seen")),
+    }
+
+
+def _upgrade_log_write(user_id, **fields):
+    """Пишем розыгрыш best-effort: без миграции игра обязана продолжать работать.
+    Возвращаем id записи (если база его отдала) или None."""
+    payload = {
+        "user_id": int(user_id),
+        "item_from": fields.get("item_from"),
+        "amount_from": _safe_int(fields.get("amount_from"), 0),
+        "item_to": fields.get("item_to"),
+        "chance": round(float(fields.get("chance") or 0), 2),
+        "roll": round(float(fields.get("roll") or 0), 2),
+        "won": bool(fields.get("won")),
+        "win_item": fields.get("win_item"),
+        "win_amount": _safe_int(fields.get("win_amount"), 0),
+        "coins_before": _safe_int(fields.get("coins_before"), 0),
+        "coins_after": _safe_int(fields.get("coins_after"), 0),
+        # Именно список, а не JSON-строка: колонка jsonb должна хранить массив.
+        "inventory_after": list(fields.get("inventory_after") or []),
+        "seen": False,
+    }
+    try:
+        res = supabase.table("upgrade_log").insert(payload).execute()
+        rows = getattr(res, "data", None) or []
+        if rows and isinstance(rows[0], dict):
+            return _safe_int(rows[0].get("id"), None)
+        return None
+    except Exception:
+        logger.warning("Не удалось записать апгрейд в upgrade_log (миграция не применена?)")
+        return None
 
 
 @app.post("/api/upgrade_action")
@@ -1410,23 +1537,39 @@ async def upgrade_action(data: UpgradeAction):
                 inventory.remove(source)
             new_coins = raw_coins
 
-        won = random.random() * 100.0 < real_chance
+        # Фиксируем сам бросок: его видно в логе, поэтому «не выдалось» проверяемо.
+        roll = round(random.random() * 100.0, 2)
+        won = roll < real_chance
         win_item = None
+        # payout — только для этого круга. Раньше здесь обнулялся сам win_amount:
+        # если запись не проходила из-за гонки, следующий круг мог выиграть с
+        # payout = 0 — «приз не выдался».
+        payout = 0
         if won:
             new_inventory = list(inventory)
             if target == "coin":
-                new_coins += win_amount
+                payout = win_amount
+                new_coins += payout
                 win_item = "coin"
             else:
                 new_inventory.append(target)
                 win_item = target
-            if new_coins > UPGRADE_MAX_REWARD * 10:
-                new_coins = min(new_coins, UPGRADE_MAX_REWARD * 10)
+                payout = 1
+            # Предохранитель по одной выплате, а не по всему балансу: раньше здесь
+            # стоял min(new_coins, UPGRADE_MAX_REWARD * 10), и игрок с балансом
+            # больше миллиона терял всё сверху — «приз не выдался».
+            new_coins = min(new_coins, raw_coins + UPGRADE_MAX_REWARD)
         else:
             new_inventory = list(inventory)
-            win_amount = 0
 
         if _upgrade_write_user(user_id, raw_coins, raw_inventory, new_coins, new_inventory):
+            # Лог пишем ПОСЛЕ успешной записи баланса: если она не прошла, розыгрыша не было.
+            log_id = _upgrade_log_write(
+                user_id, item_from=source, amount_from=amount, item_to=target,
+                chance=visual_chance, roll=roll, won=won, win_item=win_item,
+                win_amount=payout,
+                coins_before=raw_coins, coins_after=new_coins, inventory_after=new_inventory,
+            )
             return {
                 "success": won,
                 "won": won,
@@ -1434,14 +1577,70 @@ async def upgrade_action(data: UpgradeAction):
                 "amount_from": amount,
                 "item_to": target,
                 "chance": round(visual_chance, 2),
+                "roll": roll,
+                "log_id": log_id,
                 "win_item": win_item,
-                "win_amount": win_amount,
+                "win_amount": payout,
                 "new_balance": new_coins,
                 "inventory": new_inventory,
                 "new_inventory": new_inventory,
             }
 
     raise HTTPException(status_code=409, detail="Апгрейд уже обрабатывается. Попробуйте ещё раз.")
+
+
+@app.post("/api/upgrade_history")
+async def upgrade_history(data: UpgradeLogRequest):
+    """Честная статистика апгрейдов + последний непоказанный результат.
+
+    Нужен, чтобы: 1) счётчик «Апгрейдов / Успешных / Лучший» не сбрасывался,
+    2) игрок увидел приз, даже если закрыл аппку до конца анимации.
+    """
+    user = verify_telegram_data(data.initData)
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid auth data")
+    user_id = _safe_int(user.get("id"), None)
+    if user_id is None:
+        raise HTTPException(status_code=400, detail="Некорректный id пользователя")
+    check_ban(str(user_id))
+    if not is_admin_id(user_id, ADMIN_IDS):
+        raise HTTPException(status_code=403, detail="Апгрейд доступен только администраторам")
+
+    rows = _upgrade_log_rows(user_id)
+    if rows is None:
+        return {"available": False, "stats": None, "last_unseen": None,
+                "detail": "Таблица upgrade_log ещё не создана — примените миграцию"}
+    last_unseen = next((row for row in rows if not row.get("seen")), None)
+    return {
+        "available": True,
+        "stats": _upgrade_stats_from_rows(rows),
+        "last_unseen": _upgrade_log_public(last_unseen),
+        "history": [_upgrade_log_public(row) for row in rows[:10]],
+    }
+
+
+@app.post("/api/upgrade_ack")
+async def upgrade_ack(data: UpgradeAck):
+    """Помечаем результаты просмотренными, чтобы не показывать их повторно."""
+    user = verify_telegram_data(data.initData)
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid auth data")
+    user_id = _safe_int(user.get("id"), None)
+    if user_id is None:
+        raise HTTPException(status_code=400, detail="Некорректный id пользователя")
+    check_ban(str(user_id))
+    if not is_admin_id(user_id, ADMIN_IDS):
+        raise HTTPException(status_code=403, detail="Апгрейд доступен только администраторам")
+
+    try:
+        query = supabase.table("upgrade_log").update({"seen": True}).eq("user_id", user_id)
+        if data.log_id is not None:
+            query = query.lte("id", int(data.log_id))
+        query.execute()
+    except Exception:
+        logger.warning("Не удалось отметить апгрейд просмотренным (миграция не применена?)")
+        return {"success": False, "available": False}
+    return {"success": True, "available": True}
 
 
 @app.post("/api/update_balance")
