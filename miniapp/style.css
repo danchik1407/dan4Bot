@@ -36,7 +36,8 @@ main { padding: 0 16px; }
 .game-icon { font-size: 32px; margin-bottom: 12px; }
 .game-info h3 { font-size: 16px; font-weight: 800; margin-bottom: 4px; }
 .game-info p { font-size: 11px; color: var(--text-muted); }
-.game-card.locked { opacity: 0.45; filter: grayscale(1); }
+/* Недоступная карточка (Апгрейд вне ADMIN_IDS): серая и полупрозрачная. */
+.game-card.locked { opacity: 0.45; filter: grayscale(1); cursor: not-allowed; }
 .game-card.locked:active { transform: none; border-color: transparent; }
 .game-card-upgrade { border-color: rgba(255, 204, 0, 0.35); background: linear-gradient(135deg, #241f08, var(--card)); }
 .game-card-upgrade.locked { border-color: transparent; background: var(--card); }
@@ -358,6 +359,8 @@ main { padding: 0 16px; }
 .up-upgrade-btn { width: 100%; border: none; border-radius: 14px; padding: 15px; font-size: 15px; font-weight: 900; letter-spacing: 1.5px; color: #f4f9ff; background: linear-gradient(180deg, #3b82f6, #1d4ed8); box-shadow: 0 10px 26px rgba(37, 99, 235, 0.45), inset 0 1px 0 rgba(255, 255, 255, 0.25); cursor: pointer; transition: 0.15s; }
 .up-upgrade-btn:active { transform: translateY(1px); }
 .up-upgrade-btn:disabled { opacity: 0.55; cursor: not-allowed; box-shadow: none; }
+/* Пока на экране результат, кнопка неактивна, но итог должен читаться. */
+.up-upgrade-btn:disabled.win, .up-upgrade-btn:disabled.lose { opacity: 1; cursor: default; }
 .up-upgrade-btn.win { background: linear-gradient(180deg, #22c55e, #15803d); box-shadow: 0 10px 26px rgba(34, 197, 94, 0.4); }
 .up-upgrade-btn.lose { background: linear-gradient(180deg, #ef4444, #b91c1c); box-shadow: 0 10px 26px rgba(239, 68, 68, 0.35); }
 
