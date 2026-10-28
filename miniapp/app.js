@@ -61,8 +61,9 @@ const upgradeStats = { total: 0, wins: 0, best: 0 };
 // подпись рисуют ИМЕННО его: раньше любой updateUI() пересчитывал дугу под текущую
 // форму, и стрелка могла стоять «в залёте», где на самом деле был проигрыш.
 let upgradePlacedChance = null;
-// Состояние последнего результата: '' | 'spinning' | 'win' | 'lose'.
-// renderUpgrade() не должен перетирать кнопку и подпись, пока результат на экране.
+// Состояние последнего результата: '' | 'spinning' | 'win' | 'lose' | 'error'.
+// Нужно только для стилей текста под кнопкой: сама кнопка после раунда снова
+// активна и готова к следующей ставке.
 let upgradeResultState = '';
 // id результатов, которые уже показывали в этой сессии: если ack не дошёл,
 // один и тот же прошлый раунд не должен всплывать снова и снова.
@@ -740,6 +741,37 @@ function setUpgradeRollText(roll, chance, won) {
     el.className = 'up-roll' + (won ? ' win' : ' lose');
 }
 
+// Итог раунда крупной цифрой ПОД кругом. Элемент обычный (в потоке),
+// поэтому он не может наехать на круг и на «ШАНС УСПЕХА».
+function setUpgradeNet(html, state) {
+    const el = document.getElementById('up-net');
+    if (!el) return;
+    // Пустое состояние — просто пустая строка: высота зарезервирована в CSS,
+    // поэтому вёрстка не прыгает между раундами.
+    el.className = 'up-net' + (state ? ' ' + state : '');
+    el.innerHTML = html || '';
+}
+
+function clearUpgradeNet() {
+    setUpgradeNet('', '');
+}
+
+function setUpgradeNetFromResult(won, data) {
+    if (!data) { clearUpgradeNet(); return; }
+    const emoji = (id) => upgradeItemEmoji(id);
+    if (won) {
+        const win = data.win_item === 'coin'
+            ? `+${coinAmount(data.win_amount)}`
+            : `+${Number(data.win_amount) || 1} ${emoji(data.win_item)}`;
+        setUpgradeNet(win, 'win');
+    } else {
+        const lost = (data.item_from || upgradeFrom) === 'coin'
+            ? `−${coinAmount(data.amount_from)}`
+            : `−${Number(data.amount_from) || 0} ${emoji(data.item_from || upgradeFrom)}`;
+        setUpgradeNet(lost, 'lose');
+    }
+}
+
 function setUpgradeResult(text, state) {
     upgradeResultState = state || '';
     const el = document.getElementById('upgrade-result');
@@ -765,6 +797,7 @@ function clearUpgradeResult() {
     if (btn) btn.classList.remove('win', 'lose');
     setUpgradeResult('Выбери предмет и цель', '');
     setUpgradeRollText(null, null, false);
+    clearUpgradeNet();
 }
 
 function renderUpgrade() {
@@ -835,26 +868,22 @@ function renderUpgrade() {
     });
 
     // --- кнопка ---
-    // Пока показан результат прошлого раунда, надпись и цвет не сбрасываем:
-    // раньше updateUI() сразу после анимации возвращал «АПГРЕЙД», и игрок не
-    // понимал, выиграл он или нет.
+    // После результата кнопка снова синяя и активная: следующий раунд
+    // запускается тем же кликом, без выхода из игры. Блокируем её только
+    // пока крутится или пока ставка невозможна (нет денег/капсул).
     const btn = document.getElementById('upgrade-btn');
     if (btn) {
+        btn.classList.remove('win', 'lose');
         if (upgradeBusy) {
             btn.disabled = true;
             btn.innerText = 'КРУТИМ...';
-            btn.classList.remove('win', 'lose');
-        } else if (upgradeResultState === 'win' || upgradeResultState === 'lose') {
-            // После результата кнопка заблокирована: новый раунд начинается
-            // только со смены ставки/цели/предмета (это сбрасывает результат).
-            btn.disabled = true;
-            btn.classList.remove('win', 'lose');
-            btn.classList.add(upgradeResultState);
-            btn.innerText = upgradeResultState === 'win' ? 'ПОБЕДА' : 'ПРОИГРЫШ';
         } else {
+            // Результат прошлого раунда остаётся текстом ниже, а кнопка уже
+            // зовёт играть снова — без перезахода в игру.
+            const hasResult = upgradeResultState === 'win' || upgradeResultState === 'lose';
             btn.disabled = !upgradeCanStart();
-            btn.classList.remove('win', 'lose');
-            btn.innerText = 'АПГРЕЙД';
+            // Если денег/капсул на новую ставку не хватает — не обещаем «играть заново».
+            btn.innerText = (hasResult && !btn.disabled) ? 'ИГРАТЬ ЗАНОВО' : 'АПГРЕЙД';
         }
     }
     updateUpgradeStatsUI();
@@ -1170,9 +1199,6 @@ function landUpgradeArrow(won, chance, duration, token, onDone, rollValue) {
 
 async function startUpgrade() {
     if (upgradeBusy) return;
-    // Пока на экране результат прошлого раунда, новая ставка не отправляется:
-    // сначала игрок меняет ставку/цель (это сбрасывает результат).
-    if (upgradeResultState === 'win' || upgradeResultState === 'lose') return;
     if (!upgradeAccessGranted()) { updateUpgradeAccess(); return tg.showAlert('Скоро...'); }
 
     // Блокировка ставится до любых await: иначе двойной клик во время загрузки
@@ -1223,8 +1249,11 @@ async function startUpgrade() {
     upgradeStartedAt = Date.now();
     const token = ++upgradeSpinToken;   // всё, что прилетит от прошлых прогонов, игнорируем
 
+    // Новый раунд: круг из состояния «победа/проигрыш» снова в исходное,
+    // прошлый итог под кругом убираем.
     const circle = document.getElementById('up-circle');
     if (circle) { circle.classList.remove('win', 'lose'); circle.classList.add('spinning'); }
+    clearUpgradeNet();
     const btn = document.getElementById('upgrade-btn');
     if (btn) { btn.disabled = true; btn.classList.remove('win', 'lose'); btn.innerText = 'КРУТИМ...'; }
     setUpgradeResult('Крутим...', 'spinning');
@@ -1391,11 +1420,11 @@ function showMissedUpgradeResult(row) {
     if (chanceEl) chanceEl.innerText = chance.toFixed(2) + '%';
     const btn = document.getElementById('upgrade-btn');
     if (btn) {
-        btn.disabled = true;      // до новой ставки кнопка неактивна
+        btn.disabled = false;
         btn.classList.remove('win', 'lose');
-        btn.classList.add(won ? 'win' : 'lose');
-        btn.innerText = won ? 'ПОБЕДА' : 'ПРОИГРЫШ';
+        btn.innerText = 'АПГРЕЙД';
     }
+    setUpgradeNetFromResult(won, row);
     // Обязательная пометка: это НЕ результат текущей ставки, а прошлый раунд,
     // который игрок не увидел. Без неё легко решить, что приз «не засчитали».
     const prefix = '🕓 Прошлый раунд: ';
@@ -1448,12 +1477,15 @@ function finishUpgradeAnimation(data, chance) {
     if (chanceEl) chanceEl.innerText = (Number(chance) || 0).toFixed(2) + '%';
 
     if (btn) {
-        btn.disabled = true;      // до новой ставки кнопка неактивна
+        // Кнопка сразу готова к следующему раунду: синяя, с обычной надписью.
+        // Раньше она оставалась заблокированной «ПОБЕДА/ПРОИГРЫШ» навсегда —
+        // новую ставку можно было сделать только перезайдя в игру.
+        btn.disabled = false;
         btn.classList.remove('win', 'lose');
-        btn.classList.add(won ? 'win' : 'lose');
-        btn.innerText = won ? 'ПОБЕДА' : 'ПРОИГРЫШ';
+        btn.innerText = 'ИГРАТЬ ЗАНОВО';
     }
 
+    setUpgradeNetFromResult(won, data);
     setUpgradeRollText(data.roll, chance, won);
 
     // Диагностика честности: вердикт сервера обязан совпадать с броском.
