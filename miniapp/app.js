@@ -221,7 +221,8 @@ function applyProfile(data) {
     inventory = Array.isArray(data.inventory) ? data.inventory : [];
     lastChestTime = Number(data.last_chest) || 0;
     daysInGame = Math.max(0, Number(data.days_in_game) || 0);
-    isAdmin = Boolean(data.is_admin);
+    // Список ADMIN_IDS — главный источник; флаг сервера его подтверждает.
+    isAdmin = isAdminId(user && user.id) || Boolean(data.is_admin);
     userDataLoaded = true;
     balanceKnown = true;
     profileFailure = '';
@@ -844,7 +845,9 @@ function renderUpgrade() {
             btn.innerText = 'КРУТИМ...';
             btn.classList.remove('win', 'lose');
         } else if (upgradeResultState === 'win' || upgradeResultState === 'lose') {
-            btn.disabled = !upgradeCanStart();
+            // После результата кнопка заблокирована: новый раунд начинается
+            // только со смены ставки/цели/предмета (это сбрасывает результат).
+            btn.disabled = true;
             btn.classList.remove('win', 'lose');
             btn.classList.add(upgradeResultState);
             btn.innerText = upgradeResultState === 'win' ? 'ПОБЕДА' : 'ПРОИГРЫШ';
@@ -981,7 +984,9 @@ function selectUpgradeQuick(kind, value, element) {
 function setUpgradeAmount(value) {
     if (upgradeBusy) return;
     const limits = upgradeAmountLimits();
-    let next = value === 'max' ? limits.max : Number(value);
+    // MAX ставит потолок лимита (для коинов это ровно 5 000), а не весь баланс:
+    // у админа на счету бывает 980 200, одной ставкой их ставить нельзя.
+    let next = value === 'max' ? Math.min(UPGRADE_MAX_COINS, limits.max) : Number(value);
     if (!Number.isFinite(next)) return;
     next = Math.min(limits.max, Math.max(limits.min, Math.round(next)));
     upgradeFromAmount = next;
@@ -1008,13 +1013,25 @@ async function ensureUserLoaded() {
     return userDataLoaded;
 }
 
+// Доступ к Апгрейду решает СПИСОК ID (ADMIN_UI_IDS = ADMIN_IDS): у остальных
+// карточка серая и неактивная, сервер дополнительно отвечает 403.
+function upgradeAccessGranted() {
+    // Пока профиль не пришёл, isAdmin ещё false — не мигаем «Скоро...» админу.
+    if (!userDataLoaded && isAdminId(user && user.id)) return true;
+    return isAdminId(user && user.id) || Boolean(isAdmin);
+}
+
 function updateUpgradeAccess() {
+    const allowed = upgradeAccessGranted();
     const card = document.getElementById('game-card-upgrade');
-    if (card) card.classList.toggle('locked', !isAdmin);
+    if (card) {
+        card.classList.toggle('locked', !allowed);
+        card.setAttribute('aria-disabled', allowed ? 'false' : 'true');
+    }
     const lock = document.getElementById('upgrade-lock-icon');
-    if (lock) lock.style.display = isAdmin ? 'none' : 'inline';
+    if (lock) lock.style.display = allowed ? 'none' : 'inline';
     const sub = document.getElementById('upgrade-card-sub');
-    if (sub) sub.innerText = isAdmin ? 'Улучшай капсулы' : 'Скоро...';
+    if (sub) sub.innerText = allowed ? 'Улучшай капсулы' : 'Скоро...';
 }
 
 function updateUpgradeStatsUI() {
@@ -1026,9 +1043,15 @@ function updateUpgradeStatsUI() {
 }
 
 async function openUpgrade() {
+    // Проверяем ДО любых сетевых запросов: обычный игрок не должен даже на миг
+    // увидеть экран Апгрейда. Список админов — ADMIN_IDS в app.js.
+    if (!upgradeAccessGranted()) return tg.showAlert('Скоро...');
     const loaded = await ensureUserLoaded();
     if (!loaded) return tg.showAlert('Не удалось загрузить профиль. Проверьте соединение.');
-    if (!isAdmin) return tg.showAlert('Скоро...');
+    if (!upgradeAccessGranted()) {
+        updateUpgradeAccess();
+        return tg.showAlert('Скоро...');
+    }
     // Не сбрасываем незавершённый раунд: раньше вход в игру во время прокрутки
     // «съедал» результат (ставка списана, приз не показан).
     if (!upgradeBusy) {
@@ -1147,6 +1170,10 @@ function landUpgradeArrow(won, chance, duration, token, onDone, rollValue) {
 
 async function startUpgrade() {
     if (upgradeBusy) return;
+    // Пока на экране результат прошлого раунда, новая ставка не отправляется:
+    // сначала игрок меняет ставку/цель (это сбрасывает результат).
+    if (upgradeResultState === 'win' || upgradeResultState === 'lose') return;
+    if (!upgradeAccessGranted()) { updateUpgradeAccess(); return tg.showAlert('Скоро...'); }
 
     // Блокировка ставится до любых await: иначе двойной клик во время загрузки
     // профиля отправил бы две ставки.
@@ -1364,7 +1391,7 @@ function showMissedUpgradeResult(row) {
     if (chanceEl) chanceEl.innerText = chance.toFixed(2) + '%';
     const btn = document.getElementById('upgrade-btn');
     if (btn) {
-        btn.disabled = false;
+        btn.disabled = true;      // до новой ставки кнопка неактивна
         btn.classList.remove('win', 'lose');
         btn.classList.add(won ? 'win' : 'lose');
         btn.innerText = won ? 'ПОБЕДА' : 'ПРОИГРЫШ';
@@ -1379,8 +1406,8 @@ function showMissedUpgradeResult(row) {
         setUpgradeResult(text, 'win');
     } else {
         setUpgradeResult(row.item_from === 'coin'
-            ? `${prefix}❌ сгорело ${coinAmount(row.amount_from)}`
-            : `${prefix}❌ сгорело ${row.amount_from} шт.`, 'lose');
+            ? `${prefix}❌ ставка сгорела`
+            : `${prefix}❌ капсулы сгорели`, 'lose');
     }
     updateUI();
     ackUpgradeLog(row.id);
@@ -1421,7 +1448,7 @@ function finishUpgradeAnimation(data, chance) {
     if (chanceEl) chanceEl.innerText = (Number(chance) || 0).toFixed(2) + '%';
 
     if (btn) {
-        btn.disabled = false;
+        btn.disabled = true;      // до новой ставки кнопка неактивна
         btn.classList.remove('win', 'lose');
         btn.classList.add(won ? 'win' : 'lose');
         btn.innerText = won ? 'ПОБЕДА' : 'ПРОИГРЫШ';
@@ -1438,27 +1465,20 @@ function finishUpgradeAnimation(data, chance) {
     }
 
     if (won) {
-        const payout = Number(data.win_amount) || 0;
-        const stake = Number(data.amount_from) || 0;
-        // Показываем и выплату, и чистую прибавку: ставка уходит до броска,
-        // поэтому баланс растёт на payout - ставка. Без этого игрок решает,
-        // что «приз не засчитали».
-        const netProfit = data.win_item === 'coin' && data.item_from === 'coin' ? payout - stake : null;
+        // Ровно один аккуратный текст под кнопкой: «✅ Успех! Выплата X».
         const text = data.win_item === 'coin'
-            ? `✅ Успех! Выплата ${coinAmount(payout)}`
+            ? `✅ Успех! Выплата ${coinAmount(data.win_amount)}`
             : `✅ Успех! Получено: ${upgradeItemEmoji(data.win_item)} ${upgradeItemName(data.win_item)} x${data.win_amount}`;
-        setUpgradeResult(netProfit !== null && netProfit > 0 ? `${text} · чистыми +${coinAmount(netProfit)}` : text, 'win');
-        showWin(data.win_item === 'coin'
-            ? `+ ${coinAmount(netProfit !== null ? netProfit : payout)}`
-            : `✅ ${upgradeItemName(data.win_item)}`);
+        setUpgradeResult(text, 'win');
+        // Огромную всплывающую цифру здесь больше не показываем: она накрывала
+        // круг и шанс. Итог виден строкой «✅ Успех! Выплата X» под кнопкой.
         playSound('win');
         try { tg.HapticFeedback.notificationOccurred('success'); } catch (e) {}
     } else {
         const lostSource = data.item_from || upgradeFrom;
-        const stake = Number(data.amount_from) || 0;
         setUpgradeResult(lostSource === 'coin'
-            ? `❌ Не повезло. Сгорело ${coinAmount(stake)}`
-            : `❌ Не повезло. Сгорело ${stake} шт.`, 'lose');
+            ? '❌ Не повезло. Ставка сгорела'
+            : '❌ Не повезло. Капсулы сгорели', 'lose');
         playSound('lose');
         try { tg.HapticFeedback.notificationOccurred('error'); } catch (e) {}
     }
@@ -2194,6 +2214,9 @@ function startLoaderClock() {
 // ================= СТАРТ =================
 document.addEventListener('DOMContentLoaded', async () => {
     startLoaderClock();
+    // Карточку Апгрейда запираем/отпираем сразу по списку ADMIN_IDS, не дожидаясь
+    // профиля: иначе админ видел серую карточку до ответа сервера.
+    updateUpgradeAccess();
     // Тап по балансу — ручная синхронизация (полезно, если Render «просыпается»).
     ['user-balance', 'profile-coins'].forEach(id => {
         const el = document.getElementById(id);

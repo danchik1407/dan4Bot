@@ -1506,7 +1506,7 @@ async def upgrade_action(data: UpgradeAction):
         if amount < UPGRADE_MIN_BET:
             raise HTTPException(status_code=400, detail=f"Минимальная ставка {UPGRADE_MIN_BET} 🪙")
         if amount > UPGRADE_MAX_BET:
-            raise HTTPException(status_code=400, detail=f"Максимальная ставка {UPGRADE_MAX_BET} 🪙")
+            raise HTTPException(status_code=400, detail=f"Максимальная ставка {UPGRADE_MAX_BET}")
     else:
         if amount < 1:
             raise HTTPException(status_code=400, detail="Минимум 1 капсула")
