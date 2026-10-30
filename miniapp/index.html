@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
     <title>AURA GAME</title>
-    <link rel="stylesheet" href="style.css?v=aura-1">
+    <link rel="stylesheet" href="style.css?v=aura-2">
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
 </head>
 <body>
@@ -13,6 +13,19 @@
         <div class="app-loader-logo">AURA<span>GAME</span></div>
         <div class="app-loader-bar"><div class="app-loader-bar-fill"></div></div>
         <div class="app-loader-text">Загружаем игру…</div>
+    </div>
+
+    <!-- Техработы: показывается всем, кроме админов, сразу после заставки.
+         Пока экран активен, хедер, вкладки и навигация скрыты (body.maintenance). -->
+    <div id="maintenance-screen" class="maintenance-screen" role="dialog" aria-modal="true">
+        <div class="maint-glow"></div>
+        <div class="maint-card">
+            <div class="maint-icon">🛠️</div>
+            <div class="maint-title">Технические<br>работы</div>
+            <div class="maint-sub">Мы обновляем AURA GAME и скоро вернёмся.<br>Игры, магазин и сундуки временно недоступны.</div>
+            <div class="maint-note">Спасибо за терпение 💙</div>
+            <button class="maint-btn" onclick="location.reload()">Проверить снова</button>
+        </div>
     </div>
 
     <header class="top-bar" id="main-header">
@@ -382,6 +395,6 @@
         <div class="nav-item" onclick="switchTab('profile', this)"><span class="nav-icon">👤</span> Профиль</div>
     </nav>
 
-    <script src="app.js?v=aura-1" defer></script>
+    <script src="app.js?v=aura-2" defer></script>
 </body>
 </html>

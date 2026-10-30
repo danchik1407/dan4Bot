@@ -31,6 +31,41 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_IDS = [6338018270, 5184813347, 8890834384]
 MAX_BET = 10000
 
+# ==================== ТЕХРАБОТЫ ====================
+# True — приложение закрыто для всех, кроме ADMIN_IDS: обычный игрок после
+# заставки видит экран «Технические работы», а сервер отвечает ему 403 на любые
+# игровые действия (чтобы гейт нельзя было обойти запросом к API).
+# Отключить без правок кода: переменная окружения MAINTENANCE_MODE=0.
+def _maintenance_enabled() -> bool:
+    raw = (os.getenv("MAINTENANCE_MODE") or "").strip().lower()
+    if raw in ("0", "false", "no", "off"):
+        return False
+    if raw in ("1", "true", "yes", "on"):
+        return True
+    return True  # по умолчанию техработы включены
+
+
+MAINTENANCE_MODE = _maintenance_enabled()
+MAINTENANCE_MESSAGE = "🛠️ Технические работы: скоро вернёмся"
+
+
+def can_play(user_id) -> bool:
+    """Может ли этот пользователь играть прямо сейчас."""
+    if not MAINTENANCE_MODE:
+        return True
+    return is_admin_id(user_id, ADMIN_IDS)
+
+
+def require_play_access(user) -> int:
+    """Единая проверка входа в игру. Возвращает user_id, иначе — HTTPException."""
+    user_id = _safe_int(user.get("id"), None)
+    if user_id is None:
+        raise HTTPException(status_code=400, detail="Некорректный id пользователя")
+    if not can_play(user_id):
+        raise HTTPException(status_code=403, detail=MAINTENANCE_MESSAGE)
+    return user_id
+
+
 # ==================== СУНДУКИ ====================
 CHEST_COOLDOWN = 18000              # обычный сундук: 5 часов
 CHEST_MIN_COINS, CHEST_MAX_COINS = 10, 30      # обычный сундук: 10-30 коинов
@@ -177,6 +212,10 @@ def _user_payload(row, is_admin):
         "inventory": parse_inventory(row.get("inventory")),
         "last_chest": _safe_int(row.get("last_chest"), 0),
         "is_admin": is_admin,
+        # Техработы: приложение показывает экран-заглушку всем, у кого нет доступа.
+        "maintenance": MAINTENANCE_MODE,
+        "maintenance_message": MAINTENANCE_MESSAGE if MAINTENANCE_MODE else "",
+        "can_play": (not MAINTENANCE_MODE) or bool(is_admin),
         "created_at": created_text,
         "days_in_game": _days_in_game(created_at),
     }
@@ -681,6 +720,7 @@ async def get_hockey_roll_path(round_id: str):
 async def place_bet(data: PlaceBet):
     user = verify_telegram_data(data.initData)
     if not user: raise HTTPException(status_code=401, detail="Invalid auth data")
+    require_play_access(user)  # техработы: во время них играют только админы
     user_id = str(user["id"])
 
     check_ban(user_id)
@@ -898,6 +938,7 @@ def _crash_response(initData: str):
 async def crash_bet(data: CrashBet):
     user = verify_telegram_data(data.initData)
     if not user: raise HTTPException(status_code=401, detail="Invalid auth data")
+    require_play_access(user)  # техработы: во время них играют только админы
     user_id = str(user["id"])
 
     check_ban(user_id)
@@ -936,6 +977,7 @@ async def crash_bet(data: CrashBet):
 async def crash_cashout(data: CrashCashout):
     user = verify_telegram_data(data.initData)
     if not user: raise HTTPException(status_code=401, detail="Invalid auth data")
+    require_play_access(user)  # техработы: во время них играют только админы
     user_id = str(user["id"])
     check_ban(user_id)
 
@@ -998,6 +1040,7 @@ def _mines_game_active(user_id):
 async def mines_start(data: MinesStart):
     user = verify_telegram_data(data.initData)
     if not user: raise HTTPException(status_code=401, detail="Invalid auth data")
+    require_play_access(user)  # техработы: во время них играют только админы
     user_id = str(user["id"])
     check_ban(user_id)
 
@@ -1042,6 +1085,7 @@ async def mines_start(data: MinesStart):
 async def mines_open(data: MinesOpen):
     user = verify_telegram_data(data.initData)
     if not user: raise HTTPException(status_code=401, detail="Invalid auth data")
+    require_play_access(user)  # техработы: во время них играют только админы
     user_id = str(user["id"])
     check_ban(user_id)
 
@@ -1089,6 +1133,7 @@ async def mines_open(data: MinesOpen):
 async def mines_cashout(data: MinesCashout):
     user = verify_telegram_data(data.initData)
     if not user: raise HTTPException(status_code=401, detail="Invalid auth data")
+    require_play_access(user)  # техработы: во время них играют только админы
     user_id = str(user["id"])
     check_ban(user_id)
 
@@ -1178,6 +1223,7 @@ async def self_check(auth: UserAuth):
         "bot_token_set": bool(BOT_TOKEN),
         "supabase_host": _supabase_host(),
         "is_admin": is_admin_id(user_id, ADMIN_IDS) if user_id is not None else False,
+        "maintenance": MAINTENANCE_MODE,
         "rows_found": 0, "row": None, "created_at_present": None, "error": None,
     }
     if user_id is None:
@@ -1286,6 +1332,7 @@ async def open_chest(auth: OpenChestRequest):
     """
     user = verify_telegram_data(auth.initData)
     if not user: raise HTTPException(status_code=401, detail="Invalid auth data")
+    require_play_access(user)  # техработы: во время них играют только админы
     user_id = str(user["id"])
     check_ban(user_id)
 
@@ -1370,6 +1417,7 @@ async def claim_chest(auth: "ClaimChestRequest"):
     """Начисляет награду сундука. Идемпотентно: повторный запрос не платит дважды."""
     user = verify_telegram_data(auth.initData)
     if not user: raise HTTPException(status_code=401, detail="Invalid auth data")
+    require_play_access(user)  # техработы: во время них играют только админы
     user_id = int(user["id"])
     check_ban(str(user_id))
 
@@ -1451,6 +1499,7 @@ async def get_shop_items(data: ShopCatalogRequest):
 async def buy_item(data: BuyItem):
     user = verify_telegram_data(data.initData)
     if not user: raise HTTPException(status_code=401, detail="Invalid auth data")
+    require_play_access(user)  # техработы: во время них играют только админы
     user_id = int(user["id"])
     check_ban(str(user_id))
     if data.item_id not in SHOP_ITEMS:
@@ -1838,6 +1887,7 @@ async def update_balance(data: UpdateBalance):
     коинов — теперь все награды начисляет сервер, а прямой вызов закрыт."""
     user = verify_telegram_data(data.initData)
     if not user: raise HTTPException(status_code=401, detail="Invalid auth data")
+    require_play_access(user)  # техработы: во время них играют только админы
     user_id = user["id"]
     check_ban(user_id)
     if not is_admin_id(int(user_id), ADMIN_IDS):
@@ -1856,6 +1906,7 @@ async def update_balance(data: UpdateBalance):
 async def update_keys(data: UpdateKeys):
     user = verify_telegram_data(data.initData)
     if not user: raise HTTPException(status_code=401, detail="Invalid auth data")
+    require_play_access(user)  # техработы: во время них играют только админы
     user_id = user["id"]
     check_ban(user_id)
     if not is_admin_id(int(user_id), ADMIN_IDS):

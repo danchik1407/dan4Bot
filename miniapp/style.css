@@ -487,6 +487,39 @@ main { padding: 0 16px; }
     animation: loaderBar 1.4s ease-in-out infinite;
 }
 .app-loader-text { font-size: 13px; color: #8b9bb4; letter-spacing: 0.5px; }
+
+/* ================= ТЕХРАБОТЫ ================= */
+/* Экран для всех, кроме админов: появляется сразу после заставки. */
+.maintenance-screen {
+    position: fixed; inset: 0; z-index: 9000;
+    display: none; flex-direction: column; align-items: center; justify-content: center;
+    padding: 24px; text-align: center; overflow: hidden;
+    background: radial-gradient(circle at 50% 30%, #16233d 0%, #0a0f1a 58%, #05070c 100%);
+    animation: maintFade 0.35s ease;
+}
+.maintenance-screen.active { display: flex; }
+.maint-glow { position: absolute; top: -90px; left: 50%; transform: translateX(-50%); width: 320px; height: 260px; background: radial-gradient(circle, rgba(0, 122, 255, 0.5), rgba(168, 85, 247, 0.2) 45%, transparent 72%); filter: blur(10px); pointer-events: none; }
+.maint-card { position: relative; max-width: 340px; width: 100%; }
+.maint-icon { font-size: 52px; line-height: 1; margin-bottom: 14px; animation: maintPulse 2.4s ease-in-out infinite; filter: drop-shadow(0 0 14px rgba(0, 122, 255, 0.55)); }
+.maint-title { font-size: 27px; font-weight: 900; line-height: 1.15; letter-spacing: 0.5px; background: -webkit-linear-gradient(45deg, #3aa0ff, #a855f7); -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; }
+.maint-sub { margin-top: 12px; font-size: 13px; line-height: 1.55; color: #9aa8bd; }
+.maint-note { margin-top: 10px; font-size: 12px; color: #6d7a8d; }
+.maint-btn { margin-top: 22px; padding: 13px 26px; border: 1px solid rgba(0, 122, 255, 0.5); border-radius: 14px; background: rgba(0, 122, 255, 0.16); color: #dce9ff; font-size: 15px; font-weight: 800; cursor: pointer; transition: transform 0.15s, box-shadow 0.2s; }
+.maint-btn:active { transform: scale(0.97); box-shadow: 0 0 18px rgba(0, 122, 255, 0.45); }
+
+/* Пока идут техработы, интерфейс игры не показываем даже под заставкой. */
+body.maintenance #main-header,
+body.maintenance #main-nav,
+body.maintenance #sync-banner,
+body.maintenance main,
+body.maintenance .chest-win-modal,
+body.maintenance .winner-modal,
+body.maintenance .win-popup { display: none !important; }
+body.maintenance { overflow: hidden; }
+
+@keyframes maintFade { from { opacity: 0; } to { opacity: 1; } }
+@keyframes maintPulse { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.07); } }
+@media (prefers-reduced-motion: reduce) { .maint-icon { animation: none; } }
 @keyframes loaderPulse {
     0%, 100% { transform: scale(1); opacity: 0.85; }
     50% { transform: scale(1.07); opacity: 1; }
