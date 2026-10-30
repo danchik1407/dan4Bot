@@ -26,6 +26,64 @@ const COIN_IMG_SRC = 'coin.png';
 const COIN_IMG = `<img class="coin-img" src="${COIN_IMG_SRC}" alt="монета">`;
 const ADMIN_UI_IDS = [6338018270, 5184813347, 8890834384];
 function isAdminId(id) { return Boolean(id) && ADMIN_UI_IDS.includes(Number(id)); }
+
+// ================= ТЕХРАБОТЫ =================
+// Играть могут только ADMIN_IDS. Остальные после приветственной заставки видят
+// экран «Технические работы»: ни игры, ни магазин, ни сундуки им не открываются.
+// Сервер при этом отвечает им 403 (см. MAINTENANCE_MODE в api.py) — обойти нельзя.
+let maintenanceActive = false;       // показывать ли экран
+let serverMaintenance = false;       // включены ли техработы на сервере
+let accessKnown = false;             // знаем ли мы, можно ли играть
+let canPlay = false;                 // итоговое решение
+let maintenanceMessage = '';         // текст с сервера (если он его прислал)
+
+function showMaintenance() {
+    if (maintenanceActive) return;
+    maintenanceActive = true;
+    canPlay = false;
+    // Останавливаем всё, что могло успеть стартовать, и прячем игровой интерфейс.
+    try { stopHockeyPolling(); } catch (e) {}
+    try { stopCrashPolling(); } catch (e) {}
+    try { document.querySelectorAll('.game-screen').forEach(screen => screen.classList.remove('active')); } catch (e) {}
+    document.body.classList.add('maintenance');
+    const screen = document.getElementById('maintenance-screen');
+    if (screen) {
+        screen.classList.add('active');
+        // Текст с сервера (если пришёл) кладём в нижнюю строку, не ломая вёрстку.
+        const note = screen.querySelector('.maint-note');
+        if (note && maintenanceMessage) note.textContent = maintenanceMessage;
+    }
+    // Заставку НЕ обрываем: приветственная анимация должна доиграть (минимум 1 с),
+    // а экран техработ лежит под ней и просто проявляется, когда она гаснет.
+    try { hideLoader(); } catch (e) {}
+}
+
+function hideMaintenance() {
+    maintenanceActive = false;
+    document.body.classList.remove('maintenance');
+    const screen = document.getElementById('maintenance-screen');
+    if (screen) screen.classList.remove('active');
+}
+
+// Решение «пускать или нет»: админ по списку ID или по флагу сервера.
+function resolveAccess(data) {
+    const byId = isAdminId(user && user.id);
+    const byServer = Boolean(data && data.is_admin);
+    const isAdminUser = byId || byServer;
+    serverMaintenance = data && data.maintenance !== undefined ? Boolean(data.maintenance) : serverMaintenance;
+    if (data && typeof data.maintenance_message === 'string' && data.maintenance_message.trim()) {
+        maintenanceMessage = data.maintenance_message.trim();
+    }
+    if (data && typeof data.can_play === 'boolean') {
+        canPlay = data.can_play;
+    } else {
+        // Старый сервер без поля can_play: решаем по списку админов.
+        canPlay = !serverMaintenance || isAdminUser;
+    }
+    accessKnown = true;
+    return canPlay;
+}
+
 function coinAmount(value) { return `${formatCoins(value)} ${COIN_IMG}`; }
 // Ник приходит от пользователя: экранируем, чтобы он не ломал вёрстку и не тащил HTML.
 function escapeHtml(text) {
@@ -229,6 +287,14 @@ function applyProfile(data) {
     profileFailure = '';
     profileRetryCount = 0;
     setSyncBanner('');
+    // Техработы: как только узнали, что игрок не админ — показываем экран и
+    // дальше интерфейс не трогаем (иначе он мигнёт под заглушкой).
+    if (!resolveAccess(data)) {
+        updateUpgradeAccess();
+        showMaintenance();
+        return;
+    }
+    hideMaintenance();
     updateUpgradeAccess();
     updateUI();
     try { checkChestCooldown(); } catch (e) { console.error(e); }
@@ -339,6 +405,8 @@ function switchTab(tabId, element) {
 }
 
 function openGame(game) {
+    // Техработы: игры не открываются, даже если экран кто-то «дожал» вручную.
+    if (!canPlay) { showMaintenance(); return; }
     document.querySelectorAll('.winner-modal, .chest-win-modal').forEach(m => m.classList.remove('active'));
     document.getElementById('main-header').style.display = 'none';
     document.getElementById('main-nav').style.display = 'none';
@@ -2349,6 +2417,14 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
     try { await Promise.all([loadUserData(), loadShopItems()]); } catch(e) {}
     hideLoader();
+    // ---- Техработы ----
+    // Решение принимаем ПОСЛЕ заставки: профиль уже пришёл, поэтому экран не мигает.
+    // Если профиль не загрузился (нет сети / Render спит), доступа не даём —
+    // безопаснее показать заглушку, чем пустить непроверенного игрока.
+    if (!accessKnown || !canPlay) {
+        showMaintenance();
+        return;
+    }
     // Апгрейд: синхронизация поля ввода, ползунка и быстрых кнопок.
     const upgradeAmountInput = document.getElementById('upgrade-amount');
     if (upgradeAmountInput) {
