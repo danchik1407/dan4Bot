@@ -26,21 +26,52 @@ main { padding: 0 16px; }
 .tab.active { display: block; }
 @keyframes fadeIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
 
-.banner { background: linear-gradient(135deg, #1c1c1c, #0f0f0f); border: 1px solid #333; border-radius: 20px; padding: 30px 20px; margin-bottom: 20px; text-align: center; }
-.banner-title { font-size: 28px; font-weight: 900; letter-spacing: 2px; background: -webkit-linear-gradient(45deg, #007aff, #a855f7); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
-.banner-sub { color: var(--text-muted); font-size: 13px; margin-top: 5px; }
+/* ================= ГЛАВНЫЙ ЭКРАН ================= */
+/* Карточка-логотип вместо баннера с лозунгом. */
+.hero-card { position: relative; overflow: hidden; background: linear-gradient(135deg, #141c2b, #0b0f17 60%, #140f1f); border: 1px solid #26303f; border-radius: 22px; padding: 26px 20px 22px; margin-bottom: 16px; text-align: center; }
+.hero-halo { position: absolute; top: -70px; left: 50%; transform: translateX(-50%); width: 260px; height: 200px; background: radial-gradient(circle, rgba(0, 122, 255, 0.55), rgba(168, 85, 247, 0.18) 45%, transparent 70%); filter: blur(6px); pointer-events: none; }
+.hero-emblem { position: relative; font-size: 26px; line-height: 1; margin-bottom: 6px; filter: drop-shadow(0 0 10px rgba(58, 160, 255, 0.65)); }
+.hero-logo { position: relative; font-size: 32px; font-weight: 900; letter-spacing: 3px; line-height: 1.05; background: -webkit-linear-gradient(45deg, #3aa0ff, #a855f7 70%, #ff6fd8); -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; text-shadow: 0 0 24px rgba(58, 160, 255, 0.25); }
+.hero-logo span { display: block; font-size: 22px; letter-spacing: 8px; margin-top: 2px; background: -webkit-linear-gradient(45deg, #3aa0ff, #a855f7 70%, #ff6fd8); -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; }
+.hero-tag { position: relative; margin-top: 10px; font-size: 11px; letter-spacing: 0.6px; text-transform: uppercase; color: #7b8a9e; }
 
-.games-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
-.game-card { background: var(--card); border-radius: 18px; padding: 16px; display: flex; flex-direction: column; cursor: pointer; transition: 0.2s; border: 1px solid transparent; }
-.game-card:active { transform: scale(0.96); border-color: #444; }
-.game-icon { font-size: 32px; margin-bottom: 12px; }
-.game-info h3 { font-size: 16px; font-weight: 800; margin-bottom: 4px; }
-.game-info p { font-size: 11px; color: var(--text-muted); }
-/* Недоступная карточка (Апгрейд вне ADMIN_IDS): серая и полупрозрачная. */
-.game-card.locked { opacity: 0.45; filter: grayscale(1); cursor: not-allowed; }
-.game-card.locked:active { transform: none; border-color: transparent; }
-.game-card-upgrade { border-color: rgba(255, 204, 0, 0.35); background: linear-gradient(135deg, #241f08, var(--card)); }
-.game-card-upgrade.locked { border-color: transparent; background: var(--card); }
+/* Игры: длинные горизонтальные полосы на всю ширину, картинка слева. */
+.games-list { display: flex; flex-direction: column; gap: 10px; }
+.game-row { position: relative; display: flex; align-items: center; gap: 13px; width: 100%; padding: 11px 14px; border-radius: 18px; background: linear-gradient(120deg, #161a21, #11141a); border: 1px solid #23282f; cursor: pointer; transition: transform 0.15s, box-shadow 0.2s, border-color 0.2s; -webkit-tap-highlight-color: transparent; }
+.game-row:active { transform: scale(0.985); border-color: rgba(0, 122, 255, 0.65); box-shadow: 0 0 0 1px rgba(0, 122, 255, 0.35), 0 0 22px rgba(0, 122, 255, 0.28); }
+.game-row + .game-row { margin-top: 0; }
+.game-thumb { flex: 0 0 54px; width: 54px; height: 54px; border-radius: 14px; background: radial-gradient(circle at 30% 20%, #1c2431, #0d1117); border: 1px solid #263042; display: flex; align-items: center; justify-content: center; position: relative; overflow: hidden; }
+.game-text { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; }
+.game-name { font-size: 16px; font-weight: 800; line-height: 1.2; }
+.game-desc { font-size: 11px; color: var(--text-muted); margin-top: 2px; }
+.game-chevron { flex: 0 0 auto; color: #4c5666; font-size: 22px; font-weight: 700; line-height: 1; }
+
+/* Мины: девять плиток, одна красная. */
+.thumb-mines { display: grid; grid-template-columns: repeat(3, 1fr); gap: 3px; width: 36px; height: 36px; }
+.thumb-mines i { border-radius: 2px; background: #2fd15f; box-shadow: 0 0 6px rgba(47, 209, 95, 0.55); }
+.thumb-mines i.is-mine { background: #ff3b30; box-shadow: 0 0 8px rgba(255, 59, 48, 0.85); }
+
+/* Ракета с маленьким крестиком. */
+.thumb-rocket { font-size: 26px; line-height: 1; filter: drop-shadow(0 0 6px rgba(0, 122, 255, 0.5)); }
+.thumb-x { position: absolute; right: 6px; top: 4px; font-size: 13px; font-weight: 900; color: #ff3b30; text-shadow: 0 0 6px rgba(255, 59, 48, 0.9); }
+
+/* Арена: поле с четырьмя углами и шариком в центре. */
+.thumb-arena { position: relative; width: 38px; height: 38px; border-radius: 8px; background: #0b1119; border: 1px solid #22405c; }
+.thumb-arena i { position: absolute; width: 9px; height: 9px; border-radius: 2px; background: #2aa9ff; opacity: 0.85; }
+.thumb-arena i:nth-child(1) { top: 3px; left: 3px; }
+.thumb-arena i:nth-child(2) { top: 3px; right: 3px; }
+.thumb-arena i:nth-child(3) { bottom: 3px; left: 3px; }
+.thumb-arena i:nth-child(4) { bottom: 3px; right: 3px; }
+.thumb-arena b { position: absolute; left: 50%; top: 50%; width: 12px; height: 12px; margin: -6px 0 0 -6px; border-radius: 50%; background: radial-gradient(circle at 35% 30%, #ffffff, #ffcc00 55%, #b8860b); box-shadow: 0 0 8px rgba(255, 204, 0, 0.7); }
+
+/* Апгрейд: молоток и стрелка вверх. */
+.thumb-hammer { font-size: 24px; line-height: 1; filter: drop-shadow(0 0 5px rgba(255, 204, 0, 0.45)); }
+.thumb-arrow { position: absolute; right: 5px; bottom: 2px; font-size: 16px; font-weight: 900; color: #34c759; text-shadow: 0 0 6px rgba(52, 199, 89, 0.85); }
+
+.game-row.locked { opacity: 0.45; filter: grayscale(1); cursor: not-allowed; }
+.game-row.locked:active { transform: none; border-color: #23282f; box-shadow: none; }
+.game-row-upgrade { border-color: rgba(255, 204, 0, 0.3); background: linear-gradient(120deg, #201a09, #11141a); }
+.game-row-upgrade.locked { border-color: #23282f; background: linear-gradient(120deg, #161a21, #11141a); }
 .up-lock { font-size: 11px; vertical-align: middle; }
 
 .page-header { text-align: center; margin-bottom: 24px; }
@@ -110,10 +141,16 @@ main { padding: 0 16px; }
 
 /* ================= СУНДУКИ ================= */
 .chest-container { display: flex; flex-direction: column; gap: 15px; }
-.chest-card { background: var(--card); padding: 20px; border-radius: 16px; text-align: center; border: 1px solid #333; }
-.chest-icon { font-size: 50px; margin-bottom: 10px; transition: 0.3s; }
+.chest-card { background: var(--card); padding: 16px; border-radius: 18px; text-align: center; border: 1px solid #333; }
+.chest-art { width: 100%; height: 150px; border-radius: 14px; overflow: hidden; margin-bottom: 12px; background: #0b0d12; }
+.chest-art img { width: 100%; height: 100%; object-fit: cover; display: block; }
 .chest-card h3 { font-size: 18px; font-weight: 800; margin-bottom: 5px; }
 .chest-card p { font-size: 12px; color: var(--text-muted); margin-bottom: 15px; }
+.chest-card .action-btn { margin-bottom: 0; }
+
+/* Белая вспышка на 1 секунду перед рулеткой. */
+.chest-flash { position: fixed; inset: 0; background: #ffffff; opacity: 0; pointer-events: none; z-index: 9999; transition: opacity 0.25s ease; }
+.chest-flash.active { opacity: 1; transition: none; }
 
 .roulette-container { width: 100%; max-width: 350px; margin: 0 auto 20px auto; position: relative; background: var(--card); border: 2px solid var(--accent); border-radius: 15px; padding: 10px 0; overflow: hidden; box-shadow: 0 0 15px rgba(0, 122, 255, 0.5); }
 .roulette-pointer { text-align: center; color: var(--accent); font-size: 24px; position: absolute; top: -5px; left: 50%; transform: translateX(-50%); z-index: 10; text-shadow: 0 0 5px #000; }
@@ -132,6 +169,10 @@ main { padding: 0 16px; }
 .shop-item { background: var(--card); border-radius: 16px; padding: 20px; text-align: center; border: 1px solid #333; display: flex; flex-direction: column; }
 .shop-item:last-child:nth-child(odd) { grid-column: 1 / -1; width: calc(50% - 7.5px); justify-self: center; }
 .item-icon { font-size: 40px; margin-bottom: 10px; }
+.shop-art { width: 100%; aspect-ratio: 1 / 1; border-radius: 14px; overflow: hidden; margin-bottom: 10px; background: #0b0d12; }
+.shop-art img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.shop-stock { display: block; font-size: 10px; color: #9aa7b8; margin-bottom: 4px; }
+.shop-stock.low { color: #ff9500; }
 .shop-item h3 { font-size: 16px; margin-bottom: 5px; }
 .shop-item p { color: #ffcc00; font-weight: 800; margin-bottom: 6px; }
 .shop-limit { display: block; min-height: 14px; margin-bottom: 12px; color: var(--text-muted); font-size: 10px; }

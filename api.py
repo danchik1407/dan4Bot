@@ -10,7 +10,7 @@ from dotenv import load_dotenv
 from supabase import create_client, Client
 from typing import Optional
 from shop_catalog import SHOP_ITEMS, ShopPurchaseError, is_admin_id, parse_inventory, purchase_shop_item, \
-    serialize_shop_items
+    serialize_shop_items, shop_stock_snapshot
 
 load_dotenv()
 
@@ -37,6 +37,12 @@ CHEST_MIN_COINS, CHEST_MAX_COINS = 10, 30      # обычный сундук: 10
 CHEST_KEY_CHANCE = 0.20             # 20% на золотой ключ вместо коинов
 GOLD_MIN_COINS, GOLD_MAX_COINS = 60, 180       # золотой сундук (открывается ключом)
 GOLD_KEY_BACK_CHANCE = 0.10         # 10% вернуть ключ
+# Награда сундука сначала только разыгрывается: баланс меняет /api/claim_chest,
+# когда игрок нажал «Забрать» (иначе коины приходили до анимации рулетки).
+CHEST_CLAIMS_TABLE = "chest_claims"
+CHEST_CLAIMS_ERROR = (
+    "Сундуки временно недоступны: примените миграцию chest_claims в Supabase"
+)
 
 # ==================== МИНЫ ====================
 MINES_CELLS = 16
@@ -65,7 +71,7 @@ UPGRADE_MAX_CHANCE = 95.0       # 100% и выше не выдаём
 UPGRADE_MAX_REWARD = 100000     # предохранитель по выплате
 UPGRADE_COIN_MULTIPLIERS = [2, 4, 5, 8, 10]
 UPGRADE_QUICK_CHANCES = [35, 55, 75]
-UPGRADE_ITEM_PRICES = {"capsule": 500, "uniq_capsule": 1000}
+UPGRADE_ITEM_PRICES = {"capsule": 100, "uniq_capsule": 500}
 UPGRADE_SOURCES = ("coin", "capsule", "uniq_capsule")
 UPGRADE_TARGETS = ("coin", "capsule", "uniq_capsule")
 # Пока играют только админы — шанс честный. Когда откроем для всех,
@@ -431,6 +437,23 @@ async def start_hockey_settlement_worker():
     asyncio.create_task(settle_expired_rounds())
 
 
+@app.on_event("startup")
+async def init_capsule_stock():
+    """Первый запуск: строки глобального тиража капсул создаются сами."""
+    try:
+        stock = await asyncio.to_thread(shop_stock_snapshot, supabase)
+    except Exception:
+        logger.exception("Не удалось инициализировать сток капсул")
+        return
+    if stock is None:
+        logger.warning(
+            "Таблица capsule_stock недоступна — примените миграцию "
+            "20261030000000_capsule_stock_promo_types.sql в Supabase"
+        )
+        return
+    logger.info("Сток капсул: %s", stock)
+
+
 # === РАКЕТА (CRASH) ===
 CRASH_WAIT = 10
 CRASH_READY = 3
@@ -568,6 +591,11 @@ class MinesCashout(BaseModel): initData: str
 class OpenChestRequest(BaseModel):
     initData: str
     chest_type: str = "normal"
+
+
+class ClaimChestRequest(BaseModel):
+    initData: str
+    claim_id: Optional[int] = None
 
 
 class UpgradeLogRequest(BaseModel): initData: str
@@ -1200,9 +1228,62 @@ def _supabase_host():
         return ""
 
 
+def _now_iso() -> str:
+    return datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+
+def _insert_chest_claim(user_id, chest_type: str, reward_coins: int, reward_keys: int) -> dict:
+    """Запоминаем разыгранную награду. Начисление — только в /api/claim_chest."""
+    response = (
+        supabase.table(CHEST_CLAIMS_TABLE)
+        .insert({
+            "user_id": str(user_id),
+            "chest_type": chest_type,
+            "reward_coins": int(reward_coins),
+            "reward_keys": int(reward_keys),
+            # Явно: не полагаемся на DEFAULT в базе, чтобы фильтр .eq("claimed", False)
+            # всегда находил строку.
+            "claimed": False,
+        })
+        .execute()
+    )
+    row = (response.data or [None])[0]
+    if not row or row.get("id") is None:
+        raise RuntimeError("chest_claims insert вернул пустую строку")
+    return row
+
+
+def _fetch_unclaimed_claims(user_id):
+    response = (
+        supabase.table(CHEST_CLAIMS_TABLE)
+        .select("id, reward_coins, reward_keys")
+        .eq("user_id", str(user_id))
+        .eq("claimed", False)
+        .order("id")
+        .execute()
+    )
+    return response.data or []
+
+
+def _mark_claimed(claim_id, claimed: bool):
+    payload = {"claimed": claimed, "claimed_at": _now_iso() if claimed else None}
+    return (
+        supabase.table(CHEST_CLAIMS_TABLE)
+        .update(payload)
+        .eq("id", claim_id)
+        .eq("claimed", not claimed)
+        .select("id")
+        .execute()
+    )
+
+
 @app.post("/api/open_chest")
 async def open_chest(auth: OpenChestRequest):
-    """Сундук открывает и награждает сервер: обычный 10-30 коинов или 20% на ключ."""
+    """Сундук только разыгрывает награду: коины и ключи придут после «Забрать».
+
+    Так баланс не меняется до конца анимации рулетки (это был баг: начисление
+    происходило в момент нажатия на сундук).
+    """
     user = verify_telegram_data(auth.initData)
     if not user: raise HTTPException(status_code=401, detail="Invalid auth data")
     user_id = str(user["id"])
@@ -1220,6 +1301,36 @@ async def open_chest(auth: OpenChestRequest):
     keys = int(row.get("keys", 0) or 0)
     last_chest = int(row.get("last_chest", 0) or 0)
 
+    # Незабранные награды прошлых сундуков не теряем: зачисляем их перед новой игрой.
+    try:
+        pending = await asyncio.to_thread(_fetch_unclaimed_claims, user_id)
+    except Exception:
+        logger.exception("Не удалось прочитать незабранные сундуки user_id=%s", user_id)
+        raise HTTPException(status_code=503, detail=CHEST_CLAIMS_ERROR)
+    if pending:
+        # Сначала «занимаем» старые награды условным апдейтом, потом зачисляем:
+        # если зачисление не удалось — снимаем отметку, чтобы награда не пропала.
+        locked_claims = []
+        for item in pending:
+            try:
+                locked = await asyncio.to_thread(_mark_claimed, item.get("id"), True)
+                if locked.data:
+                    locked_claims.append(item)
+            except Exception:
+                logger.warning("Не удалось закрыть старый сундук id=%s", item.get("id"))
+        extra_coins = sum(int(item.get("reward_coins") or 0) for item in locked_claims)
+        extra_keys = sum(int(item.get("reward_keys") or 0) for item in locked_claims)
+        if locked_claims and not _db_update_user(user_id, coins=coins + extra_coins,
+                                                 keys=keys + extra_keys):
+            for item in locked_claims:
+                try:
+                    await asyncio.to_thread(_mark_claimed, item.get("id"), False)
+                except Exception:
+                    logger.warning("Не удалось откатить сундук id=%s", item.get("id"))
+            raise HTTPException(status_code=500, detail="Не удалось открыть сундук")
+        coins += extra_coins
+        keys += extra_keys
+
     if chest_type == "gold":
         if keys <= 0:
             raise HTTPException(status_code=400, detail="У вас нет ключей!")
@@ -1235,27 +1346,105 @@ async def open_chest(auth: OpenChestRequest):
         else:
             reward_coins, reward_keys = random.randint(CHEST_MIN_COINS, CHEST_MAX_COINS), 0
 
-    coins += reward_coins
-    keys += reward_keys
+    try:
+        claim = await asyncio.to_thread(_insert_chest_claim, user_id, chest_type, reward_coins, reward_keys)
+    except Exception:
+        logger.exception("Не удалось создать chest_claim user_id=%s", user_id)
+        raise HTTPException(status_code=503, detail=CHEST_CLAIMS_ERROR)
+
+    # Ключ тратится сразу (он оплачивает попытку), кулдаун тоже стартует сразу,
+    # а сами коины/ключи из награды — только по кнопке «Забрать».
     if not _db_update_user(user_id, coins=coins, keys=keys, last_chest=last_chest):
         raise HTTPException(status_code=500, detail="Не удалось открыть сундук")
 
     return {
         "success": True, "chest_type": chest_type,
         "reward_coins": reward_coins, "reward_keys": reward_keys,
+        "claim_id": claim.get("id"),
         "new_balance": coins, "new_keys": keys, "last_chest": last_chest,
     }
 
 
+@app.post("/api/claim_chest")
+async def claim_chest(auth: "ClaimChestRequest"):
+    """Начисляет награду сундука. Идемпотентно: повторный запрос не платит дважды."""
+    user = verify_telegram_data(auth.initData)
+    if not user: raise HTTPException(status_code=401, detail="Invalid auth data")
+    user_id = int(user["id"])
+    check_ban(str(user_id))
+
+    if auth.claim_id is None:
+        raise HTTPException(status_code=400, detail="Не указан сундук")
+
+    def _fetch():
+        response = (
+            supabase.table(CHEST_CLAIMS_TABLE)
+            .select("id, user_id, reward_coins, reward_keys, claimed")
+            .eq("id", auth.claim_id)
+            .eq("user_id", str(user_id))
+            .limit(1)
+            .execute()
+        )
+        return (response.data or [None])[0]
+
+    try:
+        claim = await asyncio.to_thread(_fetch)
+    except Exception:
+        logger.exception("Не удалось прочитать chest_claim id=%s", auth.claim_id)
+        raise HTTPException(status_code=503, detail=CHEST_CLAIMS_ERROR)
+    if not claim:
+        raise HTTPException(status_code=404, detail="Сундук не найден")
+
+    row = _db_user(str(user_id))
+    if row is None: raise HTTPException(status_code=404, detail="User not found")
+    coins = int(row.get("coins", 0) or 0)
+    keys = int(row.get("keys", 0) or 0)
+
+    if claim.get("claimed"):
+        return {"success": True, "already_claimed": True, "reward_coins": 0, "reward_keys": 0,
+                "new_balance": coins, "new_keys": keys}
+
+    # Сначала «занимаем» награду условным апдейтом, чтобы двойной тап не начислил дважды.
+    try:
+        locked = await asyncio.to_thread(_mark_claimed, claim.get("id"), True)
+    except Exception:
+        logger.exception("Не удалось отметить chest_claim id=%s", auth.claim_id)
+        raise HTTPException(status_code=503, detail=CHEST_CLAIMS_ERROR)
+    if not locked.data:
+        return {"success": True, "already_claimed": True, "reward_coins": 0, "reward_keys": 0,
+                "new_balance": coins, "new_keys": keys}
+
+    reward_coins = int(claim.get("reward_coins") or 0)
+    reward_keys = int(claim.get("reward_keys") or 0)
+    new_coins = coins + reward_coins
+    new_keys = keys + reward_keys
+    if not _db_update_user(str(user_id), coins=new_coins, keys=new_keys):
+        # Награду не записали — снимаем отметку, чтобы игрок мог нажать «Забрать» ещё раз.
+        try:
+            await asyncio.to_thread(_mark_claimed, claim.get("id"), False)
+        except Exception:
+            logger.warning("Не удалось откатить chest_claim id=%s", auth.claim_id)
+        raise HTTPException(status_code=500, detail="Не удалось забрать награду")
+
+    return {"success": True, "already_claimed": False, "reward_coins": reward_coins,
+            "reward_keys": reward_keys, "new_balance": new_coins, "new_keys": new_keys}
+
+
 @app.post("/api/shop_items")
 async def get_shop_items(data: ShopCatalogRequest):
-    """Shop catalog for the current user. Admin-only capsules are never included for regular users."""
+    """Shop catalog for the current user. Admin-only capsules are never included for regular users,
+    а распроданные по глобальному тиражу не показываются никому."""
     user = verify_telegram_data(data.initData)
     if not user: raise HTTPException(status_code=401, detail="Invalid auth data")
     user_id = int(user["id"])
     check_ban(str(user_id))
     is_admin = is_admin_id(user_id, ADMIN_IDS)
-    return {"is_admin": is_admin, "items": serialize_shop_items(is_admin)}
+    stock = await asyncio.to_thread(shop_stock_snapshot, supabase)
+    return {
+        "is_admin": is_admin,
+        "items": serialize_shop_items(is_admin, stock),
+        "stock_ready": stock is not None,
+    }
 
 
 @app.post("/api/buy_item")
@@ -1268,7 +1457,7 @@ async def buy_item(data: BuyItem):
         raise HTTPException(status_code=400, detail="Неизвестный предмет магазина")
 
     try:
-        return purchase_shop_item(supabase, user_id, data.item_id, ADMIN_IDS)
+        return await asyncio.to_thread(purchase_shop_item, supabase, user_id, data.item_id, ADMIN_IDS)
     except ShopPurchaseError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
 

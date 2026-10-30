@@ -7,13 +7,25 @@ import logging
 import json
 from types import SimpleNamespace
 from dotenv import load_dotenv
-from aiogram import Bot, Dispatcher, F
+from aiogram import Bot, Dispatcher, F, Router
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, FSInputFile, Dice, \
     WebAppInfo
 from aiogram.enums import ChatMemberStatus
+from aiogram.filters import StateFilter
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
 from aiohttp import web
 from supabase import create_client, Client
-from shop_catalog import ShopPurchaseError, parse_inventory, purchase_shop_item, visible_shop_items
+from shop_catalog import (
+    ShopPurchaseError,
+    available_shop_items,
+    inventory_item,
+    parse_inventory,
+    purchase_shop_item,
+    shop_stock_snapshot,
+    visible_inventory_items,
+    visible_shop_items,
+)
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -110,6 +122,15 @@ async def get_user_global(arg_username: str):
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
+# Отдельный роутер для пошагового создания промокода: его хендлеры должны
+# получать текстовые ответы админа ДО общего хендлера, который ловит все сообщения.
+promo_router = Router()
+
+
+class PromoCreate(StatesGroup):
+    amount = State()   # сколько коинов / капсул выдаёт промокод
+    uses = State()     # сколько всего активаций
+
 
 def is_admin(user_id: int) -> bool: return user_id in ADMIN_IDS
 
@@ -185,7 +206,8 @@ async def cmd_admin_help(message: Message):
         "• <code>забрать @user 100</code> — списать коины\n"
         "• <code>выдать ключ @user 5</code> — выдать ключи\n\n"
         "🎟️ <b>Промокоды:</b>\n"
-        "• <code>+промокод ЛЕТО 100 500</code> — создать (100 активаций, 500 коинов)\n"
+        "• <code>!создать промокод</code> — пошагово: тип награды, количество, активации\n"
+        "• <code>+промокод ЛЕТО 100 500</code> — быстро на коины (100 активаций, 500 коинов)\n"
         "• <code>-удалить промокод ЛЕТО</code> — удалить\n\n"
         "📢 <b>Созывы:</b>\n"
         "• <code>all Текст</code> — пингануть всех в чате\n"
@@ -429,6 +451,232 @@ async def cmd_transfer(message: Message):
 
 
 # ================= ПРОМОКОДЫ =================
+PROMO_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+
+
+def _new_promo_code() -> str:
+    return "AURA-" + "".join(random.choice(PROMO_CODE_ALPHABET) for _ in range(6))
+
+
+def _promo_code_from_message(message: Message):
+    """!создать промокод AURA100 — код можно задать сразу, иначе сгенерируем."""
+    parts = strip_prefix(message.text or "").split()
+    return parts[2] if len(parts) >= 3 else None
+
+
+def _promo_reward_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💰 Коины", callback_data="promo_new|coins")],
+        [InlineKeyboardButton(text="💊 Капсула", callback_data="promo_new|capsule_menu")],
+        [InlineKeyboardButton(text="✖️ Отмена", callback_data="promo_new|cancel")],
+    ])
+
+
+def _insert_promocode(payload: dict):
+    """Вставка промокода с откатом на старую схему, если миграция ещё не применена.
+
+    reward_type/item_id появились в 20261030000000_capsule_stock_promo_types.sql;
+    до неё PGRST204 не должен ломать создание обычных «коиновых» промокодов.
+    """
+    try:
+        return supabase.table("promocodes").insert(payload).execute()
+    except Exception as exc:
+        message = str(exc)
+        schema_error = "PGRST204" in message or "reward_type" in message or "item_id" in message
+        legacy_ok = payload.get("reward_type", "coins") == "coins" and not payload.get("item_id")
+        if schema_error and legacy_ok:
+            legacy = {"code": payload["code"], "uses": payload["uses"], "amount": payload["amount"]}
+            return supabase.table("promocodes").insert(legacy).execute()
+        raise
+
+
+def _promo_capsule_keyboard() -> InlineKeyboardMarkup:
+    rows = [
+        [InlineKeyboardButton(text=f"{item['emoji']} {item['name']}", callback_data=f"promo_item|{item_id}")]
+        for item_id, item in visible_shop_items(True).items()
+    ]
+    rows.append([InlineKeyboardButton(text="✖️ Отмена", callback_data="promo_new|cancel")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+@promo_router.message(F.text.func(lambda t: strip_prefix(t).lower().startswith("создать промокод")))
+async def promo_wizard_start(message: Message, state: FSMContext):
+    """!создать промокод [КОД] — только админы. Дальше бот спрашивает 3 шага."""
+    if not is_admin(message.from_user.id):
+        return
+    try:
+        await message.delete()
+    except Exception:
+        pass
+
+    code = _promo_code_from_message(message)
+    if code:
+        def _exists():
+            return supabase.table("promocodes").select("code").eq("code", code).execute()
+
+        try:
+            if (await asyncio.to_thread(_exists)).data:
+                return await message.answer(f"❌ Промокод <code>{code}</code> уже существует.",
+                                            parse_mode="HTML")
+        except Exception:
+            logger.exception("Не удалось проверить промокод %s", code)
+
+    await state.clear()
+    await state.update_data(code=code or _new_promo_code())
+    await message.answer(
+        "🧾 <b>Создание промокода</b>\n\n"
+        "Шаг 1/3 — выбери тип награды:",
+        parse_mode="HTML", reply_markup=_promo_reward_keyboard(),
+    )
+
+
+@promo_router.callback_query(F.data == "promo_new|cancel")
+async def promo_wizard_cancel(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
+    try:
+        await callback.message.edit_text("❌ Создание промокода отменено.")
+    except Exception:
+        pass
+    await callback.answer()
+
+
+@promo_router.callback_query(F.data.startswith("promo_new|"))
+async def promo_wizard_type(callback: CallbackQuery, state: FSMContext):
+    if not is_admin(callback.from_user.id):
+        return await callback.answer("Только для админов", show_alert=True)
+    action = callback.data.split("|", 1)[1]
+    data = await state.get_data()
+    if not data.get("code"):
+        await state.clear()
+        return await callback.answer("Сессия истекла, начни заново: !создать промокод", show_alert=True)
+
+    if action == "coins":
+        await state.update_data(reward_type="coins", item_id=None)
+        await state.set_state(PromoCreate.amount)
+        await callback.message.edit_text(
+            f"🧾 Промокод <code>{data['code']}</code>\n\n"
+            "Шаг 2/3 — сколько <b>коинов</b> выдавать? Отправь число.",
+            parse_mode="HTML")
+    elif action == "capsule_menu":
+        await callback.message.edit_text(
+            f"🧾 Промокод <code>{data['code']}</code>\n\n"
+            "Шаг 2/3 — какая <b>капсула</b> в награде?",
+            parse_mode="HTML", reply_markup=_promo_capsule_keyboard())
+    return await callback.answer()
+
+
+@promo_router.callback_query(F.data.startswith("promo_item|"))
+async def promo_wizard_item(callback: CallbackQuery, state: FSMContext):
+    if not is_admin(callback.from_user.id):
+        return await callback.answer("Только для админов", show_alert=True)
+    item_id = callback.data.split("|", 1)[1]
+    item = inventory_item(item_id)
+    data = await state.get_data()
+    if item is None or item_id not in visible_shop_items(True):
+        return await callback.answer("Неизвестная капсула", show_alert=True)
+    if not data.get("code"):
+        await state.clear()
+        return await callback.answer("Сессия истекла, начни заново: !создать промокод", show_alert=True)
+
+    await state.update_data(reward_type="capsule", item_id=item_id)
+    await state.set_state(PromoCreate.amount)
+    await callback.message.edit_text(
+        f"🧾 Промокод <code>{data['code']}</code>\n\n"
+        f"Шаг 2/3 — сколько капсул «{item['emoji']} {item['name']}» выдавать? Отправь число.",
+        parse_mode="HTML")
+    return await callback.answer()
+
+
+@promo_router.message(StateFilter(PromoCreate.amount))
+async def promo_wizard_amount(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id):
+        await state.clear()
+        return
+    text = strip_prefix(message.text or "").strip()
+    try:
+        amount = int(text)
+    except (TypeError, ValueError):
+        return await message.answer("❌ Нужно целое число. Сколько выдавать?")
+    if amount <= 0:
+        return await message.answer("❌ Количество должно быть больше нуля.")
+
+    data = await state.get_data()
+    is_capsule = data.get("reward_type") == "capsule"
+    limit = 1000 if is_capsule else 1_000_000
+    if amount > limit:
+        return await message.answer(f"❌ Слишком много. Максимум — {limit}.")
+
+    await state.update_data(amount=amount)
+    await state.set_state(PromoCreate.uses)
+    what = f"капсул «{inventory_item(data.get('item_id'))['name']}»" if is_capsule else "коинов"
+    await message.answer(f"✅ Награда: <b>{amount}</b> {what}\n\n"
+                         "Шаг 3/3 — сколько всего активаций? Отправь число.",
+                         parse_mode="HTML")
+
+
+@promo_router.message(StateFilter(PromoCreate.uses))
+async def promo_wizard_uses(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id):
+        await state.clear()
+        return
+    text = strip_prefix(message.text or "").strip()
+    try:
+        uses = int(text)
+    except (TypeError, ValueError):
+        return await message.answer("❌ Нужно целое число. Сколько активаций?")
+    if uses <= 0:
+        return await message.answer("❌ Активаций должно быть больше нуля.")
+
+    data = await state.get_data()
+    code = data.get("code")
+    amount = int(data.get("amount") or 0)
+    reward_type = data.get("reward_type") or "coins"
+    item_id = data.get("item_id")
+    if not code or amount <= 0:
+        await state.clear()
+        return await message.answer("❌ Сессия истекла, начни заново: <code>!создать промокод</code>",
+                                    parse_mode="HTML")
+
+    payload = {"code": code, "uses": uses, "amount": amount, "reward_type": reward_type,
+               "item_id": item_id if reward_type == "capsule" else None}
+
+    def _add():
+        return _insert_promocode(payload)
+
+    try:
+        await asyncio.to_thread(_add)
+    except Exception as exc:
+        logger.exception("Не удалось создать промокод %s", code)
+        await state.clear()
+        hint = ""
+        if reward_type == "capsule":
+            hint = ("\n\n💡 Для капсульных промокодов примените миграцию "
+                    "<code>20261030000000_capsule_stock_promo_types.sql</code>.")
+        return await message.answer(
+            f"❌ Не удалось создать промокод: <code>{safe_text(exc)}</code>{hint}", parse_mode="HTML")
+
+    await state.clear()
+    if reward_type == "capsule":
+        item = inventory_item(item_id) or {"emoji": "💊", "name": "капсула"}
+        reward_text = f"{item['emoji']} <b>{item['name']}</b> × {amount}"
+    else:
+        reward_text = f"<b>{coin_amount(amount)}</b>"
+    await message.answer(
+        "✅ <b>Промокод создан!</b>\n\n"
+        f"🔑 Код: <code>{code}</code>\n"
+        f"🎁 Награда: {reward_text}\n"
+        f"🎟 Активаций: <b>{uses}</b>\n\n"
+        f"Активация игроком: <code>промо {code}</code>",
+        parse_mode="HTML")
+
+
+@promo_router.message(StateFilter(PromoCreate.amount, PromoCreate.uses),
+                      F.text.func(lambda t: strip_prefix(t).lower().startswith("отмена")))
+async def promo_wizard_cancel_text(message: Message, state: FSMContext):
+    await state.clear()
+    await message.answer("❌ Создание промокода отменено.")
+
+
 @dp.message(F.text.func(lambda t: strip_prefix(t).lower().startswith("+промокод")))
 async def cmd_admin_promocode(message: Message):
     if not is_admin(message.from_user.id): return
@@ -447,9 +695,9 @@ async def cmd_admin_promocode(message: Message):
 
     def _add():
         try:
-            supabase.table("promocodes").insert({"code": code, "uses": uses, "amount": amount}).execute()
+            _insert_promocode({"code": code, "uses": uses, "amount": amount, "reward_type": "coins"})
         except Exception as e:
-            print(e)
+            logger.warning("Не удалось создать промокод %s: %s", code, e)
 
     await asyncio.to_thread(_add)
     await message.answer(f"✅ Промокод <code>{code}</code> создан!\nАктиваций: {uses}\nНаграда: {amount} коинов",
@@ -487,7 +735,7 @@ async def cmd_promo(message: Message):
     res = await asyncio.to_thread(_fetch)
     if not res.data: return await message.answer("❌ Промокод не найден.")
     promo = res.data[0]
-    if promo["uses"] <= 0: return await message.answer("❌ Этот промокод уже закончился.")
+    if int(promo.get("uses") or 0) <= 0: return await message.answer("❌ Этот промокод уже закончился.")
     user_id = str(message.from_user.id)
 
     def _check_used():
@@ -495,14 +743,45 @@ async def cmd_promo(message: Message):
 
     used_res = await asyncio.to_thread(_check_used)
     if used_res.data: return await message.answer("❌ Вы уже активировали этот промокод.")
-    new_uses = promo["uses"] - 1
-    await asyncio.to_thread(lambda: supabase.table("promocodes").update({"uses": new_uses}).eq("code", code).execute())
+
+    reward_type = (promo.get("reward_type") or "coins").strip().lower()
+    item_id = (promo.get("item_id") or "").strip()
+    amount = int(promo.get("amount") or 0)
+    item = inventory_item(item_id) if reward_type == "capsule" else None
+    if amount <= 0 or (reward_type == "capsule" and item is None):
+        return await message.answer("❌ Промокод настроен неверно, напиши администратору.")
+
+    # Условное списание активации: два игрока не смогут активировать последнюю одновременно.
+    new_uses = int(promo["uses"]) - 1
+    try:
+        taken = await asyncio.to_thread(lambda: supabase.table("promocodes")
+                                        .update({"uses": new_uses})
+                                        .eq("code", code)
+                                        .eq("uses", int(promo["uses"]))
+                                        .select("code")
+                                        .execute())
+    except Exception:
+        logger.exception("Не удалось списать активацию промокода %s", code)
+        return await message.answer("❌ Не удалось активировать промокод, попробуй позже.")
+    if not taken.data:
+        return await message.answer("❌ Этот промокод уже закончился.")
+
     user = await get_user(message.from_user.id, message.from_user.username)
-    await update_user(message.from_user.id, coins=user["coins"] + promo["amount"])
+    if reward_type == "capsule":
+        inventory = parse_inventory(user.get("inventory"))
+        inventory.extend([item_id] * amount)
+        await update_user(message.from_user.id, inventory=json.dumps(inventory, ensure_ascii=False))
+        reward_text = f"{item['emoji']} <b>{item['name']}</b> × {amount}"
+        balance_text = f"\n💰 Баланс: <b>{user['coins']}</b> коинов"
+    else:
+        await update_user(message.from_user.id, coins=user["coins"] + amount)
+        reward_text = f"<b>{coin_amount(amount)}</b>"
+        balance_text = f"\n💰 Новый баланс: <b>{user['coins'] + amount}</b> коинов"
+
     await asyncio.to_thread(
         lambda: supabase.table("promocode_uses").insert({"code": code, "user_id": user_id}).execute())
     await message.answer(
-        f"🎉 <b>Промокод активирован!</b>\n\n🎁 Вы получили: <b>{promo['amount']}</b> коинов\n💰 Новый баланс: <b>{user['coins'] + promo['amount']}</b> коинов",
+        f"🎉 <b>Промокод активирован!</b>\n\n🎁 Вы получили: {reward_text}{balance_text}",
         parse_mode="HTML")
 
 
@@ -532,7 +811,7 @@ async def cmd_pocket(message: Message):
     text = f"💰 <b>Карман {name}</b>\n\n👛 Баланс: <b>{user['coins']}</b> коинов\n"
     if user.get("keys", 0) > 0: text += f"🔑 Ключи: <b>{user['keys']}</b>\n"
     inventory_lines = []
-    for item_id, item in visible_shop_items(is_admin(message.from_user.id)).items():
+    for item_id, item in visible_inventory_items(is_admin(message.from_user.id)).items():
         count = inv.count(item_id)
         if count:
             inventory_lines.append(f"{item['emoji']} {item['short_name']}: <b>{count} шт.</b>\n")
@@ -544,20 +823,37 @@ async def cmd_pocket(message: Message):
 
 
 # ================= ТОП =================
+async def get_global_top(limit: int = 10):
+    """Топ по балансу из базы, без админов и без привязки к текущему чату."""
+    def _fetch():
+        return (supabase.table("users")
+                .select("user_id, username, coins")
+                .order("coins", desc=True)
+                .limit(limit + len(ADMIN_IDS) + 10)
+                .execute().data)
+
+    rows = await asyncio.to_thread(_fetch)
+    players = [u for u in rows if int(u.get("user_id") or 0) not in ADMIN_IDS]
+    return players[:limit]
+
+
 @dp.message(F.text.func(lambda t: strip_prefix(t).lower().startswith("топ")))
 async def cmd_top(message: Message):
-    users = await get_users_from_chat(message.chat.id) if message.chat.type in ("group",
-                                                                                "supergroup") else await get_users_from_chat(
-        None)
-    users = [u for u in users if int(u["user_id"]) not in ADMIN_IDS]
-    users.sort(key=lambda x: x.get("coins", 0), reverse=True)
+    try:
+        users = await get_global_top(10)
+    except Exception:
+        logger.exception("Не удалось получить топ игроков")
+        return await message.answer("❌ Не удалось загрузить топ, попробуй позже.")
+    if not users:
+        return await message.answer("💰 <b>ТОП-10 ПО КОИНАМ</b>\n\nПока пусто.", parse_mode="HTML")
+
     msg = "💰 <b>ТОП-10 ПО КОИНАМ</b>\n━━━━━━━━━━━━━━━━━━━━\n\n"
     medals = ["🥇", "🥈", "🥉"]
-    for i, u in enumerate(users[:10]):
+    for i, u in enumerate(users):
         prefix = medals[i] if i < 3 else f"{i + 1}."
-        username = u.get("username", "Игрок")
+        username = str(u.get("username") or "Игрок")
         display_name = username if len(username) < 20 else username[:17] + "..."
-        msg += f"{prefix} {safe_text(display_name)} — <b>{coin_amount(u['coins'])}</b>\n"
+        msg += f"{prefix} {safe_text(display_name)} — <b>{coin_amount(u.get('coins') or 0)}</b>\n"
     await message.answer(msg, parse_mode="HTML")
 
 
@@ -580,10 +876,13 @@ async def cmd_open(message: Message):
 async def cmd_shop(message: Message):
     lines = ["🛍️ <b>Магазин AURA</b>", "", "Выбери капсулу — покупка появится в кармане:"]
     buttons = []
-    for item_id, item in visible_shop_items(is_admin(message.from_user.id)).items():
+    stock = await asyncio.to_thread(shop_stock_snapshot, supabase)
+    for item_id, item, left in available_shop_items(is_admin(message.from_user.id), stock):
         limit_text = f" · лимит {item['daily_limit']}/день" if item["daily_limit"] is not None else ""
+        stock_text = f" · осталось {left} из {item['total_limit']}" if left is not None else ""
         price_text = f"{item['price']:,}".replace(",", " ")
-        lines.append(f"{item['emoji']} <b>{item['name']}</b> — <b>{price_text}</b> коинов{limit_text}")
+        lines.append(f"{item['emoji']} <b>{item['name']}</b> — <b>{price_text}</b> коинов"
+                     f"{limit_text}{stock_text}")
         buttons.append(InlineKeyboardButton(
             text=f"{item['emoji']} {item['short_name']} · {price_text}",
             callback_data=f"shop_buy|{item_id}",
@@ -605,7 +904,7 @@ async def cmd_upgrade(message: Message):
         "🛠️ <b>Апгрейд</b>\n\n"
         "Кладёшь предмет слева, выбираешь цель справа — круг показывает шанс.\n"
         "Коины: от 50 до 5 000 · кэфы x2, x4, x5, x8, x10 или готовый шанс 35/55/75%\n"
-        "Капсулы: обычная 💊 (500 коинов) → уникальная ⚱️ (1 000 коинов)\n\n"
+        "Капсулы: обычная 💊 (100 коинов) → уникальная ⚱️ (500 коинов)\n\n"
         "Открывай мини-аппку 👇"
     )
     kb = InlineKeyboardMarkup(inline_keyboard=[[
@@ -893,12 +1192,22 @@ async def summon_all_members(chat_id: int, call_text: str, starter_id: int):
         active_summons.pop(chat_id, None)
 
 
-@dp.message()
+# Ловит всё, что не разобрали команды. Регистрируется ПОСЛЕДНИМ роутером,
+# иначе он «съедал» бы ответы админа в пошаговом создании промокода.
+misc_router = Router()
+
+
+@misc_router.message()
 async def handle_all_messages(message: Message):
     try:
         await process_random_coin_drop(message)
     except Exception as e:
         logger.error(f"Ошибка дропа: {e}")
+
+
+# Порядок важен: сначала промо-мастер (ждёт текстовые ответы админа), потом всё остальное.
+dp.include_router(promo_router)
+dp.include_router(misc_router)
 
 
 async def start_fake_website():

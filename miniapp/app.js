@@ -55,7 +55,7 @@ const UPGRADE_ARROW_MIN_LAND = 650;   // минимум времени на то
 const UPGRADE_MIN_COINS = 50, UPGRADE_MAX_COINS = 5000, UPGRADE_MAX_CAPSULES = 50;
 const UPGRADE_MAX_CHANCE = 95;
 const UPGRADE_MULTS = [2, 4, 5, 8, 10];
-const UPGRADE_FALLBACK_PRICES = { capsule: 500, uniq_capsule: 1000 };
+const UPGRADE_FALLBACK_PRICES = { capsule: 100, uniq_capsule: 500 };
 const upgradeStats = { total: 0, wins: 0, best: 0 };
 // Шанс, с которым реально играет текущий раунд. Пока он зафиксирован, круг и
 // подпись рисуют ИМЕННО его: раньше любой updateUI() пересчитывал дугу под текущую
@@ -428,12 +428,43 @@ async function loadGlobalTop() {
 }
 
 // ================= СУНДУКИ =================
-// Награду считает сервер (обычный сундук: 10-30 коинов или 20% на ключ; золотой — ключом),
-// аппка только крутит рулетку и показывает то, что реально пришло.
-let pendingChestReward = 0, pendingChestIsKey = false, pendingChestIsGold = false;
+// Сервер только РАЗЫГРЫВАЕТ награду (/api/open_chest), а начисляет её
+// /api/claim_chest после кнопки «Забрать». До этого баланс не меняется —
+// раньше коины приходили ещё до анимации рулетки, это был баг.
+let pendingChestClaimId = null, chestFlashTimer = null;
 
 function chestRouletteItemHtml(isKey, amount) {
     return isKey ? '🔑<span>Ключ</span>' : `${COIN_IMG}<span>${amount}</span>`;
+}
+
+// Белая вспышка ровно на секунду, затем крутим рулетку.
+function playChestFlash(durationMs = 1000) {
+    const flash = document.getElementById('chest-flash');
+    if (!flash) return Promise.resolve();
+    // Перезапуск анимации, если вспышку вызвали повторно.
+    flash.classList.remove('active');
+    void flash.offsetWidth;
+    flash.classList.add('active');
+    try { tg.HapticFeedback && tg.HapticFeedback.impactOccurred('medium'); } catch (e) {}
+    if (chestFlashTimer) clearTimeout(chestFlashTimer);
+    return new Promise(resolve => {
+        chestFlashTimer = setTimeout(() => {
+            flash.classList.remove('active');
+            chestFlashTimer = null;
+            resolve();
+        }, durationMs);
+    });
+}
+
+function hideChestRoulette() {
+    const roulette = document.getElementById('roulette-container');
+    if (roulette) roulette.style.display = 'none';
+    const buttons = document.getElementById('chest-buttons');
+    if (buttons) buttons.style.display = 'flex';
+    const modal = document.getElementById('chest-win-modal');
+    if (modal) modal.classList.remove('active');
+    pendingChestClaimId = null;
+    checkChestCooldown();
 }
 
 async function openChest(type) {
@@ -441,6 +472,10 @@ async function openChest(type) {
     const isGold = type === 'gold';
     if (isGold && keys <= 0) return tg.showAlert("У вас нет ключей!");
     isProcessing = true;
+
+    // 1) Вспышка и запрос к серверу идут одновременно: награда уже известна,
+    //    но баланс ещё НЕ тронут.
+    const flashPromise = playChestFlash(1000);
     let data = null;
     try {
         const response = await fetch(`${API_URL}/api/open_chest`, {
@@ -448,23 +483,30 @@ async function openChest(type) {
             body: JSON.stringify({ initData: tg.initData, chest_type: isGold ? 'gold' : 'normal' })
         });
         data = await response.json().catch(() => ({}));
-        if (!response.ok) { isProcessing = false; return tg.showAlert(data.detail || "Сундук перезаряжается!"); }
-    } catch (e) { isProcessing = false; return tg.showAlert("Ошибка соединения"); }
+        if (!response.ok) {
+            isProcessing = false;
+            document.getElementById('chest-flash').classList.remove('active');
+            return tg.showAlert(data.detail || "Сундук перезаряжается!");
+        }
+    } catch (e) {
+        isProcessing = false;
+        document.getElementById('chest-flash').classList.remove('active');
+        return tg.showAlert("Ошибка соединения");
+    }
 
-    // Награда уже начислена сервером — баланс просто синхронизируем.
-    balance = Number(data.new_balance) || 0;
-    balanceKnown = true;
+    // Ключ за попытку списан сразу, коины из награды — только после «Забрать».
     keys = Number(data.new_keys) || 0;
     if (data.last_chest) lastChestTime = Number(data.last_chest);
     const rewardCoins = Number(data.reward_coins) || 0;
     const rewardKeys = Number(data.reward_keys) || 0;
     const isKey = rewardKeys > 0;
-    pendingChestReward = rewardCoins; pendingChestIsKey = isKey; pendingChestIsGold = isGold;
+    pendingChestClaimId = data.claim_id != null ? Number(data.claim_id) : null;
     updateUI();
     isProcessing = false;
 
     document.getElementById('chest-buttons').style.display = 'none';
-    const roulette = document.getElementById('roulette-container'); roulette.style.display = 'block';
+    // Рулетку показываем только ПОСЛЕ вспышки — сначала секунда белого экрана.
+    const roulette = document.getElementById('roulette-container'); roulette.style.display = 'none';
     const track = document.getElementById('roulette-track');
     track.style.transform = 'translateX(0)'; track.innerHTML = ''; void track.offsetWidth;
 
@@ -482,6 +524,12 @@ async function openChest(type) {
         div.innerHTML = chestRouletteItemHtml(item.isKey, item.amount);
         track.appendChild(div);
     }
+
+    // Ждём окончания вспышки (её длительность фиксирована — 1 секунда), только
+    // потом показываем рулетку.
+    await flashPromise;
+    roulette.style.display = 'block';
+    void roulette.offsetWidth;
     await new Promise(r => setTimeout(r, 50));
     const firstItem = track.firstElementChild;
     const itemWidth = firstItem ? firstItem.offsetWidth : 81;
@@ -501,22 +549,46 @@ async function openChest(type) {
             document.getElementById('chest-win-text').innerHTML = isKey
                 ? 'ЗОЛОТОЙ КЛЮЧ!'
                 : `Вы получили ${coinAmount(rewardCoins)}`;
-            modal.classList.add('active'); playSound('win');
+            modal.classList.add('active');
+            playSound('win');
         }
     }
     requestAnimationFrame(step);
 }
 
 async function claimChestReward() {
-    // Награда уже начислена при открытии — кнопка только закрывает окно.
+    // Начисление награды — здесь, а не при открытии сундука.
     if (isProcessing) return;
+    const claimId = pendingChestClaimId;
+    if (claimId == null) { hideChestRoulette(); return; }
+
+    const btn = document.getElementById('chest-claim-btn');
     isProcessing = true;
-    document.getElementById('chest-win-modal').classList.remove('active');
-    document.getElementById('roulette-container').style.display = 'none';
-    document.getElementById('chest-buttons').style.display = 'flex';
-    checkChestCooldown();
-    pendingChestReward = 0; pendingChestIsKey = false; pendingChestIsGold = false;
-    isProcessing = false;
+    if (btn) { btn.disabled = true; btn.innerText = 'Забираем…'; }
+    try {
+        const res = await fetch(`${API_URL}/api/claim_chest`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ initData: tg.initData, claim_id: claimId })
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+            // Окно не закрываем: игрок нажмёт «Забрать» ещё раз.
+            tg.showAlert(data.detail || "Не удалось забрать награду");
+            return;
+        }
+        balance = Number(data.new_balance) || 0; balanceKnown = true;
+        keys = Number(data.new_keys) || 0;
+        updateUI();
+        playSound('win');
+    } catch (e) {
+        console.error("Ошибка начисления сундука", e);
+        tg.showAlert("Ошибка соединения");
+        return;
+    } finally {
+        isProcessing = false;
+        if (btn) { btn.disabled = false; btn.innerText = 'Забрать'; }
+    }
+    hideChestRoulette();
 }
 
 // ================= МАГАЗИН =================
@@ -538,7 +610,10 @@ async function loadShopItems() {
                 price: Number(item.price),
                 shopImage: item.shop_image,
                 inventoryImage: item.inventory_image,
-                dailyLimit: item.daily_limit
+                dailyLimit: item.daily_limit,
+                // Глобальный тираж: stock — сколько осталось, stockTotal — весь тираж.
+                stock: item.stock == null ? null : Number(item.stock),
+                stockTotal: item.total_limit == null ? null : Number(item.total_limit)
             };
         });
         shopItemsLoaded = true;
@@ -561,11 +636,21 @@ function renderShop() {
     grid.innerHTML = ids.map(itemId => {
         const item = SHOP_ITEMS[itemId];
         const limitText = item.dailyLimit != null ? `До ${item.dailyLimit} шт. в день` : '';
+        // «Осталось: X из Y» мелким шрифтом под капсулой; при нуле карточку не рисуем.
+        const hasStock = item.stock != null && item.stockTotal != null;
+        if (hasStock && item.stock <= 0) return '';
+        const stockText = hasStock
+            ? `<small class="shop-stock${item.stock <= Math.max(1, Math.round(item.stockTotal * 0.1)) ? ' low' : ''}">Осталось: ${item.stock} из ${item.stockTotal}</small>`
+            : '';
+        const art = item.shopImage
+            ? `<div class="shop-art"><img src="${item.shopImage}" alt="${item.name}" loading="lazy"></div>`
+            : `<div class="item-icon">${item.emoji || '💊'}</div>`;
         return `
             <article class="shop-item">
-                <div class="item-icon">${item.emoji || '💊'}</div>
+                ${art}
                 <h3>${item.name}</h3>
                 <p>${coinAmount(item.price)}</p>
+                ${stockText}
                 <small class="shop-limit">${limitText}</small>
                 <button class="buy-btn" onclick="buyItem('${itemId}')">Купить</button>
             </article>
@@ -596,6 +681,8 @@ async function buyItem(itemId) {
         updateUI();
         showWin("✅ Успешно куплено!");
         playSound('click');
+        // Тираж уменьшился — перечитываем каталог, чтобы «Осталось» не врало.
+        loadShopItems();
     } catch(e) {
         console.error("Ошибка покупки", e);
         tg.showAlert("Ошибка соединения");
