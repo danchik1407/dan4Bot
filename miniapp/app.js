@@ -107,7 +107,7 @@ let upgradeBusy = false, upgradeStartedAt = 0;
 // Белая стрелка: угол в градусах (0 = вверх), rAF-цикл и «поколение» прогона,
 // чтобы запоздавшие колбэки от прошлого спина не перетирали новый результат.
 let upgradeArrowAngle = 0, upgradeArrowRaf = null, upgradeSpinToken = 0;
-const UPGRADE_DURATION = 3000;
+const UPGRADE_DURATION = 3400;        // 3–4 секунды: быстрый спин + торможение
 const UPGRADE_ARROW_SPEED = 900;      // градусов в секунду в фазе ожидания ответа сервера
 const UPGRADE_ARROW_MIN_LAND = 650;   // минимум времени на торможение, мс
 const UPGRADE_MIN_COINS = 50, UPGRADE_MAX_COINS = 5000, UPGRADE_MAX_CAPSULES = 50;
@@ -119,6 +119,9 @@ const upgradeStats = { total: 0, wins: 0, best: 0 };
 // подпись рисуют ИМЕННО его: раньше любой updateUI() пересчитывал дугу под текущую
 // форму, и стрелка могла стоять «в залёте», где на самом деле был проигрыш.
 let upgradePlacedChance = null;
+// После раунда кнопка показывает «ИГРАТЬ ЗАНОВО»: первый клик сбрасывает круг,
+// второй — делает новую ставку. Без этого игрок не понимал, что делать дальше.
+let upgradeAwaitingRestart = false;
 // Состояние последнего результата: '' | 'spinning' | 'win' | 'lose' | 'error'.
 // Нужно только для стилей текста под кнопкой: сама кнопка после раунда снова
 // активна и готова к следующей ставке.
@@ -535,8 +538,17 @@ function hideChestRoulette() {
     checkChestCooldown();
 }
 
+// Сундуки во время техработ открывают только админы. Обычному игроку даже
+// запрос не отправляем: сервер всё равно ответил бы 403.
+const CHEST_MAINTENANCE_ALERT = 'Сундуки на тех. работах. Скоро!';
+
+function chestAccessGranted() {
+    return isAdminId(user && user.id) || Boolean(isAdmin);
+}
+
 async function openChest(type) {
     if (isProcessing) return;
+    if (!chestAccessGranted()) return tg.showAlert(CHEST_MAINTENANCE_ALERT);
     const isGold = type === 'gold';
     if (isGold && keys <= 0) return tg.showAlert("У вас нет ключей!");
     isProcessing = true;
@@ -553,7 +565,11 @@ async function openChest(type) {
         data = await response.json().catch(() => ({}));
         if (!response.ok) {
             isProcessing = false;
-            document.getElementById('chest-flash').classList.remove('active');
+            const flashEl = document.getElementById('chest-flash');
+            if (flashEl) flashEl.classList.remove('active');
+            // 403 — техработы; 503 — не применена миграция chest_claims. Пишем
+            // понятную причину, чтобы админ сразу видел, что чинить.
+            if (response.status === 403) return tg.showAlert(CHEST_MAINTENANCE_ALERT);
             return tg.showAlert(data.detail || "Сундук перезаряжается!");
         }
     } catch (e) {
@@ -627,6 +643,7 @@ async function openChest(type) {
 async function claimChestReward() {
     // Начисление награды — здесь, а не при открытии сундука.
     if (isProcessing) return;
+    if (!chestAccessGranted()) return tg.showAlert(CHEST_MAINTENANCE_ALERT);
     const claimId = pendingChestClaimId;
     if (claimId == null) { hideChestRoulette(); return; }
 
@@ -878,24 +895,6 @@ function upgradeRingChance() {
     return upgradePlacedChance === null ? upgradeChance() : upgradePlacedChance;
 }
 
-// «Выпало 63.20 из 50.00 — вне сектора»: итог можно проверить глазами,
-// никаких «вроде зашло, а не засчитало».
-function setUpgradeRollText(roll, chance, won) {
-    const el = document.getElementById('up-roll');
-    if (!el) return;
-    const rollNumber = Number(roll);
-    const chanceNumber = Number(chance);
-    if (roll === null || roll === undefined || !Number.isFinite(rollNumber)) {
-        el.textContent = 'Стрелка встанет на выпавшее число';
-        el.className = 'up-roll';
-        return;
-    }
-    const chanceText = Number.isFinite(chanceNumber) ? chanceNumber.toFixed(2) : '—';
-    el.innerHTML = `Выпало <b>${rollNumber.toFixed(2)}</b> из ${chanceText} — `
-        + (won ? 'в секторе успеха' : 'вне сектора');
-    el.className = 'up-roll' + (won ? ' win' : ' lose');
-}
-
 // Итог раунда крупной цифрой ПОД кругом. Элемент обычный (в потоке),
 // поэтому он не может наехать на круг и на «ШАНС УСПЕХА».
 function setUpgradeNet(html, state) {
@@ -939,6 +938,37 @@ function setUpgradeResult(text, state) {
     el.className = 'up-result' + (state ? ' ' + (state === 'error' ? 'lose' : state) : '');
 }
 
+// Возвращает круг и кнопку в исходное состояние: можно сразу ставить снова.
+function resetUpgradeRound() {
+    upgradeAwaitingRestart = false;
+    upgradeSpinToken++;          // отменяем любые недоигранные анимации стрелки
+    stopUpgradeArrow();
+    resetUpgradeArrow();
+    releaseUpgradeChance();
+    const circle = document.getElementById('up-circle');
+    if (circle) {
+        circle.classList.remove('spinning', 'win', 'lose');
+        // Дуга снова показывает шанс текущей формы, а не прошлого раунда.
+        circle.style.setProperty('--p', (Math.min(upgradeChance(), 100) * 3.6).toFixed(2) + 'deg');
+    }
+    const btn = document.getElementById('upgrade-btn');
+    if (btn) {
+        btn.disabled = false;
+        btn.classList.remove('win', 'lose');
+        btn.innerText = 'АПГРЕЙД';       // синий цвет — базовый стиль кнопки
+    }
+    setUpgradeResult('Выбери предмет и цель', '');
+    clearUpgradeNet();
+    renderUpgrade();
+}
+
+// Единая точка входа для кнопки: либо сброс после раунда, либо новая ставка.
+function onUpgradeButtonClick() {
+    if (upgradeBusy) return;
+    if (upgradeAwaitingRestart) return resetUpgradeRound();
+    return startUpgrade();
+}
+
 function clearUpgradeResult() {
     // Любое изменение формы = новый раунд: снимаем фиксацию прошлого шанса.
     releaseUpgradeChance();
@@ -948,10 +978,10 @@ function clearUpgradeResult() {
         stopUpgradeArrow();
         resetUpgradeArrow();
     }
+    upgradeAwaitingRestart = false;
     const btn = document.getElementById('upgrade-btn');
-    if (btn) btn.classList.remove('win', 'lose');
+    if (btn) { btn.disabled = false; btn.classList.remove('win', 'lose'); btn.innerText = 'АПГРЕЙД'; }
     setUpgradeResult('Выбери предмет и цель', '');
-    setUpgradeRollText(null, null, false);
     clearUpgradeNet();
 }
 
@@ -1035,10 +1065,12 @@ function renderUpgrade() {
         } else {
             // Результат прошлого раунда остаётся текстом ниже, а кнопка уже
             // зовёт играть снова — без перезахода в игру.
-            const hasResult = upgradeResultState === 'win' || upgradeResultState === 'lose';
-            btn.disabled = !upgradeCanStart();
-            // Если денег/капсул на новую ставку не хватает — не обещаем «играть заново».
-            btn.innerText = (hasResult && !btn.disabled) ? 'ИГРАТЬ ЗАНОВО' : 'АПГРЕЙД';
+            const hasResult = upgradeAwaitingRestart
+                && (upgradeResultState === 'win' || upgradeResultState === 'lose');
+            // «Играть заново» доступна всегда: клик только сбрасывает круг,
+            // даже если денег на новую ставку уже нет — иначе кнопка «залипает».
+            btn.disabled = hasResult ? false : !upgradeCanStart();
+            btn.innerText = hasResult ? 'ИГРАТЬ ЗАНОВО' : 'АПГРЕЙД';
         }
     }
     updateUpgradeStatsUI();
@@ -1314,13 +1346,14 @@ function landUpgradeArrow(won, chance, duration, token, onDone, rollValue) {
 
     const current = ((upgradeArrowAngle % 360) + 360) % 360;
     const delta = ((desired - current) % 360 + 360) % 360;
-    const turns = duration >= 2500 ? 4 : duration >= 1200 ? 3 : 1;
+    const turns = duration >= 2500 ? 5 : duration >= 1200 ? 3 : 1;
     const target = upgradeArrowAngle + turns * 360 + delta;
 
     const startAngle = upgradeArrowAngle;
     const startTime = typeof performance !== 'undefined' ? performance.now() : Date.now();
     const total = Math.max(0, duration);
     let finished = false;
+    let lastAngle = startAngle;
 
     const complete = () => {
         if (finished) return;
@@ -1329,17 +1362,35 @@ function landUpgradeArrow(won, chance, duration, token, onDone, rollValue) {
         // начаться новый спин, и страховочный таймер не должен его ломать.
         if (token !== upgradeSpinToken) return;
         stopUpgradeArrow();
-        setUpgradeArrowAngle(desired);   // фиксируем точное положение
+        // Докручиваем ВПЕРЁД до ближайшего угла, дающего выпавшее число.
+        // Раньше здесь стоял «голый» desired (0..360): стрелка мгновенно
+        // отматывалась назад на несколько оборотов, и вместе с ней на миг
+        // пропадал итог раунда.
+        const aligned = lastAngle + (((desired - lastAngle) % 360) + 360) % 360;
+        setUpgradeArrowAngle(aligned);
         if (typeof onDone === 'function') onDone();
     };
 
-    // easeOutQuint: быстро в начале, ощутимое торможение в конце.
-    const ease = (t) => 1 - Math.pow(1 - t, 5);
+    // Профиль движения: сначала стрелка крутится ровным быстрым ходом
+    // (SPIN_SHARE времени), затем плавно тормозит и гаснет в нуле ровно на
+    // выпавшем числе. Стык фаз без рывка: скорость в конце спина совпадает
+    // со стартовой скоростью торможения (S1 = 3·us / (1 + 2·us)).
+    const SPIN_SHARE = 0.34;
+    const spinDistance = (3 * SPIN_SHARE) / (1 + 2 * SPIN_SHARE);
+    const spinVelocity = spinDistance / SPIN_SHARE;
+    const ease = (t) => {
+        if (t <= 0) return 0;
+        if (t >= 1) return 1;
+        if (t < SPIN_SHARE) return spinVelocity * t;
+        const x = (t - SPIN_SHARE) / (1 - SPIN_SHARE);
+        return spinDistance + (1 - spinDistance) * (1 - Math.pow(1 - x, 3));
+    };
     const step = () => {
         if (token !== upgradeSpinToken) { finished = true; return; }
         const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
         const progress = total > 0 ? Math.min(1, (now - startTime) / total) : 1;
-        setUpgradeArrowAngle(startAngle + (target - startAngle) * ease(progress));
+        lastAngle = startAngle + (target - startAngle) * ease(progress);
+        setUpgradeArrowAngle(lastAngle);
         if (progress >= 1) { complete(); return; }
         upgradeArrowRaf = typeof requestAnimationFrame === 'function'
             ? requestAnimationFrame(step)
@@ -1359,6 +1410,7 @@ async function startUpgrade() {
     // Блокировка ставится до любых await: иначе двойной клик во время загрузки
     // профиля отправил бы две ставки.
     upgradeBusy = true;
+    upgradeAwaitingRestart = false;
 
     try {
         const loaded = await ensureUserLoaded();
@@ -1455,7 +1507,7 @@ async function startUpgrade() {
         return;
     }
 
-    // Общая длительность анимации — 3 секунды: остаток времени уходит на торможение стрелки.
+    // Общая длительность анимации — 3.4 секунды: остаток времени уходит на торможение стрелки.
     const elapsed = Date.now() - upgradeStartedAt;
     const remaining = Math.max(UPGRADE_ARROW_MIN_LAND, UPGRADE_DURATION - elapsed);
 
@@ -1570,15 +1622,15 @@ function showMissedUpgradeResult(row) {
         circle.style.setProperty('--p', (Math.min(chance, 100) * 3.6).toFixed(2) + 'deg');
     }
     setUpgradeArrowAngle(((upgradeArrowTargetFor(won, chance, row.roll) % 360) + 360) % 360);
-    setUpgradeRollText(row.roll, chance, won);
     const chanceEl = document.getElementById('up-chance');
     if (chanceEl) chanceEl.innerText = chance.toFixed(2) + '%';
     const btn = document.getElementById('upgrade-btn');
     if (btn) {
         btn.disabled = false;
         btn.classList.remove('win', 'lose');
-        btn.innerText = 'АПГРЕЙД';
+        btn.innerText = 'ИГРАТЬ ЗАНОВО';
     }
+    upgradeAwaitingRestart = true;
     setUpgradeNetFromResult(won, row);
     // Обязательная пометка: это НЕ результат текущей ставки, а прошлый раунд,
     // который игрок не увидел. Без неё легко решить, что приз «не засчитали».
@@ -1639,9 +1691,9 @@ function finishUpgradeAnimation(data, chance) {
         btn.classList.remove('win', 'lose');
         btn.innerText = 'ИГРАТЬ ЗАНОВО';
     }
+    upgradeAwaitingRestart = true;
 
     setUpgradeNetFromResult(won, data);
-    setUpgradeRollText(data.roll, chance, won);
 
     // Диагностика честности: вердикт сервера обязан совпадать с броском.
     const rollNumber = Number(data.roll);
