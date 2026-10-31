@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
     <title>AURA GAME</title>
-    <link rel="stylesheet" href="style.css?v=aura-2">
+    <link rel="stylesheet" href="style.css?v=aura-3">
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
 </head>
 <body>
@@ -264,7 +264,6 @@
                     <!-- Итог раунда: аккуратная цифра ПОД кругом (в потоке, не поверх). -->
                     <div class="up-net" id="up-net" aria-live="polite"></div>
                     <div class="up-outcome" id="up-outcome">Выигрыш: 1 000 <img class="coin-img" src="coin.png" alt="монета"></div>
-                    <div class="up-roll" id="up-roll">Стрелка встанет на выпавшее число</div>
 
                     <div class="up-quick-chances">
                         <button class="up-chip" data-target="mult:2" onclick="selectUpgradeQuick('mult', 2, this)">x2</button>
@@ -275,7 +274,7 @@
                         <button class="up-chip" data-target="chance:75" onclick="selectUpgradeQuick('chance', 75, this)">75%</button>
                     </div>
 
-                    <button class="up-upgrade-btn" id="upgrade-btn" onclick="startUpgrade()">АПГРЕЙД</button>
+                    <button class="up-upgrade-btn" id="upgrade-btn" onclick="onUpgradeButtonClick()">АПГРЕЙД</button>
                     <div class="up-result" id="upgrade-result">Выбери предмет и цель</div>
                 </section>
 
@@ -395,6 +394,6 @@
         <div class="nav-item" onclick="switchTab('profile', this)"><span class="nav-icon">👤</span> Профиль</div>
     </nav>
 
-    <script src="app.js?v=aura-2" defer></script>
+    <script src="app.js?v=aura-3" defer></script>
 </body>
 </html>

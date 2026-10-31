@@ -857,20 +857,6 @@ async def cmd_top(message: Message):
     await message.answer(msg, parse_mode="HTML")
 
 
-# ================= СУНДУКИ =================
-# Сундуки открываются только в мини-аппке: там награду считает сервер
-# (10-30 коинов или 20% на золотой ключ). Команда в боте просто объясняет это.
-@dp.message(F.text.func(lambda t: strip_prefix(t).lower().startswith("открыть")))
-async def cmd_open(message: Message):
-    await message.answer(
-        "📦 <b>Сундуки теперь открываются только в нашем Mini App!</b>\n\n"
-        f"Переходи по ссылке: <a href='{MINIAPP_URL}'>{MINIAPP_URL}</a>\n\n"
-        "🎁 Там же крутятся Мины, Арена и Ракета с общим балансом.",
-        parse_mode="HTML",
-        disable_web_page_preview=True,
-    )
-
-
 # ================= МАГАЗИН =================
 @dp.message(F.text.func(lambda t: strip_prefix(t).lower().startswith("магазин")))
 async def cmd_shop(message: Message):
@@ -1095,7 +1081,7 @@ async def cmd_bot_stats(message: Message):
     F.text.func(lambda t: strip_prefix(t).lower().startswith("помощь") or strip_prefix(t).lower().startswith("help")))
 async def cmd_help(message: Message):
     text = (
-        "📖 <b>СПИСОК КОМАНД БОТА</b>\n━━━━━━━━━━━━━━━━━━━━\n\n🎁 <b>Случайные коины:</b>\n• Просто пиши в чате — с шансом 0.5% получишь 1-5 коинов\n\n🎟️ <b>Промокоды:</b>\n• <code>промо код</code> — активировать промокод\n\n📦 <b>Сундуки:</b>\n• <code>открыть</code> — сундуки открываются только в Mini App\n\n💰 <b>Экономика:</b>\n• <code>карман</code> — твой баланс\n• <code>карман @user</code> — баланс другого\n• <code>перевод @user сумма</code> — перевести\n• <code>перевод сумма</code> (ответом) — быстрый перевод\n• <code>топ</code> — топ-10 богачей\n• <code>магазин</code> — магазин\n\n🎲 <b>Игры:</b>\n• <code>кубы @user ставка</code> — дуэль в кости\n• <code>кубы ставка</code> (ответом) — быстрый вызов\n\n📱 <b>Мини-приложение:</b>\n• <code>апка</code> — ссылка на наше казино\n\n• <code>тег</code> — проверка бота\n• <code>помощь</code> — эта справка")
+        "📖 <b>СПИСОК КОМАНД БОТА</b>\n━━━━━━━━━━━━━━━━━━━━\n\n🎁 <b>Случайные коины:</b>\n• Просто пиши в чате — с шансом 0.5% получишь 1-5 коинов\n\n🎟️ <b>Промокоды:</b>\n• <code>промо код</code> — активировать промокод\n\n💰 <b>Экономика:</b>\n• <code>карман</code> — твой баланс\n• <code>карман @user</code> — баланс другого\n• <code>перевод @user сумма</code> — перевести\n• <code>перевод сумма</code> (ответом) — быстрый перевод\n• <code>топ</code> — топ-10 богачей\n• <code>магазин</code> — магазин\n\n🎲 <b>Игры:</b>\n• <code>кубы @user ставка</code> — дуэль в кости\n• <code>кубы ставка</code> (ответом) — быстрый вызов\n\n📱 <b>Мини-приложение:</b>\n• <code>апка</code> — ссылка на наше казино\n\n• <code>тег</code> — проверка бота\n• <code>помощь</code> — эта справка")
     await message.answer(text, parse_mode="HTML")
 
 

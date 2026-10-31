@@ -75,9 +75,26 @@ GOLD_KEY_BACK_CHANCE = 0.10         # 10% вернуть ключ
 # Награда сундука сначала только разыгрывается: баланс меняет /api/claim_chest,
 # когда игрок нажал «Забрать» (иначе коины приходили до анимации рулетки).
 CHEST_CLAIMS_TABLE = "chest_claims"
-CHEST_CLAIMS_ERROR = (
-    "Сундуки временно недоступны: примените миграцию chest_claims в Supabase"
-)
+CHEST_CLAIMS_GENERIC = "Не удалось открыть сундук, попробуйте ещё раз"
+CHEST_CLAIMS_UNAVAILABLE = "Сундуки обновляются, попробуйте чуть позже"
+CHEST_CLAIMS_MIGRATION_FILE = "supabase/migrations/20261030000000_capsule_stock_promo_types.sql"
+
+
+def _chest_claims_detail(exc: Exception) -> str:
+    """Текст ошибки для игрока + честный лог для админа.
+
+    Раньше ЛЮБАЯ ошибка insert/update отдавала в мини-аппку «примените миграцию
+    chest_claims» — сообщение про миграцию видел и админ, у которого всё уже
+    применено. Теперь инструкция уходит в лог, а игрок получает нейтральный текст.
+    """
+    message = f"{type(exc).__name__}: {exc}"
+    if any(marker in message for marker in
+           ("chest_claims", "PGRST204", "PGRST205", "does not exist", "schema cache")):
+        logger.error("Таблица %s недоступна. Примените %s и выполните NOTIFY pgrst, 'reload schema'. Ошибка: %s",
+                     CHEST_CLAIMS_TABLE, CHEST_CLAIMS_MIGRATION_FILE, message)
+        return CHEST_CLAIMS_UNAVAILABLE
+    logger.warning("Сбой сундуков: %s", message)
+    return CHEST_CLAIMS_GENERIC
 
 # ==================== МИНЫ ====================
 MINES_CELLS = 16
@@ -1351,9 +1368,9 @@ async def open_chest(auth: OpenChestRequest):
     # Незабранные награды прошлых сундуков не теряем: зачисляем их перед новой игрой.
     try:
         pending = await asyncio.to_thread(_fetch_unclaimed_claims, user_id)
-    except Exception:
+    except Exception as exc:
         logger.exception("Не удалось прочитать незабранные сундуки user_id=%s", user_id)
-        raise HTTPException(status_code=503, detail=CHEST_CLAIMS_ERROR)
+        raise HTTPException(status_code=503, detail=_chest_claims_detail(exc)) from exc
     if pending:
         # Сначала «занимаем» старые награды условным апдейтом, потом зачисляем:
         # если зачисление не удалось — снимаем отметку, чтобы награда не пропала.
@@ -1395,9 +1412,9 @@ async def open_chest(auth: OpenChestRequest):
 
     try:
         claim = await asyncio.to_thread(_insert_chest_claim, user_id, chest_type, reward_coins, reward_keys)
-    except Exception:
+    except Exception as exc:
         logger.exception("Не удалось создать chest_claim user_id=%s", user_id)
-        raise HTTPException(status_code=503, detail=CHEST_CLAIMS_ERROR)
+        raise HTTPException(status_code=503, detail=_chest_claims_detail(exc)) from exc
 
     # Ключ тратится сразу (он оплачивает попытку), кулдаун тоже стартует сразу,
     # а сами коины/ключи из награды — только по кнопке «Забрать».
@@ -1437,9 +1454,9 @@ async def claim_chest(auth: "ClaimChestRequest"):
 
     try:
         claim = await asyncio.to_thread(_fetch)
-    except Exception:
+    except Exception as exc:
         logger.exception("Не удалось прочитать chest_claim id=%s", auth.claim_id)
-        raise HTTPException(status_code=503, detail=CHEST_CLAIMS_ERROR)
+        raise HTTPException(status_code=503, detail=_chest_claims_detail(exc)) from exc
     if not claim:
         raise HTTPException(status_code=404, detail="Сундук не найден")
 
@@ -1455,9 +1472,9 @@ async def claim_chest(auth: "ClaimChestRequest"):
     # Сначала «занимаем» награду условным апдейтом, чтобы двойной тап не начислил дважды.
     try:
         locked = await asyncio.to_thread(_mark_claimed, claim.get("id"), True)
-    except Exception:
+    except Exception as exc:
         logger.exception("Не удалось отметить chest_claim id=%s", auth.claim_id)
-        raise HTTPException(status_code=503, detail=CHEST_CLAIMS_ERROR)
+        raise HTTPException(status_code=503, detail=_chest_claims_detail(exc)) from exc
     if not locked.data:
         return {"success": True, "already_claimed": True, "reward_coins": 0, "reward_keys": 0,
                 "new_balance": coins, "new_keys": keys}
