@@ -1222,10 +1222,32 @@ function upgradeAngleForPercent(percent) {
 }
 
 // Ставит --p круга (границу зелёной зоны) по проценту.
+// Дополнительно заливаем круг ИЗ JS тем же углом и явным `from 0deg`:
+// так зона не зависит от того, какая версия style.css прилетела в кэш.
+// Раньше в CSS стояло `from -90deg`, и круг был повёрнут на 90°: при шансе
+// 50% зелёным оказывался ВЕРХ, а стрелка считала угол от верха — отсюда
+// «на красном зашло / на зелёном не может».
+function upgradeRingGradientCss(percent) {
+    const circle = document.getElementById('up-circle');
+    const win = !!circle && circle.classList.contains('win');
+    const lose = !!circle && circle.classList.contains('lose');
+    const deg = upgradeAngleForPercent(percent).toFixed(2) + 'deg';
+    const green = lose ? 'rgba(34, 197, 94, 0.45)' : '#22c55e';
+    const red = win ? 'rgba(239, 68, 68, 0.3)' : '#ef4444';
+    return `conic-gradient(from 0deg, ${green} 0 ${deg}, ${red} ${deg} 360deg)`;
+}
+
+function setUpgradeRingGradient(percent) {
+    const ring = document.getElementById('up-circle-ring');
+    if (!ring) return;
+    ring.style.background = upgradeRingGradientCss(percent);
+}
+
 function setUpgradeRingPercent(percent) {
     const circle = document.getElementById('up-circle');
     if (!circle) return;
     circle.style.setProperty('--p', upgradeAngleForPercent(percent).toFixed(2) + 'deg');
+    setUpgradeRingGradient(percent);
 }
 
 // Выигрыш = бросок НЕ БОЛЬШЕ шанса (шанс 50%: бросок 22 — победа, 50 — тоже победа,
