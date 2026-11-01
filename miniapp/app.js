@@ -948,17 +948,21 @@ async function loadShopItems() {
                 shopImage: item.shop_image,
                 inventoryImage: item.inventory_image,
                 dailyLimit: item.daily_limit,
+                // Лимиты магазина отключены (задача 17): капсулы бесконечные,
+                // счётчика «Осталось» нет вообще — ни числа, ни подписи.
+                unlimited: Boolean(item.unlimited),
                 // Глобальный тираж: stock — сколько осталось, stockTotal — весь тираж.
                 // stock_total приходит отдельным полем (старый сервер отдавал только
                 // total_limit) — берём то, что есть, чтобы «Осталось: X из Y» не пропадало.
-                stock: item.stock == null ? null : Number(item.stock),
+                stock: item.unlimited || item.stock == null ? null : Number(item.stock),
                 // stock_ready=false — сервер не смог прочитать/списать тираж
                 // (нет миграции или RLS). Тогда «Осталось: X из Y» не показываем:
                 // врать про полный тираж хуже, чем не показывать его вовсе.
-                stockReady: item.stock_ready !== false && !shopStockUnreliable,
-                stockTotal: (item.stock_total != null ? item.stock_total : item.total_limit) == null
-                    ? null
-                    : Number(item.stock_total != null ? item.stock_total : item.total_limit)
+                stockReady: !item.unlimited && item.stock_ready !== false && !shopStockUnreliable,
+                stockTotal: item.unlimited ? null
+                    : ((item.stock_total != null ? item.stock_total : item.total_limit) == null
+                        ? null
+                        : Number(item.stock_total != null ? item.stock_total : item.total_limit))
             };
         });
         shopItemsLoaded = true;
@@ -983,11 +987,11 @@ function renderShop() {
         // «Осталось: X из Y» мелким шрифтом под капсулой; при нуле карточку не рисуем.
         const hasStock = item.stock != null && item.stockTotal != null && item.stockReady !== false;
         if (hasStock && item.stock <= 0) return '';
-        // Остаток неизвестен (нет строки тиража / RLS): не рисуем полный тираж как остаток,
-        // иначе карточка обещает «1 000 из 1 000», а покупка отвечает «распродан».
-        const stockText = hasStock
+        // Лимитов нет — про остаток не пишем ничего. Если лимиты вернут и остаток
+        // неизвестен, вместо фиктивного «1 000 из 1 000» будет честная подпись.
+        const stockText = item.unlimited ? '' : (hasStock
             ? `<small class="shop-stock${item.stock <= Math.max(1, Math.round(item.stockTotal * 0.1)) ? ' low' : ''}">Осталось: ${formatCoins(item.stock)} из ${formatCoins(item.stockTotal)}</small>`
-            : (item.stockTotal != null ? `<small class="shop-stock muted">Остаток уточняется</small>` : '');
+            : (item.stockTotal != null ? `<small class="shop-stock muted">Остаток уточняется</small>` : ''));
         const image = shopImageFor(itemId, item);
         const art = image
             ? `<div class="shop-art"><img src="${image}" alt="${escapeHtml(item.name)}" loading="lazy"></div>`
@@ -1035,8 +1039,10 @@ async function buyItem(itemId) {
         // Сервер не смог списать тираж → числам в этой сессии больше не верим:
         // следующий каталог может прочитать старую строку и снова показать
         // «1 000 из 1 000» после покупки.
-        if (data.stock_ready === false) shopStockUnreliable = true;
-        else if (data.stock_ready === true) shopStockUnreliable = false;
+        if (!data.unlimited) {
+            if (data.stock_ready === false) shopStockUnreliable = true;
+            else if (data.stock_ready === true) shopStockUnreliable = false;
+        }
         if (SHOP_ITEMS[itemId]) {
             if (data.stock != null) SHOP_ITEMS[itemId].stock = Number(data.stock);
             SHOP_ITEMS[itemId].stockReady = data.stock_ready !== false && !shopStockUnreliable;

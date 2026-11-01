@@ -11,7 +11,8 @@ from dotenv import load_dotenv
 from supabase import create_client, Client
 from typing import Optional
 from shop_catalog import SHOP_ITEMS, ShopPurchaseError, is_admin_id, parse_inventory, purchase_shop_item, \
-    serialize_shop_items, missing_stock_rows, shop_stock_snapshot, stock_diagnostics
+    serialize_shop_items, missing_stock_rows, shop_stock_snapshot, stock_diagnostics, \
+    STOCK_LIMITS_ENABLED
 
 load_dotenv()
 
@@ -125,7 +126,10 @@ async def health():
     global _stock_health_cache
     now_ts = time.time()
     cache_ttl = STOCK_HEALTH_TTL if _stock_health_cache["value"] is not None else 5.0
-    if now_ts - _stock_health_cache["at"] > cache_ttl:
+    if not STOCK_LIMITS_ENABLED:
+        # Лимитов нет — тираж не читаем вообще (нечего проверять).
+        _stock_health_cache = {"at": now_ts, "value": None, "error": None}
+    elif now_ts - _stock_health_cache["at"] > cache_ttl:
         try:
             _stock_health_cache = {"at": now_ts, "value": await asyncio.to_thread(shop_stock_snapshot, supabase),
                                    "error": None}
@@ -144,6 +148,8 @@ async def health():
             "url": "/miniapp/",
         },
         "shop_stock": {
+            # Задача 17: лимиты отключены — капсулы бесконечные, тираж не ведётся.
+            "limits_enabled": STOCK_LIMITS_ENABLED,
             "ready": stock is not None,
             "left": stock,
             "rpc": "shop_take_stock",
@@ -152,8 +158,9 @@ async def health():
             # Строки тиража, которых нет в таблице. Непустой список — это ровно тот
             # случай, когда магазин рисовал «Осталось: 1000 из 1000», а покупка
             # отвечала «Товар распродан»: списывать было нечего.
-            "missing_rows": missing_stock_rows(stock),
-            "hint": _stock_health_hint(stock, stock_error),
+            "missing_rows": missing_stock_rows(stock) if STOCK_LIMITS_ENABLED else [],
+            "hint": _stock_health_hint(stock, stock_error) if STOCK_LIMITS_ENABLED else
+            "лимиты отключены: капсулы продаются без ограничений",
         },
         # MAINTENANCE_MODE объявлен ниже по файлу, но к моменту запроса уже существует.
         "maintenance": MAINTENANCE_MODE,
@@ -1847,11 +1854,13 @@ async def get_shop_items(data: ShopCatalogRequest):
     user_id = int(user["id"])
     check_ban(str(user_id))
     is_admin = is_admin_id(user_id, ADMIN_IDS)
-    stock = await asyncio.to_thread(shop_stock_snapshot, supabase)
+    # Лимиты отключены — в базу за тиражом не ходим вовсе.
+    stock = await asyncio.to_thread(shop_stock_snapshot, supabase) if STOCK_LIMITS_ENABLED else None
     return {
         "is_admin": is_admin,
         "items": serialize_shop_items(is_admin, stock),
-        "stock_ready": stock is not None,
+        "stock_ready": (stock is not None) if STOCK_LIMITS_ENABLED else False,
+        "unlimited": not STOCK_LIMITS_ENABLED,
     }
 
 
@@ -1892,12 +1901,13 @@ async def buy_item(data: BuyItem):
         raise HTTPException(status_code=400, detail="Неизвестный предмет магазина")
 
     try:
-        result = await asyncio.to_thread(purchase_shop_item, supabase, user_id, data.item_id, ADMIN_IDS)
+        result = await asyncio.to_thread(purchase_shop_item, supabase, user_id, data.item_id,
+                                         ADMIN_IDS, "mini")
     except ShopPurchaseError as exc:
         print(f"МАГАЗИН: отказ user_id={user_id} item={data.item_id} "
               f"[{exc.status_code}] {exc.message}", flush=True)
         raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
-    if not result.get("stock_ready", True):
+    if STOCK_LIMITS_ENABLED and not result.get("stock_ready", True):
         # Купили, но тираж не списан: говорим прямо, а не делаем вид, что всё хорошо.
         print(f"МАГАЗИН: ВНИМАНИЕ тираж не списан (stock_ready=false) item={data.item_id} — "
               f"примените supabase/migrations/20261104000000_shop_stock_fix.sql", flush=True)

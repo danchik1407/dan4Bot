@@ -22,6 +22,8 @@ from shop_catalog import (
     inventory_item,
     parse_inventory,
     purchase_shop_item,
+    shop_purchase_stats,
+    shop_stats_report,
     shop_stock_snapshot,
     visible_inventory_items,
     visible_shop_items,
@@ -1241,7 +1243,8 @@ async def _complete_shop_purchase(callback: CallbackQuery, item_id: str):
         return await callback.answer("❌ Неизвестный товар", show_alert=True)
     try:
         await get_user(callback.from_user.id, callback.from_user.username)
-        await asyncio.to_thread(purchase_shop_item, supabase, callback.from_user.id, item_id, ADMIN_IDS)
+        await asyncio.to_thread(purchase_shop_item, supabase, callback.from_user.id, item_id,
+                                 ADMIN_IDS, "bot")
     except ShopPurchaseError as exc:
         logger.warning("Покупка %s пользователем %s отклонена: %s", item_id, callback.from_user.id, exc.message)
         return await callback.answer(f"❌ {exc.message}", show_alert=True)
@@ -1280,9 +1283,20 @@ async def cmd_bot_stats(message: Message):
         total_users = len(users)
         now = time.time()
         active_24h = sum(1 for u in users if u.get("last_chest") and (now - float(u.get("last_chest"))) < 86400)
-        total_coins = sum(u.get("coins", 0) for u in users)
+        total_coins = sum(u.get("coins", 0) or 0 for u in users)
+
+        # ===== Сколько каких капсул купили (задача 17) =====
+        # Считаем по таблице shop_purchases через shop_purchase_stats(); если
+        # миграции нет — прямо говорим об этом, а не показываем нули.
+        stats = await asyncio.to_thread(shop_purchase_stats, supabase)
         text = (
-            f"📊 <b>СТАТИСТИКА БОТА</b>\n━━━━━━━━━━━━━━━━━━━━\n\n👥 Всего пользователей: <b>{total_users}</b>\n🔥 Активных за 24ч: <b>{active_24h}</b>\n💰 Всего коинов в системе: <b>{total_coins}</b>\n")
+            "📊 <b>СТАТИСТИКА БОТА</b>\n━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"👥 Всего пользователей: <b>{total_users}</b>\n"
+            f"🔥 Активных за 24ч: <b>{active_24h}</b>\n"
+            f"💰 Всего коинов в системе: <b>{total_coins:,}</b>\n\n"
+            "🛒 <b>КУПЛЕНО В МАГАЗИНЕ</b>\n"
+            + shop_stats_report(users, stats)
+        )
         await message.answer(text, parse_mode="HTML")
     except Exception as e:
         logger.error(f"Ошибка при получении статистики: {e}")
