@@ -4,12 +4,13 @@ from fastapi.responses import JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 import asyncio
+import uuid
 import logging
 import os, hashlib, hmac, json, time, random, uvicorn, datetime, math
 from urllib.parse import parse_qsl
 from dotenv import load_dotenv
 from supabase import create_client, Client
-from typing import Optional
+from typing import Optional, Union
 from shop_catalog import SHOP_ITEMS, ShopPurchaseError, is_admin_id, parse_inventory, purchase_shop_item, \
     serialize_shop_items, missing_stock_rows, shop_stock_snapshot, stock_diagnostics, \
     STOCK_LIMITS_ENABLED
@@ -18,7 +19,7 @@ load_dotenv()
 
 # Номер сборки: по нему из /api/health видно, что на сервисе НЕ старый код.
 # Если после деплоя здесь прежнее значение — Render ещё не перезапустился.
-API_BUILD = "2026-11-01-stock-rows-4"
+API_BUILD = "2026-11-01-house-edge-5"
 
 logger = logging.getLogger("aura-api")
 if not logger.handlers:
@@ -325,6 +326,13 @@ UPGRADE_TARGETS = ("coin", "capsule", "uniq_capsule")
 # Пока играют только админы — шанс честный. Когда откроем для всех,
 # реальный шанс = визуальный / этот делитель (то есть x2 = 25%).
 UPGRADE_NON_ADMIN_DIVIDER = 2
+
+# ДОМ-ЭДЖ ПО БАЛАНСУ (задача 18): с баланса 1000 коинов и выше играем чаще
+# в минус — реальный шанс = расчётный * этот множитель (50% → 40%).
+# Клиент считает тот же множитель по своему балансу (UPGRADE_HOUSE_EDGE_* в
+# miniapp/app.js), поэтому зелёная зона круга и вердикт сервера совпадают.
+UPGRADE_HOUSE_EDGE_MIN_BALANCE = 1000
+UPGRADE_HOUSE_EDGE_FACTOR = 0.8
 
 BOT_NAMES = ["Shark_V", "LuckyFox", "NeonWolf", "GhostByte", "PixelKing", "CyberCat", "IronFist", "VoidWalker",
              "ShadowAce", "RogueOne", "Toxic", "Viper", "Sniper", "ProGamer", "NoobMaster", "Killer", "Dragon"]
@@ -847,7 +855,9 @@ class OpenChestRequest(BaseModel):
 
 class ClaimChestRequest(BaseModel):
     initData: str
-    claim_id: Optional[int] = None
+    # int — строка в chest_claims; str «mem-…» — награда ждёт в памяти процесса
+    # (когда таблица недоступна). См. _pending_claim_put.
+    claim_id: Optional[Union[int, str]] = None
 
 
 class UpgradeLogRequest(BaseModel): initData: str
@@ -1529,6 +1539,54 @@ def _rpc_missing(exc: Exception) -> bool:
     return any(marker in message for marker in _RPC_MISSING_MARKERS)
 
 
+# ==================== СУНДУКИ БЕЗ ТАБЛИЦЫ ====================
+# Требование игрока: баланс меняется ТОЛЬКО по кнопке «Забрать». Если
+# chest_claims недоступна (нет таблицы / RLS), награда не начисляется сразу,
+# а ждёт в памяти процесса под строковым id вида «mem-…».
+# Минус: при перезапуске Render такая награда пропадёт — поэтому таблица
+# chest_claims остаётся основным путём (миграция 20261102 / 20261106).
+_PENDING_CHEST_CLAIMS: dict[str, dict] = {}
+PENDING_CHEST_TTL = 12 * 3600
+
+
+def _pending_claim_gc() -> None:
+    deadline = time.time() - PENDING_CHEST_TTL
+    for key in [k for k, v in _PENDING_CHEST_CLAIMS.items() if float(v.get("at", 0)) < deadline]:
+        _PENDING_CHEST_CLAIMS.pop(key, None)
+
+
+def _pending_claim_put(user_id, reward_coins: int, reward_keys: int) -> str:
+    """Кладёт награду «до кнопки Забрать» в память. Возвращает строковый claim_id."""
+    _pending_claim_gc()
+    claim_id = "mem-" + uuid.uuid4().hex[:12]
+    _PENDING_CHEST_CLAIMS[claim_id] = {
+        "user_id": str(user_id),
+        "coins": int(reward_coins),
+        "keys": int(reward_keys),
+        "at": time.time(),
+    }
+    return claim_id
+
+
+def _pending_claim_take(claim_id, user_id) -> dict | None:
+    """Забирает награду из памяти ровно один раз. None — нет/чужая."""
+    entry = _PENDING_CHEST_CLAIMS.get(str(claim_id))
+    if not entry or entry.get("user_id") != str(user_id):
+        return None
+    return _PENDING_CHEST_CLAIMS.pop(str(claim_id), None)
+
+
+def _pending_claim_release(claim_id, entry: dict | None) -> None:
+    """Возвращает награду на место, если запись баланса не удалась."""
+    if not entry:
+        return
+    _PENDING_CHEST_CLAIMS[str(claim_id)] = entry
+
+
+def _is_pending_claim(claim_id) -> bool:
+    return isinstance(claim_id, str) and claim_id.startswith("mem-")
+
+
 def _insert_chest_claim(user_id, chest_type: str, reward_coins: int, reward_keys: int) -> dict:
     """Запоминаем разыгранную награду. Начисление — только в /api/claim_chest.
 
@@ -1710,9 +1768,10 @@ async def open_chest(auth: OpenChestRequest):
     keys = int(row.get("keys", 0) or 0)
     last_chest = int(row.get("last_chest", 0) or 0)
 
-    # Незабранные награды прошлых сундуков не теряем: зачисляем их перед новой игрой.
-    # Если chest_claims недоступна — сундук всё равно открываем: награда этого
-    # раунда будет начислена сразу, а не потеряна вместе с кнопкой.
+    # Незабранные награды прошлых сундуков не теряем: зачисляем их перед новой игрой
+    # (закрытие старого сундука = согласие игрока, награда уже показана в рулетке).
+    # Если chest_claims недоступна — сундук всё равно открываем, а награда этого
+    # раунда ждёт кнопки «Забрать» в памяти процесса (_pending_claim_put).
     try:
         pending = await asyncio.to_thread(_fetch_unclaimed_claims, user_id)
     except ChestUnavailable as exc:
@@ -1761,26 +1820,12 @@ async def open_chest(auth: OpenChestRequest):
     try:
         claim = await asyncio.to_thread(_insert_chest_claim, user_id, chest_type, reward_coins, reward_keys)
     except ChestUnavailable as exc:
-        # СТАРАЯ СХЕМА (без chest_claims): начисляем награду сразу, чтобы сундук
-        # работал даже когда таблицы нет, RLS закрыт или PostgREST не видит схему.
-        _log_chest_error("chest_claims недоступна → начисляем сразу", exc, user_id)
-        new_coins = coins + reward_coins
-        new_keys = keys + reward_keys
-        if not _db_update_user(user_id, coins=new_coins, keys=new_keys, last_chest=last_chest):
-            print(f"ОШИБКА СУНДУКА: не удалось начислить награду user_id={user_id} "
-                  f"(+{reward_coins} коинов, +{reward_keys} ключей)", flush=True)
-            raise HTTPException(status_code=500, detail="Не удалось открыть сундук") from exc
-        print(f"СУНДУК: начислено сразу (без chest_claims) user_id={user_id} "
-              f"+{reward_coins} коинов, +{reward_keys} ключей", flush=True)
-        return {
-            "success": True, "chest_type": chest_type,
-            "reward_coins": reward_coins, "reward_keys": reward_keys,
-            "claim_id": None,
-            # Клиент по этим двум флагам понимает: награда уже на балансе,
-            # отдельный /api/claim_chest вызывать не нужно.
-            "credited": True, "deferred": False,
-            "new_balance": new_coins, "new_keys": new_keys, "last_chest": last_chest,
-        }
+        # chest_claims недоступна — НЕ начисляем награду сейчас (баланс должен
+        # меняться только по «Забрать»), а держим её в памяти процесса.
+        _log_chest_error("chest_claims недоступна → награда ждёт «Забрать» в памяти", exc, user_id)
+        claim = {"id": _pending_claim_put(user_id, reward_coins, reward_keys)}
+        print(f"СУНДУК: награда отложена в памяти user_id={user_id} claim={claim['id']} "
+              f"(+{reward_coins} коинов, +{reward_keys} ключей)", flush=True)
     except Exception as exc:  # noqa: BLE001
         _log_chest_error("создание chest_claim", exc, user_id)
         raise HTTPException(status_code=503, detail=_chest_claims_detail(exc)) from exc
@@ -1817,6 +1862,25 @@ async def claim_chest(auth: "ClaimChestRequest"):
     if row is None: raise HTTPException(status_code=404, detail="User not found")
     coins = int(row.get("coins", 0) or 0)
     keys = int(row.get("keys", 0) or 0)
+
+    if _is_pending_claim(auth.claim_id):
+        # Награда из памяти: «занимаем» её один раз, при сбое вернём обратно.
+        pending = _pending_claim_take(auth.claim_id, user_id)
+        if pending is None:
+            raise HTTPException(
+                status_code=404,
+                detail="Награда не найдена (сервер перезапускался). Открой сундук ещё раз")
+        reward_coins = int(pending.get("coins") or 0)
+        reward_keys = int(pending.get("keys") or 0)
+        new_coins = coins + reward_coins
+        new_keys = keys + reward_keys
+        if not _db_update_user(str(user_id), coins=new_coins, keys=new_keys):
+            _pending_claim_release(auth.claim_id, pending)
+            raise HTTPException(status_code=500, detail="Не удалось забрать награду")
+        print(f"СУНДУК: награда забрана из памяти user_id={user_id} "
+              f"+{reward_coins} коинов, +{reward_keys} ключей", flush=True)
+        return {"success": True, "already_claimed": False, "reward_coins": reward_coins,
+                "reward_keys": reward_keys, "new_balance": new_coins, "new_keys": new_keys}
 
     try:
         claim = await asyncio.to_thread(_chest_take, auth.claim_id, user_id)
@@ -2162,9 +2226,6 @@ async def upgrade_action(data: UpgradeAction):
     win_amount, visual_chance = _upgrade_target_value(
         source, amount, target, data.target_multiplier, data.target_chance
     )
-    # Пока играют только админы — шанс честный. Для обычных игроков (в будущем)
-    # реальный шанс будет в UPGRADE_NON_ADMIN_DIVIDER раз меньше визуального.
-    real_chance = visual_chance if admin else visual_chance / UPGRADE_NON_ADMIN_DIVIDER
 
     for _attempt in range(5):
         raw_coins, raw_inventory = _upgrade_read_user(user_id)
@@ -2182,6 +2243,15 @@ async def upgrade_action(data: UpgradeAction):
             for _ in range(amount):
                 inventory.remove(source)
             new_coins = raw_coins
+
+        # ДОМ-ЭДЖ: на балансе от 1000 коинов шанс ниже расчётного. Считаем здесь,
+        # а не до цикла, потому что баланс мог измениться между попытками.
+        edge = 1.0
+        if raw_coins >= UPGRADE_HOUSE_EDGE_MIN_BALANCE:
+            edge = UPGRADE_HOUSE_EDGE_FACTOR
+        real_chance = visual_chance * edge
+        if not admin:
+            real_chance /= UPGRADE_NON_ADMIN_DIVIDER
 
         # ВАЖНО: и вердикт, и стрелка считаются по ОДНОМУ числу — по тому, которое
         # уходит клиенту в поле "real_chance". Клиент рисует зелёную зону 0..chance
@@ -2231,9 +2301,12 @@ async def upgrade_action(data: UpgradeAction):
                 "item_from": source,
                 "amount_from": amount,
                 "item_to": target,
-                # Шанс, который видит игрок: для админов он же и есть боевой
-                # (real_chance ниже), поэтому «пришло 50.00 — сравнили с 50.00».
-                "chance": round(visual_chance, 2),
+                # Шанс, который играли: клиент рисует по нему зелёную зону и
+                # подпись «шанс успеха», поэтому число всегда совпадает с вердиктом.
+                "chance": chance_verdict,
+                # Расчётный (рекламный) шанс без дом-эджа — только для диагностики.
+                "advertised_chance": round(visual_chance, 2),
+                "house_edge": edge,
                 # Реальный шанс = то же число, что участвовало в сравнении.
                 # Клиент рисует сектор и ставит стрелку именно по нему,
                 # поэтому геометрия круга и вердикт не могут разойтись.
@@ -2353,8 +2426,12 @@ async def get_global_top():
 
 @app.get("/api/season_end")
 async def get_season_end():
-    end_date = datetime.datetime(2026, 11, 1, 15, 0, 0)
-    return {"end_timestamp": int(end_date.timestamp())}
+    # Лидерборд продлён до 02.11.2026, 17:00 по Москве (UTC+3).
+    # Время задаём с явной зоной: Render живёт в UTC, и наивный datetime
+    # сдвигал бы конец сезона на 3 часа.
+    msk = datetime.timezone(datetime.timedelta(hours=3))
+    end_date = datetime.datetime(2026, 11, 2, 17, 0, 0, tzinfo=msk)
+    return {"end_timestamp": int(end_date.timestamp()), "timezone": "Europe/Moscow"}
 
 
 @app.get("/{filename}", include_in_schema=False)

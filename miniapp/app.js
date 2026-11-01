@@ -287,7 +287,8 @@ let animFrameId = null;
 let isAnimatingFlight = false;
 let flightStartTime = 0;
 
-let lbTimerEnd = Date.now() + (30 * 24 * 3600 * 1000);
+// Запасное значение на случай, если /api/season_end не ответил: 02.11.2026 17:00 МСК.
+let lbTimerEnd = Date.parse('2026-11-02T14:00:00Z') || (Date.now() + (30 * 24 * 3600 * 1000));
 
 // ================= ЗВУКИ =================
 const AudioContextClass = window.AudioContext || window.webkitAudioContext;
@@ -851,15 +852,16 @@ async function openChest(type) {
     const rewardCoins = Number(data.reward_coins) || 0;
     const rewardKeys = Number(data.reward_keys) || 0;
     const isKey = rewardKeys > 0;
-    // Старая схема: если таблица выдачи недоступна, сервер начисляет награду
-    // сразу и присылает credited=true (claim_id=null). Отдельный запрос «Забрать»
-    // тогда не нужен — награда уже на балансе.
-    chestRewardCredited = Boolean(data.credited) || data.claim_id == null;
+    // Баланс меняется ТОЛЬКО по кнопке «Забрать». Сервер всегда присылает
+    // claim_id: число (строка в chest_claims) или строку «mem-…» (награда ждёт
+    // в памяти процесса, если таблицы нет). Никакого «начислили сразу».
+    chestRewardCredited = data.credited === true;
     if (chestRewardCredited && data.new_balance != null) {
         balance = Number(data.new_balance) || 0;
         balanceKnown = true;
     }
-    pendingChestClaimId = data.claim_id != null ? Number(data.claim_id) : null;
+    // claim_id не приводим к Number: строковый id «mem-…» отправится как есть.
+    pendingChestClaimId = data.claim_id != null ? data.claim_id : null;
     updateUI();
     isProcessing = false;
 
@@ -889,7 +891,7 @@ async function claimChestReward() {
     if (!chestAccessGranted()) return tg.showAlert(CHEST_MAINTENANCE_ALERT);
     const claimId = pendingChestClaimId;
     if (claimId == null) {
-        // Награда уже начислена сервером при открытии сундука — забирать нечего.
+        // Сервер не выдал claim_id — забирать нечего, но и не врём про баланс.
         hideChestRoulette();
         return;
     }
@@ -1116,6 +1118,26 @@ function upgradeChanceFor(fromValue, toValue) {
 
 function upgradeChance() { return upgradeRawChance(upgradeSourceValue(), upgradeTargetValue()); }
 
+// ================= ДОМ-ЭДЖ ПО БАЛАНСУ =================
+// Ровно те же числа, что в api.py: с баланса 1000 коинов реальный шанс ниже
+// расчётного. Клиент обязан рисовать ИМЕННО боевой шанс — иначе зелёная зона
+// обещала бы одно, а сервер решал по другому (это и был баг «на красном зашло»).
+const UPGRADE_HOUSE_EDGE_MIN_BALANCE = 1000;
+const UPGRADE_HOUSE_EDGE_FACTOR = 0.8;
+
+function upgradeHouseEdgeFactor(balanceValue) {
+    const value = Number(balanceValue === undefined ? balance : balanceValue);
+    if (!Number.isFinite(value)) return 1;
+    return value >= UPGRADE_HOUSE_EDGE_MIN_BALANCE ? UPGRADE_HOUSE_EDGE_FACTOR : 1;
+}
+
+// Шанс, по которому реально играем (и который рисуем на круге).
+function upgradeDisplayChance(raw) {
+    const base = raw === undefined ? upgradeChance() : Number(raw);
+    if (!Number.isFinite(base)) return 0;
+    return Math.max(0, Math.min(100, base * upgradeHouseEdgeFactor()));
+}
+
 function upgradeChanceIsValid(chance) {
     return chance >= 0.5 && chance <= UPGRADE_MAX_CHANCE;
 }
@@ -1178,7 +1200,9 @@ function releaseUpgradeChance() {
 }
 
 function upgradeRingChance() {
-    return upgradePlacedChance === null ? upgradeChance() : upgradePlacedChance;
+    // Пока раунд не сыгран — показываем боевой шанс (с дом-эджем), чтобы круг
+    // не «сжимался» в момент остановки стрелки.
+    return upgradePlacedChance === null ? upgradeDisplayChance() : upgradePlacedChance;
 }
 
 // ОДНА формула угла на весь круг: и заливка (--p), и белая риска границы,
@@ -1292,8 +1316,8 @@ function resetUpgradeRound() {
     const circle = document.getElementById('up-circle');
     if (circle) {
         circle.classList.remove('spinning', 'win', 'lose');
-        // Дуга снова показывает шанс текущей формы, а не прошлого раунда.
-        setUpgradeRingPercent(upgradeChance());
+        // Дуга снова показывает шанс текущей формы (с дом-эджем), а не прошлого раунда.
+        setUpgradeRingPercent(upgradeDisplayChance());
     }
     const btn = document.getElementById('upgrade-btn');
     if (btn) {
@@ -1464,6 +1488,7 @@ function renderUpgradeTargets() {
         UPGRADE_MULTS.forEach(mult => {
             const toValue = fromValue * mult;
             const chance = upgradeRawChance(fromValue, toValue);
+            const shownChance = upgradeDisplayChance(chance);
             const active = upgradeTarget.kind === 'mult' && Number(upgradeTarget.value) === mult;
             tiles.push({
                 key: `mult:${mult}`,
@@ -1472,25 +1497,27 @@ function renderUpgradeTargets() {
                 html: `<div class="up-to-tile-icon">${COIN_IMG}</div>
                        <div class="up-to-tile-name">x${mult}</div>
                        <div class="up-to-tile-value">${coinAmount(toValue)}</div>
-                       <div class="up-to-tile-chance">${chance.toFixed(2)}%</div>`
+                       <div class="up-to-tile-chance">${shownChance.toFixed(2)}%</div>`
             });
         });
         if (upgradeTarget.kind === 'chance') {
             const toValue = upgradeTargetValue(fromValue);
             const chance = upgradeRawChance(fromValue, toValue);
+            const shownChance = upgradeDisplayChance(chance);
             tiles.push({
                 key: `chance:${upgradeTarget.value}`,
                 active: true,
                 html: `<div class="up-to-tile-icon">🎯</div>
                        <div class="up-to-tile-name">${Number(upgradeTarget.value).toFixed(0)}%</div>
                        <div class="up-to-tile-value">${coinAmount(toValue)}</div>
-                       <div class="up-to-tile-chance">${chance.toFixed(2)}%</div>`
+                       <div class="up-to-tile-chance">${shownChance.toFixed(2)}%</div>`
             });
         }
     } else {
         ['capsule', 'uniq_capsule'].forEach(itemId => {
             const toValue = upgradePrice(itemId);
             const chance = upgradeRawChance(fromValue, toValue);
+            const shownChance = upgradeDisplayChance(chance);
             const active = upgradeTarget.kind === 'item' && upgradeTarget.value === itemId;
             const disabled = !upgradeChanceIsValid(chance);
             tiles.push({
@@ -1500,7 +1527,7 @@ function renderUpgradeTargets() {
                 html: `<div class="up-to-tile-icon">${upgradeItemEmoji(itemId)}</div>
                        <div class="up-to-tile-name">${itemId === 'uniq_capsule' ? 'Уник.' : 'Обычная'}</div>
                        <div class="up-to-tile-value">${coinAmount(toValue)}</div>
-                       <div class="up-to-tile-chance">${disabled ? '—' : chance.toFixed(2) + '%'}</div>`
+                       <div class="up-to-tile-chance">${disabled ? '—' : shownChance.toFixed(2) + '%'}</div>`
             });
         });
     }
