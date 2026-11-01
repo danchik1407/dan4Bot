@@ -62,6 +62,31 @@ CORS открыт (`allow_origins=["*"]`): в WebView Telegram Origin бывае
 именно она уходит игрокам: по «голому» https-адресу Telegram не передаёт
 `initData`, и авторизация в Mini App ломается.
 
+## 3.1. Если видите «Not Found»
+
+`Not Found` — это ответ 404. Ниже все места, где он раньше появлялся, и что теперь:
+
+| Что было не так | Было | Стало |
+|---|---|---|
+| В BotFather указан корень сервиса (без `/miniapp/`) | `Not Found` | 307 → `/miniapp/` |
+| В BotFather указан `/index.html`, `/app.js`, `/style.css` | `Not Found` | 307 → `/miniapp/<файл>` |
+| В BotFather указан адрес сервиса **dan4Bot** | `Not Found` | редирект в Mini App на aura-api |
+| Имя Web Service в Render ≠ адреса в коде (`aura-api-mppt` / `aura-api-mptt`) | Render отвечает 404 на весь домен | клиент сам находит живой `/api/health`, бот на старте пишет рабочий адрес в лог |
+| Запрос к `/api/...` несуществующего сервиса | `{"detail":"Not Found"}` | то же, но в `!сервисы` видно «❌ 404 Not Found» и подсказка про `AURA_API_URL` |
+| Открыли `/webapp`, `/main` и т.п. | `Not Found` | 404 с подсказкой: где Mini App, где `/api/health`, где `/api/docs` |
+
+Проверка адресов (в браузере или терминале):
+
+```bash
+curl -s https://<сервис>.onrender.com/api/health        # {"ok":true,"service":"aura-api",...}
+curl -sI https://<сервис>.onrender.com/                 # 307 → /miniapp/
+curl -sI https://<сервис>.onrender.com/index.html       # 307 → /miniapp/index.html
+```
+
+В боте (админ): `!сервисы` — покажет `✅ онлайн` или `❌ 404 Not Found` с причиной.
+Если нужного домена нет в коде — задайте переменную `AURA_API_URL` в сервисе dan4Bot,
+перезапуск не требуется для клиента: он всё равно возьмёт origin страницы `/miniapp/`.
+
 ## 4. Как проверить, что всё на двух сервисах
 
 1. В боте (админ): `!сервисы` — покажет статус `aura-api` (`/api/health`),

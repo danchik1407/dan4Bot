@@ -1,6 +1,6 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import RedirectResponse
+from fastapi.responses import JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 import asyncio
@@ -19,7 +19,10 @@ logger = logging.getLogger("aura-api")
 if not logger.handlers:
     logging.basicConfig(level=logging.INFO)
 
-app = FastAPI(title="AURA API", docs_url="/api/docs", openapi_url="/api/openapi.json")
+# Схему и документацию уводим под /api: корневые /docs и /openapi.json заняты
+# статикой Mini App, а «Not Found» на них только путал при настройке.
+app = FastAPI(title="AURA API", docs_url="/api/docs", redoc_url=None,
+              openapi_url="/api/openapi.json")
 
 # CORS: мини-аппка живёт на этом же сервисе, но запросы к API приходят из WebView
 # Telegram (Origin может быть https://web.telegram.org, t.me или вообще отсутствовать),
@@ -60,6 +63,21 @@ async def root_redirect():
     style.css/app.js относительные, и с корня они превратились бы в /style.css (404).
     """
     return RedirectResponse(url="/miniapp/", status_code=307)
+
+
+# Файлы, которые исторически пытаются открыть по корню сервиса.
+# Например, в BotFather указали https://aura-api-....onrender.com/index.html —
+# раньше это был голый «Not Found», теперь редирект в реальную папку статики.
+ROOT_STATIC_FILES = {
+    "index.html", "app.js", "style.css", "coin.png",
+    "chest_normal.jpg", "chest_gold.jpg", "avatar_placeholder.svg",
+}
+
+
+@app.get("/favicon.ico", include_in_schema=False)
+async def favicon():
+    """Пустой ответ вместо 404 в логах и в консоли браузера."""
+    return Response(status_code=204)
 
 
 @app.get("/api/health")
@@ -2009,6 +2027,46 @@ async def get_global_top():
 async def get_season_end():
     end_date = datetime.datetime(2026, 11, 1, 15, 0, 0)
     return {"end_timestamp": int(end_date.timestamp())}
+
+
+@app.get("/{filename}", include_in_schema=False)
+async def root_static_redirect(filename: str):
+    """Корневые ссылки на файлы Mini App → в /miniapp/.
+
+    Регистрируется ПОСЛЕДНИМ и работает только по белому списку, поэтому
+    /api/* и /miniapp/* он не перекрывает. Нужен из-за самой частой ошибки
+    настройки: в BotFather указывают корень сервиса или /index.html, а Mini App
+    живёт в /miniapp/ — и игрок видел просто «Not Found».
+    """
+    name = (filename or "").strip()
+    # /miniapp без слэша: catch-all перехватывает его раньше Mount, поэтому
+    # редирект на канонический /miniapp/ делаем здесь же.
+    if name == "miniapp":
+        return RedirectResponse(url="/miniapp/", status_code=307)
+    if name in ROOT_STATIC_FILES:
+        return RedirectResponse(url=f"/miniapp/{name}", status_code=307)
+    raise HTTPException(status_code=404, detail="Not Found")
+
+
+@app.exception_handler(404)
+async def not_found_handler(request: Request, exc: HTTPException):
+    """Понятный 404 вместо «Not Found» без подсказок.
+
+    Ошибка на /api/* остаётся машинно-читаемой (detail), а на «человеческих»
+    адресах добавлены подсказки: где лежит Mini App и какие пути существуют.
+    """
+    detail = getattr(exc, "detail", None) or "Not Found"
+    if request.url.path.startswith("/api/"):
+        return JSONResponse(status_code=404, content={"detail": detail})
+    return JSONResponse(status_code=404, content={
+        "detail": detail,
+        "path": request.url.path,
+        "hint": "Mini App раздаётся по /miniapp/ — в BotFather укажите "
+                "https://<домен-сервиса>/miniapp/",
+        "miniapp": "/miniapp/",
+        "api_health": "/api/health",
+        "api_docs": "/api/docs",
+    })
 
 
 if __name__ == "__main__":
