@@ -1793,7 +1793,13 @@ async def upgrade_action(data: UpgradeAction):
             new_coins = raw_coins
 
         # Фиксируем сам бросок: его видно в логе, поэтому «не выдалось» проверяемо.
+        # Вердикт железно = «бросок меньше шанса»: стрелка в круге стоит на этом же
+        # броске, поэтому «попал в сектор» и «засчитали победу» всегда совпадают.
+        # 0.00..99.99 — если вернуть ровно 100.00, при шансе 100% запись «roll < chance»
+        # дала бы проигрыш, хотя стрелка стоит в закрашенном секторе.
         roll = round(random.random() * 100.0, 2)
+        if roll >= 100.0:
+            roll = 99.99
         won = roll < real_chance
         win_item = None
         # payout — только для этого круга. Раньше здесь обнулялся сам win_amount:
@@ -1832,6 +1838,7 @@ async def upgrade_action(data: UpgradeAction):
                 "amount_from": amount,
                 "item_to": target,
                 "chance": round(visual_chance, 2),
+                "real_chance": round(real_chance, 2),
                 "roll": roll,
                 "log_id": log_id,
                 "win_item": win_item,
