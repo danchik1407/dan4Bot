@@ -241,7 +241,9 @@ supabase/migrations/20261106000000_stock_limits_on.sql
 выключен — играют все, апгрейд остаётся только за админами. Тиражи к открытию
 обнуляются файлом `supabase/migrations/20261107000000_open_launch_promo_rls_and_stock_reset.sql`
 (он же лечит RLS у `promocodes`: ошибка `42501 new row violates row-level
-security policy for table "promocodes"`).
+security policy for table "promocodes"`). Там же витрина стала одинаковой для
+всех: `ruby`, `diamond`, `galactic` больше не `admin_only` — обычный игрок видит
+все 5 капсул с тиражами.
 
 **Если счётчик не двигается:** почти всегда не применён
 `20261106000000_stock_limits_on.sql` (нет RPC или RLS режет `UPDATE`). В логах
