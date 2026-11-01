@@ -153,11 +153,16 @@ def _initial_stock_rows() -> list[dict]:
 
 
 def ensure_stock_rows(supabase_client) -> bool:
-    """Создаёт строки стока, которых не хватает. False — таблицы нет (миграция не применена)."""
+    """Создаёт недостающие строки тиража. True — строки на месте, False — создать не удалось.
+
+    Именно из-за пустой (или частично пустой) capsule_stock магазин показывал
+    «Осталось: 1 000 из 1 000», а покупка отвечала «Товар распродан»: списывать
+    было нечего. Поэтому результат теперь честный, а не «вроде всё ок».
+    """
     try:
         response = supabase_client.table(STOCK_TABLE).select("item_id").execute()
     except Exception as exc:  # noqa: BLE001 — таблицы может не быть до миграции
-        logger.warning("Сток капсул недоступен: %s", exc)
+        logger.error("ОШИБКА СТОКА: таблица %s недоступна: %s", STOCK_TABLE, exc)
         return False
 
     existing = {str(row.get("item_id")) for row in (response.data or [])}
@@ -166,9 +171,15 @@ def ensure_stock_rows(supabase_client) -> bool:
         return True
     try:
         supabase_client.table(STOCK_TABLE).insert(missing).execute()
+        print("СТОК: созданы недостающие строки тиража "
+              f"{[row['item_id'] for row in missing]}", flush=True)
+        return True
     except Exception as exc:  # noqa: BLE001 — параллельный воркер мог уже вставить строки
-        logger.warning("Не удалось инициализировать сток капсул: %s", exc)
-    return True
+        logger.error("ОШИБКА СТОКА: не удалось создать строки %s: %s. "
+                     "Нужна политика RLS и гранты — "
+                     "supabase/migrations/20261104000000_shop_stock_fix.sql",
+                     [row["item_id"] for row in missing], exc)
+        return False
 
 
 def load_stock(supabase_client) -> dict[str, int] | None:
@@ -207,6 +218,27 @@ def shop_stock_snapshot(supabase_client) -> dict[str, int] | None:
     return load_stock(supabase_client)
 
 
+def missing_stock_rows(stock: dict[str, int] | None) -> list[str]:
+    """Предметы каталога, у которых нет строки тиража: причина «1000 из 1000 → распродан»."""
+    if stock is None:
+        return []
+    return [item_id for item_id, item in SHOP_ITEMS.items()
+            if item.get("total_limit") is not None and item_id not in stock]
+
+
+def stock_known(item_id: str, item: dict, stock: dict[str, int] | None) -> bool:
+    """Знаем ли РЕАЛЬНЫЙ остаток.
+
+    Таблица может читаться, но строки для предмета нет (её не создали миграцией
+    или её удалили). Раньше в этом случае магазин показывал полный тираж —
+    «Осталось: 1 000 из 1 000», — а покупка отвечала «Товар распродан»,
+    потому что списывать было нечего. Теперь такой остаток считается НЕИЗВЕСТНЫМ.
+    """
+    if stock is None or item.get("total_limit") is None:
+        return False
+    return item_id in stock
+
+
 def stock_left(item_id: str, item: dict, stock: dict[str, int] | None) -> int | None:
     """Сколько осталось. None — у предмета нет общего лимита или сток неизвестен."""
     total_limit = item.get("total_limit")
@@ -241,7 +273,10 @@ def serialize_shop_items(is_admin: bool, stock: dict[str, int] | None = None) ->
     for item_id, item, left in available_shop_items(is_admin, stock):
         total_limit = item.get("total_limit")
         total = int(total_limit) if total_limit is not None else None
-        stock_left_value = left if left is not None else total
+        known = stock_known(item_id, item, stock)
+        # Остаток неизвестен — отдаём тираж как справочную цифру, но stock_ready=false,
+        # и клиент не рисует «Осталось: X из Y» (иначе он врал: см. stock_known).
+        stock_left_value = left if known else total
         payload.append({
             "id": item_id,
             "name": item["name"],
@@ -252,7 +287,7 @@ def serialize_shop_items(is_admin: bool, stock: dict[str, int] | None = None) ->
             "total_limit": total,
             "stock": stock_left_value,
             "stock_total": total,
-            "stock_ready": stock is not None,
+            "stock_ready": known,
             "shop_image": item["shop_image"],
             "inventory_image": item["inventory_image"],
         })
@@ -482,13 +517,48 @@ def reserve_stock(supabase_client, item_id: str) -> int | None:
             logger.error("ОШИБКА СТОКА: функция %s сообщила, что таблицы %s нет",
                          STOCK_TAKE_RPC, STOCK_TABLE)
             raise StockUnavailable("capsule_stock отсутствует")
-        if verdict == "sold_out":
-            print(f"СТОК {item_id}: распродан — отдаём «Товар распродан»", flush=True)
-            raise StockSoldOut(item_id)
+        if verdict == "ok":
+            if left is None:
+                left = _read_stock_remaining(supabase_client, item_id)
+            logger.info("Сток %s: списано → %s", item_id, left)
+            return left
+
+        # verdict == "sold_out": -1/False бывает и когда строки в таблице нет
+        # (её не создали, удалили, RLS режет UPDATE) — а магазин показывал
+        # «Осталось: 1000 из 1000». Прежде чем говорить «распродан», читаем таблицу.
+        left = _read_stock_remaining(supabase_client, item_id)   # заодно создаёт строки
         if left is None:
-            left = _read_stock_remaining(supabase_client, item_id)
-        logger.info("Сток %s: -1 → %s", item_id, left)
-        return left
+            # Строки нет и создать не удалось (RLS/права). Это НЕ «распродано»:
+            # тираж не ведётся — продаём, но остаток не показываем.
+            print(f"ОШИБКА СТОКА: {item_id} нет строки в {STOCK_TABLE} — "
+                  f"примените supabase/migrations/20261104000000_shop_stock_fix.sql", flush=True)
+            raise StockUnavailable(f"нет строки {item_id} в {STOCK_TABLE}")
+
+        if left <= 0:
+            print(f"СТОК {item_id}: распродан (в таблице 0) — «Товар распродан»", flush=True)
+            raise StockSoldOut(item_id)
+
+        # Остаток в таблице есть, а списание не прошло. Самая частая причина —
+        # строки только что создали (или PostgREST ещё греет кэш схемы): одна
+        # повторная попытка закрывает этот случай без ложного «распродан».
+        found_retry, data_retry, params_retry = _call_take_stock(supabase_client, item_id)
+        if found_retry:
+            verdict_retry, left_retry = _interpret_take_result(data_retry)
+            print(f"СТОК {item_id}: повтор {params_retry} → {data_retry!r} ({verdict_retry})",
+                  flush=True)
+            if verdict_retry == "ok":
+                if left_retry is None:
+                    left_retry = _read_stock_remaining(supabase_client, item_id)
+                return left_retry
+            left = _read_stock_remaining(supabase_client, item_id) or left
+
+        # Так и не списали, хотя остаток есть: функция/RLS не применяет UPDATE.
+        # Покупку не отменяем, но и остаток не выдумываем (stock_ready=false).
+        print(f"ОШИБКА СТОКА: RPC вернула «распродано», но в таблице {item_id}: {left} — "
+              f"списание не применяется (нужны SECURITY DEFINER и политика RLS из "
+              f"20261104000000_shop_stock_fix.sql)", flush=True)
+        logger.error("Сток %s: RPC сказала «распродано», а в таблице %s", item_id, left)
+        raise StockUnavailable(f"списание не применилось, в таблице {left}")
 
     # Функции нет вообще (миграция не применена) — последний шанс: условный UPDATE.
     logger.warning("RPC %s не найдена — списываем условным UPDATE (старая схема)",
