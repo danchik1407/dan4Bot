@@ -1,5 +1,6 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 import asyncio
@@ -18,12 +19,64 @@ logger = logging.getLogger("aura-api")
 if not logger.handlers:
     logging.basicConfig(level=logging.INFO)
 
-app = FastAPI()
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"],
-                   allow_headers=["*"])
+app = FastAPI(title="AURA API", docs_url="/api/docs", openapi_url="/api/openapi.json")
 
-if os.path.exists("miniapp"):
-    app.mount("/miniapp", StaticFiles(directory="miniapp", html=True), name="miniapp")
+# CORS: мини-аппка живёт на этом же сервисе, но запросы к API приходят из WebView
+# Telegram (Origin может быть https://web.telegram.org, t.me или вообще отсутствовать),
+# поэтому разрешаем все источники. Куки/сессии не используем — авторизация только
+# через подписанный initData, так что "*" здесь безопасен.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+    expose_headers=["*"],
+    max_age=86400,
+)
+
+# ==================== СТАТИКА MINI APP ====================
+# Архитектура проекта — ДВА сервиса Render:
+#   aura-api (этот файл) — FastAPI + раздача miniapp (index.html/app.js/style.css);
+#   dan4Bot             — aiogram (bot.py), статику не раздаёт.
+# Путь считаем от самого файла: на Render рабочий каталог может отличаться,
+# из-за этого раньше статика могла «не подняться» и Mini App отдавал 404.
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+MINIAPP_DIR = os.path.join(BASE_DIR, "miniapp")
+
+if os.path.isdir(MINIAPP_DIR):
+    # То же самое, что app.mount("/miniapp", StaticFiles(directory="miniapp", html=True)),
+    # только путь абсолютный: на Render рабочий каталог процесса может отличаться от корня репозитория.
+    app.mount("/miniapp", StaticFiles(directory=MINIAPP_DIR, html=True), name="miniapp")
+else:  # pragma: no cover — защита от кривого деплоя
+    logger.error("Папка miniapp не найдена (%s): Mini App не будет раздаваться", MINIAPP_DIR)
+
+
+@app.get("/", include_in_schema=False)
+async def root_redirect():
+    """Корень сервиса ведёт на Mini App.
+
+    Именно 307-редирект, а не отдача index.html с «/»: в index.html пути к
+    style.css/app.js относительные, и с корня они превратились бы в /style.css (404).
+    """
+    return RedirectResponse(url="/miniapp/", status_code=307)
+
+
+@app.get("/api/health")
+async def health():
+    """Проверка сервиса: Render health check + админская диагностика в боте."""
+    return {
+        "ok": True,
+        "service": "aura-api",
+        "static": {
+            "dir": "miniapp",
+            "ready": os.path.isfile(os.path.join(MINIAPP_DIR, "index.html")),
+            "url": "/miniapp/",
+        },
+        # MAINTENANCE_MODE объявлен ниже по файлу, но к моменту запроса уже существует.
+        "maintenance": MAINTENANCE_MODE,
+    }
+
 
 supabase: Client = create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_KEY"))
 BOT_TOKEN = os.getenv("BOT_TOKEN")

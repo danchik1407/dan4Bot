@@ -5,18 +5,42 @@ const user = tg.initDataUnsafe?.user;
 if (user) {
     document.getElementById('user-name').innerText = user.first_name;
     document.getElementById('profile-name').innerText = user.first_name;
+    // Аватар — локальная заглушка avatar_placeholder.svg: внешний via.placeholder.com
+    // в WebView Telegram грузился через раз и оставлял битую картинку.
     if (user.photo_url) {
         document.getElementById('user-avatar').src = user.photo_url;
         document.getElementById('profile-avatar-large').src = user.photo_url;
     }
 }
 
-const API_URL = "https://aura-api-mptt.onrender.com";
+// ================= АДРЕС API =================
+// Мини-аппку раздаёт сам сервис aura-api (Render), поэтому по умолчанию стучимся
+// на ТОТ ЖЕ origin, с которого загружена страница: домен физически не может
+// «разъехаться» с сервисом (опечатка в константе раньше ломала все запросы).
+// Абсолютный адрес остаётся запасным вариантом — только если страницу открыли
+// не с нашего сервера (локальный файл, сторонний хостинг статики).
+const API_URL_FALLBACK = "https://aura-api-mptt.onrender.com";
+
+function resolveApiUrl(loc) {
+    const fallback = API_URL_FALLBACK;
+    try {
+        if (!loc || !/^https?:$/.test(loc.protocol) || !loc.hostname) return fallback;
+        const host = String(loc.hostname).toLowerCase();
+        const servedByOurService = host.endsWith(".onrender.com")
+            || host === "localhost" || host === "127.0.0.1";
+        if (!servedByOurService) return fallback;
+        return String(loc.origin).replace(/\/+$/, "");
+    } catch (e) {
+        return fallback;
+    }
+}
+
+const API_URL = resolveApiUrl(typeof location !== "undefined" ? location : null);
 // Каталог приходит с сервера и уже отфильтрован: капсулы для админов не попадают в ответ обычным игрокам.
 let SHOP_ITEMS = {};
 let shopItemsLoaded = false;
 // Актуальные картинки капсул (PNG с прозрачным фоном). Держим их и на клиенте:
-// если сервер отдаст старый путь (capsule_card.jpg) или вообще без картинки,
+// если сервер отдаст старый jpg-путь или вообще без картинки,
 // магазин и инвентарь всё равно покажут нормальный арт, а не чёрный квадрат.
 const SHOP_IMAGE_FALLBACK = {
     capsule: 'cap_shop_normal.png',

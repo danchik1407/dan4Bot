@@ -8,13 +8,13 @@ import json
 from types import SimpleNamespace
 from dotenv import load_dotenv
 from aiogram import Bot, Dispatcher, F, Router
-from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, FSInputFile, Dice, \
-    WebAppInfo
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, FSInputFile
 from aiogram.enums import ChatMemberStatus
 from aiogram.filters import StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiohttp import web
+import aiohttp                     # клиент для проверки сервиса aura-api (/api/health)
+from aiohttp import web            # только для start_fake_website (порт Render)
 from supabase import create_client, Client
 from shop_catalog import (
     ShopPurchaseError,
@@ -44,7 +44,20 @@ if not SUPABASE_URL or not SUPABASE_KEY: raise SystemExit("❌ ОШИБКА: Н�
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 COOLDOWN_SECONDS = 5 * 60 * 60
-MINIAPP_URL = "https://t.me/Auragameplay_bot/Auragame"
+
+# ================= АДРЕСА СЕРВИСОВ (Render) =================
+# Проект работает строго на ДВУХ сервисах Render:
+#   1) aura-api — FastAPI (api.py): игры + раздача статики Mini App (/miniapp);
+#   2) dan4Bot  — этот процесс (bot.py): только aiogram, без веб-сервера кроме
+#      start_fake_website (он нужен, чтобы Render видел открытый порт).
+# Оба сервиса смотрят в одну базу Supabase, поэтому баланс в боте и в аппке общий.
+API_URL = (os.getenv("AURA_API_URL") or "https://aura-api-mptt.onrender.com").rstrip("/")
+# Именно этот адрес должен быть прописан в BotFather → Configure Mini App.
+WEBAPP_URL = os.getenv("AURA_WEBAPP_URL") or f"{API_URL}/miniapp/"
+# Внутри Telegram мини-аппка открывается прямой ссылкой t.me/<бот>/<short_name>:
+# по «голому» https-адресу WebView не передаёт initData и авторизация ломается.
+# short_name задаётся в BotFather → Configure Mini App, а сам URL там = WEBAPP_URL.
+MINIAPP_URL = os.getenv("MINIAPP_URL") or "https://t.me/Auragameplay_bot/Auragame"
 CHALLENGE_TIMEOUT = 60
 COIN_DROP_CHANCE = 0.005
 COIN_DROP_MIN = 1
@@ -899,6 +912,46 @@ async def cmd_upgrade(message: Message):
     await message.answer(text, parse_mode="HTML", reply_markup=kb, disable_web_page_preview=True)
 
 
+# ================= ДИАГНОСТИКА СЕРВИСОВ (АДМИНЫ) =================
+@dp.message(F.text.func(lambda t: strip_prefix(t).lower().startswith(("сервис", "service"))))
+async def cmd_services(message: Message):
+    """Показывает, что проект действительно живёт на двух сервисах Render."""
+    if not is_admin(message.from_user.id):
+        return await message.answer("❌ Команда доступна только администраторам бота.")
+
+    api_status = "не ответил"
+    api_details = ""
+    try:
+        timeout = aiohttp.ClientTimeout(total=12)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(f"{API_URL}/api/health") as response:
+                data = await response.json(content_type=None)
+                if response.status == 200 and data.get("ok"):
+                    static = data.get("static") or {}
+                    api_status = "✅ онлайн"
+                    api_details = (
+                        f"\n• статика miniapp: {'✅' if static.get('ready') else '❌'} ({static.get('url', '/miniapp/')})"
+                        f"\n• техработы: {'включены' if data.get('maintenance') else 'выключены'}"
+                    )
+                else:
+                    api_status = f"⚠️ ответил кодом {response.status}"
+    except Exception as exc:  # noqa: BLE001 — диагностика не должна падать
+        api_status = f"❌ {type(exc).__name__}"
+
+    text = (
+        "🖥️ <b>СЕРВИСЫ ПРОЕКТА</b>\n━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"1️⃣ <b>aura-api</b> (FastAPI): {api_status}{api_details}\n"
+        f"   • API: <code>{API_URL}</code>\n"
+        f"   • Mini App: <code>{WEBAPP_URL}</code>\n\n"
+        "2️⃣ <b>dan4Bot</b> (aiogram): ✅ этот процесс\n"
+        "   • веб-сервер только для порта Render (start_fake_website)\n"
+        "   • игровые данные читает из общей базы Supabase\n\n"
+        f"🔗 Ссылка для игроков: {MINIAPP_URL}\n"
+        "ℹ️ В BotFather → Configure Mini App должен быть указан адрес aura-api."
+    )
+    await message.answer(text, parse_mode="HTML", disable_web_page_preview=True)
+
+
 # ================= ВЫДАТЬ КЛЮЧИ =================
 @dp.message(F.text.func(lambda t: strip_prefix(t).lower().startswith("выдать ключ")))
 async def cmd_admin_give_key(message: Message):
@@ -1092,9 +1145,18 @@ async def cmd_tag(message: Message):
 
 @dp.message(F.text.func(lambda t: strip_prefix(t).lower().startswith("апка")))
 async def cmd_apka(message: Message):
+    # Ссылка берётся из MINIAPP_URL (BotFather → прямой линк на мини-апп),
+    # а сам мини-апп раздаёт сервис aura-api: WEBAPP_URL.
     text = (
-        "📱 <b>Наше Mini App!</b>\n\n🎮 Заходи в наше казино прямо из Telegram:\n👉 <a href='http://t.me/Auragameplay_bot/Auragame'>http://t.me/Auragameplay_bot/Auragame</a>\n\n💰 Там тебя ждут сундуки, рулетка, мины и краш с общим балансом!")
-    await message.answer(text, parse_mode="HTML")
+        "📱 <b>Наше Mini App!</b>\n\n"
+        "🎮 Заходи в наше казино прямо из Telegram:\n"
+        f"👉 <a href='{MINIAPP_URL}'>{MINIAPP_URL}</a>\n\n"
+        "💰 Там тебя ждут сундуки, рулетка, мины и краш с общим балансом!"
+    )
+    kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="🎮 Открыть AURA GAME", url=MINIAPP_URL)
+    ]])
+    await message.answer(text, parse_mode="HTML", reply_markup=kb, disable_web_page_preview=True)
 
 
 # ================= СКРЫТЫЕ КОМАНДЫ =================
@@ -1197,6 +1259,12 @@ dp.include_router(misc_router)
 
 
 async def start_fake_website():
+    """Минимальный HTTP-ответ для Render.
+
+    Render убивает Web Service без открытого порта, а бот работает на long-polling.
+    Этот сервер НЕ раздаёт Mini App и не обрабатывает игры — за них отвечает
+    отдельный сервис aura-api (api.py). Не добавляйте сюда статику/API.
+    """
     port = int(os.environ.get('PORT', 10000))
     app = web.Application()
     app.router.add_get('/', lambda r: web.Response(text="Bot is running!"))
