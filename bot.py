@@ -8,7 +8,7 @@ import json
 from types import SimpleNamespace
 from dotenv import load_dotenv
 from aiogram import Bot, Dispatcher, F, Router
-from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, FSInputFile
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, FSInputFile, WebAppInfo
 from aiogram.enums import ChatMemberStatus
 from aiogram.filters import StateFilter
 from aiogram.fsm.context import FSMContext
@@ -62,10 +62,32 @@ API_URL_CANDIDATES = [
 API_URL = (os.getenv("AURA_API_URL") or API_URL_CANDIDATES[0]).rstrip("/")
 # Именно этот адрес должен быть прописан в BotFather → Configure Mini App.
 WEBAPP_URL = os.getenv("AURA_WEBAPP_URL") or f"{API_URL}/miniapp/"
-# Внутри Telegram мини-аппка открывается прямой ссылкой t.me/<бот>/<short_name>:
-# по «голому» https-адресу WebView не передаёт initData и авторизация ломается.
-# short_name задаётся в BotFather → Configure Mini App, а сам URL там = WEBAPP_URL.
-MINIAPP_URL = os.getenv("MINIAPP_URL") or "https://t.me/Auragameplay_bot/Auragame"
+# Внутри Telegram мини-аппку открывают двумя способами:
+#   1) кнопкой с web_app (WebAppInfo) — работает в личке и не зависит от short_name;
+#   2) прямой ссылкой t.me/<бот>/<short_name> — нужна, чтобы переслать другу.
+# Внутри ссылки (2) имя бота пишется вручную и часто устаревает: бот переименован,
+# short_name в BotFather другой — и команда «апка» даёт «не рабочую ссылку».
+# Поэтому username берём у Telegram (get_me) при старте, а short_name — из env
+# MINIAPP_SHORT_NAME (по умолчанию Auragame, как в BotFather → Configure Mini App).
+MINIAPP_SHORT_NAME = (os.getenv("MINIAPP_SHORT_NAME") or "Auragame").strip().strip("/")
+BOT_USERNAME = (os.getenv("BOT_USERNAME") or "").strip().lstrip("@")
+# Явный override: если ссылку нужно жёстко зафиксировать.
+MINIAPP_URL = os.getenv("MINIAPP_URL") or ""
+
+
+def miniapp_direct_url() -> str:
+    """Прямая ссылка t.me/<бот>/<short_name> для пересылки друзьям.
+
+    Строится из НАСТОЯЩЕГО @username (его отдаёт Telegram), поэтому
+    переименование бота больше не ломает команду «апка».
+    """
+    override = (os.getenv("MINIAPP_URL") or MINIAPP_URL or "").strip()
+    if override:
+        return override
+    if BOT_USERNAME:
+        return f"https://t.me/{BOT_USERNAME}/{MINIAPP_SHORT_NAME}"
+    return f"https://t.me/{MINIAPP_SHORT_NAME}"
+
 CHALLENGE_TIMEOUT = 60
 COIN_DROP_CHANCE = 0.005
 COIN_DROP_MIN = 1
@@ -1159,17 +1181,35 @@ async def cmd_tag(message: Message):
 
 @dp.message(F.text.func(lambda t: strip_prefix(t).lower().startswith("апка")))
 async def cmd_apka(message: Message):
-    # Ссылка берётся из MINIAPP_URL (BotFather → прямой линк на мини-апп),
-    # а сам мини-апп раздаёт сервис aura-api: WEBAPP_URL.
+    """Ссылка на Mini App.
+
+    Раньше кнопка вела на захардкоженный t.me/<старый_бот>/<short_name>: стоило
+    переименовать бота или указать в BotFather другой short_name — и Telegram
+    открывал пустую страницу («ссылка не рабочая»). Теперь:
+      • в личке — кнопка web_app с адресом aura-api (WEBAPP_URL): Telegram сам
+        открывает приложение и передаёт initData, короткое имя не нужно вовсе;
+      • плюс отдельная кнопка с прямой ссылкой t.me/<текущий_бот>/<short_name>
+        (username спрашиваем у Telegram), чтобы переслать другу;
+      • если что-то пошло не так — в тексте есть и обычная https-ссылка.
+    """
+    direct = miniapp_direct_url()
+    rows = []
+    if message.chat.type == "private":
+        rows.append([InlineKeyboardButton(text="🎮 Открыть AURA GAME", web_app=WebAppInfo(url=WEBAPP_URL))])
+        rows.append([InlineKeyboardButton(text="🔗 Ссылка для друзей", url=direct)])
+    else:
+        # В группах Telegram запрещает кнопки web_app — только обычная ссылка.
+        rows.append([InlineKeyboardButton(text="🎮 Открыть AURA GAME", url=direct)])
+
     text = (
         "📱 <b>Наше Mini App!</b>\n\n"
         "🎮 Заходи в наше казино прямо из Telegram:\n"
-        f"👉 <a href='{MINIAPP_URL}'>{MINIAPP_URL}</a>\n\n"
+        f"👉 <a href='{WEBAPP_URL}'>{WEBAPP_URL}</a>\n\n"
         "💰 Там тебя ждут сундуки, рулетка, мины и краш с общим балансом!"
     )
-    kb = InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="🎮 Открыть AURA GAME", url=MINIAPP_URL)
-    ]])
+    if message.chat.type != "private":
+        text += f"\n\n🔗 Прямая ссылка: <a href='{direct}'>{direct}</a>"
+    kb = InlineKeyboardMarkup(inline_keyboard=rows)
     await message.answer(text, parse_mode="HTML", reply_markup=kb, disable_web_page_preview=True)
 
 
@@ -1371,10 +1411,16 @@ async def start_fake_website():
 
 
 async def main():
+    global BOT_USERNAME
     await start_fake_website()
     await resolve_api_url()          # выправляем адрес aura-api до первого запроса
     me = await bot.get_me()
-    logger.info(f"🤖 Бот: @{me.username}")
+    if me.username:
+        # Настоящее имя бота: из него строится прямая ссылка на Mini App,
+        # поэтому «апка» больше не зависит от устаревшей константы в коде.
+        BOT_USERNAME = me.username
+    logger.info(f"🤖 Бот: @{me.username} | Mini App: {WEBAPP_URL}")
+    logger.info(f"🔗 Прямая ссылка Mini App: {miniapp_direct_url()}")
     await dp.start_polling(bot)
 
 

@@ -51,16 +51,31 @@ CORS открыт (`allow_origins=["*"]`): в WebView Telegram Origin бывае
   - `SUPABASE_KEY`
   - (необязательно) `AURA_API_URL` — по умолчанию `https://aura-api-mptt.onrender.com`
   - (необязательно) `AURA_WEBAPP_URL` — по умолчанию `AURA_API_URL + "/miniapp/"`
-  - (необязательно) `MINIAPP_URL` — прямая ссылка `t.me/<бот>/<short_name>`
+  - (необязательно) `MINIAPP_SHORT_NAME` — короткое имя из BotFather (по умолчанию `Auragame`)
+  - (необязательно) `MINIAPP_URL` — если нужно жёстко задать прямую ссылку `t.me/<бот>/<short_name>`
+  - (необязательно) `BOT_USERNAME` — имя бота без `@`; по умолчанию берётся у Telegram при старте
   - Render сам добавляет `PORT` — его слушает `start_fake_website`
 
 ## 3. BotFather
 
 `Configure Mini App` → **Web App URL** должен быть
 `https://aura-api-mptt.onrender.com/miniapp/` (то есть `WEBAPP_URL` из `bot.py`).
-`short_name` (`Auragame`) даёт ссылку `https://t.me/Auragameplay_bot/Auragame` —
-именно она уходит игрокам: по «голому» https-адресу Telegram не передаёт
-`initData`, и авторизация в Mini App ломается.
+`short_name` (`Auragame`) даёт прямую ссылку `https://t.me/<ваш_бот>/Auragame`.
+
+**Как бот формирует ссылку в `!апка`:**
+
+1. В личке — кнопка `web_app` с адресом `WEBAPP_URL` (это Mini App на aura-api).
+   Telegram открывает приложение сам и передаёт `initData`, короткое имя тут не
+   участвует — поэтому кнопка работает даже если `short_name` в BotFather другой.
+2. Вторая кнопка — прямая ссылка `t.me/<бот>/<short_name>` для пересылки другу.
+   `<бот>` подставляется из `get_me()` при старте, а не из константы в коде:
+   после переименования бота ссылка не ломается.
+3. В группе (Telegram запрещает там `web_app`) остаётся только эта прямая ссылка.
+
+Если в BotFather `short_name` не `Auragame` — задайте `MINIAPP_SHORT_NAME` в
+сервисе dan4Bot или `MINIAPP_URL` целиком; перезапуск бота применит значение.
+Имя бота обязано совпадать с реальным `@username` — иначе `t.me` покажет пустую
+страницу (про это в логах: `🔗 Прямая ссылка Mini App: …`).
 
 ## 3.1. Если видите «Not Found»
 

@@ -70,7 +70,7 @@ async def root_redirect():
 # раньше это был голый «Not Found», теперь редирект в реальную папку статики.
 ROOT_STATIC_FILES = {
     "index.html", "app.js", "style.css", "coin.png",
-    "chest_normal.jpg", "chest_gold.jpg", "avatar_placeholder.svg",
+    "chest_normal.png", "chest_gold.png", "avatar_placeholder.svg",
 }
 
 
