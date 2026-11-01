@@ -51,7 +51,15 @@ COOLDOWN_SECONDS = 5 * 60 * 60
 #   2) dan4Bot  — этот процесс (bot.py): только aiogram, без веб-сервера кроме
 #      start_fake_website (он нужен, чтобы Render видел открытый порт).
 # Оба сервиса смотрят в одну базу Supabase, поэтому баланс в боте и в аппке общий.
-API_URL = (os.getenv("AURA_API_URL") or "https://aura-api-mptt.onrender.com").rstrip("/")
+# Адрес API берём из переменной окружения, а если она не задана — проверяем
+# известные варианты имени сервиса. Render на НЕСУЩЕСТВУЮЩЕМ имени сервиса
+# отвечает 404 «Not Found», поэтому адрес нельзя просто «угадать» в константе:
+# при старте бот сам находит живой и пишет в лог.
+API_URL_CANDIDATES = [
+    "https://aura-api-mppt.onrender.com",
+    "https://aura-api-mptt.onrender.com",
+]
+API_URL = (os.getenv("AURA_API_URL") or API_URL_CANDIDATES[0]).rstrip("/")
 # Именно этот адрес должен быть прописан в BotFather → Configure Mini App.
 WEBAPP_URL = os.getenv("AURA_WEBAPP_URL") or f"{API_URL}/miniapp/"
 # Внутри Telegram мини-аппка открывается прямой ссылкой t.me/<бот>/<short_name>:
@@ -919,24 +927,30 @@ async def cmd_services(message: Message):
     if not is_admin(message.from_user.id):
         return await message.answer("❌ Команда доступна только администраторам бота.")
 
+    result = await fetch_health(API_URL, timeout=12)
+    status = result.get("status")
+    data = result.get("data") or {}
     api_status = "не ответил"
     api_details = ""
-    try:
-        timeout = aiohttp.ClientTimeout(total=12)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.get(f"{API_URL}/api/health") as response:
-                data = await response.json(content_type=None)
-                if response.status == 200 and data.get("ok"):
-                    static = data.get("static") or {}
-                    api_status = "✅ онлайн"
-                    api_details = (
-                        f"\n• статика miniapp: {'✅' if static.get('ready') else '❌'} ({static.get('url', '/miniapp/')})"
-                        f"\n• техработы: {'включены' if data.get('maintenance') else 'выключены'}"
-                    )
-                else:
-                    api_status = f"⚠️ ответил кодом {response.status}"
-    except Exception as exc:  # noqa: BLE001 — диагностика не должна падать
-        api_status = f"❌ {type(exc).__name__}"
+    if status is None:
+        api_status = f"❌ {result.get('error', 'нет связи')}"
+        api_details = "\n• проверьте, что Web Service запущен и имя в Render верное"
+    elif status == 404:
+        api_status = "❌ 404 Not Found"
+        api_details = (
+            "\n• такого сервиса/пути нет: скорее всего имя Web Service в Render"
+            " отличается от адреса в настройках"
+            "\n• исправьте AURA_API_URL на реальный адрес сервиса"
+        )
+    elif status == 200 and isinstance(data, dict) and data.get("service") == "aura-api":
+        static = data.get("static") or {}
+        api_status = "✅ онлайн"
+        api_details = (
+            f"\n• статика miniapp: {'✅' if static.get('ready') else '❌'} ({static.get('url', '/miniapp/')})"
+            f"\n• техработы: {'включены' if data.get('maintenance') else 'выключены'}"
+        )
+    else:
+        api_status = f"⚠️ ответил кодом {status}"
 
     text = (
         "🖥️ <b>СЕРВИСЫ ПРОЕКТА</b>\n━━━━━━━━━━━━━━━━━━━━\n\n"
@@ -1258,6 +1272,68 @@ dp.include_router(promo_router)
 dp.include_router(misc_router)
 
 
+async def fetch_health(base: str, timeout: float = 8.0) -> dict:
+    """Запрашивает /api/health и возвращает разбор ответа.
+
+    {"status": 200, "data": {...}} — сервис ответил;
+    {"status": 404, ...}         — такого сервиса/пути нет (частая причина
+                                   «Not Found»: неверное имя Web Service в Render);
+    {"status": None, "error": "…"} — сеть/DNS/таймаут.
+    """
+    url = f"{base.rstrip('/')}/api/health"
+    try:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=timeout)) as session:
+            async with session.get(url) as response:
+                data = None
+                try:
+                    data = await response.json(content_type=None)
+                except Exception:  # noqa: BLE001 — тело может быть не JSON
+                    data = None
+                return {"status": response.status, "data": data, "url": url}
+    except Exception as exc:  # noqa: BLE001 — сетевая диагностика не должна падать
+        logger.warning("aura-api недоступен по %s: %s: %s", base, type(exc).__name__, exc)
+        return {"status": None, "error": f"{type(exc).__name__}", "url": url}
+
+
+async def probe_api(base: str, timeout: float = 8.0) -> bool:
+    """Живой ли это aura-api: /api/health отвечает service == "aura-api"."""
+    result = await fetch_health(base, timeout)
+    data = result.get("data") or {}
+    return result.get("status") == 200 and isinstance(data, dict) and data.get("service") == "aura-api"
+
+
+async def resolve_api_url() -> str:
+    """Проверяет адрес API и при необходимости переключается на рабочий.
+
+    Порядок: адрес из env (если задан) → первый кандидат → остальные.
+    Возвращает текущий (уже выправленный) API_URL.
+    """
+    global API_URL, WEBAPP_URL
+    override = (os.getenv("AURA_API_URL") or "").strip().rstrip("/")
+    candidates = []
+    for base in ([override] if override else []) + [API_URL] + API_URL_CANDIDATES:
+        base = (base or "").strip().rstrip("/")
+        if base and base not in candidates:
+            candidates.append(base)
+
+    for base in candidates:
+        if await probe_api(base):
+            if base != API_URL:
+                logger.warning("aura-api найден по адресу %s (в настройках был %s) — переключаюсь", base, API_URL)
+            API_URL = base
+            if not os.getenv("AURA_WEBAPP_URL"):
+                WEBAPP_URL = f"{API_URL}/miniapp/"
+            logger.info("✅ aura-api: %s | Mini App: %s", API_URL, WEBAPP_URL)
+            return API_URL
+
+    logger.error(
+        "❌ aura-api не найден ни по одному адресу (%s). "
+        "Проверьте имя Web Service в Render и переменную AURA_API_URL.",
+        ", ".join(candidates),
+    )
+    return API_URL
+
+
 async def start_fake_website():
     """Минимальный HTTP-ответ для Render.
 
@@ -1267,8 +1343,27 @@ async def start_fake_website():
     """
     port = int(os.environ.get('PORT', 10000))
     app = web.Application()
-    app.router.add_get('/', lambda r: web.Response(text="Bot is running!"))
-    app.router.add_get('/health', lambda r: web.Response(text="OK"))
+
+    async def index(request):
+        return web.json_response({
+            "ok": True,
+            "service": "dan4Bot",
+            "info": "Telegram-бот на long-polling. Mini App раздаёт сервис aura-api.",
+            "miniapp": WEBAPP_URL,
+        })
+
+    async def health(request):
+        return web.Response(text="OK")
+
+    async def anything_else(request):
+        # Самая частая ошибка настройки: в BotFather указан адрес ЭТОГО сервиса.
+        # Раньше игрок получал голый 404 «Not Found» — теперь его просто
+        # перекидывает в Mini App на aura-api.
+        raise web.HTTPFound(WEBAPP_URL)
+
+    app.router.add_get('/', index)
+    app.router.add_get('/health', health)
+    app.router.add_get('/{tail:.*}', anything_else)
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, '0.0.0.0', port)
@@ -1277,6 +1372,7 @@ async def start_fake_website():
 
 async def main():
     await start_fake_website()
+    await resolve_api_url()          # выправляем адрес aura-api до первого запроса
     me = await bot.get_me()
     logger.info(f"🤖 Бот: @{me.username}")
     await dp.start_polling(bot)

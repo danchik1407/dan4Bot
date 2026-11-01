@@ -14,28 +14,107 @@ if (user) {
 }
 
 // ================= АДРЕС API =================
-// Мини-аппку раздаёт сам сервис aura-api (Render), поэтому по умолчанию стучимся
-// на ТОТ ЖЕ origin, с которого загружена страница: домен физически не может
-// «разъехаться» с сервисом (опечатка в константе раньше ломала все запросы).
-// Абсолютный адрес остаётся запасным вариантом — только если страницу открыли
-// не с нашего сервера (локальный файл, сторонний хостинг статики).
-const API_URL_FALLBACK = "https://aura-api-mptt.onrender.com";
+// Мини-аппку раздаёт сам сервис aura-api, поэтому главное правило простое:
+// если страница открыта из /miniapp/ — API находится на ЭТОМ ЖЕ домене.
+// Так адрес не зависит от имени сервиса в Render: опечатка в константе
+// (aura-api-mppt / mptt) больше не превращает все запросы в «Not Found».
+// Абсолютные адреса — только запасные, для случая «страницу открыли не с нашего
+// сервера» (файл с диска, сторонний хостинг статики). Если и они не отвечают,
+// приложение само находит живой сервис через /api/health (см. recoverApiUrl).
+const API_URL_CANDIDATES = [
+    "https://aura-api-mppt.onrender.com",
+    "https://aura-api-mptt.onrender.com",
+];
+const API_URL_FALLBACK = API_URL_CANDIDATES[0];
 
-function resolveApiUrl(loc) {
-    const fallback = API_URL_FALLBACK;
+function normalizeApiUrl(url) {
+    return String(url === null || url === undefined ? "" : url)
+        .replace(/\/+$/, "")
+        // «/miniapp» в конце не нужен: дальше всегда приписывается /api/...
+        .replace(/\/miniapp$/, "");
+}
+
+// Путь вида /miniapp/ или /miniapp/index.html значит «страницу отдал aura-api».
+function servedFromMiniApp(loc) {
     try {
-        if (!loc || !/^https?:$/.test(loc.protocol) || !loc.hostname) return fallback;
-        const host = String(loc.hostname).toLowerCase();
-        const servedByOurService = host.endsWith(".onrender.com")
-            || host === "localhost" || host === "127.0.0.1";
-        if (!servedByOurService) return fallback;
-        return String(loc.origin).replace(/\/+$/, "");
+        return /^\/miniapp(\/|$)/.test(String(loc.pathname || "/"));
     } catch (e) {
-        return fallback;
+        return false;
     }
 }
 
-const API_URL = resolveApiUrl(typeof location !== "undefined" ? location : null);
+function resolveApiUrl(loc) {
+    try {
+        if (!loc || !/^https?:$/.test(loc.protocol) || !loc.hostname) return API_URL_FALLBACK;
+        if (servedFromMiniApp(loc)) return normalizeApiUrl(loc.origin);
+        return API_URL_FALLBACK;
+    } catch (e) {
+        return API_URL_FALLBACK;
+    }
+}
+
+// Адреса для проверки: сначала собственный origin (если он вообще http),
+// затем текущий и известные кандидаты.
+function apiUrlCandidates(current) {
+    const list = [];
+    try {
+        if (typeof location !== "undefined" && /^https?:$/.test(location.protocol) && location.origin) {
+            list.push(location.origin);
+        }
+    } catch (e) {}
+    list.push(current);
+    list.push.apply(list, API_URL_CANDIDATES);
+    const seen = [];
+    list.forEach(url => {
+        const value = normalizeApiUrl(url);
+        if (!seen.includes(value)) seen.push(value);
+    });
+    return seen;
+}
+
+// Живой ли это сервис: /api/health отвечает ok + service=aura-api.
+// Обычный 404 «Not Found» от Render сюда не пройдёт — именно он и появлялся
+// при неверном имени сервиса.
+async function probeApiUrl(base, timeoutMs) {
+    if (typeof fetch !== "function") return false;
+    const controller = typeof AbortController === "function" ? new AbortController() : null;
+    const timer = controller && timeoutMs
+        ? setTimeout(() => { try { controller.abort(); } catch (e) {} }, timeoutMs)
+        : null;
+    try {
+        const options = { method: "GET", cache: "no-store" };
+        if (controller) options.signal = controller.signal;
+        const response = await fetch(`${normalizeApiUrl(base)}/api/health`, options);
+        if (!response.ok) return false;
+        const data = await response.json().catch(() => null);
+        return Boolean(data && data.service === "aura-api");
+    } catch (e) {
+        return false;
+    } finally {
+        if (timer) clearTimeout(timer);
+    }
+}
+
+// API_URL меняется на ходу: адрес проверяется только при сбое загрузки профиля.
+let API_URL = resolveApiUrl(typeof location !== "undefined" ? location : null);
+let apiUrlVerified = false;
+
+// Перебираем кандидатов и переключаемся на первый живой.
+// Возвращает true, если адрес реально изменился (тогда запрос стоит повторить).
+async function recoverApiUrl() {
+    if (apiUrlVerified) return false;
+    const candidates = apiUrlCandidates(API_URL);
+    for (const base of candidates) {
+        if (await probeApiUrl(base, 6000)) {
+            apiUrlVerified = true;
+            if (base === API_URL) return false;
+            console.warn(`AURA: рабочий адрес API — ${base} (был ${API_URL || "текущий домен"})`);
+            API_URL = base;
+            return true;
+        }
+    }
+    return false;
+}
 // Каталог приходит с сервера и уже отфильтрован: капсулы для админов не попадают в ответ обычным игрокам.
 let SHOP_ITEMS = {};
 let shopItemsLoaded = false;
@@ -401,30 +480,49 @@ async function loadUserData(options) {
     profileLoadPromise = (async () => {
         let lastError = 'Не удалось загрузить профиль';
         let banned = false;
-        for (let attempt = 1; attempt <= attempts; attempt++) {
-            try {
-                const response = await fetch(`${API_URL}/api/user`, {
-                    method: 'POST', headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ initData: tg.initData })
-                });
-                const data = await response.json().catch(() => ({}));
-                if (response.status === 403) {
-                    banned = true;
-                    tg.showAlert(data.detail || "Вы забанены");
-                    try { tg.close(); } catch (e) {}
-                    return false;
+
+        // Одна серия запросов к текущему API_URL.
+        const tryLoadProfile = async () => {
+            for (let attempt = 1; attempt <= attempts; attempt++) {
+                try {
+                    const response = await fetch(`${API_URL}/api/user`, {
+                        method: 'POST', headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ initData: tg.initData })
+                    });
+                    const data = await response.json().catch(() => ({}));
+                    if (response.status === 403) {
+                        banned = true;
+                        tg.showAlert(data.detail || "Вы забанены");
+                        try { tg.close(); } catch (e) {}
+                        return 'banned';
+                    }
+                    if (response.ok && data && data.coins !== undefined) {
+                        applyProfile(data);
+                        apiUrlVerified = true;      // адрес API точно рабочий
+                        return 'ok';
+                    }
+                    lastError = data.detail
+                        ? `${data.detail} (код ${response.status})`
+                        : `Сервер ответил ошибкой ${response.status}`;
+                } catch (e) {
+                    lastError = 'Нет связи с сервером';
                 }
-                if (response.ok && data && data.coins !== undefined) {
-                    applyProfile(data);
-                    return true;
-                }
-                lastError = data.detail
-                    ? `${data.detail} (код ${response.status})`
-                    : `Сервер ответил ошибкой ${response.status}`;
-            } catch (e) {
-                lastError = 'Нет связи с сервером';
+                if (attempt < attempts) await new Promise(r => setTimeout(r, retryDelay * attempt));
             }
-            if (attempt < attempts) await new Promise(r => setTimeout(r, retryDelay * attempt));
+            return 'failed';
+        };
+
+        let result = await tryLoadProfile();
+        if (result === 'banned') return false;
+        if (result === 'ok') return true;
+
+        // Не получилось — возможно, в коде устаревший домен сервиса (Render на
+        // несуществующем имени отвечает 404 «Not Found»). Ищем живой /api/health
+        // и повторяем загрузку уже по правильному адресу.
+        if (await recoverApiUrl()) {
+            result = await tryLoadProfile();
+            if (result === 'banned') return false;
+            if (result === 'ok') return true;
         }
 
         profileFailure = lastError;
@@ -449,6 +547,8 @@ async function refreshProfile() {
     if (profileRetryTimer) { clearTimeout(profileRetryTimer); profileRetryTimer = null; }
     profileRetryCount = 0;
     setSyncBanner('Обновляем баланс…');
+    // Ручное «Повторить» — удобный момент перепроверить сам адрес сервиса.
+    if (!apiUrlVerified) await recoverApiUrl();
     const ok = await loadUserData({ attempts: 2, retryDelay: 700 });
     if (!ok) setSyncBanner(profileFailure || 'Баланс не загрузился');
     return ok;
