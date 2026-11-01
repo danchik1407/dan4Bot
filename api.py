@@ -13,13 +13,13 @@ from supabase import create_client, Client
 from typing import Optional, Union
 from shop_catalog import SHOP_ITEMS, ShopPurchaseError, is_admin_id, parse_inventory, purchase_shop_item, \
     serialize_shop_items, missing_stock_rows, shop_stock_snapshot, stock_diagnostics, \
-    STOCK_LIMITS_ENABLED
+    sold_out_items, STOCK_LIMITS_ENABLED
 
 load_dotenv()
 
 # Номер сборки: по нему из /api/health видно, что на сервисе НЕ старый код.
 # Если после деплоя здесь прежнее значение — Render ещё не перезапустился.
-API_BUILD = "2026-11-01-house-edge-5"
+API_BUILD = "2026-11-01-stock-on-7"
 
 logger = logging.getLogger("aura-api")
 if not logger.handlers:
@@ -149,7 +149,8 @@ async def health():
             "url": "/miniapp/",
         },
         "shop_stock": {
-            # Задача 17: лимиты отключены — капсулы бесконечные, тираж не ведётся.
+            # Задача 19: лимиты включены — у каждой капсулы общий тираж.
+            # false бывает только если в shop_catalog.py флаг выключили вручную.
             "limits_enabled": STOCK_LIMITS_ENABLED,
             "ready": stock is not None,
             "left": stock,
@@ -161,7 +162,7 @@ async def health():
             # отвечала «Товар распродан»: списывать было нечего.
             "missing_rows": missing_stock_rows(stock) if STOCK_LIMITS_ENABLED else [],
             "hint": _stock_health_hint(stock, stock_error) if STOCK_LIMITS_ENABLED else
-            "лимиты отключены: капсулы продаются без ограничений",
+            "лимиты выключены в коде: капсулы продаются без ограничений",
         },
         # MAINTENANCE_MODE объявлен ниже по файлу, но к моменту запроса уже существует.
         "maintenance": MAINTENANCE_MODE,
@@ -1924,6 +1925,9 @@ async def get_shop_items(data: ShopCatalogRequest):
     return {
         "is_admin": is_admin,
         "items": serialize_shop_items(is_admin, stock),
+        # Распроданные предметы: витрина должна сказать «Всё распродано»,
+        # а не «Магазин пуст» — иначе это выглядит как поломка.
+        "sold_out": sold_out_items(is_admin, stock),
         "stock_ready": (stock is not None) if STOCK_LIMITS_ENABLED else False,
         "unlimited": not STOCK_LIMITS_ENABLED,
     }

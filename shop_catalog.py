@@ -11,11 +11,14 @@ logger = logging.getLogger(__name__)
 STOCK_TABLE = "capsule_stock"
 
 # ==================== ЛИМИТЫ МАГАЗИНА ====================
-# Задача 17: лимиты отключены — капсулы продаются без ограничений («бесконечные»).
-# Отключаются сразу все: общий тираж (total_limit) и дневные лимиты (daily_limit).
-# Данные в SHOP_ITEMS и таблица capsule_stock остались целыми: чтобы вернуть
-# лимиты, достаточно поставить здесь True — остальной код уже готов.
-STOCK_LIMITS_ENABLED = False
+# Задача 19: ВСЕ капсулы снова лимитированные (как просил игрок).
+# True — работает общий тираж (total_limit, общий на всех) и дневные лимиты
+# (daily_limit, только для не-админов). False — «бесконечные» капсулы без счётчика.
+# Чтобы лимиты реально работали, в Supabase должны быть применены
+# supabase/migrations/20261104000000_shop_stock_fix.sql (таблица capsule_stock,
+# функции shop_take_stock / shop_return_stock / shop_stock_list) и
+# supabase/migrations/20261106000000_stock_limits_on.sql.
+STOCK_LIMITS_ENABLED = True
 
 # Таблица истории покупок: по ней «стата бота» считает, сколько чего купили.
 PURCHASES_TABLE = "shop_purchases"
@@ -187,7 +190,7 @@ def ensure_stock_rows(supabase_client) -> bool:
     except Exception as exc:  # noqa: BLE001 — параллельный воркер мог уже вставить строки
         logger.error("ОШИБКА СТОКА: не удалось создать строки %s: %s. "
                      "Нужна политика RLS и гранты — "
-                     "supabase/migrations/20261104000000_shop_stock_fix.sql",
+                     "supabase/migrations/20261106000000_stock_limits_on.sql",
                      [row["item_id"] for row in missing], exc)
         return False
 
@@ -272,6 +275,22 @@ def available_shop_items(is_admin: bool, stock: dict[str, int] | None = None) ->
         if left is not None and left <= 0:
             continue  # распродано — карточку не показываем вообще
         result.append((item_id, item, left))
+    return result
+
+
+def sold_out_items(is_admin: bool, stock: dict[str, int] | None = None) -> list[str]:
+    """Предметы каталога, которые уже распроданы (их нет в available_shop_items).
+
+    Нужен, чтобы пустая витрина не выглядела как «магазин сломался»: когда
+    кончился тираж, клиент пишет «Всё распродано», а не «Магазин пуст».
+    """
+    if not STOCK_LIMITS_ENABLED or stock is None:
+        return []
+    result = []
+    for item_id, item in visible_shop_items(is_admin).items():
+        left = stock_left(item_id, item, stock)
+        if left is not None and left <= 0:
+            result.append(item_id)
     return result
 
 
@@ -517,7 +536,14 @@ def _interpret_take_result(data) -> tuple[str, int | None]:
 
 
 def _read_stock_remaining(supabase_client, item_id: str) -> int | None:
-    """Текущий остаток предмета: RPC → таблица. None — прочитать не удалось."""
+    """Текущий остаток предмета: RPC → таблица. None — прочитать не удалось.
+
+    ВАЖНО: если функции списка нет ИЛИ в ней нет строки этого предмета, идём в
+    таблицу через _read_stock_value — именно там создаются недостающие строки
+    тиража (ensure_stock_rows). Раньше при пустой таблице здесь возвращался None,
+    и покупка отвечала «нет строки, примените миграцию», хотя строку можно было
+    создать на месте.
+    """
     data = _rpc_call(supabase_client, "shop_stock_list", {})
     if data is not _RPC_MISSING:
         for row in data or []:
@@ -526,7 +552,6 @@ def _read_stock_remaining(supabase_client, item_id: str) -> int | None:
                     return max(0, int(row.get("stock") or 0))
                 except (TypeError, ValueError):
                     return 0
-        return None
     available, current = _read_stock_value(supabase_client, item_id)
     return current if available else None
 
@@ -565,7 +590,7 @@ def reserve_stock(supabase_client, item_id: str) -> int | None:
             # Строки нет и создать не удалось (RLS/права). Это НЕ «распродано»:
             # тираж не ведётся — продаём, но остаток не показываем.
             print(f"ОШИБКА СТОКА: {item_id} нет строки в {STOCK_TABLE} — "
-                  f"примените supabase/migrations/20261104000000_shop_stock_fix.sql", flush=True)
+                  f"примените supabase/migrations/20261106000000_stock_limits_on.sql", flush=True)
             raise StockUnavailable(f"нет строки {item_id} в {STOCK_TABLE}")
 
         if left <= 0:
@@ -590,7 +615,7 @@ def reserve_stock(supabase_client, item_id: str) -> int | None:
         # Покупку не отменяем, но и остаток не выдумываем (stock_ready=false).
         print(f"ОШИБКА СТОКА: RPC вернула «распродано», но в таблице {item_id}: {left} — "
               f"списание не применяется (нужны SECURITY DEFINER и политика RLS из "
-              f"20261104000000_shop_stock_fix.sql)", flush=True)
+              f"20261106000000_stock_limits_on.sql)", flush=True)
         logger.error("Сток %s: RPC сказала «распродано», а в таблице %s", item_id, left)
         raise StockUnavailable(f"списание не применилось, в таблице {left}")
 
