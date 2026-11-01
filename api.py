@@ -74,6 +74,21 @@ ROOT_STATIC_FILES = {
 }
 
 
+# Telegram WebView кэширует статику агрессивно: игрок мог видеть СТАРЫЙ app.js
+# (в нём оставались старые тексты и старая логика круга), хотя сервер уже отдавал
+# новый. Теперь index.html всегда перепроверяется, а JS/CSS кэшируются по версии
+# в адресе (?v=aura-9): сменили версию — браузер скачает файл заново.
+@app.middleware("http")
+async def static_cache_headers(request: Request, call_next):
+    response = await call_next(request)
+    path = request.url.path
+    if path.endswith(".html") or path in ("/miniapp", "/miniapp/"):
+        response.headers["Cache-Control"] = "no-cache, must-revalidate"
+    elif path.endswith((".js", ".css")):
+        response.headers["Cache-Control"] = "public, max-age=86400"
+    return response
+
+
 @app.get("/favicon.ico", include_in_schema=False)
 async def favicon():
     """Пустой ответ вместо 404 в логах и в консоли браузера."""
@@ -1961,7 +1976,7 @@ def _upgrade_write_user(user_id: int, raw_coins: int, raw_inventory, coins: int,
 
 
 # ==================== ЛОГ АПГРЕЙДОВ ====================
-# Каждый розыгрыш пишется в upgrade_log: что ставили, какой был шанс, что выпало,
+# Каждый розыгрыш пишется в upgrade_log: что ставили, какой был шанс, какой был бросок,
 # сколько стало коинов и капсул. Это и доказательство выплаты, и честная статистика
 # («Апгрейдов / Успешных / Лучший»), и восстановление результата, если игрок
 # закрыл аппку до конца анимации.
@@ -2105,20 +2120,18 @@ async def upgrade_action(data: UpgradeAction):
                 inventory.remove(source)
             new_coins = raw_coins
 
-        # Вердикт и стрелка считаются по ОДНОМУ числу — по тому, что уходит клиенту.
-        # Клиент рисует границу сектора из округлённого шанса, поэтому сравнивать
-        # надо именно с округлённым. Раньше сравнивали с неокруглённым real_chance:
-        # бросок 55.24 при real_chance 55.244 давал победу, а стрелка вставала ровно
-        # на границу сектора 55.24 — визуально «в красной зоне, но победа».
+        # ВАЖНО: и вердикт, и стрелка считаются по ОДНОМУ числу — по тому, которое
+        # уходит клиенту в поле "real_chance". Клиент рисует зелёную зону 0..chance
+        # и ставит стрелку на roll * 3.6°, поэтому любое расхождение в округлении
+        # сразу даёт «стрелка в красной зоне, а засчитали победу».
         chance_verdict = round(min(100.0, max(0.0, float(real_chance))), 2)
-        # Бросок — тоже до сотых: клиент ставит стрелку на roll * 3.6°.
-        # 0.00..99.99: ровно 100.00 при шансе 100% дало бы проигрыш, хотя стрелка
-        # стоит в закрашенном секторе.
-        roll = round(random.random() * 100.0, 2)
-        if roll >= 100.0:
-            roll = 99.99
-        # СТРОГО: roll < chance — победа, roll >= chance — проигрыш. Без допусков.
-        won = roll < chance_verdict
+        # Бросок: random.uniform(0, 100), до сотых — клиент ставит угол roll * 3.6°.
+        roll = round(random.uniform(0.0, 100.0), 2)
+        roll = min(100.0, max(0.0, roll))
+        # Правило игрока: roll <= chance — победа, roll > chance — проигрыш.
+        # Граница (roll == chance) принадлежит ЗЕЛЁНОЙ зоне, ровно как заливка
+        # на клиенте: зелёная 0..chance, красная chance..100.
+        won = roll <= chance_verdict
         win_item = None
         # payout — только для этого круга. Раньше здесь обнулялся сам win_amount:
         # если запись не проходила из-за гонки, следующий круг мог выиграть с
@@ -2155,6 +2168,8 @@ async def upgrade_action(data: UpgradeAction):
                 "item_from": source,
                 "amount_from": amount,
                 "item_to": target,
+                # Шанс, который видит игрок: для админов он же и есть боевой
+                # (real_chance ниже), поэтому «пришло 50.00 — сравнили с 50.00».
                 "chance": round(visual_chance, 2),
                 # Реальный шанс = то же число, что участвовало в сравнении.
                 # Клиент рисует сектор и ставит стрелку именно по нему,

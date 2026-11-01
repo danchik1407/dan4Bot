@@ -397,6 +397,10 @@ main { padding: 0 16px; }
    а «промах» почти прозрачным — из-за этого стрелка «в тёмной части» и
    вердикт читались по-разному. */
 .up-circle-ring { background: conic-gradient(from -90deg, #22c55e 0 var(--p, 0deg), #ef4444 var(--p, 0deg) 360deg); filter: drop-shadow(0 0 12px rgba(34, 197, 94, 0.35)); transition: filter 0.3s, background 0.3s; }
+/* Метка границы: белая риска на угле --p, крутится вместе с заливкой.
+   Игроку видно, пересекла стрелка границу зелёной зоны или осталась внутри. */
+.up-boundary { position: absolute; inset: 0; z-index: 2; pointer-events: none; transform: rotate(var(--p, 0deg)); }
+.up-boundary::before { content: ''; position: absolute; left: 50%; top: 0; width: 2px; height: 15px; margin-left: -1px; border-radius: 2px; background: rgba(255, 255, 255, 0.9); box-shadow: 0 0 8px rgba(255, 255, 255, 0.75); }
 /* Белая стрелка: вращается через JS, в конце плавно замедляется и замирает на результате. */
 .up-arrow-wrap { position: absolute; inset: 0; z-index: 2; transform: rotate(0deg); will-change: transform; pointer-events: none; }
 .up-arrow { position: absolute; left: 50%; bottom: 50%; width: 3px; height: 43%; transform: translateX(-50%); border-radius: 3px; background: linear-gradient(to top, rgba(255, 255, 255, 0.1), #ffffff 40%, #ffffff); box-shadow: 0 0 10px rgba(255, 255, 255, 0.75); }
