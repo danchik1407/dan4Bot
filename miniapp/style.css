@@ -144,10 +144,11 @@ main { padding: 0 16px; }
 /* ================= СУНДУКИ ================= */
 .chest-container { display: flex; flex-direction: column; gap: 15px; }
 .chest-card { background: var(--card); padding: 16px; border-radius: 18px; text-align: center; border: 1px solid #333; }
-.chest-art { width: 100%; border-radius: 14px; overflow: hidden; margin-bottom: 12px; background: transparent; display: flex; align-items: center; justify-content: center; }
-/* contain + max-height: сундук нарисован с полями, обрезать его нельзя.
-   Фиксированные 165px по высоте резали картинку по бокам/сверху. */
-.chest-art img { width: 100%; height: auto; max-height: 200px; object-fit: contain; display: block; }
+.chest-art { width: 100%; border-radius: 14px; overflow: hidden; margin-bottom: 10px; background: transparent; display: flex; align-items: center; justify-content: center; }
+/* Сундуки теперь PNG с прозрачным фоном (чёрный прямоугольник убран),
+   поэтому картинку не растягиваем на всю карточку — она заметно меньше
+   и «плавает» на фоне карточки. contain обязателен: обрезать нельзя. */
+.chest-art img { width: auto; height: auto; max-width: 70%; max-height: 170px; object-fit: contain; display: block; filter: drop-shadow(0 6px 14px rgba(0, 0, 0, 0.55)); }
 .chest-card h3 { font-size: 18px; font-weight: 800; margin-bottom: 5px; }
 .chest-card p { font-size: 12px; color: var(--text-muted); margin-bottom: 15px; }
 .chest-card .action-btn { margin-bottom: 0; }
@@ -343,7 +344,7 @@ main { padding: 0 16px; }
 .up-panel-center { align-items: center; justify-content: flex-start; }
 
 /* --- левая панель --- */
-.up-slot { border-radius: 16px; border: 1px dashed rgba(59, 130, 246, 0.35); background: radial-gradient(circle at 50% 20%, rgba(59, 130, 246, 0.16), rgba(10, 15, 23, 0.75) 72%); padding: 18px 10px; text-align: center; }
+.up-slot { border-radius: 16px; border: 1px solid rgba(59, 130, 246, 0.22); background: radial-gradient(circle at 50% 20%, rgba(59, 130, 246, 0.16), rgba(10, 15, 23, 0.75) 72%); padding: 18px 10px; text-align: center; }
 .up-slot-icon { font-size: 42px; line-height: 1; filter: drop-shadow(0 0 16px rgba(59, 130, 246, 0.55)); }
 .up-slot-name { margin-top: 8px; font-size: 13px; font-weight: 800; color: #dbe7f7; }
 .up-slot-value { margin-top: 3px; font-size: 12px; font-weight: 900; color: #58a6ff; font-variant-numeric: tabular-nums; }
