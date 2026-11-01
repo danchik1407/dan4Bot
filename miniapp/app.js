@@ -1154,10 +1154,7 @@ function lockUpgradeChance(value) {
     // Фиксируем границу круга СРАЗУ, тем же числом, по которому сервер считал
     // вердикт: иначе зелёная зона какое-то время показывала бы локальный расчёт,
     // а стрелка останавливалась бы по серверному — расхождение на границе.
-    const circle = document.getElementById('up-circle');
-    if (circle && upgradePlacedChance !== null) {
-        circle.style.setProperty('--p', (Math.min(upgradePlacedChance, 100) * 3.6).toFixed(2) + 'deg');
-    }
+    if (upgradePlacedChance !== null) setUpgradeRingPercent(upgradePlacedChance);
 }
 
 function releaseUpgradeChance() {
@@ -1168,10 +1165,27 @@ function upgradeRingChance() {
     return upgradePlacedChance === null ? upgradeChance() : upgradePlacedChance;
 }
 
+// ОДНА формула угла на весь круг: и заливка (--p), и белая риска границы,
+// и стрелка считают угол только отсюда. 0% — верх круга, дальше по часовой.
+const UPGRADE_DEG_PER_PERCENT = 3.6;
+
+function upgradeAngleForPercent(percent) {
+    const value = Number(percent);
+    const safe = Number.isFinite(value) ? Math.min(100, Math.max(0, value)) : 0;
+    return safe * UPGRADE_DEG_PER_PERCENT;
+}
+
+// Ставит --p круга (границу зелёной зоны) по проценту.
+function setUpgradeRingPercent(percent) {
+    const circle = document.getElementById('up-circle');
+    if (!circle) return;
+    circle.style.setProperty('--p', upgradeAngleForPercent(percent).toFixed(2) + 'deg');
+}
+
 // Выигрыш = бросок НЕ БОЛЬШЕ шанса (шанс 50%: бросок 22 — победа, 50 — тоже победа,
 // 50.01 — проигрыш). Ровно то же правило на сервере: roll <= chance — победа.
 // Функция одна на клиент, чтобы стрелка, дуга и текст не могли разойтись:
-// зелёная зона на круге — это [0, шанс], и стрелка стоит на броске * 3.6°.
+// зелёная зона на круге — это [0, шанс], и стрелка стоит на upgradeAngleForPercent(roll).
 function upgradeRollWon(roll, chance) {
     // null/undefined/'' — это «броска нет», а не 0: Number(null) === 0 иначе
     // превращал отсутствие данных в «победу с шансом 0%».
@@ -1187,8 +1201,8 @@ function upgradeRollWon(roll, chance) {
 function upgradeRollInsideSector(roll, chance) {
     const won = upgradeRollWon(roll, chance);
     if (won === null) return null;
-    const angle = Number(roll) * 3.6;
-    const sector = Math.min(360, Math.max(0, Number(chance)) * 3.6);
+    const angle = upgradeAngleForPercent(roll);
+    const sector = upgradeAngleForPercent(chance);
     // Зелёная зона — [0, шанс], граница включена: ровно так же, как считает
     // сервер (roll <= chance — победа) и как залит conic-gradient.
     return angle <= sector + 1e-9;
@@ -1263,7 +1277,7 @@ function resetUpgradeRound() {
     if (circle) {
         circle.classList.remove('spinning', 'win', 'lose');
         // Дуга снова показывает шанс текущей формы, а не прошлого раунда.
-        circle.style.setProperty('--p', (Math.min(upgradeChance(), 100) * 3.6).toFixed(2) + 'deg');
+        setUpgradeRingPercent(upgradeChance());
     }
     const btn = document.getElementById('upgrade-btn');
     if (btn) {
@@ -1380,7 +1394,7 @@ function renderUpgrade() {
     const chance = upgradeRingChance();
     const circle = document.getElementById('up-circle');
     if (circle) {
-        circle.style.setProperty('--p', (Math.min(chance, 100) * 3.6).toFixed(2) + 'deg');
+        setUpgradeRingPercent(chance);
         circle.classList.toggle('invalid', upgradePlacedChance === null && !upgradeChanceIsValid(liveChance));
     }
     if (!upgradeBusy) setText('up-chance', chance.toFixed(2) + '%');
@@ -1668,33 +1682,44 @@ function startUpgradeArrowSpin(token) {
         : setTimeout(() => step(), 16);
 }
 
-// Куда встанет стрелка. Если сервер прислал выпавшее число (roll), стрелка
-// показывает ИМЕННО его: бросок 0..100 → угол 0..360 (0° — верх круга,
-// по часовой стрелке, как и заливка conic-gradient).
+// Куда встанет стрелка. Если сервер прислал бросок (roll), стрелка показывает
+// ИМЕННО его: угол = upgradeAngleForPercent(roll) — та же формула, что красит
+// зелёную зону круга и белую риску границы.
 //
-// Единственное исключение — сама граница: при броске «впритык» (ближе 0.1 п.п.)
-// стрелка сдвигается на 0.1 процентного пункта внутрь зоны, которую назвал
-// вердикт: победа — чуть в зелёное, проигрыш — чуть в красное. Ширина стрелки
-// больше этих 0.36°, поэтому иначе при шансе 50% и броске 50.00 было бы видно
-// «стрелка на линии» и непонятно, засчитали попадание или нет.
-const UPGRADE_BOUNDARY_NUDGE_PCT = 0.1;
+// Единственное исключение — сама граница. Стрелка толще, чем 0.1 п.п., поэтому
+// при броске «впритык» она визуально наезжала на линию, и победа выглядела как
+// «стрелка в красной зоне». Теперь у границы держится видимый зазор:
+//   победа  → стрелка гарантированно ВНУТРИ зелёного (arc − зазор);
+//   проигрыш → стрелка гарантированно ВНУТРИ красного (arc + зазор).
+// Дальше зазора от границы стрелка стоит ровно на броске, без искажений.
+const UPGRADE_BOUNDARY_NUDGE_PCT = 0.1;      // логический минимум сдвига, п.п.
+const UPGRADE_ARROW_CLEARANCE_PCT = 0.6;     // видимый зазор до линии, п.п.
+
+function upgradeArrowClearanceDeg(arc) {
+    const nudge = upgradeAngleForPercent(UPGRADE_BOUNDARY_NUDGE_PCT);
+    const wanted = upgradeAngleForPercent(UPGRADE_ARROW_CLEARANCE_PCT);
+    // У очень маленького шанса зелёная зона уже зазора — берём половину дуги,
+    // чтобы стрелка всё равно осталась внутри зелёного.
+    const limit = Math.max(0.6, arc * 0.5);
+    return Math.max(nudge, Math.min(wanted, limit));
+}
 
 function upgradeArrowTargetFor(won, chance, rollValue) {
     const chanceNumber = Math.max(0, Math.min(100, Number(chance) || 0));
-    const arc = Math.max(0.5, Math.min(360, chanceNumber * 3.6));
-    const nudge = UPGRADE_BOUNDARY_NUDGE_PCT * 3.6;
+    const arc = Math.max(0.5, Math.min(360, upgradeAngleForPercent(chanceNumber)));
+    const clearance = upgradeArrowClearanceDeg(arc);
     const rollNumber = Number(rollValue);
     if (Number.isFinite(rollNumber)) {
-        // Угол строго по выпавшему числу.
-        let desired = Math.max(0, Math.min(359.6, rollNumber * 3.6));
-        // Около самой границы (ближе 0.1 п.п.) сдвигаем стрелку В СТОРОНУ ЗОНЫ,
-        // которую назвал вердикт: победа — чуть в зелёное, проигрыш — чуть в красное.
-        // Дальше от границы угол остаётся равным выпавшему числу без изменений.
-        if (Math.abs(desired - arc) < nudge) {
-            desired = won ? Math.max(0, arc - nudge) : Math.min(359.6, arc + nudge);
+        // Угол строго по броску — той же формулой, что и заливка круга.
+        let desired = Math.max(0, Math.min(359.6, upgradeAngleForPercent(rollNumber)));
+        if (Math.abs(desired - arc) < clearance) {
+            desired = won
+                ? Math.max(0, arc - clearance)          // внутрь зелёного
+                : Math.min(359.6, arc + clearance);     // внутрь красного
         }
         return desired;
     }
+    // Броска нет (старый ответ сервера) — случайная позиция в нужной зоне.
     if (won) {
         const margin = Math.min(arc * 0.18, Math.max(arc * 0.1, 2));
         return margin + Math.random() * Math.max(arc - margin * 2, arc * 0.25);
@@ -1996,7 +2021,7 @@ function showMissedUpgradeResult(row) {
     if (circle) {
         circle.classList.remove('spinning', 'win', 'lose');
         circle.classList.add(won ? 'win' : 'lose');
-        circle.style.setProperty('--p', (Math.min(chance, 100) * 3.6).toFixed(2) + 'deg');
+        setUpgradeRingPercent(chance);
     }
     setUpgradeArrowAngle(((upgradeArrowTargetFor(won, chance, row.roll) % 360) + 360) % 360);
     const chanceEl = document.getElementById('up-chance');
@@ -2056,7 +2081,7 @@ function finishUpgradeAnimation(data, chance) {
     if (circle) {
         circle.classList.remove('spinning', 'win', 'lose');
         circle.classList.add(won ? 'win' : 'lose');
-        circle.style.setProperty('--p', ((Number(chance) || 0) * 3.6).toFixed(2) + 'deg');
+        setUpgradeRingPercent(chance);
     }
     const chanceEl = document.getElementById('up-chance');
     if (chanceEl) chanceEl.innerText = (Number(chance) || 0).toFixed(2) + '%';
@@ -2087,8 +2112,9 @@ function finishUpgradeAnimation(data, chance) {
     const insideSector = upgradeRollInsideSector(rollNumber, chanceNumber);
     if (insideSector !== null && insideSector !== won) {
         console.error('Апгрейд: стрелка и вердикт расходятся', {
-            roll: rollNumber, chance: chanceNumber, angle: rollNumber * 3.6,
-            sectorDeg: Math.min(360, chanceNumber * 3.6), won,
+            roll: rollNumber, chance: chanceNumber,
+            angle: upgradeAngleForPercent(rollNumber),
+            sectorDeg: upgradeAngleForPercent(chanceNumber), won,
         });
     }
 

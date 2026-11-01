@@ -1045,7 +1045,8 @@ async def cmd_services(message: Message):
         chest_line = (
             "📦 Сундуки: ⚠️ таблица есть, SQL-функций нет\n"
             "   • награда пока начисляется сразу при открытии (без «Забрать»)\n"
-            "   • примените supabase/migrations/20261102000000_stock_and_chest_rpc.sql"
+            "   • примените supabase/migrations/20261102000000_stock_and_chest_rpc.sql "
+            "и 20261103000000_shop_take_stock_amount.sql"
         )
     else:
         chest_line = (
@@ -1059,17 +1060,26 @@ async def cmd_services(message: Message):
 
     # Тираж капсул: если в health нет данных о стоке — значит магазин не знает остаток.
     stock = data.get("shop_stock") if isinstance(data, dict) else None
+    build = (data.get("build") if isinstance(data, dict) else None) or "?"
     if not isinstance(stock, dict):
-        stock_line = "🎟️ Тираж: ⚠️ не проверить"
+        stock_line = (
+            "🎟️ Тираж: ❌ сервер НЕ умеет читать сток (старый код)\n"
+            "   • задеплойте aura-api из ветки main и проверьте /api/stock_debug"
+        )
     elif stock.get("ready"):
         left = stock.get("left") or {}
         preview = ", ".join(f"{k}: {v}" for k, v in list(left.items())[:3])
-        stock_line = f"🎟️ Тираж: ✅ {preview or 'пусто'}"
+        stock_line = (
+            f"🎟️ Тираж: ✅ {preview or 'пусто'}\n"
+            f"   • RPC shop_take_stock: {stock.get('rpc', 'shop_take_stock')}"
+            f" · проверка: {API_URL}/api/stock_debug"
+        )
     else:
         stock_line = (
             "🎟️ Тираж: ❌ сервер не читает capsule_stock\n"
             f"   • {str(stock.get('error') or 'таблица недоступна')[:160]}\n"
-            "   • примените supabase/migrations/20261102000000_stock_and_chest_rpc.sql"
+            "   • примените supabase/migrations/20261103000000_shop_take_stock_amount.sql\n"
+            f"   • диагностика: {API_URL}/api/stock_debug"
         )
 
     text = (
@@ -1082,6 +1092,7 @@ async def cmd_services(message: Message):
         "2️⃣ <b>dan4Bot</b> (aiogram): ✅ этот процесс\n"
         "   • веб-сервер только для порта Render (start_fake_website)\n"
         "   • игровые данные читает из общей базы Supabase\n\n"
+        f"🧱 Сборка API: <code>{build}</code>\n"
         f"🔗 Ссылка для игроков: {miniapp_direct_url()}\n"
         f"{chest_line}\n"
         f"{stock_line}\n"
