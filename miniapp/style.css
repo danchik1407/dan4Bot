@@ -157,17 +157,37 @@ main { padding: 0 16px; }
 .chest-flash { position: fixed; inset: 0; background: #ffffff; opacity: 0; pointer-events: none; z-index: 9999; transition: opacity 0.25s ease; }
 .chest-flash.active { opacity: 1; transition: none; }
 
-.roulette-container { width: 100%; max-width: 350px; margin: 0 auto 20px auto; position: relative; background: var(--card); border: 2px solid var(--accent); border-radius: 15px; padding: 10px 0; overflow: hidden; box-shadow: 0 0 15px rgba(0, 122, 255, 0.5); }
-.roulette-pointer { text-align: center; color: var(--accent); font-size: 24px; position: absolute; top: -5px; left: 50%; transform: translateX(-50%); z-index: 10; text-shadow: 0 0 5px #000; }
-.roulette-window { height: 80px; overflow: hidden; display: flex; align-items: center; position: relative; }
-.roulette-window::before, .roulette-window::after { content: ''; position: absolute; width: 100%; height: 30px; z-index: 5; pointer-events: none; }
-.roulette-window::before { top: 0; background: linear-gradient(to bottom, var(--card), transparent); }
-.roulette-window::after { bottom: 0; background: linear-gradient(to top, var(--card), transparent); }
-.roulette-track { display: flex; align-items: center; }
-.roulette-item { min-width: 80px; height: 80px; display: flex; flex-direction: column; justify-content: center; align-items: center; font-size: 30px; font-weight: 800; border-right: 1px solid #333; color: white; position: relative; }
-.roulette-item span { font-size: 12px; margin-top: 5px; color: var(--text-muted); }
-.roulette-item.win { color: #34c759; text-shadow: 0 0 15px rgba(52, 199, 89, 0.8); }
-.roulette-item.win span { color: #34c759; font-weight: 900; }
+/* ================= РУЛЕТКА СУНДУКА (как в кейсах CS) =================
+   Полоса предметов на всю ширину, по центру золотая метка. Ячейки фиксированной
+   ширины: по ней считается остановка, поэтому картинка всегда встаёт ровно
+   под указателем, а не «примерно». */
+.roulette-container { width: 100%; max-width: 360px; margin: 0 auto 16px auto; position: relative; background: linear-gradient(180deg, #151d29, #0c121a); border: 1px solid rgba(59, 130, 246, 0.35); border-radius: 16px; padding: 22px 0 16px 0; overflow: hidden; box-shadow: 0 12px 30px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.05); }
+.roulette-caption { text-align: center; font-size: 10px; font-weight: 900; letter-spacing: 1.4px; text-transform: uppercase; color: #6f8bb5; margin-bottom: 8px; transition: color 0.25s; }
+.roulette-container.hit .roulette-caption { color: #ffcc00; }
+/* Золотая линия в центре: показывает, какая ячейка сейчас под стрелками. */
+.roulette-marker { position: absolute; top: 0; bottom: 0; left: 50%; width: 2px; margin-left: -1px; background: linear-gradient(to bottom, rgba(255, 204, 0, 0), #ffcc00 22%, #ffcc00 78%, rgba(255, 204, 0, 0)); box-shadow: 0 0 12px rgba(255, 204, 0, 0.75); z-index: 6; pointer-events: none; }
+.roulette-pointer { position: absolute; left: 50%; transform: translateX(-50%); color: #ffcc00; font-size: 14px; line-height: 1; z-index: 7; pointer-events: none; filter: drop-shadow(0 0 6px rgba(255, 204, 0, 0.85)); }
+.roulette-pointer-top { top: 0; }
+.roulette-pointer-bottom { bottom: 0; }
+.roulette-window { height: 92px; overflow: hidden; position: relative; }
+/* Затемнение по краям полосы: создаёт ощущение глубины, как в кейсах. */
+.roulette-window::before, .roulette-window::after { content: ''; position: absolute; top: 0; bottom: 0; width: 46px; z-index: 5; pointer-events: none; }
+.roulette-window::before { left: 0; background: linear-gradient(to right, #0c121a, rgba(12, 18, 26, 0)); }
+.roulette-window::after { right: 0; background: linear-gradient(to left, #0c121a, rgba(12, 18, 26, 0)); }
+.roulette-track { display: flex; align-items: stretch; will-change: transform; }
+.roulette-item { flex: 0 0 84px; width: 84px; height: 92px; display: flex; flex-direction: column; justify-content: center; align-items: center; gap: 4px; font-size: 17px; font-weight: 800; color: #e6eefb; background: linear-gradient(180deg, #1b2431, #121923); border-right: 1px solid rgba(255, 255, 255, 0.06); position: relative; font-variant-numeric: tabular-nums; }
+.roulette-item .coin-img { width: 26px; height: 26px; margin: 0; }
+.roulette-item span { font-size: 12px; font-weight: 700; color: #8fb4e0; }
+.roulette-item.is-key { color: #ffcc00; }
+/* Выигрышная ячейка: подсвечивается уже после остановки, чтобы не выдать заранее. */
+.roulette-item.win { background: linear-gradient(180deg, rgba(255, 204, 0, 0.26), rgba(255, 204, 0, 0.06)); box-shadow: inset 0 0 0 1px rgba(255, 204, 0, 0.6), 0 0 20px rgba(255, 204, 0, 0.45); color: #ffd75e; }
+.roulette-item.win span { color: #ffd75e; font-weight: 900; }
+.roulette-item.win.hit { animation: rouletteHit 0.45s ease-out 2; }
+@keyframes rouletteHit {
+    0% { transform: scale(1); }
+    45% { transform: scale(1.12); }
+    100% { transform: scale(1); }
+}
 
 /* ================= МАГАЗИН ================= */
 .shop-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 15px; }

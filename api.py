@@ -167,6 +167,39 @@ def _chest_claims_detail(exc: Exception) -> str:
     logger.warning("Сбой сундуков: %s", message)
     return CHEST_CLAIMS_GENERIC
 
+
+@app.get("/api/chest_ready")
+async def chest_ready():
+    """Готова ли таблица сундуков (диагностика для бота и админа).
+
+    Клиент получает «Сундуки обновляются, попробуйте чуть позже», когда
+    chest_claims недоступна: не применена миграция или в PostgREST устарел кэш
+    схемы. Эта ручка отвечает одной строкой, что именно не так, чтобы не гадать
+    по логам Render.
+    """
+    def _probe():
+        response = (
+            supabase.table(CHEST_CLAIMS_TABLE)
+            .select("id")
+            .limit(1)
+            .execute()
+        )
+        return response.data or []
+
+    try:
+        rows = await asyncio.to_thread(_probe)
+    except Exception as exc:
+        message = f"{type(exc).__name__}: {exc}"
+        return JSONResponse(status_code=200, content={
+            "ok": False,
+            "table": CHEST_CLAIMS_TABLE,
+            "detail": _chest_claims_detail(exc),
+            "error": message[:400],
+            "migration": CHEST_CLAIMS_MIGRATION_FILE,
+            "hint": "Примените миграцию и выполните NOTIFY pgrst, 'reload schema'",
+        })
+    return {"ok": True, "table": CHEST_CLAIMS_TABLE, "rows_preview": len(rows)}
+
 # ==================== МИНЫ ====================
 MINES_CELLS = 16
 MINES_MAX_COUNT = 5
