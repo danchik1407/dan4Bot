@@ -1039,14 +1039,37 @@ async def cmd_services(message: Message):
 
     if chest.get("status") is None:
         chest_line = f"📦 Сундуки: ⚠️ не проверить ({chest.get('error', 'нет связи')})"
+    elif chest.get("ok") and chest.get("rpc_ready"):
+        chest_line = "📦 Сундуки: ✅ таблица chest_claims и функции на месте"
     elif chest.get("ok"):
-        chest_line = "📦 Сундуки: ✅ таблица chest_claims на месте"
+        chest_line = (
+            "📦 Сундуки: ⚠️ таблица есть, SQL-функций нет\n"
+            "   • награда пока начисляется сразу при открытии (без «Забрать»)\n"
+            "   • примените supabase/migrations/20261102000000_stock_and_chest_rpc.sql"
+        )
     else:
         chest_line = (
-            "📦 Сундуки: ❌ таблица chest_claims недоступна\n"
+            "📦 Сундуки: ⚠️ таблица chest_claims недоступна — включён старый режим\n"
             f"   • {chest.get('detail', 'ошибка базы')}\n"
-            "   • примените supabase/migrations/20261030000000_capsule_stock_promo_types.sql "
-            "и выполните NOTIFY pgrst, 'reload schema'"
+            "   • награда начисляется сразу при открытии сундука (играть можно)\n"
+            "   • чтобы вернуть «Забрать»: примените "
+            "supabase/migrations/20261030000000_capsule_stock_promo_types.sql "
+            "и 20261102000000_stock_and_chest_rpc.sql, затем NOTIFY pgrst, 'reload schema'"
+        )
+
+    # Тираж капсул: если в health нет данных о стоке — значит магазин не знает остаток.
+    stock = data.get("shop_stock") if isinstance(data, dict) else None
+    if not isinstance(stock, dict):
+        stock_line = "🎟️ Тираж: ⚠️ не проверить"
+    elif stock.get("ready"):
+        left = stock.get("left") or {}
+        preview = ", ".join(f"{k}: {v}" for k, v in list(left.items())[:3])
+        stock_line = f"🎟️ Тираж: ✅ {preview or 'пусто'}"
+    else:
+        stock_line = (
+            "🎟️ Тираж: ❌ сервер не читает capsule_stock\n"
+            f"   • {str(stock.get('error') or 'таблица недоступна')[:160]}\n"
+            "   • примените supabase/migrations/20261102000000_stock_and_chest_rpc.sql"
         )
 
     text = (
@@ -1061,6 +1084,7 @@ async def cmd_services(message: Message):
         "   • игровые данные читает из общей базы Supabase\n\n"
         f"🔗 Ссылка для игроков: {miniapp_direct_url()}\n"
         f"{chest_line}\n"
+        f"{stock_line}\n"
         "ℹ️ В BotFather → Configure Mini App должен быть указан адрес aura-api."
     )
     await message.answer(text, parse_mode="HTML", disable_web_page_preview=True)
@@ -1445,7 +1469,10 @@ async def probe_chest_claims(base: str, timeout: int = 10) -> dict:
                 "error": ""}
     if not isinstance(data, dict):
         return {"ok": False, "status": status, "detail": "неожиданный ответ", "error": ""}
-    return {"ok": bool(data.get("ok")), "status": status, "detail": str(data.get("detail") or data.get("error") or ""),
+    return {"ok": bool(data.get("ok")), "status": status,
+            "detail": str(data.get("detail") or data.get("error") or ""),
+            "rpc_ready": bool(data.get("rpc_ready")),
+            "fallback": str(data.get("fallback") or ""),
             "error": ""}
 
 

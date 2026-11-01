@@ -80,9 +80,29 @@ async def favicon():
     return Response(status_code=204)
 
 
+# Кэш состояния тиража для /api/health: {at, value, error}.
+_stock_health_cache = {"at": 0.0, "value": None, "error": None}
+STOCK_HEALTH_TTL = 20.0
+
+
 @app.get("/api/health")
 async def health():
     """Проверка сервиса: Render health check + админская диагностика в боте."""
+    # Состояние тиража: если магазин продаёт, а «Осталось» не меняется — видно здесь.
+    # Кэш на 20 секунд: Render дергает /api/health часто, а лишние запросы к базе
+    # на каждый пинг не нужны.
+    global _stock_health_cache
+    now_ts = time.time()
+    cache_ttl = STOCK_HEALTH_TTL if _stock_health_cache["value"] is not None else 5.0
+    if now_ts - _stock_health_cache["at"] > cache_ttl:
+        try:
+            _stock_health_cache = {"at": now_ts, "value": await asyncio.to_thread(shop_stock_snapshot, supabase),
+                                   "error": None}
+        except Exception as exc:  # noqa: BLE001
+            _stock_health_cache = {"at": now_ts, "value": None,
+                                   "error": f"{type(exc).__name__}: {exc}"[:300]}
+    stock = _stock_health_cache["value"]
+    stock_error = _stock_health_cache["error"]
     return {
         "ok": True,
         "service": "aura-api",
@@ -90,6 +110,13 @@ async def health():
             "dir": "miniapp",
             "ready": os.path.isfile(os.path.join(MINIAPP_DIR, "index.html")),
             "url": "/miniapp/",
+        },
+        "shop_stock": {
+            "ready": stock is not None,
+            "left": stock,
+            "error": stock_error,
+            "hint": None if stock is not None else
+            "примените supabase/migrations/20261102000000_stock_and_chest_rpc.sql",
         },
         # MAINTENANCE_MODE объявлен ниже по файлу, но к моменту запроса уже существует.
         "maintenance": MAINTENANCE_MODE,
@@ -189,19 +216,37 @@ async def chest_ready():
         )
         return response.data or []
 
+    def _probe_rpc():
+        supabase.rpc("chest_claim_pending", {"p_user_id": "__probe__"}).execute()
+        return True
+
     try:
         rows = await asyncio.to_thread(_probe)
     except Exception as exc:
-        message = f"{type(exc).__name__}: {exc}"
+        # Сундуки при этом всё равно работают: награда начисляется сразу,
+        # без отложенного «Забрать» (см. open_chest).
+        print(f"ОШИБКА СУНДУКА: таблица {CHEST_CLAIMS_TABLE} недоступна: "
+              f"{type(exc).__name__}: {exc}", flush=True)
         return JSONResponse(status_code=200, content={
             "ok": False,
             "table": CHEST_CLAIMS_TABLE,
             "detail": _chest_claims_detail(exc),
-            "error": message[:400],
+            "error": f"{type(exc).__name__}: {exc}"[:400],
             "migration": CHEST_CLAIMS_MIGRATION_FILE,
-            "hint": "Примените миграцию и выполните NOTIFY pgrst, 'reload schema'",
+            "rpc_migration": "supabase/migrations/20261102000000_stock_and_chest_rpc.sql",
+            "fallback": "награда начисляется сразу при открытии сундука",
+            "hint": "Примените миграции и выполните NOTIFY pgrst, 'reload schema'",
         })
-    return {"ok": True, "table": CHEST_CLAIMS_TABLE, "rows_preview": len(rows)}
+
+    try:
+        rpc_ready = await asyncio.to_thread(_probe_rpc)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("RPC сундуков недоступны: %s", exc)
+        rpc_ready = False
+    return {"ok": True, "table": CHEST_CLAIMS_TABLE, "rows_preview": len(rows),
+            "rpc_ready": rpc_ready,
+            "rpc_missing_hint": None if rpc_ready else
+            "примените supabase/migrations/20261102000000_stock_and_chest_rpc.sql"}
 
 # ==================== МИНЫ ====================
 MINES_CELLS = 16
@@ -1402,49 +1447,198 @@ def _now_iso() -> str:
     return datetime.datetime.now(datetime.timezone.utc).isoformat()
 
 
+class ChestUnavailable(Exception):
+    """chest_claims недоступна: таблицы/функции нет, RLS или база отказала.
+
+    Раньше такая ошибка превращалась в 503 «Сундуки обновляются, попробуйте
+    чуть позже», и сундук нельзя было открыть вообще. Теперь награда просто
+    начисляется сразу (старая схема, без отложенного «Забрать»).
+    """
+
+
+# Признаки «таблица chest_claims или функция chest_claim_* недоступна».
+_CHEST_UNAVAILABLE_MARKERS = (
+    "chest_claims", "chest_claim_", "PGRST202", "PGRST204", "PGRST205", "42P01", "42501",
+    "row-level security", "does not exist", "schema cache",
+    "Could not find the table", "Could not find the function", "permission denied",
+)
+_RPC_MISSING_MARKERS = (
+    "PGRST202", "PGRST205", "404", "Could not find the function",
+    "Could not find the table", "does not exist", "schema cache",
+)
+
+
+def _log_chest_error(context: str, exc: Exception, user_id=None) -> None:
+    """Одна строка в консоль Render + в лог: по ней видно, что именно сломалось."""
+    text = f"{type(exc).__name__}: {exc}"
+    print(f"ОШИБКА СУНДУКА: {context} user_id={user_id}: {text}", flush=True)
+    logger.error("ОШИБКА СУНДУКА: %s user_id=%s: %s", context, user_id, text)
+
+
+def _chest_unavailable(exc: Exception) -> bool:
+    message = f"{type(exc).__name__}: {exc}"
+    return any(marker in message for marker in _CHEST_UNAVAILABLE_MARKERS)
+
+
+def _rpc_missing(exc: Exception) -> bool:
+    message = f"{type(exc).__name__}: {exc}"
+    return any(marker in message for marker in _RPC_MISSING_MARKERS)
+
+
 def _insert_chest_claim(user_id, chest_type: str, reward_coins: int, reward_keys: int) -> dict:
-    """Запоминаем разыгранную награду. Начисление — только в /api/claim_chest."""
-    response = (
-        supabase.table(CHEST_CLAIMS_TABLE)
-        .insert({
-            "user_id": str(user_id),
-            "chest_type": chest_type,
-            "reward_coins": int(reward_coins),
-            "reward_keys": int(reward_keys),
-            # Явно: не полагаемся на DEFAULT в базе, чтобы фильтр .eq("claimed", False)
-            # всегда находил строку.
-            "claimed": False,
-        })
-        .execute()
-    )
+    """Запоминаем разыгранную награду. Начисление — только в /api/claim_chest.
+
+    Сначала пробуем SQL-функцию chest_claim_create (миграция
+    20261102000000_stock_and_chest_rpc.sql): она пишет в таблицу от имени
+    владельца, поэтому работает и при включённом RLS. Если функции нет —
+    обычный insert. Любая ошибка → ChestUnavailable (начислим сразу).
+    """
+    try:
+        rows = supabase.rpc("chest_claim_create", {
+            "p_user_id": str(user_id),
+            "p_chest_type": chest_type,
+            "p_coins": int(reward_coins),
+            "p_keys": int(reward_keys),
+        }).execute().data
+        claim_id = None
+        if isinstance(rows, list) and rows:
+            claim_id = (rows[0] or {}).get("claim_id")
+        elif isinstance(rows, dict):
+            claim_id = rows.get("claim_id")
+        if claim_id is not None:
+            return {"id": claim_id}
+        raise RuntimeError("chest_claim_create вернула пустой id")
+    except Exception as exc:  # noqa: BLE001
+        if not _rpc_missing(exc):
+            _log_chest_error("chest_claim_create", exc, user_id)
+            raise ChestUnavailable(f"{type(exc).__name__}: {exc}") from exc
+        logger.warning("RPC chest_claim_create недоступна (%s) — пишем в таблицу", exc)
+
+    try:
+        response = (
+            supabase.table(CHEST_CLAIMS_TABLE)
+            .insert({
+                "user_id": str(user_id),
+                "chest_type": chest_type,
+                "reward_coins": int(reward_coins),
+                "reward_keys": int(reward_keys),
+                # Явно: не полагаемся на DEFAULT в базе, чтобы фильтр .eq("claimed", False)
+                # всегда находил строку.
+                "claimed": False,
+            })
+            .execute()
+        )
+    except Exception as exc:  # noqa: BLE001
+        _log_chest_error("insert chest_claims", exc, user_id)
+        raise ChestUnavailable(f"{type(exc).__name__}: {exc}") from exc
+
     row = (response.data or [None])[0]
     if not row or row.get("id") is None:
-        raise RuntimeError("chest_claims insert вернул пустую строку")
+        _log_chest_error("insert chest_claims: пустая строка", RuntimeError("пустой ответ"), user_id)
+        raise ChestUnavailable("chest_claims insert вернул пустую строку")
     return row
 
 
 def _fetch_unclaimed_claims(user_id):
-    response = (
-        supabase.table(CHEST_CLAIMS_TABLE)
-        .select("id, reward_coins, reward_keys")
-        .eq("user_id", str(user_id))
-        .eq("claimed", False)
-        .order("id")
-        .execute()
-    )
+    """Незабранные награды игрока. ChestUnavailable — таблицы/функции нет."""
+    try:
+        rows = supabase.rpc("chest_claim_pending", {"p_user_id": str(user_id)}).execute().data
+        return list(rows or [])
+    except Exception as exc:  # noqa: BLE001
+        if not _rpc_missing(exc):
+            _log_chest_error("chest_claim_pending", exc, user_id)
+            raise ChestUnavailable(f"{type(exc).__name__}: {exc}") from exc
+        logger.warning("RPC chest_claim_pending недоступна (%s) — читаем таблицу", exc)
+
+    try:
+        response = (
+            supabase.table(CHEST_CLAIMS_TABLE)
+            .select("id, reward_coins, reward_keys")
+            .eq("user_id", str(user_id))
+            .eq("claimed", False)
+            .order("id")
+            .execute()
+        )
+    except Exception as exc:  # noqa: BLE001
+        _log_chest_error("select chest_claims", exc, user_id)
+        raise ChestUnavailable(f"{type(exc).__name__}: {exc}") from exc
     return response.data or []
 
 
-def _mark_claimed(claim_id, claimed: bool):
-    payload = {"claimed": claimed, "claimed_at": _now_iso() if claimed else None}
-    return (
-        supabase.table(CHEST_CLAIMS_TABLE)
-        .update(payload)
-        .eq("id", claim_id)
-        .eq("claimed", not claimed)
-        .select("id")
-        .execute()
-    )
+def _chest_take(claim_id, user_id) -> dict:
+    """Атомарно «занимает» награду. {'found', 'already_claimed', 'reward_coins', 'reward_keys'}."""
+    try:
+        rows = supabase.rpc("chest_claim_take", {
+            "p_claim_id": int(claim_id), "p_user_id": str(user_id),
+        }).execute().data
+        if not rows:
+            return {"found": False, "already_claimed": False, "reward_coins": 0, "reward_keys": 0}
+        row = rows[0] or {}
+        return {
+            "found": True,
+            "already_claimed": bool(row.get("already_claimed")),
+            "reward_coins": int(row.get("reward_coins") or 0),
+            "reward_keys": int(row.get("reward_keys") or 0),
+        }
+    except Exception as exc:  # noqa: BLE001
+        if not _rpc_missing(exc):
+            _log_chest_error("chest_claim_take", exc, user_id)
+            raise ChestUnavailable(f"{type(exc).__name__}: {exc}") from exc
+        logger.warning("RPC chest_claim_take недоступна (%s) — работаем с таблицей", exc)
+
+    try:
+        response = (
+            supabase.table(CHEST_CLAIMS_TABLE)
+            .select("id, user_id, reward_coins, reward_keys, claimed")
+            .eq("id", int(claim_id))
+            .eq("user_id", str(user_id))
+            .limit(1)
+            .execute()
+        )
+        row = (response.data or [None])[0]
+        if not row:
+            return {"found": False, "already_claimed": False, "reward_coins": 0, "reward_keys": 0}
+        if row.get("claimed"):
+            return {"found": True, "already_claimed": True, "reward_coins": 0, "reward_keys": 0}
+        updated = (
+            supabase.table(CHEST_CLAIMS_TABLE)
+            .update({"claimed": True, "claimed_at": _now_iso()})
+            .eq("id", int(claim_id))
+            .eq("user_id", str(user_id))
+            .eq("claimed", False)
+            .select("id")
+            .execute()
+        )
+    except Exception as exc:  # noqa: BLE001
+        _log_chest_error("claim chest_claim id=%s" % claim_id, exc, user_id)
+        raise ChestUnavailable(f"{type(exc).__name__}: {exc}") from exc
+
+    if not updated.data:
+        return {"found": True, "already_claimed": True, "reward_coins": 0, "reward_keys": 0}
+    return {
+        "found": True,
+        "already_claimed": False,
+        "reward_coins": int(row.get("reward_coins") or 0),
+        "reward_keys": int(row.get("reward_keys") or 0),
+    }
+
+
+def _chest_release(claim_id, user_id) -> None:
+    """Откат «занятия», если награду не удалось записать в профиль."""
+    try:
+        supabase.rpc("chest_claim_release", {
+            "p_claim_id": int(claim_id), "p_user_id": str(user_id),
+        }).execute()
+        return
+    except Exception as exc:  # noqa: BLE001
+        if not _rpc_missing(exc):
+            _log_chest_error("chest_claim_release", exc, user_id)
+            return
+    try:
+        supabase.table(CHEST_CLAIMS_TABLE).update({"claimed": False, "claimed_at": None}).eq(
+            "id", int(claim_id)).eq("user_id", str(user_id)).eq("claimed", True).execute()
+    except Exception as exc:  # noqa: BLE001
+        _log_chest_error("release chest_claim id=%s" % claim_id, exc, user_id)
 
 
 @app.post("/api/open_chest")
@@ -1473,31 +1667,33 @@ async def open_chest(auth: OpenChestRequest):
     last_chest = int(row.get("last_chest", 0) or 0)
 
     # Незабранные награды прошлых сундуков не теряем: зачисляем их перед новой игрой.
+    # Если chest_claims недоступна — сундук всё равно открываем: награда этого
+    # раунда будет начислена сразу, а не потеряна вместе с кнопкой.
     try:
         pending = await asyncio.to_thread(_fetch_unclaimed_claims, user_id)
-    except Exception as exc:
-        logger.exception("Не удалось прочитать незабранные сундуки user_id=%s", user_id)
-        raise HTTPException(status_code=503, detail=_chest_claims_detail(exc)) from exc
+    except ChestUnavailable as exc:
+        _log_chest_error("незабранные награды недоступны", exc, user_id)
+        pending = []
+    except Exception as exc:  # noqa: BLE001
+        _log_chest_error("чтение незабранных наград", exc, user_id)
+        pending = []
     if pending:
         # Сначала «занимаем» старые награды условным апдейтом, потом зачисляем:
         # если зачисление не удалось — снимаем отметку, чтобы награда не пропала.
         locked_claims = []
         for item in pending:
             try:
-                locked = await asyncio.to_thread(_mark_claimed, item.get("id"), True)
-                if locked.data:
+                taken = await asyncio.to_thread(_chest_take, item.get("id"), user_id)
+                if taken.get("found") and not taken.get("already_claimed"):
                     locked_claims.append(item)
-            except Exception:
-                logger.warning("Не удалось закрыть старый сундук id=%s", item.get("id"))
+            except Exception as exc:  # noqa: BLE001
+                _log_chest_error("закрытие старого сундука id=%s" % item.get("id"), exc, user_id)
         extra_coins = sum(int(item.get("reward_coins") or 0) for item in locked_claims)
         extra_keys = sum(int(item.get("reward_keys") or 0) for item in locked_claims)
         if locked_claims and not _db_update_user(user_id, coins=coins + extra_coins,
                                                  keys=keys + extra_keys):
             for item in locked_claims:
-                try:
-                    await asyncio.to_thread(_mark_claimed, item.get("id"), False)
-                except Exception:
-                    logger.warning("Не удалось откатить сундук id=%s", item.get("id"))
+                await asyncio.to_thread(_chest_release, item.get("id"), user_id)
             raise HTTPException(status_code=500, detail="Не удалось открыть сундук")
         coins += extra_coins
         keys += extra_keys
@@ -1517,10 +1713,32 @@ async def open_chest(auth: OpenChestRequest):
         else:
             reward_coins, reward_keys = random.randint(CHEST_MIN_COINS, CHEST_MAX_COINS), 0
 
+    claim = None
     try:
         claim = await asyncio.to_thread(_insert_chest_claim, user_id, chest_type, reward_coins, reward_keys)
-    except Exception as exc:
-        logger.exception("Не удалось создать chest_claim user_id=%s", user_id)
+    except ChestUnavailable as exc:
+        # СТАРАЯ СХЕМА (без chest_claims): начисляем награду сразу, чтобы сундук
+        # работал даже когда таблицы нет, RLS закрыт или PostgREST не видит схему.
+        _log_chest_error("chest_claims недоступна → начисляем сразу", exc, user_id)
+        new_coins = coins + reward_coins
+        new_keys = keys + reward_keys
+        if not _db_update_user(user_id, coins=new_coins, keys=new_keys, last_chest=last_chest):
+            print(f"ОШИБКА СУНДУКА: не удалось начислить награду user_id={user_id} "
+                  f"(+{reward_coins} коинов, +{reward_keys} ключей)", flush=True)
+            raise HTTPException(status_code=500, detail="Не удалось открыть сундук") from exc
+        print(f"СУНДУК: начислено сразу (без chest_claims) user_id={user_id} "
+              f"+{reward_coins} коинов, +{reward_keys} ключей", flush=True)
+        return {
+            "success": True, "chest_type": chest_type,
+            "reward_coins": reward_coins, "reward_keys": reward_keys,
+            "claim_id": None,
+            # Клиент по этим двум флагам понимает: награда уже на балансе,
+            # отдельный /api/claim_chest вызывать не нужно.
+            "credited": True, "deferred": False,
+            "new_balance": new_coins, "new_keys": new_keys, "last_chest": last_chest,
+        }
+    except Exception as exc:  # noqa: BLE001
+        _log_chest_error("создание chest_claim", exc, user_id)
         raise HTTPException(status_code=503, detail=_chest_claims_detail(exc)) from exc
 
     # Ключ тратится сразу (он оплачивает попытку), кулдаун тоже стартует сразу,
@@ -1532,6 +1750,7 @@ async def open_chest(auth: OpenChestRequest):
         "success": True, "chest_type": chest_type,
         "reward_coins": reward_coins, "reward_keys": reward_keys,
         "claim_id": claim.get("id"),
+        "credited": False, "deferred": True,
         "new_balance": coins, "new_keys": keys, "last_chest": last_chest,
     }
 
@@ -1548,41 +1767,22 @@ async def claim_chest(auth: "ClaimChestRequest"):
     if auth.claim_id is None:
         raise HTTPException(status_code=400, detail="Не указан сундук")
 
-    def _fetch():
-        response = (
-            supabase.table(CHEST_CLAIMS_TABLE)
-            .select("id, user_id, reward_coins, reward_keys, claimed")
-            .eq("id", auth.claim_id)
-            .eq("user_id", str(user_id))
-            .limit(1)
-            .execute()
-        )
-        return (response.data or [None])[0]
-
-    try:
-        claim = await asyncio.to_thread(_fetch)
-    except Exception as exc:
-        logger.exception("Не удалось прочитать chest_claim id=%s", auth.claim_id)
-        raise HTTPException(status_code=503, detail=_chest_claims_detail(exc)) from exc
-    if not claim:
-        raise HTTPException(status_code=404, detail="Сундук не найден")
-
+    # Профиль читаем ДО «занятия» награды: если строки пользователя нет, выдача
+    # останется незабранной и не потеряется.
     row = _db_user(str(user_id))
     if row is None: raise HTTPException(status_code=404, detail="User not found")
     coins = int(row.get("coins", 0) or 0)
     keys = int(row.get("keys", 0) or 0)
 
-    if claim.get("claimed"):
-        return {"success": True, "already_claimed": True, "reward_coins": 0, "reward_keys": 0,
-                "new_balance": coins, "new_keys": keys}
-
-    # Сначала «занимаем» награду условным апдейтом, чтобы двойной тап не начислил дважды.
     try:
-        locked = await asyncio.to_thread(_mark_claimed, claim.get("id"), True)
-    except Exception as exc:
-        logger.exception("Не удалось отметить chest_claim id=%s", auth.claim_id)
+        claim = await asyncio.to_thread(_chest_take, auth.claim_id, user_id)
+    except ChestUnavailable as exc:
+        _log_chest_error("chest_claim_take id=%s" % auth.claim_id, exc, user_id)
         raise HTTPException(status_code=503, detail=_chest_claims_detail(exc)) from exc
-    if not locked.data:
+    if not claim.get("found"):
+        raise HTTPException(status_code=404, detail="Сундук не найден")
+
+    if claim.get("already_claimed"):
         return {"success": True, "already_claimed": True, "reward_coins": 0, "reward_keys": 0,
                 "new_balance": coins, "new_keys": keys}
 
@@ -1592,12 +1792,11 @@ async def claim_chest(auth: "ClaimChestRequest"):
     new_keys = keys + reward_keys
     if not _db_update_user(str(user_id), coins=new_coins, keys=new_keys):
         # Награду не записали — снимаем отметку, чтобы игрок мог нажать «Забрать» ещё раз.
-        try:
-            await asyncio.to_thread(_mark_claimed, claim.get("id"), False)
-        except Exception:
-            logger.warning("Не удалось откатить chest_claim id=%s", auth.claim_id)
+        await asyncio.to_thread(_chest_release, auth.claim_id, user_id)
         raise HTTPException(status_code=500, detail="Не удалось забрать награду")
 
+    print(f"СУНДУК: награда забрана user_id={user_id} +{reward_coins} коинов, "
+          f"+{reward_keys} ключей", flush=True)
     return {"success": True, "already_claimed": False, "reward_coins": reward_coins,
             "reward_keys": reward_keys, "new_balance": new_coins, "new_keys": new_keys}
 
@@ -1630,9 +1829,16 @@ async def buy_item(data: BuyItem):
         raise HTTPException(status_code=400, detail="Неизвестный предмет магазина")
 
     try:
-        return await asyncio.to_thread(purchase_shop_item, supabase, user_id, data.item_id, ADMIN_IDS)
+        result = await asyncio.to_thread(purchase_shop_item, supabase, user_id, data.item_id, ADMIN_IDS)
     except ShopPurchaseError as exc:
+        print(f"МАГАЗИН: отказ user_id={user_id} item={data.item_id} "
+              f"[{exc.status_code}] {exc.message}", flush=True)
         raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
+    # Одна строка на покупку: по ней видно и баланс, и остаток тиража.
+    print(f"МАГАЗИН: куплено user_id={user_id} item={data.item_id} "
+          f"баланс→{result.get('new_balance')} остаток→{result.get('stock')} "
+          f"stock_ready={result.get('stock_ready')}", flush=True)
+    return result
 
 # ==================== АПГРЕЙД (TONGRADER) ====================
 def _upgrade_normalize_request(data: "UpgradeAction") -> tuple[str, int, str, str]:
