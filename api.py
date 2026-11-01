@@ -19,7 +19,7 @@ load_dotenv()
 
 # Номер сборки: по нему из /api/health видно, что на сервисе НЕ старый код.
 # Если после деплоя здесь прежнее значение — Render ещё не перезапустился.
-API_BUILD = "2026-11-01-stock-on-7"
+API_BUILD = "2026-11-01-clean-bot-8"
 
 logger = logging.getLogger("aura-api")
 if not logger.handlers:

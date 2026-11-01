@@ -17,6 +17,7 @@ import aiohttp                     # клиент для проверки сер
 from aiohttp import web            # только для start_fake_website (порт Render)
 from supabase import create_client, Client
 from shop_catalog import (
+    DAILY_LIMITS_ENABLED,
     ShopPurchaseError,
     available_shop_items,
     inventory_item,
@@ -77,7 +78,7 @@ WEBAPP_URL = os.getenv("AURA_WEBAPP_URL") or f"{API_URL}/miniapp/"
 #   1) кнопкой с web_app (WebAppInfo) — работает в личке и не зависит от short_name;
 #   2) прямой ссылкой t.me/<бот>/<short_name> — нужна, чтобы переслать другу.
 # Внутри ссылки (2) имя бота пишется вручную и часто устаревает: бот переименован,
-# short_name в BotFather другой — и команда «апка» даёт «не рабочую ссылку».
+# short_name в BotFather другой — и получается «не рабочая ссылка».
 # Поэтому username берём у Telegram (get_me) при старте, а short_name — из env
 # MINIAPP_SHORT_NAME (по умолчанию Auragame, как в BotFather → Configure Mini App).
 MINIAPP_SHORT_NAME = (os.getenv("MINIAPP_SHORT_NAME") or "Auragame").strip().strip("/")
@@ -111,7 +112,7 @@ def miniapp_direct_url() -> str:
     """Прямая ссылка t.me/<бот>/<short_name> для пересылки друзьям.
 
     Строится из НАСТОЯЩЕГО @username (его отдаёт Telegram), поэтому
-    переименование бота больше не ломает команду «апка».
+    переименование бота больше не ломает ссылку на Mini App.
     """
     override = (os.getenv("MINIAPP_URL") or MINIAPP_URL or "").strip()
     if override:
@@ -274,7 +275,6 @@ async def cmd_admin_help(message: Message):
         "• <code>разбан @user</code> — разбанить\n"
         "• <code>список банов</code> — список всех забаненных\n"
         "• <code>забрать капсулы @user</code> — удалить все капсулы\n"
-        "• <code>апгрейд</code> — ссылка на игру «Апгрейд»\n"
         "• <code>забрать всё @user</code> — полностью очистить инвентарь и баланс\n\n"
         "💰 <b>Экономика:</b>\n"
         "• <code>+пополнить карман @user 500</code> — выдать коины\n"
@@ -968,7 +968,8 @@ async def cmd_shop(message: Message):
     buttons = []
     stock = await asyncio.to_thread(shop_stock_snapshot, supabase)
     for item_id, item, left in available_shop_items(is_admin(message.from_user.id), stock):
-        limit_text = f" · лимит {item['daily_limit']}/день" if item["daily_limit"] is not None else ""
+        limit_text = (f" · лимит {item['daily_limit']}/день"
+                      if DAILY_LIMITS_ENABLED and item["daily_limit"] is not None else "")
         stock_text = f" · осталось {left} из {item['total_limit']}" if left is not None else ""
         price_text = f"{item['price']:,}".replace(",", " ")
         lines.append(f"{item['emoji']} <b>{item['name']}</b> — <b>{price_text}</b> коинов"
@@ -988,23 +989,6 @@ async def cmd_shop(message: Message):
         reply_markup=InlineKeyboardMarkup(inline_keyboard=rows) if rows else None,
     )
 
-
-# ================= АПГРЕЙД (АДМИНЫ) =================
-@dp.message(F.text.func(lambda t: strip_prefix(t).lower().startswith("апгрейд")))
-async def cmd_upgrade(message: Message):
-    if not is_admin(message.from_user.id):
-        return await message.answer("❌ Команда доступна только администраторам бота.")
-    text = (
-        "🛠️ <b>Апгрейд</b>\n\n"
-        "Кладёшь предмет слева, выбираешь цель справа — круг показывает шанс.\n"
-        "Коины: от 50 до 5 000 · кэфы x2, x4, x5, x8, x10 или готовый шанс 35/55/75%\n"
-        "Капсулы: обычная 💊 (100 коинов) → уникальная ⚱️ (500 коинов)\n\n"
-        "Открывай мини-аппку 👇"
-    )
-    kb = InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="🛠️ Открыть Апгрейд", url=miniapp_direct_url())
-    ]])
-    await message.answer(text, parse_mode="HTML", reply_markup=kb, disable_web_page_preview=True)
 
 
 # ================= ДИАГНОСТИКА СЕРВИСОВ (АДМИНЫ) =================
@@ -1110,7 +1094,7 @@ async def cmd_services(message: Message):
         f"   • API: <code>{API_URL}</code>\n"
         f"   • Mini App: <code>{WEBAPP_URL}</code> "
         "ℹ️ (только для BotFather; игрокам эту ссылку не отправляйте — "
-        "у них кнопка в <code>апка</code>)\n\n"
+        "у них кнопка Mini App в меню бота)\n\n"
         "2️⃣ <b>dan4Bot</b> (aiogram): ✅ этот процесс\n"
         "   • веб-сервер только для порта Render (start_fake_website)\n"
         "   • игровые данные читает из общей базы Supabase\n\n"
@@ -1317,46 +1301,13 @@ async def cmd_bot_stats(message: Message):
     F.text.func(lambda t: strip_prefix(t).lower().startswith("помощь") or strip_prefix(t).lower().startswith("help")))
 async def cmd_help(message: Message):
     text = (
-        "📖 <b>СПИСОК КОМАНД БОТА</b>\n━━━━━━━━━━━━━━━━━━━━\n\n🎁 <b>Случайные коины:</b>\n• Просто пиши в чате — с шансом 0.5% получишь 1-5 коинов\n\n🎟️ <b>Промокоды:</b>\n• <code>промо код</code> — активировать промокод\n\n💰 <b>Экономика:</b>\n• <code>карман</code> — твой баланс\n• <code>карман @user</code> — баланс другого\n• <code>перевод @user сумма</code> — перевести\n• <code>перевод сумма</code> (ответом) — быстрый перевод\n• <code>топ</code> — топ-10 богачей\n• <code>магазин</code> — магазин\n\n🎲 <b>Игры:</b>\n• <code>кубы @user ставка</code> — дуэль в кости\n• <code>кубы ставка</code> (ответом) — быстрый вызов\n\n📱 <b>Мини-приложение:</b>\n• <code>апка</code> — ссылка на наше казино\n\n• <code>тег</code> — проверка бота\n• <code>помощь</code> — эта справка")
+        "📖 <b>СПИСОК КОМАНД БОТА</b>\n━━━━━━━━━━━━━━━━━━━━\n\n🎟️ <b>Промокоды:</b>\n• <code>промо код</code> — активировать промокод\n\n💰 <b>Экономика:</b>\n• <code>карман</code> — твой баланс\n• <code>карман @user</code> — баланс другого\n• <code>перевод @user сумма</code> — перевести\n• <code>перевод сумма</code> (ответом) — быстрый перевод\n• <code>топ</code> — топ-10 богачей\n• <code>магазин</code> — магазин\n\n🎲 <b>Игры:</b>\n• <code>кубы @user ставка</code> — дуэль в кости\n• <code>кубы ставка</code> (ответом) — быстрый вызов\n\n• <code>тег</code> — проверка бота\n• <code>помощь</code> — эта справка")
     await message.answer(text, parse_mode="HTML")
 
 
 @dp.message(F.text.func(lambda t: strip_prefix(t).lower().startswith("тег")))
 async def cmd_tag(message: Message):
     await message.answer(f"👋 Я на месте, {safe_text(message.from_user.full_name)}!")
-
-
-@dp.message(F.text.func(lambda t: strip_prefix(t).lower().startswith("апка")))
-async def cmd_apka(message: Message):
-    """Mini App — ТОЛЬКО через Telegram, без прямых ссылок на Render.
-
-    Прямой адрес сервиса (…onrender.com/miniapp/) открывает приложение вне
-    Telegram: initData не передаётся, игры не работают, а игрок видит пустой
-    экран или «технические работы». Поэтому в тексте сообщения адреса сервиса
-    больше нет — только кнопка:
-      • в личке — web_app: Telegram сам открывает приложение и передаёт initData;
-      • в группах web_app запрещён Telegram, поэтому там кнопка-ссылка t.me —
-        она тоже открывает Mini App внутри Telegram, а не в браузере.
-    """
-    rows = []
-    if message.chat.type == "private":
-        rows.append([InlineKeyboardButton(
-            text="🎮 Открыть AURA GAME",
-            web_app=WebAppInfo(url=miniapp_webapp_url()),
-        )])
-    else:
-        rows.append([InlineKeyboardButton(
-            text="🎮 Открыть AURA GAME",
-            url=miniapp_direct_url(),
-        )])
-
-    text = (
-        "📱 <b>Наше Mini App!</b>\n\n"
-        "🎮 Заходи в наше казино прямо из Telegram — жми кнопку ниже.\n\n"
-        "💰 Там тебя ждут сундуки, рулетка, мины и краш с общим балансом!"
-    )
-    kb = InlineKeyboardMarkup(inline_keyboard=rows)
-    await message.answer(text, parse_mode="HTML", reply_markup=kb, disable_web_page_preview=True)
 
 
 # ================= СКРЫТЫЕ КОМАНДЫ =================
@@ -1596,7 +1547,7 @@ async def main():
     me = await bot.get_me()
     if me.username:
         # Настоящее имя бота: из него строится прямая ссылка на Mini App,
-        # поэтому «апка» больше не зависит от устаревшей константы в коде.
+        # поэтому ссылка не зависит от устаревшей константы в коде.
         BOT_USERNAME = me.username
     logger.info(f"🤖 Бот: @{me.username} | Mini App: {WEBAPP_URL}")
     logger.info(f"🔗 Прямая ссылка Mini App: {miniapp_direct_url()}")
