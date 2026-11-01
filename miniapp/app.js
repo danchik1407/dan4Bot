@@ -1144,9 +1144,16 @@ function upgradeRollWon(roll, chance) {
 }
 
 // Насколько бросок «внутри» сектора успеха: для логов и проверки честности.
+// Допуск 0.1 п.п. — ровно тот, на который стрелка отодвигается от границы,
+// поэтому «попал ровно в границу» больше не считается расхождением.
 function upgradeRollInsideSector(roll, chance) {
     const won = upgradeRollWon(roll, chance);
-    return won === null ? null : (won && Number(roll) * 3.6 < Math.min(360, Number(chance) * 3.6));
+    if (won === null) return null;
+    const angle = Number(roll) * 3.6;
+    const sector = Math.min(360, Math.max(0, Number(chance)) * 3.6);
+    // Сектор успеха — это ровно [0, шанс). Граница принадлежит красной зоне,
+    // как и в вердикте сервера (roll >= chance — проигрыш).
+    return angle < sector - 1e-9;
 }
 
 // Каким шансом реально играли. Сервер присылает и визуальный chance, и real_chance
@@ -1624,17 +1631,29 @@ function startUpgradeArrowSpin(token) {
 }
 
 // Куда встанет стрелка. Если сервер прислал выпавшее число (roll), стрелка
-// показывает ИМЕННО его: бросок 0..100 → угол 0..360. Раньше позиция выбиралась
-// случайно «внутри/вне сектора», поэтому стрелка и реальный бросок могли
-// разойтись — игрок видел «залетело», а приза не было.
+// показывает ИМЕННО его: бросок 0..100 → угол 0..360 (0° — верх круга,
+// по часовой стрелке, как и заливка conic-gradient).
+//
+// Единственное исключение — граница сектора: при броске «впритык» стрелка
+// сдвигается на 0.1 процентного пункта (0.36°) внутрь зоны, соответствующей
+// вердикту. Иначе при шансе 50% и броске 50.00 стрелка стояла бы ровно на
+// линии, и было не понять, попала она в зелёную зону или уже нет.
+const UPGRADE_BOUNDARY_NUDGE_PCT = 0.1;
+
 function upgradeArrowTargetFor(won, chance, rollValue) {
-    const arc = Math.max(0.5, Math.min(360, (Number(chance) || 0) * 3.6));
+    const chanceNumber = Math.max(0, Math.min(100, Number(chance) || 0));
+    const arc = Math.max(0.5, Math.min(360, chanceNumber * 3.6));
+    const nudge = UPGRADE_BOUNDARY_NUDGE_PCT * 3.6;
     const rollNumber = Number(rollValue);
     if (Number.isFinite(rollNumber)) {
-        let desired = Math.max(0.4, Math.min(359.6, rollNumber * 3.6));
-        // Страховка на границе округления: стрелка обязана совпадать с итогом.
-        if (won && desired >= arc) desired = Math.max(0.4, Math.min(arc * 0.5, arc - 0.6));
-        if (!won && desired < arc) desired = Math.min(359.6, arc + 0.8);
+        // Угол строго по выпавшему числу.
+        let desired = Math.max(0, Math.min(359.6, rollNumber * 3.6));
+        // Около самой границы (ближе 0.1 п.п.) сдвигаем стрелку В СТОРОНУ ЗОНЫ,
+        // которую назвал вердикт: победа — чуть в зелёное, проигрыш — чуть в красное.
+        // Дальше от границы угол остаётся равным выпавшему числу без изменений.
+        if (Math.abs(desired - arc) < nudge) {
+            desired = won ? Math.max(0, arc - nudge) : Math.min(359.6, arc + nudge);
+        }
         return desired;
     }
     if (won) {
@@ -1962,8 +1981,8 @@ function showMissedUpgradeResult(row) {
         setUpgradeResult(text, 'win');
     } else {
         setUpgradeResult(row.item_from === 'coin'
-            ? `${prefix}❌ ставка сгорела`
-            : `${prefix}❌ капсулы сгорели`, 'lose');
+            ? `${prefix}❌ Не повезло — ставка сгорела`
+            : `${prefix}❌ Не повезло — капсулы сгорели`, 'lose');
     }
     updateUI();
     ackUpgradeLog(row.id);
@@ -2045,10 +2064,10 @@ function finishUpgradeAnimation(data, chance) {
         playSound('win');
         try { tg.HapticFeedback.notificationOccurred('success'); } catch (e) {}
     } else {
-        const lostSource = data.item_from || upgradeFrom;
-        setUpgradeResult(lostSource === 'coin'
-            ? '❌ Не повезло. Ставка сгорела'
-            : '❌ Не повезло. Капсулы сгорели', 'lose');
+        // Красный текст под кругом — ровно «❌ Не повезло».
+        // Что именно сгорело (коины/капсулы и сколько), видно в блоке под кругом
+        // (.up-net), поэтому дублировать это здесь больше не нужно.
+        setUpgradeResult('❌ Не повезло', 'lose');
         playSound('lose');
         try { tg.HapticFeedback.notificationOccurred('error'); } catch (e) {}
     }
