@@ -1151,6 +1151,13 @@ function ensureUpgradeSourceValid() {
 function lockUpgradeChance(value) {
     const number = Number(value);
     upgradePlacedChance = Number.isFinite(number) && number > 0 ? number : null;
+    // Фиксируем границу круга СРАЗУ, тем же числом, по которому сервер считал
+    // вердикт: иначе зелёная зона какое-то время показывала бы локальный расчёт,
+    // а стрелка останавливалась бы по серверному — расхождение на границе.
+    const circle = document.getElementById('up-circle');
+    if (circle && upgradePlacedChance !== null) {
+        circle.style.setProperty('--p', (Math.min(upgradePlacedChance, 100) * 3.6).toFixed(2) + 'deg');
+    }
 }
 
 function releaseUpgradeChance() {
@@ -1161,9 +1168,10 @@ function upgradeRingChance() {
     return upgradePlacedChance === null ? upgradeChance() : upgradePlacedChance;
 }
 
-// Выигрыш = бросок МЕНЬШЕ шанса (шанс 50%, выпало 22 — победа; выпало 80 — проигрыш).
+// Выигрыш = бросок НЕ БОЛЬШЕ шанса (шанс 50%: бросок 22 — победа, 50 — тоже победа,
+// 50.01 — проигрыш). Ровно то же правило на сервере: roll <= chance — победа.
 // Функция одна на клиент, чтобы стрелка, дуга и текст не могли разойтись:
-// сектор успеха на круге — это ровно [0, шанс), и стрелка стоит на броске * 3.6°.
+// зелёная зона на круге — это [0, шанс], и стрелка стоит на броске * 3.6°.
 function upgradeRollWon(roll, chance) {
     // null/undefined/'' — это «броска нет», а не 0: Number(null) === 0 иначе
     // превращал отсутствие данных в «победу с шансом 0%».
@@ -1172,20 +1180,18 @@ function upgradeRollWon(roll, chance) {
     const rollNumber = Number(roll);
     const chanceNumber = Number(chance);
     if (!Number.isFinite(rollNumber) || !Number.isFinite(chanceNumber)) return null;
-    return rollNumber < chanceNumber;
+    return rollNumber <= chanceNumber;
 }
 
-// Насколько бросок «внутри» сектора успеха: для логов и проверки честности.
-// Допуск 0.1 п.п. — ровно тот, на который стрелка отодвигается от границы,
-// поэтому «попал ровно в границу» больше не считается расхождением.
+// Попал ли бросок в зелёную зону — для логов и проверки честности.
 function upgradeRollInsideSector(roll, chance) {
     const won = upgradeRollWon(roll, chance);
     if (won === null) return null;
     const angle = Number(roll) * 3.6;
     const sector = Math.min(360, Math.max(0, Number(chance)) * 3.6);
-    // Сектор успеха — это ровно [0, шанс). Граница принадлежит красной зоне,
-    // как и в вердикте сервера (roll >= chance — проигрыш).
-    return angle < sector - 1e-9;
+    // Зелёная зона — [0, шанс], граница включена: ровно так же, как считает
+    // сервер (roll <= chance — победа) и как залит conic-gradient.
+    return angle <= sector + 1e-9;
 }
 
 // Каким шансом реально играли. Сервер присылает и визуальный chance, и real_chance
@@ -1666,10 +1672,11 @@ function startUpgradeArrowSpin(token) {
 // показывает ИМЕННО его: бросок 0..100 → угол 0..360 (0° — верх круга,
 // по часовой стрелке, как и заливка conic-gradient).
 //
-// Единственное исключение — граница сектора: при броске «впритык» стрелка
-// сдвигается на 0.1 процентного пункта (0.36°) внутрь зоны, соответствующей
-// вердикту. Иначе при шансе 50% и броске 50.00 стрелка стояла бы ровно на
-// линии, и было не понять, попала она в зелёную зону или уже нет.
+// Единственное исключение — сама граница: при броске «впритык» (ближе 0.1 п.п.)
+// стрелка сдвигается на 0.1 процентного пункта внутрь зоны, которую назвал
+// вердикт: победа — чуть в зелёное, проигрыш — чуть в красное. Ширина стрелки
+// больше этих 0.36°, поэтому иначе при шансе 50% и броске 50.00 было бы видно
+// «стрелка на линии» и непонятно, засчитали попадание или нет.
 const UPGRADE_BOUNDARY_NUDGE_PCT = 0.1;
 
 function upgradeArrowTargetFor(won, chance, rollValue) {

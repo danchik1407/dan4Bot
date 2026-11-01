@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
     <title>AURA GAME</title>
-    <link rel="stylesheet" href="style.css?v=aura-8">
+    <link rel="stylesheet" href="style.css?v=aura-9">
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
 </head>
 <body>
@@ -261,6 +261,9 @@
                 <section class="up-panel up-panel-center">
                     <div class="up-circle" id="up-circle">
                         <div class="up-circle-ring" id="up-circle-ring"></div>
+                        <!-- Белая риска ровно на границе зелёной зоны (угол --p).
+                             Без неё при стрелке «впритык» не видно, пересечена граница или нет. -->
+                        <div class="up-boundary" id="up-boundary" aria-hidden="true"></div>
                         <div class="up-arrow-wrap" id="up-arrow"><div class="up-arrow"></div></div>
                         <div class="up-circle-inner">
                             <div class="up-chance" id="up-chance">00.00%</div>
@@ -401,6 +404,6 @@
         <div class="nav-item" onclick="switchTab('profile', this)"><span class="nav-icon">👤</span> Профиль</div>
     </nav>
 
-    <script src="app.js?v=aura-8" defer></script>
+    <script src="app.js?v=aura-9" defer></script>
 </body>
 </html>
