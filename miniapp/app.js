@@ -806,11 +806,15 @@ function runChestRoulette({ isGold, isKey, rewardCoins }) {
     });
 }
 
-// Сундуки во время техработ открывают только админы. Обычному игроку даже
-// запрос не отправляем: сервер всё равно ответил бы 403.
+// Сундуки открыты всем, как только сервер снял техработы (can_play: true).
+// Если техработы снова включат (MAINTENANCE_MODE=1), пускаем только админов —
+// обычному игроку даже запрос не отправляем: сервер всё равно ответил бы 403.
 const CHEST_MAINTENANCE_ALERT = 'Сундуки на тех. работах. Скоро!';
 
 function chestAccessGranted() {
+    // canPlay приходит с сервера (см. resolveAccess): на открытой игре — true
+    // для всех. Если техработы снова включат — сундуки остаются у админов.
+    if (canPlay) return true;
     return isAdminId(user && user.id) || Boolean(isAdmin);
 }
 
