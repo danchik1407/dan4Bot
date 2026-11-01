@@ -1056,6 +1056,20 @@ async def cmd_services(message: Message):
             "и 20261102000000_stock_and_chest_rpc.sql, затем NOTIFY pgrst, 'reload schema'"
         )
 
+    # Шанс обычной капсулы в сундуках (задача 22) — прямо из /api/health, чтобы
+    # админ видел реальные числа сервера, а не догадки.
+    chests = data.get("chests") if isinstance(data, dict) else None
+    if isinstance(chests, dict):
+        def _pct(key):
+            try:
+                value = float((chests.get(key) or {}).get("capsule_chance"))
+            except (TypeError, ValueError):
+                return None
+            return value * 100
+        normal_pct, gold_pct = _pct("normal"), _pct("gold")
+        if normal_pct is not None and gold_pct is not None:
+            chest_line += (f"\n   • 💊 капсула: обычный {normal_pct:g}%, золотой {gold_pct:g}%")
+
     # Тираж капсул: если в health нет данных о стоке — значит магазин не знает остаток.
     stock = data.get("shop_stock") if isinstance(data, dict) else None
     build = (data.get("build") if isinstance(data, dict) else None) or "?"
