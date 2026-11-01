@@ -20,6 +20,11 @@ STOCK_TABLE = "capsule_stock"
 # supabase/migrations/20261106000000_stock_limits_on.sql.
 STOCK_LIMITS_ENABLED = True
 
+# Дневные лимиты (daily_limit) выключены отдельно от тиража: игрок ограничен
+# только общим тиражом капсул, а не тем, сколько можно купить за сутки.
+# True — вернуть «30/день» на уникальную и «5/день» на алмазную.
+DAILY_LIMITS_ENABLED = False
+
 # Таблица истории покупок: по ней «стата бота» считает, сколько чего купили.
 PURCHASES_TABLE = "shop_purchases"
 
@@ -335,7 +340,8 @@ def serialize_shop_items(is_admin: bool, stock: dict[str, int] | None = None) ->
             "short_name": item["short_name"],
             "emoji": item["emoji"],
             "price": int(item["price"]),
-            "daily_limit": item["daily_limit"],
+            # Дневных лимитов нет — клиент не должен рисовать «лимит N/день».
+            "daily_limit": item["daily_limit"] if DAILY_LIMITS_ENABLED else None,
             "total_limit": total,
             "stock": stock_left_value,
             "stock_total": total,
@@ -884,7 +890,7 @@ def purchase_shop_item(supabase_client, user_id: int, item_id: str, admin_ids: l
         daily_buys = _parse_daily_buys(raw_daily_buys) if last_reset == today else {}
 
         current_count = daily_buys.get(item_id, 0)
-        if STOCK_LIMITS_ENABLED and not is_admin and daily_limit is not None and current_count >= daily_limit:
+        if DAILY_LIMITS_ENABLED and not is_admin and daily_limit is not None and current_count >= daily_limit:
             raise ShopPurchaseError(DAILY_LIMIT_ERROR)
         if current_coins < price:
             raise ShopPurchaseError("Недостаточно коинов")
