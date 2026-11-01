@@ -21,7 +21,7 @@ SHOP_ITEMS = {
         "daily_limit": None,
         "total_limit": 1000,
         "admin_only": False,
-        "shop_image": "capsule_card.jpg",
+        "shop_image": "cap_shop_normal.png",
         "inventory_image": "inv_capsule.png",
     },
     "uniq_capsule": {
@@ -32,7 +32,7 @@ SHOP_ITEMS = {
         "daily_limit": 30,
         "total_limit": 500,
         "admin_only": False,
-        "shop_image": "uniq_capsule_card.jpg",
+        "shop_image": "cap_shop_uniq.png",
         "inventory_image": "inv_uniq_capsule.png",
     },
     "ruby": {
@@ -43,8 +43,8 @@ SHOP_ITEMS = {
         "daily_limit": None,
         "total_limit": 100,
         "admin_only": True,
-        "shop_image": "ruby_card.jpg",
-        "inventory_image": None,
+        "shop_image": "cap_shop_ruby.png",
+        "inventory_image": "inv_ruby.png",
     },
     "diamond": {
         "name": "Алмазная капсула",
@@ -54,7 +54,7 @@ SHOP_ITEMS = {
         "daily_limit": 5,
         "total_limit": 50,
         "admin_only": True,
-        "shop_image": "diamond_card.jpg",
+        "shop_image": "cap_shop_diamond.png",
         "inventory_image": "inv_diamond.png",
     },
     "galactic": {
@@ -65,8 +65,8 @@ SHOP_ITEMS = {
         "daily_limit": None,
         "total_limit": 10,
         "admin_only": True,
-        "shop_image": "galactic_card.jpg",
-        "inventory_image": None,
+        "shop_image": "cap_shop_galactic.png",
+        "inventory_image": "inv_galactic.png",
     },
 }
 
@@ -219,10 +219,18 @@ def available_shop_items(is_admin: bool, stock: dict[str, int] | None = None) ->
 
 
 def serialize_shop_items(is_admin: bool, stock: dict[str, int] | None = None) -> list[dict]:
-    """JSON-ready catalog for the Mini App, already filtered for the viewer and the stock."""
+    """JSON-ready catalog for the Mini App, already filtered for the viewer and the stock.
+
+    stock/total всегда числа, когда у предмета есть тираж: без таблицы стока
+    (миграция не применена) клиент показывал «Осталось» пустым, потому что
+    приходило null. Теперь остаток падает обратно к тиражу, а stock_ready
+    честно говорит, знаем ли мы реальный остаток.
+    """
     payload = []
     for item_id, item, left in available_shop_items(is_admin, stock):
         total_limit = item.get("total_limit")
+        total = int(total_limit) if total_limit is not None else None
+        stock_left_value = left if left is not None else total
         payload.append({
             "id": item_id,
             "name": item["name"],
@@ -230,8 +238,10 @@ def serialize_shop_items(is_admin: bool, stock: dict[str, int] | None = None) ->
             "emoji": item["emoji"],
             "price": int(item["price"]),
             "daily_limit": item["daily_limit"],
-            "total_limit": int(total_limit) if total_limit is not None else None,
-            "stock": left,
+            "total_limit": total,
+            "stock": stock_left_value,
+            "stock_total": total,
+            "stock_ready": stock is not None,
             "shop_image": item["shop_image"],
             "inventory_image": item["inventory_image"],
         })

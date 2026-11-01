@@ -175,14 +175,17 @@ main { padding: 0 16px; }
 .item-icon { font-size: 40px; margin-bottom: 10px; background: transparent; }
 /* Прозрачный контейнер: у карточек капсул уже свой тёмный фон, а чёрная
    плашка вокруг картинки выглядела как обрезанная рамка. */
+/* Картинки капсул — PNG с прозрачным фоном: контейнер прозрачный,
+   object-fit: contain, никаких чёрных плашек и обрезки по краям. */
 .shop-art { width: 100%; aspect-ratio: 1 / 1; border-radius: 14px; overflow: hidden; margin-bottom: 10px; background: transparent; display: flex; align-items: center; justify-content: center; }
-.shop-art img { width: 100%; height: 100%; object-fit: contain; display: block; }
-.shop-stock { display: block; font-size: 10px; color: #9aa7b8; margin-bottom: 4px; }
+.shop-art img { width: 100%; height: 100%; object-fit: contain; object-position: center; background: transparent; display: block; }
+.shop-stock { display: block; font-size: 11px; font-weight: 700; color: #9aa7b8; margin-bottom: 8px; font-variant-numeric: tabular-nums; }
 .shop-stock.low { color: #ff9500; }
 .shop-item h3 { font-size: 16px; margin-bottom: 5px; }
 .shop-item p { color: #ffcc00; font-weight: 800; margin-bottom: 6px; }
-.shop-limit { display: block; min-height: 14px; margin-bottom: 12px; color: var(--text-muted); font-size: 10px; }
 .buy-btn { margin-top: auto; background: var(--accent); color: white; border: none; padding: 10px; width: 100%; border-radius: 10px; font-weight: 800; cursor: pointer; }
+/* Без дневного лимита подпись остатка — последняя строка перед кнопкой. */
+.shop-stock:last-of-type { margin-bottom: 12px; }
 .buy-btn:active { transform: scale(0.95); }
 
 /* ================= ПРОФИЛЬ ================= */
@@ -198,6 +201,9 @@ main { padding: 0 16px; }
 .inventory-grid { display: flex; flex-wrap: wrap; gap: 10px; }
 .inv-item { flex: 1 1 72px; min-width: 0; background: #252525; padding: 15px 10px; border-radius: 10px; text-align: center; border: 1px solid #333; }
 .inv-emoji { font-size: 24px; line-height: 1.2; }
+/* Арт капсулы в кармане: прозрачный фон, картинка вписана целиком. */
+.inv-art { width: 100%; height: 56px; display: flex; align-items: center; justify-content: center; background: transparent; }
+.inv-art img { max-width: 100%; max-height: 56px; width: auto; height: auto; object-fit: contain; background: transparent; display: block; }
 .inv-item span { font-size: 10px; color: var(--text-muted); display: block; margin-top: 5px; }
 .inv-empty { flex: 1 1 100%; grid-column: 1 / -1; padding: 18px; color: var(--text-muted); background: #252525; border: 1px solid #333; border-radius: 12px; }
 

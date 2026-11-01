@@ -15,6 +15,38 @@ const API_URL = "https://aura-api-mptt.onrender.com";
 // Каталог приходит с сервера и уже отфильтрован: капсулы для админов не попадают в ответ обычным игрокам.
 let SHOP_ITEMS = {};
 let shopItemsLoaded = false;
+// Актуальные картинки капсул (PNG с прозрачным фоном). Держим их и на клиенте:
+// если сервер отдаст старый путь (capsule_card.jpg) или вообще без картинки,
+// магазин и инвентарь всё равно покажут нормальный арт, а не чёрный квадрат.
+const SHOP_IMAGE_FALLBACK = {
+    capsule: 'cap_shop_normal.png',
+    uniq_capsule: 'cap_shop_uniq.png',
+    ruby: 'cap_shop_ruby.png',
+    diamond: 'cap_shop_diamond.png',
+    galactic: 'cap_shop_galactic.png',
+};
+const INV_IMAGE_FALLBACK = {
+    capsule: 'inv_capsule.png',
+    uniq_capsule: 'inv_uniq_capsule.png',
+    ruby: 'inv_ruby.png',
+    diamond: 'inv_diamond.png',
+    galactic: 'inv_galactic.png',
+    malachite: 'inv_malachite.png',
+    emerald: 'inv_emerald.png',
+};
+
+function shopImageFor(itemId, item) {
+    const fromServer = item && item.shopImage ? String(item.shopImage) : '';
+    // .jpg-карточки со старым чёрным фоном больше не используем.
+    if (fromServer && /\.png$/i.test(fromServer)) return fromServer;
+    return SHOP_IMAGE_FALLBACK[itemId] || '';
+}
+
+function inventoryImageFor(itemId, item) {
+    const fromServer = item && item.inventoryImage ? String(item.inventoryImage) : '';
+    if (fromServer && /\.png$/i.test(fromServer)) return fromServer;
+    return INV_IMAGE_FALLBACK[itemId] || '';
+}
 let balance = 0, keys = 0, currentBet = 10, inventory = [], lastChestTime = 0, isProcessing = false, userDataLoaded = false;
 let daysInGame = 0;
 // Баланс показываем только когда он реально пришёл с сервера, иначе «…» вместо ложного 0.
@@ -107,6 +139,8 @@ let upgradeBusy = false, upgradeStartedAt = 0;
 // Белая стрелка: угол в градусах (0 = вверх), rAF-цикл и «поколение» прогона,
 // чтобы запоздавшие колбэки от прошлого спина не перетирали новый результат.
 let upgradeArrowAngle = 0, upgradeArrowRaf = null, upgradeSpinToken = 0;
+let upgradeFetchPending = false;     // ждём ответ сервера по текущей ставке
+let upgradeBusyTimer = null;         // сторож «кнопка залипла»
 const UPGRADE_DURATION = 3400;        // 3–4 секунды: быстрый спин + торможение
 const UPGRADE_ARROW_SPEED = 900;      // градусов в секунду в фазе ожидания ответа сервера
 const UPGRADE_ARROW_MIN_LAND = 650;   // минимум времени на торможение, мс
@@ -250,12 +284,19 @@ function updateUI() {
     if (ownedItems.length === 0) {
         inv.innerHTML = `<div class="inv-empty">📦 Инвентарь пуст</div>`;
     } else {
-        inv.innerHTML = ownedItems.map(([itemId, item]) => `
+        inv.innerHTML = ownedItems.map(([itemId, item]) => {
+            // Картинка капсулы (PNG с прозрачным фоном), эмодзи — только запасной вариант.
+            const art = inventoryImageFor(itemId, item);
+            const artHtml = art
+                ? `<div class="inv-art"><img src="${art}" alt="${escapeHtml(item.name)}" loading="lazy"></div>`
+                : `<div class="inv-emoji">${item.emoji || '💊'}</div>`;
+            return `
             <div class="inv-item">
-                <div class="inv-emoji">${item.emoji || '💊'}</div>
-                <span>${item.shortName || item.name} x${inventoryCounts[itemId]}</span>
+                ${artHtml}
+                <span>${escapeHtml(item.shortName || item.name)} x${inventoryCounts[itemId]}</span>
             </div>
-        `).join('');
+        `;
+        }).join('');
     }
     renderUpgrade();
     updateUpgradeStatsUI();
@@ -697,8 +738,12 @@ async function loadShopItems() {
                 inventoryImage: item.inventory_image,
                 dailyLimit: item.daily_limit,
                 // Глобальный тираж: stock — сколько осталось, stockTotal — весь тираж.
+                // stock_total приходит отдельным полем (старый сервер отдавал только
+                // total_limit) — берём то, что есть, чтобы «Осталось: X из Y» не пропадало.
                 stock: item.stock == null ? null : Number(item.stock),
-                stockTotal: item.total_limit == null ? null : Number(item.total_limit)
+                stockTotal: (item.stock_total != null ? item.stock_total : item.total_limit) == null
+                    ? null
+                    : Number(item.stock_total != null ? item.stock_total : item.total_limit)
             };
         });
         shopItemsLoaded = true;
@@ -720,15 +765,15 @@ function renderShop() {
     }
     grid.innerHTML = ids.map(itemId => {
         const item = SHOP_ITEMS[itemId];
-        const limitText = item.dailyLimit != null ? `До ${item.dailyLimit} шт. в день` : '';
         // «Осталось: X из Y» мелким шрифтом под капсулой; при нуле карточку не рисуем.
         const hasStock = item.stock != null && item.stockTotal != null;
         if (hasStock && item.stock <= 0) return '';
         const stockText = hasStock
-            ? `<small class="shop-stock${item.stock <= Math.max(1, Math.round(item.stockTotal * 0.1)) ? ' low' : ''}">Осталось: ${item.stock} из ${item.stockTotal}</small>`
+            ? `<small class="shop-stock${item.stock <= Math.max(1, Math.round(item.stockTotal * 0.1)) ? ' low' : ''}">Осталось: ${formatCoins(item.stock)} из ${formatCoins(item.stockTotal)}</small>`
             : '';
-        const art = item.shopImage
-            ? `<div class="shop-art"><img src="${item.shopImage}" alt="${item.name}" loading="lazy"></div>`
+        const image = shopImageFor(itemId, item);
+        const art = image
+            ? `<div class="shop-art"><img src="${image}" alt="${escapeHtml(item.name)}" loading="lazy"></div>`
             : `<div class="item-icon">${item.emoji || '💊'}</div>`;
         return `
             <article class="shop-item">
@@ -736,7 +781,6 @@ function renderShop() {
                 <h3>${item.name}</h3>
                 <p>${coinAmount(item.price)}</p>
                 ${stockText}
-                <small class="shop-limit">${limitText}</small>
                 <button class="buy-btn" onclick="buyItem('${itemId}')">Купить</button>
             </article>
         `;
@@ -895,6 +939,38 @@ function upgradeRingChance() {
     return upgradePlacedChance === null ? upgradeChance() : upgradePlacedChance;
 }
 
+// Выигрыш = бросок МЕНЬШЕ шанса (шанс 50%, выпало 22 — победа; выпало 80 — проигрыш).
+// Функция одна на клиент, чтобы стрелка, дуга и текст не могли разойтись:
+// сектор успеха на круге — это ровно [0, шанс), и стрелка стоит на броске * 3.6°.
+function upgradeRollWon(roll, chance) {
+    // null/undefined/'' — это «броска нет», а не 0: Number(null) === 0 иначе
+    // превращал отсутствие данных в «победу с шансом 0%».
+    const isBlank = v => v === null || v === undefined || v === '';
+    if (isBlank(roll) || isBlank(chance)) return null;
+    const rollNumber = Number(roll);
+    const chanceNumber = Number(chance);
+    if (!Number.isFinite(rollNumber) || !Number.isFinite(chanceNumber)) return null;
+    return rollNumber < chanceNumber;
+}
+
+// Насколько бросок «внутри» сектора успеха: для логов и проверки честности.
+function upgradeRollInsideSector(roll, chance) {
+    const won = upgradeRollWon(roll, chance);
+    return won === null ? null : (won && Number(roll) * 3.6 < Math.min(360, Number(chance) * 3.6));
+}
+
+// Каким шансом реально играли. Сервер присылает и визуальный chance, и real_chance
+// (для админов они совпадают): вердикт считается по real_chance, поэтому клиент
+// обязан сверяться именно с ним, иначе «попал в сектор, а написали проигрыш».
+function upgradeEffectiveChance(data, fallback) {
+    const real = Number(data && data.real_chance);
+    if (Number.isFinite(real) && real > 0) return real;
+    const visual = Number(data && data.chance);
+    if (Number.isFinite(visual) && visual > 0) return visual;
+    const local = Number(fallback);
+    return Number.isFinite(local) ? local : 0;
+}
+
 // Итог раунда крупной цифрой ПОД кругом. Элемент обычный (в потоке),
 // поэтому он не может наехать на круг и на «ШАНС УСПЕХА».
 function setUpgradeNet(html, state) {
@@ -942,6 +1018,9 @@ function setUpgradeResult(text, state) {
 function resetUpgradeRound() {
     upgradeAwaitingRestart = false;
     upgradeSpinToken++;          // отменяем любые недоигранные анимации стрелки
+    upgradeFetchPending = false;
+    if (upgradeBusyTimer) { clearTimeout(upgradeBusyTimer); upgradeBusyTimer = null; }
+    upgradeBusy = false;         // после сброса кнопка обязана быть живой
     stopUpgradeArrow();
     resetUpgradeArrow();
     releaseUpgradeChance();
@@ -962,9 +1041,43 @@ function resetUpgradeRound() {
     renderUpgrade();
 }
 
+// Снимаем «крутится» и возвращаем кнопке рабочее состояние.
+// Нужно на всех путях, где раунд мог прерваться (перезаход, ошибка, таймаут):
+// иначе upgradeBusy остаётся true и кнопка не реагирует до перезагрузки аппки.
+function releaseUpgradeBusy() {
+    upgradeBusy = false;
+    if (upgradeBusyTimer) { clearTimeout(upgradeBusyTimer); upgradeBusyTimer = null; }
+    const circle = document.getElementById('up-circle');
+    if (circle) circle.classList.remove('spinning');
+    const btn = document.getElementById('upgrade-btn');
+    if (btn) {
+        btn.disabled = false;
+        btn.classList.remove('win', 'lose');
+        if (btn.innerText === 'КРУТИМ...') btn.innerText = 'АПГРЕЙД';
+    }
+}
+
+// Сторож: если по какой-то причине ответ/анимация потерялись, через 15 секунд
+// кнопка всё равно оживает. Лучше показать «АПГРЕЙД», чем мёртвую кнопку.
+function armUpgradeBusyWatchdog() {
+    if (upgradeBusyTimer) clearTimeout(upgradeBusyTimer);
+    upgradeBusyTimer = setTimeout(() => {
+        upgradeBusyTimer = null;
+        if (!upgradeBusy) return;
+        console.warn('Апгрейд: раунд не завершился за 15 с — разблокируем кнопку');
+        releaseUpgradeBusy();
+        renderUpgrade();
+    }, 15000);
+}
+
 // Единая точка входа для кнопки: либо сброс после раунда, либо новая ставка.
 function onUpgradeButtonClick() {
-    if (upgradeBusy) return;
+    if (upgradeBusy) {
+        // Страховка от «залипшей» кнопки: если спин давно не идёт и запрос не ждём —
+        // считаем раунд потерянным и оживляем кнопку, а не игнорируем клик молча.
+        if (upgradeArrowRaf === null && !upgradeFetchPending) releaseUpgradeBusy();
+        else return;
+    }
     if (upgradeAwaitingRestart) return resetUpgradeRound();
     return startUpgrade();
 }
@@ -1268,6 +1381,9 @@ async function openUpgrade() {
         updateUpgradeAccess();
         return tg.showAlert('Скоро...');
     }
+    // Если раунд «пропал» (ни анимации, ни ожидания ответа), не блокируем вход:
+    // раньше кнопка навсегда оставалась в «КРУТИМ...» и перезаход не помогал.
+    if (upgradeBusy && upgradeArrowRaf === null && !upgradeFetchPending) releaseUpgradeBusy();
     // Не сбрасываем незавершённый раунд: раньше вход в игру во время прокрутки
     // «съедал» результат (ставка списана, приз не показан).
     if (!upgradeBusy) {
@@ -1386,7 +1502,12 @@ function landUpgradeArrow(won, chance, duration, token, onDone, rollValue) {
         return spinDistance + (1 - spinDistance) * (1 - Math.pow(1 - x, 3));
     };
     const step = () => {
-        if (token !== upgradeSpinToken) { finished = true; return; }
+        if (token !== upgradeSpinToken) {
+            finished = true;
+            // Раунд отменён посреди торможения: кнопка не должна остаться «КРУТИМ...».
+            releaseUpgradeBusy();
+            return;
+        }
         const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
         const progress = total > 0 ? Math.min(1, (now - startTime) / total) : 1;
         lastAngle = startAngle + (target - startAngle) * ease(progress);
@@ -1411,19 +1532,24 @@ async function startUpgrade() {
     // профиля отправил бы две ставки.
     upgradeBusy = true;
     upgradeAwaitingRestart = false;
+    upgradeFetchPending = true;
+    armUpgradeBusyWatchdog();
 
     try {
         const loaded = await ensureUserLoaded();
         if (!loaded) {
-            upgradeBusy = false;
+            upgradeFetchPending = false;
+            releaseUpgradeBusy();
             return tg.showAlert('Не удалось загрузить баланс. Проверьте соединение.');
         }
         if (!isAdmin) {
-            upgradeBusy = false;
+            upgradeFetchPending = false;
+            releaseUpgradeBusy();
             return tg.showAlert('Скоро...');
         }
         if (!upgradeCanStart()) {
-            upgradeBusy = false;
+            upgradeFetchPending = false;
+            releaseUpgradeBusy();
             if (!upgradeChanceIsValid(upgradeChance())) {
                 return tg.showAlert(upgradeChance() > UPGRADE_MAX_CHANCE
                     ? 'Шанс выше 95% — выбери цель подороже'
@@ -1434,7 +1560,8 @@ async function startUpgrade() {
             return tg.showAlert('Такой апгрейд сейчас невозможен');
         }
     } catch (e) {
-        upgradeBusy = false;
+        upgradeFetchPending = false;
+        releaseUpgradeBusy();
         console.error('Ошибка подготовки апгрейда', e);
         return tg.showAlert('Не удалось подготовить апгрейд');
     }
@@ -1492,12 +1619,15 @@ async function startUpgrade() {
         errorText = timedOut ? 'Сервер не ответил. Проверьте соединение' : 'Ошибка соединения';
     } finally {
         if (abortTimer) clearTimeout(abortTimer);
+        upgradeFetchPending = false;
     }
 
     if (token !== upgradeSpinToken) {
         // Раунд отменён (например, открыли экран заново). Результат всё равно
-        // пришёл с сервера: баланс и инвентарь надо применить, иначе игрок увидит
-        // «ставку списали, приза нет».
+        // пришёл с сервера: баланс и инвентарь надо применять, иначе игрок увидит
+        // «ставку списали, приза нет» — и обязательно снимаем блокировку, иначе
+        // кнопка навсегда оставалась в «КРУТИМ...» (то самое «залипание»).
+        releaseUpgradeBusy();
         if (data) {
             applyUpgradeServerState(data);
             try { updateUI(); } catch (e) {}
@@ -1514,7 +1644,7 @@ async function startUpgrade() {
     if (errorText || !data) {
         stopUpgradeArrow();
         if (circle) circle.classList.remove('spinning', 'win', 'lose');
-        upgradeBusy = false;
+        releaseUpgradeBusy();
         setUpgradeResult(errorText || 'Не удалось запустить апгрейд', 'error');
         if (btn) { btn.disabled = false; btn.innerText = 'АПГРЕЙД'; }
         if (unauthorized) { isAdmin = false; updateUpgradeAccess(); }
@@ -1534,8 +1664,7 @@ async function startUpgrade() {
     // Шанс, с которым реально играли, — это data.chance с сервера. Клиентский
     // расчёт может разойтись с ним (округления, множитель), и тогда стрелка
     // останавливалась внутри сектора, хотя сервер бросил проигрыш.
-    const serverChance = Number(data.chance);
-    const roundChance = Number.isFinite(serverChance) && serverChance > 0 ? serverChance : chance;
+    const roundChance = upgradeEffectiveChance(data, chance) || chance;
     lockUpgradeChance(roundChance);
     landUpgradeArrow(won, roundChance, remaining, token, () => {
         if (circle) circle.classList.remove('spinning');
@@ -1631,6 +1760,7 @@ function showMissedUpgradeResult(row) {
         btn.innerText = 'ИГРАТЬ ЗАНОВО';
     }
     upgradeAwaitingRestart = true;
+    releaseUpgradeBusy();
     setUpgradeNetFromResult(won, row);
     // Обязательная пометка: это НЕ результат текущей ставки, а прошлый раунд,
     // который игрок не увидел. Без неё легко решить, что приз «не засчитали».
@@ -1660,7 +1790,7 @@ async function checkPendingUpgradeResult() {
 // Результат уже посчитан сервером: здесь только показываем его игроку.
 function finishUpgradeAnimation(data, chance) {
     if (!data) return;
-    upgradeBusy = false;
+    releaseUpgradeBusy();
     const circle = document.getElementById('up-circle');
     const btn = document.getElementById('upgrade-btn');
     // Сервер присылает won (он же success). Основной флаг — won, success оставляем запасным.
@@ -1696,11 +1826,22 @@ function finishUpgradeAnimation(data, chance) {
     setUpgradeNetFromResult(won, data);
 
     // Диагностика честности: вердикт сервера обязан совпадать с броском.
+    // Сравниваем с тем шансом, по которому сервер считал вердикт (real_chance),
+    // и заодно проверяем, что стрелка действительно в секторе успеха.
     const rollNumber = Number(data.roll);
     const chanceNumber = Number(chance);
-    if (Number.isFinite(rollNumber) && Number.isFinite(chanceNumber)
-        && won !== (rollNumber < chanceNumber)) {
-        console.warn('Апгрейд: бросок и вердикт расходятся', { roll: rollNumber, chance: chanceNumber, won });
+    const expectedWon = upgradeRollWon(rollNumber, chanceNumber);
+    if (expectedWon !== null && won !== expectedWon) {
+        console.error('Апгрейд: бросок и вердикт расходятся', {
+            roll: rollNumber, chance: chanceNumber, visualChance: data.chance, won,
+        });
+    }
+    const insideSector = upgradeRollInsideSector(rollNumber, chanceNumber);
+    if (insideSector !== null && insideSector !== won) {
+        console.error('Апгрейд: стрелка и вердикт расходятся', {
+            roll: rollNumber, chance: chanceNumber, angle: rollNumber * 3.6,
+            sectorDeg: Math.min(360, chanceNumber * 3.6), won,
+        });
     }
 
     if (won) {
