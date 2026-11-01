@@ -172,14 +172,25 @@ def ensure_stock_rows(supabase_client) -> bool:
 
 
 def load_stock(supabase_client) -> dict[str, int] | None:
-    """Снимок стока {item_id: остаток}. None — таблицы нет, лимиты не применяем."""
+    """Снимок стока {item_id: остаток}. None — таблицы нет, лимиты не применяем.
+
+    Читаем через функцию shop_stock_list: она работает и при включённом RLS на
+    таблице (иначе SELECT падал, магазин показывал полный тираж, а списание
+    уходило «в никуда» — ровно тот баг, из-за которого счётчик не менялся).
+    """
+    rows = None
     try:
-        response = supabase_client.table(STOCK_TABLE).select("item_id, stock").execute()
+        rows = supabase_client.rpc("shop_stock_list", {}).execute().data
     except Exception as exc:  # noqa: BLE001
-        logger.warning("Сток капсул недоступен: %s", exc)
-        return None
+        logger.warning("RPC shop_stock_list недоступна (%s), читаем таблицу напрямую", exc)
+    if rows is None:
+        try:
+            rows = supabase_client.table(STOCK_TABLE).select("item_id, stock").execute().data
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Сток капсул недоступен: %s", exc)
+            return None
     stock: dict[str, int] = {}
-    for row in response.data or []:
+    for row in rows or []:
         item_id = str(row.get("item_id") or "")
         if not item_id:
             continue
@@ -314,30 +325,158 @@ def _read_stock_value(supabase_client, item_id: str) -> tuple[bool, int]:
         return True, 0
 
 
-def _reserve_stock(supabase_client, item_id: str, current: int) -> bool:
-    """Атомарно списывает 1 единицу. False — кто-то успел раньше (нужен повтор)."""
+# ==================== СПИСАНИЕ ТИРАЖА ====================
+# Строгое списание — это SQL-функция shop_take_stock из миграции
+# 20261102000000_stock_and_chest_rpc.sql:
+#     UPDATE capsule_stock SET stock = stock - 1 WHERE item_id = ... AND stock > 0
+# Один атомарный запрос вместо «прочитал 1000 → записал 999», поэтому две
+# одновременные покупки не продают одну капсулу дважды и не затирают остаток.
+STOCK_TAKE_RPC = "shop_take_stock"
+STOCK_RETURN_RPC = "shop_return_stock"
+
+# Признаки «функции/таблицы нет»: значит миграция не применена, списываем старым
+# способом (условный UPDATE). Это НЕ повод отменять покупку.
+_RPC_MISSING_MARKERS = (
+    "PGRST202", "PGRST205", "404", "Could not find the function", "Could not find the table",
+    "does not exist", "schema cache",
+)
+# Признаки «запись запрещена»: RLS, права, таймаут. Сток не обновится, и врать
+# игроку «Осталось: 1000 из 1000» нельзя — сообщаем честно (stock_ready=false).
+_STOCK_WRITE_BLOCKED = (
+    "42501", "row-level security", "permission denied", "timeout", "timed out",
+    "Connection", "JSON could not be generated", "503",
+)
+
+
+class StockSoldOut(Exception):
+    """Тираж кончился: продавать нечего."""
+
+
+class StockUnavailable(Exception):
+    """Списать тираж нечем (нет таблицы/функции или запись запрещена).
+
+    Покупку не отменяем — иначе магазин встанет целиком из-за одной таблицы,
+    но и не делаем вид, что тираж уменьшился: вызывающий код вернёт
+    stock_ready=false, и клиент не покажет фальшивое «Осталось: X из Y».
+    """
+
+
+def _stock_error_text(exc: Exception) -> str:
+    return f"{type(exc).__name__}: {exc}"
+
+
+def _is_rpc_missing(exc: Exception) -> bool:
+    message = _stock_error_text(exc)
+    return any(marker in message for marker in _RPC_MISSING_MARKERS)
+
+
+def _is_write_blocked(exc: Exception) -> bool:
+    message = _stock_error_text(exc)
+    return any(marker in message for marker in _STOCK_WRITE_BLOCKED)
+
+
+def _rpc_int(supabase_client, name: str, params: dict) -> int | None:
+    """Вызов SQL-функции, возвращающей число. None — функции нет (миграция не применена)."""
     try:
+        response = supabase_client.rpc(name, params).execute()
+    except Exception as exc:  # noqa: BLE001
+        if _is_rpc_missing(exc):
+            logger.warning("RPC %s недоступна (миграция не применена?): %s", name, exc)
+            return None
+        raise
+    data = response.data
+    if isinstance(data, list):
+        data = data[0] if data else None
+        if isinstance(data, dict):
+            data = next(iter(data.values()), None)
+    try:
+        return int(data)
+    except (TypeError, ValueError):
+        return None
+
+
+def reserve_stock(supabase_client, item_id: str) -> int | None:
+    """Списывает одну единицу тиража. Возвращает остаток после списания.
+
+    None — тираж не ведётся (нет таблицы/функции): покупку разрешаем.
+    StockSoldOut — распродано, StockUnavailable — списать не удалось.
+    """
+    # 1) Основной путь: атомарная функция в базе.
+    try:
+        left = _rpc_int(supabase_client, STOCK_TAKE_RPC, {"p_item_id": item_id})
+    except Exception as exc:  # noqa: BLE001
+        logger.error("ОШИБКА СТОКА: списание %s через RPC: %s", item_id, _stock_error_text(exc))
+        # Функция есть, но база отказала (RLS/таймаут) — честно говорим клиенту.
+        raise StockUnavailable(_stock_error_text(exc)) from exc
+
+    if left == -2:  # таблицы нет
+        logger.error("ОШИБКА СТОКА: таблица %s не найдена — примените "
+                     "20261102000000_stock_and_chest_rpc.sql", STOCK_TABLE)
+        raise StockUnavailable("capsule_stock отсутствует")
+    if left == -1:
+        print(f"СТОК {item_id}: распродан (0)", flush=True)
+        raise StockSoldOut(item_id)
+    if left is not None:
+        # Именно эта строка и есть проверка «транзакция прошла» — в логах Render.
+        print(f"СТОК {item_id}: списано 1, осталось {left}", flush=True)
+        logger.info("Сток %s: -1 → %s", item_id, left)
+        return left
+
+    # 2) Функции нет (старая база) — условный UPDATE «только если остаток не изменился».
+    for _attempt in range(3):
+        available, current = _read_stock_value(supabase_client, item_id)
+        if not available:
+            raise StockUnavailable("capsule_stock недоступна")
+        if current <= 0:
+            print(f"СТОК {item_id}: распродан (0)", flush=True)
+            raise StockSoldOut(item_id)
+        try:
+            updated = (
+                supabase_client.table(STOCK_TABLE)
+                .update({"stock": current - 1})
+                .eq("item_id", item_id)
+                .eq("stock", current)
+                .select("item_id")
+                .execute()
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.error("ОШИБКА СТОКА: списание %s: %s", item_id, _stock_error_text(exc))
+            raise StockUnavailable(_stock_error_text(exc)) from exc
+        if updated.data:
+            print(f"СТОК {item_id}: списано 1, осталось {current - 1} (без RPC)", flush=True)
+            return current - 1
+        # Остаток изменился параллельной покупкой — перечитываем.
+    raise StockUnavailable("не удалось атомарно списать тираж")
+
+
+def release_stock(supabase_client, item_id: str) -> None:
+    """Возвращает единицу тиража, если покупку не удалось записать в профиль."""
+    try:
+        left = _rpc_int(supabase_client, STOCK_RETURN_RPC, {"p_item_id": item_id})
+    except Exception as exc:  # noqa: BLE001
+        logger.error("ОШИБКА СТОКА: возврат %s через RPC: %s", item_id, _stock_error_text(exc))
+        left = None
+    if left is not None and left >= 0:
+        print(f"СТОК {item_id}: возврат 1, осталось {left}", flush=True)
+        return
+    if left is not None:
+        return  # -2 (таблицы нет) / -1 (уже полный тираж) — возвращать нечего
+
+    try:
+        available, current = _read_stock_value(supabase_client, item_id)
+        if not available:
+            return
         updated = (
             supabase_client.table(STOCK_TABLE)
-            .update({"stock": current - 1})
+            .update({"stock": current + 1})
             .eq("item_id", item_id)
             .eq("stock", current)
-            .select("item_id")
             .execute()
         )
-    except Exception as exc:  # noqa: BLE001 — сток сломался, но покупку не отменяем
-        logger.warning("Не удалось списать сток %s: %s", item_id, exc)
-        return True
-    return bool(updated.data)
-
-
-def _release_stock(supabase_client, item_id: str, reserved_left: int) -> None:
-    """Возвращает единицу стока, если покупку не удалось записать в профиль."""
-    try:
-        supabase_client.table(STOCK_TABLE).update({"stock": reserved_left + 1}).eq(
-            "item_id", item_id).eq("stock", reserved_left).execute()
+        if updated.data:
+            print(f"СТОК {item_id}: возврат 1, осталось {current + 1} (без RPC)", flush=True)
     except Exception as exc:  # noqa: BLE001
-        logger.warning("Не удалось вернуть сток %s: %s", item_id, exc)
+        logger.error("ОШИБКА СТОКА: возврат %s: %s", item_id, _stock_error_text(exc))
 
 
 def purchase_shop_item(supabase_client, user_id: int, item_id: str, admin_ids: list[int]) -> dict:
@@ -388,16 +527,18 @@ def purchase_shop_item(supabase_client, user_id: int, item_id: str, admin_ids: l
         if current_coins < price:
             raise ShopPurchaseError("Недостаточно коинов")
 
-        # 1) Сначала резервируем единицу глобального тиража: если капсулу только что
-        #    выкупили, повторяем попытку с новым остатком, а не продаём «минус одну».
-        stock_available, stock_now = _read_stock_value(supabase_client, item_id)
-        reserved_left = None
-        if stock_available:
-            if stock_now <= 0:
-                raise ShopPurchaseError(SOLD_OUT_ERROR)
-            if not _reserve_stock(supabase_client, item_id, stock_now):
-                continue  # остаток изменился параллельной покупкой — читаем заново
-            reserved_left = stock_now - 1
+        # 1) Сначала списываем единицу глобального тиража — строго и до баланса.
+        #    Распродано → 400 «Товар распродан»; списать не удалось → покупку не
+        #    отменяем, но и остаток не выдумываем: stock_ready=false.
+        stock_ready = True
+        try:
+            reserved_left = reserve_stock(supabase_client, item_id)
+        except StockSoldOut as exc:
+            raise ShopPurchaseError(SOLD_OUT_ERROR) from exc
+        except StockUnavailable as exc:
+            logger.error("Покупка %s без списания тиража: %s", item_id, exc)
+            stock_ready = False
+            reserved_left = None
 
         daily_buys[item_id] = current_count + 1
         inventory = parse_inventory(user.get("inventory"))
@@ -423,7 +564,7 @@ def purchase_shop_item(supabase_client, user_id: int, item_id: str, admin_ids: l
             )
         except Exception as exc:
             if reserved_left is not None:
-                _release_stock(supabase_client, item_id, reserved_left)
+                release_stock(supabase_client, item_id)
             message = SCHEMA_ERROR if _schema_error(exc) else "Не удалось завершить покупку. Попробуйте ещё раз."
             raise ShopPurchaseError(message, 503) from exc
 
@@ -435,10 +576,11 @@ def purchase_shop_item(supabase_client, user_id: int, item_id: str, admin_ids: l
                 "daily_buys": daily_buys,
                 "last_shop_reset": today,
                 "stock": reserved_left,
+                "stock_ready": stock_ready,
             }
 
         # 2) Списание с баланса не прошло (кнопку нажали дважды) — возвращаем тираж.
         if reserved_left is not None:
-            _release_stock(supabase_client, item_id, reserved_left)
+            release_stock(supabase_client, item_id)
 
     raise ShopPurchaseError("Покупка обрабатывается. Обновите данные и попробуйте ещё раз.", 409)

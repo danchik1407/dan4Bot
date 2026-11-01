@@ -668,6 +668,9 @@ async function loadGlobalTop() {
 // /api/claim_chest после кнопки «Забрать». До этого баланс не меняется —
 // раньше коины приходили ещё до анимации рулетки, это был баг.
 let pendingChestClaimId = null, chestFlashTimer = null;
+// true — награда этого сундука начислена сразу при открытии (старая схема,
+// когда chest_claims недоступна): кнопка «Забрать» только закрывает окно.
+let chestRewardCredited = false;
 
 function chestRouletteItemHtml(isKey, amount) {
     return isKey ? '🔑<span>Ключ</span>' : `${COIN_IMG}<span>${amount}</span>`;
@@ -707,6 +710,7 @@ function hideChestRoulette() {
     const modal = document.getElementById('chest-win-modal');
     if (modal) modal.classList.remove('active');
     pendingChestClaimId = null;
+    chestRewardCredited = false;
     checkChestCooldown();
 }
 
@@ -847,6 +851,14 @@ async function openChest(type) {
     const rewardCoins = Number(data.reward_coins) || 0;
     const rewardKeys = Number(data.reward_keys) || 0;
     const isKey = rewardKeys > 0;
+    // Старая схема: если таблица выдачи недоступна, сервер начисляет награду
+    // сразу и присылает credited=true (claim_id=null). Отдельный запрос «Забрать»
+    // тогда не нужен — награда уже на балансе.
+    chestRewardCredited = Boolean(data.credited) || data.claim_id == null;
+    if (chestRewardCredited && data.new_balance != null) {
+        balance = Number(data.new_balance) || 0;
+        balanceKnown = true;
+    }
     pendingChestClaimId = data.claim_id != null ? Number(data.claim_id) : null;
     updateUI();
     isProcessing = false;
@@ -876,7 +888,11 @@ async function claimChestReward() {
     if (isProcessing) return;
     if (!chestAccessGranted()) return tg.showAlert(CHEST_MAINTENANCE_ALERT);
     const claimId = pendingChestClaimId;
-    if (claimId == null) { hideChestRoulette(); return; }
+    if (claimId == null) {
+        // Награда уже начислена сервером при открытии сундука — забирать нечего.
+        hideChestRoulette();
+        return;
+    }
 
     const btn = document.getElementById('chest-claim-btn');
     isProcessing = true;
@@ -908,6 +924,11 @@ async function claimChestReward() {
 }
 
 // ================= МАГАЗИН =================
+// Если сервер хоть раз ответил «тираж списать не удалось» (RLS / нет миграции),
+// не показываем «Осталось: X из Y» до перезапуска приложения: число в базе в
+// этот момент уже не соответствует проданному, и показывать его — врать.
+let shopStockUnreliable = false;
+
 async function loadShopItems() {
     try {
         const response = await fetch(`${API_URL}/api/shop_items`, {
@@ -931,6 +952,10 @@ async function loadShopItems() {
                 // stock_total приходит отдельным полем (старый сервер отдавал только
                 // total_limit) — берём то, что есть, чтобы «Осталось: X из Y» не пропадало.
                 stock: item.stock == null ? null : Number(item.stock),
+                // stock_ready=false — сервер не смог прочитать/списать тираж
+                // (нет миграции или RLS). Тогда «Осталось: X из Y» не показываем:
+                // врать про полный тираж хуже, чем не показывать его вовсе.
+                stockReady: item.stock_ready !== false && !shopStockUnreliable,
                 stockTotal: (item.stock_total != null ? item.stock_total : item.total_limit) == null
                     ? null
                     : Number(item.stock_total != null ? item.stock_total : item.total_limit)
@@ -956,7 +981,7 @@ function renderShop() {
     grid.innerHTML = ids.map(itemId => {
         const item = SHOP_ITEMS[itemId];
         // «Осталось: X из Y» мелким шрифтом под капсулой; при нуле карточку не рисуем.
-        const hasStock = item.stock != null && item.stockTotal != null;
+        const hasStock = item.stock != null && item.stockTotal != null && item.stockReady !== false;
         if (hasStock && item.stock <= 0) return '';
         const stockText = hasStock
             ? `<small class="shop-stock${item.stock <= Math.max(1, Math.round(item.stockTotal * 0.1)) ? ' low' : ''}">Осталось: ${formatCoins(item.stock)} из ${formatCoins(item.stockTotal)}</small>`
@@ -1000,7 +1025,14 @@ async function buyItem(itemId) {
         updateUI();
         showWin("✅ Успешно куплено!");
         playSound('click');
-        // Тираж уменьшился — перечитываем каталог, чтобы «Осталось» не врало.
+        // Тираж уменьшился — сначала ставим остаток из ответа сервера (видно сразу,
+        // даже если следующий запрос не дойдёт), потом перечитываем каталог целиком.
+        shopStockUnreliable = data.stock_ready === false;
+        if (data.stock != null && SHOP_ITEMS[itemId]) {
+            SHOP_ITEMS[itemId].stock = Number(data.stock);
+            SHOP_ITEMS[itemId].stockReady = data.stock_ready !== false && !shopStockUnreliable;
+            renderShop();
+        }
         loadShopItems();
     } catch(e) {
         console.error("Ошибка покупки", e);
