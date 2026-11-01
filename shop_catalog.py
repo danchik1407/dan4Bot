@@ -10,6 +10,16 @@ logger = logging.getLogger(__name__)
 # Глобальный сток лимитированных капсул: одна строка на предмет, общая на всех игроков.
 STOCK_TABLE = "capsule_stock"
 
+# ==================== ЛИМИТЫ МАГАЗИНА ====================
+# Задача 17: лимиты отключены — капсулы продаются без ограничений («бесконечные»).
+# Отключаются сразу все: общий тираж (total_limit) и дневные лимиты (daily_limit).
+# Данные в SHOP_ITEMS и таблица capsule_stock остались целыми: чтобы вернуть
+# лимиты, достаточно поставить здесь True — остальной код уже готов.
+STOCK_LIMITS_ENABLED = False
+
+# Таблица истории покупок: по ней «стата бота» считает, сколько чего купили.
+PURCHASES_TABLE = "shop_purchases"
+
 # Каталог. total_limit — общий тираж на весь мир (как у NFT): когда сток кончился,
 # карточка исчезает из магазина навсегда. daily_limit — старый дневной лимит.
 SHOP_ITEMS = {
@@ -254,6 +264,10 @@ def available_shop_items(is_admin: bool, stock: dict[str, int] | None = None) ->
     """(item_id, item, остаток) только для того, что реально можно купить сейчас."""
     result = []
     for item_id, item in visible_shop_items(is_admin).items():
+        if not STOCK_LIMITS_ENABLED:
+            # Лимиты выключены: распроданных карточек не бывает вообще.
+            result.append((item_id, item, None))
+            continue
         left = stock_left(item_id, item, stock)
         if left is not None and left <= 0:
             continue  # распродано — карточку не показываем вообще
@@ -273,6 +287,25 @@ def serialize_shop_items(is_admin: bool, stock: dict[str, int] | None = None) ->
     for item_id, item, left in available_shop_items(is_admin, stock):
         total_limit = item.get("total_limit")
         total = int(total_limit) if total_limit is not None else None
+        if not STOCK_LIMITS_ENABLED:
+            # Лимитов нет — счётчика «Осталось» в магазине быть не должно:
+            # ни числа, ни «Остаток уточняется», ни «Товар распродан».
+            payload.append({
+                "id": item_id,
+                "name": item["name"],
+                "short_name": item["short_name"],
+                "emoji": item["emoji"],
+                "price": int(item["price"]),
+                "daily_limit": None,
+                "total_limit": None,
+                "stock": None,
+                "stock_total": None,
+                "stock_ready": False,
+                "unlimited": True,
+                "shop_image": item["shop_image"],
+                "inventory_image": item["inventory_image"],
+            })
+            continue
         known = stock_known(item_id, item, stock)
         # Остаток неизвестен — отдаём тираж как справочную цифру, но stock_ready=false,
         # и клиент не рисует «Осталось: X из Y» (иначе он врал: см. stock_known).
@@ -288,6 +321,7 @@ def serialize_shop_items(is_admin: bool, stock: dict[str, int] | None = None) ->
             "stock": stock_left_value,
             "stock_total": total,
             "stock_ready": known,
+            "unlimited": False,
             "shop_image": item["shop_image"],
             "inventory_image": item["inventory_image"],
         })
@@ -671,7 +705,118 @@ def stock_diagnostics(supabase_client) -> dict:
     return result
 
 
-def purchase_shop_item(supabase_client, user_id: int, item_id: str, admin_ids: list[int]) -> dict:
+def record_purchase(supabase_client, user_id: int, item_id: str, price: int, source: str = "mini") -> bool:
+    """Записывает факт покупки для статистики («стата бота»). Никогда не ломает покупку.
+
+    Пишем отдельной строкой, а не счётчиком: из истории видно и когда, и откуда
+    (Mini App / бот), а агрегаты считает SQL-функция shop_purchase_stats().
+    Если таблицы ещё нет, в лог уходит одна понятная строка, а покупка проходит.
+    """
+    try:
+        supabase_client.table(PURCHASES_TABLE).insert({
+            "user_id": str(user_id),
+            "item_id": item_id,
+            "price": int(price),
+            "source": source,
+        }).execute()
+        return True
+    except Exception as exc:  # noqa: BLE001 — статистика не должна мешать продажам
+        logger.warning("Не удалось записать покупку %s в %s: %s. "
+                       "Примените supabase/migrations/20261105000000_shop_stats.sql",
+                       item_id, PURCHASES_TABLE, exc)
+        return False
+
+
+def shop_purchase_stats(supabase_client) -> dict[str, dict] | None:
+    """Сколько каких предметов купили: {item_id: {"bought": n, "coins": сумма}}.
+
+    None — истории покупок нет (миграция 20261105 не применена). Считаем через
+    SQL-функцию shop_purchase_stats(); если её нет — читаем таблицу и складываем
+    в Python (на сотнях строк это нормально).
+    """
+    rows = None
+    try:
+        rows = supabase_client.rpc("shop_purchase_stats", {}).execute().data
+    except Exception as exc:  # noqa: BLE001
+        logger.info("RPC shop_purchase_stats недоступна (%s) — считаем по таблице", exc)
+
+    if rows is None:
+        try:
+            rows = supabase_client.table(PURCHASES_TABLE).select("item_id, price").execute().data
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("История покупок недоступна (%s): примените "
+                           "supabase/migrations/20261105000000_shop_stats.sql", exc)
+            return None
+
+    stats: dict[str, dict] = {}
+    for row in rows or []:
+        item_id = str(row.get("item_id") or "")
+        if not item_id:
+            continue
+        bought = row.get("bought")
+        coins = row.get("coins")
+        if coins is None:
+            # Режим «без RPC»: строки таблицы — это отдельные покупки с полем price.
+            coins = row.get("price")
+        try:
+            bought = int(bought) if bought is not None else 1
+        except (TypeError, ValueError):
+            bought = 1
+        try:
+            coins = int(coins) if coins is not None else 0
+        except (TypeError, ValueError):
+            coins = 0
+        entry = stats.setdefault(item_id, {"bought": 0, "coins": 0})
+        entry["bought"] += bought
+        entry["coins"] += coins
+    return stats
+
+
+def shop_stats_report(users: list[dict], stats: dict[str, dict] | None) -> str:
+    """Текст блока «КУПЛЕНО В МАГАЗИНЕ» для команды «стата бота».
+
+    stats — результат shop_purchase_stats() (None — истории покупок нет).
+    users — строки таблицы users, из них считаем, сколько капсул сейчас на руках.
+    """
+    lines: list[str] = []
+    total_bought = 0
+    total_spent = 0
+    if stats is None:
+        lines.append("• нет данных — примените "
+                     "<code>supabase/migrations/20261105000000_shop_stats.sql</code>")
+    else:
+        for item_id, entry in sorted(stats.items(), key=lambda kv: -kv[1]["bought"]):
+            item = SHOP_ITEMS.get(item_id, {})
+            name = item.get("name") or item_id
+            emoji = item.get("emoji") or "•"
+            lines.append(f"• {emoji} {name} — <b>{entry['bought']}</b> шт "
+                         f"(<b>{entry['coins']:,}</b> 🪙)")
+            total_bought += entry["bought"]
+            total_spent += entry["coins"]
+        if not lines:
+            lines.append("• пока не купили ни одной капсулы")
+        lines.append("")
+        lines.append(f"Итого: <b>{total_bought}</b> шт на <b>{total_spent:,}</b> 🪙")
+
+    held: dict[str, int] = {}
+    for user_row in users or []:
+        for owned in parse_inventory(user_row.get("inventory")):
+            held[owned] = held.get(owned, 0) + 1
+    if held:
+        held_line = " · ".join(
+            f"{SHOP_ITEMS.get(iid, {}).get('emoji', '•')} "
+            f"{SHOP_ITEMS.get(iid, {}).get('name', iid)}: <b>{count}</b>"
+            for iid, count in sorted(held.items(), key=lambda kv: -kv[1])
+        )
+    else:
+        held_line = "пусто"
+    lines.append("")
+    lines.append(f"🧺 Сейчас на руках: {held_line}")
+    return "\n".join(lines)
+
+
+def purchase_shop_item(supabase_client, user_id: int, item_id: str, admin_ids: list[int],
+                       source: str = "mini") -> dict:
     """Validate and persist one purchase with optimistic protection against concurrent clicks."""
     numeric_user_id = int(user_id)
     is_admin = is_admin_id(numeric_user_id, admin_ids)
@@ -714,25 +859,25 @@ def purchase_shop_item(supabase_client, user_id: int, item_id: str, admin_ids: l
         daily_buys = _parse_daily_buys(raw_daily_buys) if last_reset == today else {}
 
         current_count = daily_buys.get(item_id, 0)
-        if not is_admin and daily_limit is not None and current_count >= daily_limit:
+        if STOCK_LIMITS_ENABLED and not is_admin and daily_limit is not None and current_count >= daily_limit:
             raise ShopPurchaseError(DAILY_LIMIT_ERROR)
         if current_coins < price:
             raise ShopPurchaseError("Недостаточно коинов")
 
-        # 1) Сначала списываем единицу глобального тиража — строго и до баланса.
-        #    Распродано → 400 «Товар распродан»; списать не удалось → покупку не
-        #    отменяем, но и остаток не выдумываем: stock_ready=false.
+        # 1) Тираж списывается ДО баланса. При выключенных лимитах (задача 17)
+        #    этого шага нет вообще: «Товар распродан» невозможно по построению.
         stock_ready = True
         stock_taken = False          # списали единицу тиража → её надо вернуть при сбое
         reserved_left = None
-        try:
-            reserved_left = reserve_stock(supabase_client, item_id)
-            stock_taken = True
-        except StockSoldOut as exc:
-            raise ShopPurchaseError(SOLD_OUT_ERROR) from exc
-        except StockUnavailable as exc:
-            logger.error("Покупка %s без списания тиража: %s", item_id, exc)
-            stock_ready = False
+        if STOCK_LIMITS_ENABLED:
+            try:
+                reserved_left = reserve_stock(supabase_client, item_id)
+                stock_taken = True
+            except StockSoldOut as exc:
+                raise ShopPurchaseError(SOLD_OUT_ERROR) from exc
+            except StockUnavailable as exc:
+                logger.error("Покупка %s без списания тиража: %s", item_id, exc)
+                stock_ready = False
 
         daily_buys[item_id] = current_count + 1
         inventory = parse_inventory(user.get("inventory"))
@@ -763,6 +908,9 @@ def purchase_shop_item(supabase_client, user_id: int, item_id: str, admin_ids: l
             raise ShopPurchaseError(message, 503) from exc
 
         if updated.data:
+            # Статистика покупок: пишем только после того, как баланс и инвентарь
+            # реально сохранились, иначе в отчёте были бы неоплаченные покупки.
+            record_purchase(supabase_client, numeric_user_id, item_id, price, source)
             return {
                 "success": True,
                 "new_balance": new_coins,
@@ -770,7 +918,8 @@ def purchase_shop_item(supabase_client, user_id: int, item_id: str, admin_ids: l
                 "daily_buys": daily_buys,
                 "last_shop_reset": today,
                 "stock": reserved_left,
-                "stock_ready": stock_ready,
+                "stock_ready": stock_ready if STOCK_LIMITS_ENABLED else False,
+                "unlimited": not STOCK_LIMITS_ENABLED,
             }
 
         # 2) Списание с баланса не прошло (кнопку нажали дважды) — возвращаем тираж.
