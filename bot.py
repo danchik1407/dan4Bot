@@ -977,11 +977,15 @@ async def cmd_shop(message: Message):
             text=f"{item['emoji']} {item['short_name']} · {price_text}",
             callback_data=f"shop_buy|{item_id}",
         ))
+    if not buttons:
+        # Весь тираж распродан: пустой список выглядел бы как поломка.
+        lines.append("")
+        lines.append("🔒 <b>Всё распродано.</b> Тираж закончился — следи за новостями.")
     rows = [buttons[index:index + 2] for index in range(0, len(buttons), 2)]
     await message.answer(
         "\n".join(lines),
         parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows) if rows else None,
     )
 
 
@@ -1078,7 +1082,7 @@ async def cmd_services(message: Message):
             stock_line = (
                 f"🎟️ Тираж: ⚠️ нет строк для: {', '.join(missing)}\n"
                 "   • магазин честно пишет «Остаток уточняется», покупка не блокируется\n"
-                "   • лечение: примените supabase/migrations/20261104000000_shop_stock_fix.sql\n"
+                "   • лечение: примените supabase/migrations/20261106000000_stock_limits_on.sql\n"
                 f"   • проверка: {API_URL}/api/stock_debug"
             )
         else:
@@ -1087,11 +1091,16 @@ async def cmd_services(message: Message):
                 f"   • RPC shop_take_stock: {stock.get('rpc', 'shop_take_stock')}"
                 f" · проверка: {API_URL}/api/stock_debug"
             )
+    elif stock.get("limits_enabled") is False:
+        stock_line = (
+            "🎟️ Тираж: ⚠️ лимиты выключены в коде (STOCK_LIMITS_ENABLED = False)\n"
+            "   • капсулы продаются без счётчика, «Осталось» не показывается"
+        )
     else:
         stock_line = (
             "🎟️ Тираж: ❌ сервер не читает capsule_stock\n"
             f"   • {str(stock.get('error') or 'таблица недоступна')[:160]}\n"
-            "   • примените supabase/migrations/20261104000000_shop_stock_fix.sql\n"
+            "   • примените supabase/migrations/20261106000000_stock_limits_on.sql\n"
             f"   • диагностика: {API_URL}/api/stock_debug"
         )
 

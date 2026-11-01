@@ -930,6 +930,9 @@ async function claimChestReward() {
 // не показываем «Осталось: X из Y» до перезапуска приложения: число в базе в
 // этот момент уже не соответствует проданному, и показывать его — врать.
 let shopStockUnreliable = false;
+// Распроданные предметы (приходят с сервера): витрина должна сказать
+// «Всё распродано», а не «Магазин пуст» — иначе это выглядит как поломка.
+let shopSoldOut = [];
 
 async function loadShopItems() {
     try {
@@ -940,6 +943,7 @@ async function loadShopItems() {
         });
         const data = await response.json().catch(() => ({}));
         if (!response.ok) throw new Error(data.detail || "Не удалось загрузить магазин");
+        shopSoldOut = Array.isArray(data.sold_out) ? data.sold_out : [];
         SHOP_ITEMS = {};
         (data.items || []).forEach(item => {
             SHOP_ITEMS[item.id] = {
@@ -981,7 +985,9 @@ function renderShop() {
     if (!grid) return;
     const ids = Object.keys(SHOP_ITEMS);
     if (ids.length === 0) {
-        grid.innerHTML = `<div class="inv-empty">${shopItemsLoaded ? "Магазин пуст" : "Магазин недоступен"}</div>`;
+        const emptyText = !shopItemsLoaded ? "Магазин недоступен"
+            : (shopSoldOut.length > 0 ? "Всё распродано" : "Магазин пуст");
+        grid.innerHTML = `<div class="inv-empty">${emptyText}</div>`;
         return;
     }
     grid.innerHTML = ids.map(itemId => {
