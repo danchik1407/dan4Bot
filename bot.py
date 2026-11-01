@@ -937,7 +937,7 @@ async def cmd_upgrade(message: Message):
         "Открывай мини-аппку 👇"
     )
     kb = InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="🛠️ Открыть Апгрейд", url=MINIAPP_URL)
+        InlineKeyboardButton(text="🛠️ Открыть Апгрейд", url=miniapp_direct_url())
     ]])
     await message.answer(text, parse_mode="HTML", reply_markup=kb, disable_web_page_preview=True)
 
@@ -952,6 +952,10 @@ async def cmd_services(message: Message):
     result = await fetch_health(API_URL, timeout=12)
     status = result.get("status")
     data = result.get("data") or {}
+    # Сундуки живут в таблице chest_claims. Если её нет (не применена миграция)
+    # или в PostgREST устарел кэш схемы, клиент получает «Сундуки обновляются,
+    # попробуйте чуть позже» и рулетка не запускается вообще. Проверяем явно.
+    chest = await probe_chest_claims(API_URL)
     api_status = "не ответил"
     api_details = ""
     if status is None:
@@ -974,6 +978,18 @@ async def cmd_services(message: Message):
     else:
         api_status = f"⚠️ ответил кодом {status}"
 
+    if chest.get("status") is None:
+        chest_line = f"📦 Сундуки: ⚠️ не проверить ({chest.get('error', 'нет связи')})"
+    elif chest.get("ok"):
+        chest_line = "📦 Сундуки: ✅ таблица chest_claims на месте"
+    else:
+        chest_line = (
+            "📦 Сундуки: ❌ таблица chest_claims недоступна\n"
+            f"   • {chest.get('detail', 'ошибка базы')}\n"
+            "   • примените supabase/migrations/20261030000000_capsule_stock_promo_types.sql "
+            "и выполните NOTIFY pgrst, 'reload schema'"
+        )
+
     text = (
         "🖥️ <b>СЕРВИСЫ ПРОЕКТА</b>\n━━━━━━━━━━━━━━━━━━━━\n\n"
         f"1️⃣ <b>aura-api</b> (FastAPI): {api_status}{api_details}\n"
@@ -982,7 +998,8 @@ async def cmd_services(message: Message):
         "2️⃣ <b>dan4Bot</b> (aiogram): ✅ этот процесс\n"
         "   • веб-сервер только для порта Render (start_fake_website)\n"
         "   • игровые данные читает из общей базы Supabase\n\n"
-        f"🔗 Ссылка для игроков: {MINIAPP_URL}\n"
+        f"🔗 Ссылка для игроков: {miniapp_direct_url()}\n"
+        f"{chest_line}\n"
         "ℹ️ В BotFather → Configure Mini App должен быть указан адрес aura-api."
     )
     await message.answer(text, parse_mode="HTML", disable_web_page_preview=True)
@@ -1340,6 +1357,36 @@ async def probe_api(base: str, timeout: float = 8.0) -> bool:
     result = await fetch_health(base, timeout)
     data = result.get("data") or {}
     return result.get("status") == 200 and isinstance(data, dict) and data.get("service") == "aura-api"
+
+
+async def probe_chest_claims(base: str, timeout: int = 10) -> dict:
+    """Проверяет, доступна ли таблица сундуков на сервере aura-api.
+
+    Возвращает {"ok": bool, "status": int|None, "detail": str, "error": str}.
+    Именно из-за недоступной chest_claims Mini App показывает «Сундуки
+    обновляются, попробуйте чуть позже» и рулетка не запускается.
+    """
+    base = (base or "").strip().rstrip("/")
+    if not base:
+        return {"ok": False, "status": None, "detail": "", "error": "адрес API не задан"}
+    try:
+        client_timeout = aiohttp.ClientTimeout(total=timeout)
+        async with aiohttp.ClientSession(timeout=client_timeout) as session:
+            async with session.get(f"{base}/api/chest_ready") as response:
+                status = response.status
+                try:
+                    data = await response.json(content_type=None)
+                except Exception:
+                    data = {}
+    except Exception as exc:
+        return {"ok": False, "status": None, "detail": "", "error": f"{type(exc).__name__}"}
+    if status == 404:
+        return {"ok": False, "status": 404, "detail": "эндпоинт /api/chest_ready не найден — обновите aura-api",
+                "error": ""}
+    if not isinstance(data, dict):
+        return {"ok": False, "status": status, "detail": "неожиданный ответ", "error": ""}
+    return {"ok": bool(data.get("ok")), "status": status, "detail": str(data.get("detail") or data.get("error") or ""),
+            "error": ""}
 
 
 async def resolve_api_url() -> str:

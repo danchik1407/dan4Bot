@@ -694,13 +694,111 @@ function playChestFlash(durationMs = 1000) {
 
 function hideChestRoulette() {
     const roulette = document.getElementById('roulette-container');
-    if (roulette) roulette.style.display = 'none';
+    if (roulette) {
+        roulette.style.display = 'none';
+        roulette.classList.remove('spinning', 'hit');
+    }
+    const track = document.getElementById('roulette-track');
+    if (track) { track.style.transform = 'translateX(0)'; track.innerHTML = ''; }
+    const caption = document.getElementById('roulette-caption');
+    if (caption) caption.textContent = 'Открываем сундук…';
     const buttons = document.getElementById('chest-buttons');
     if (buttons) buttons.style.display = 'flex';
     const modal = document.getElementById('chest-win-modal');
     if (modal) modal.classList.remove('active');
     pendingChestClaimId = null;
     checkChestCooldown();
+}
+
+// ================= РУЛЕТКА СУНДУКА (как в кейсах CS) =================
+// Полоса предметов едет справа налево и плавно тормозит; на каждой пройденной
+// ячейке — щелчок, в конце выигрышная ячейка встаёт ровно под золотую метку и
+// подсвечивается. Ширина ячейки берётся из вёрстки (.roulette-item), поэтому
+// остановка всегда точная — раньше считалось «на глаз» и могло не совпасть.
+const ROULETTE_ITEM_COUNT = 90;
+const ROULETTE_SPIN_MS = 6200;
+const ROULETTE_MIN_TICK_MS = 45;
+const ROULETTE_ITEM_FALLBACK = 84;
+
+function chestRouletteFiller(isGold) {
+    // Соседние ячейки показывают реальный диапазон сундука, чтобы рулетка не врала.
+    if (Math.random() < (isGold ? 0.08 : 0.18)) return { isKey: true, amount: 0 };
+    const min = isGold ? 60 : 10, max = isGold ? 180 : 30;
+    return { isKey: false, amount: Math.floor(Math.random() * (max - min + 1)) + min };
+}
+
+function buildChestRouletteTrack({ isGold, isKey, rewardCoins }) {
+    const track = document.getElementById('roulette-track');
+    if (!track) return null;
+    // Выигрыш далеко от края, чтобы полосе было куда ехать.
+    const winIndex = Math.floor(Math.random() * 50) + 24;
+    const cells = [];
+    for (let i = 0; i < ROULETTE_ITEM_COUNT; i++) {
+        const item = i === winIndex ? { isKey, amount: rewardCoins } : chestRouletteFiller(isGold);
+        cells.push(
+            `<div class="roulette-item${item.isKey ? ' is-key' : ''}"${i === winIndex ? ' data-win="1"' : ''}>` +
+            `${chestRouletteItemHtml(item.isKey, item.amount)}</div>`
+        );
+    }
+    track.innerHTML = cells.join('');
+    track.style.transition = 'none';
+    track.style.transform = 'translateX(0)';
+    return { track, winIndex };
+}
+
+// Крутит рулетку и резолвится, когда ячейка встала на место и подсвечена.
+function runChestRoulette({ isGold, isKey, rewardCoins }) {
+    return new Promise(resolve => {
+        const container = document.getElementById('roulette-container');
+        const built = buildChestRouletteTrack({ isGold, isKey, rewardCoins });
+        if (!container || !built) return resolve(false);
+        const { track, winIndex } = built;
+
+        container.classList.remove('hit');
+        container.classList.add('spinning');
+        container.style.display = 'block';
+        const caption = document.getElementById('roulette-caption');
+        if (caption) caption.textContent = 'Открываем сундук…';
+        void container.offsetWidth;             // фиксируем вёрстку до измерений
+
+        const firstCell = track.firstElementChild;
+        const itemWidth = (firstCell && firstCell.getBoundingClientRect().width) || ROULETTE_ITEM_FALLBACK;
+        const windowEl = track.parentElement;
+        const windowWidth = (windowEl && windowEl.getBoundingClientRect().width) || 340;
+        // Центр выигрышной ячейки должен совпасть с центром окна.
+        const target = Math.max(0, winIndex * itemWidth - (windowWidth / 2 - itemWidth / 2));
+
+        let lastCell = -1, lastTickAt = 0;
+        const startedAt = performance.now();
+        const frame = now => {
+            const progress = Math.min((now - startedAt) / ROULETTE_SPIN_MS, 1);
+            const eased = 1 - Math.pow(1 - progress, 4);   // резкий разгон → долгое торможение
+            const offset = target * eased;
+            track.style.transform = `translateX(-${offset}px)`;
+
+            const cell = Math.round((offset + windowWidth / 2) / itemWidth);
+            if (cell !== lastCell) {
+                lastCell = cell;
+                if (now - lastTickAt > ROULETTE_MIN_TICK_MS) {
+                    lastTickAt = now;
+                    playSound('click');
+                }
+            }
+
+            if (progress < 1) { requestAnimationFrame(frame); return; }
+
+            track.style.transform = `translateX(-${target}px)`;
+            container.classList.remove('spinning');
+            container.classList.add('hit');
+            const winner = track.querySelector('[data-win="1"]');
+            if (winner) winner.classList.add('win', 'hit');
+            if (caption) caption.textContent = 'Ваша награда!';
+            try { tg.HapticFeedback && tg.HapticFeedback.notificationOccurred('success'); } catch (e) {}
+            playSound('win');
+            resolve(true);
+        };
+        requestAnimationFrame(frame);
+    });
 }
 
 // Сундуки во время техработ открывают только админы. Обычному игроку даже
@@ -754,55 +852,23 @@ async function openChest(type) {
     isProcessing = false;
 
     document.getElementById('chest-buttons').style.display = 'none';
-    // Рулетку показываем только ПОСЛЕ вспышки — сначала секунда белого экрана.
-    const roulette = document.getElementById('roulette-container'); roulette.style.display = 'none';
-    const track = document.getElementById('roulette-track');
-    track.style.transform = 'translateX(0)'; track.innerHTML = ''; void track.offsetWidth;
+    const winModal = document.getElementById('chest-win-modal');
+    if (winModal) winModal.classList.remove('active');
 
-    const winIndex = Math.floor(Math.random() * 60) + 20;
-    const filler = () => {
-        // Соседние ячейки показывают реальный диапазон сундука, чтобы рулетка не врала.
-        if (!isGold && Math.random() < 0.2) return { isKey: true, amount: 0 };
-        const min = isGold ? 60 : 10, max = isGold ? 180 : 30;
-        return { isKey: false, amount: Math.floor(Math.random() * (max - min + 1)) + min };
-    };
-    for (let i = 0; i < 100; i++) {
-        const item = i === winIndex ? { isKey, amount: rewardCoins } : filler();
-        const div = document.createElement('div');
-        div.className = 'roulette-item' + (i === winIndex ? ' win' : '');
-        div.innerHTML = chestRouletteItemHtml(item.isKey, item.amount);
-        track.appendChild(div);
-    }
-
-    // Ждём окончания вспышки (её длительность фиксирована — 1 секунда), только
-    // потом показываем рулетку.
+    // Вспышка длится ровно 1 секунду — и только после неё появляется рулетка.
     await flashPromise;
-    roulette.style.display = 'block';
-    void roulette.offsetWidth;
-    await new Promise(r => setTimeout(r, 50));
-    const firstItem = track.firstElementChild;
-    const itemWidth = firstItem ? firstItem.offsetWidth : 81;
-    const windowWidth = track.parentElement ? track.parentElement.offsetWidth : 350;
-    const centerOffset = (windowWidth / 2) - (itemWidth / 2);
-    const targetScroll = (winIndex * itemWidth) - centerOffset;
-    let start = null; const duration = 6000;
-    function step(timestamp) {
-        if (!start) start = timestamp;
-        const progress = timestamp - start; const easeOut = 1 - Math.pow(1 - Math.min(progress / duration, 1), 4); const currentScroll = targetScroll * easeOut;
-        track.style.transform = `translateX(-${currentScroll}px)`;
-        if (progress < duration) { requestAnimationFrame(step); }
-        else {
-            track.style.transform = `translateX(-${targetScroll}px)`;
-            const modal = document.getElementById('chest-win-modal');
-            document.getElementById('chest-win-icon').innerHTML = isKey ? '🔑' : COIN_IMG;
-            document.getElementById('chest-win-text').innerHTML = isKey
-                ? 'ЗОЛОТОЙ КЛЮЧ!'
-                : `Вы получили ${coinAmount(rewardCoins)}`;
-            modal.classList.add('active');
-            playSound('win');
-        }
+    await runChestRoulette({ isGold, isKey, rewardCoins });
+    // Небольшая пауза: игрок должен увидеть, что ячейка встала под меткой и
+    // подсветилась, а уже потом поверх открывается окно награды.
+    await new Promise(r => setTimeout(r, 700));
+
+    const iconEl = document.getElementById('chest-win-icon');
+    const textEl = document.getElementById('chest-win-text');
+    if (iconEl) iconEl.innerHTML = isKey ? '🔑' : COIN_IMG;
+    if (textEl) {
+        textEl.innerHTML = isKey ? 'ЗОЛОТОЙ КЛЮЧ!' : `Вы получили ${coinAmount(rewardCoins)}`;
     }
-    requestAnimationFrame(step);
+    if (winModal) winModal.classList.add('active');
 }
 
 async function claimChestReward() {
