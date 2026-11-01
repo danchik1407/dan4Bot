@@ -11,9 +11,13 @@ from dotenv import load_dotenv
 from supabase import create_client, Client
 from typing import Optional
 from shop_catalog import SHOP_ITEMS, ShopPurchaseError, is_admin_id, parse_inventory, purchase_shop_item, \
-    serialize_shop_items, shop_stock_snapshot
+    serialize_shop_items, shop_stock_snapshot, stock_diagnostics
 
 load_dotenv()
+
+# Номер сборки: по нему из /api/health видно, что на сервисе НЕ старый код.
+# Если после деплоя здесь прежнее значение — Render ещё не перезапустился.
+API_BUILD = "2026-11-01-stock-rpc-3"
 
 logger = logging.getLogger("aura-api")
 if not logger.handlers:
@@ -121,6 +125,7 @@ async def health():
     return {
         "ok": True,
         "service": "aura-api",
+        "build": API_BUILD,
         "static": {
             "dir": "miniapp",
             "ready": os.path.isfile(os.path.join(MINIAPP_DIR, "index.html")),
@@ -129,6 +134,8 @@ async def health():
         "shop_stock": {
             "ready": stock is not None,
             "left": stock,
+            "rpc": "shop_take_stock",
+            "debug": "/api/stock_debug",
             "error": stock_error,
             "hint": None if stock is not None else
             "примените supabase/migrations/20261102000000_stock_and_chest_rpc.sql",
@@ -1831,6 +1838,31 @@ async def get_shop_items(data: ShopCatalogRequest):
         "items": serialize_shop_items(is_admin, stock),
         "stock_ready": stock is not None,
     }
+
+
+@app.get("/api/stock_debug")
+async def stock_debug():
+    """Диагностика тиража капсул: доходит ли покупка до RPC и что отвечает база.
+
+    Ничего не списывает (пробный вызов с несуществующим item_id). Открывается
+    в браузере: https://<сервис>/api/stock_debug — сразу видно, применена ли
+    SQL-функция, какая у неё сигнатура и какой остаток в таблице.
+    """
+    try:
+        report = await asyncio.to_thread(stock_diagnostics, supabase)
+    except Exception as exc:  # noqa: BLE001
+        return JSONResponse(status_code=200, content={
+            "ok": False, "build": API_BUILD,
+            "error": f"{type(exc).__name__}: {exc}"[:300],
+        })
+    report["ok"] = bool(report.get("rpc_ready"))
+    report["build"] = API_BUILD
+    report["how_to_read"] = {
+        "rpc_ready": "true — функция shop_take_stock найдена и отвечает",
+        "attempts[].verdict": "sold_out на пробном id — правильный ответ (нечего списывать)",
+        "snapshot": "остаток, который сейчас видит магазин",
+    }
+    return report
 
 
 @app.post("/api/buy_item")
