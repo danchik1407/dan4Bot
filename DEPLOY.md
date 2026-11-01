@@ -444,6 +444,10 @@ won = roll <= chance_verdict                                   # граница 
   показывает зону вердикта;
 - белая риска `.up-boundary` крутится вместе с `--p` и показывает, где кончается
   зелёная зона;
+- заливка круга теперь ставится **из JS** (`upgradeRingGradientCss()` →
+  `conic-gradient(from 0deg, …)`) тем же углом `% * 3.6`, поэтому даже устаревший
+  `style.css` из кэша Telegram не может повернуть круг на 90° и «перекрасить»
+  вердикт; в `index.html` добавлены `Cache-Control/Pragma/Expires` мета-теги;
 - зелёная зона: `conic-gradient(from 0deg, #22c55e 0 var(--p), #ef4444 var(--p) 360deg)`.
 
 > **Почему именно `from 0deg`.** В CSS у `conic-gradient` ноль — это 12 часов, то есть
