@@ -983,9 +983,11 @@ function renderShop() {
         // «Осталось: X из Y» мелким шрифтом под капсулой; при нуле карточку не рисуем.
         const hasStock = item.stock != null && item.stockTotal != null && item.stockReady !== false;
         if (hasStock && item.stock <= 0) return '';
+        // Остаток неизвестен (нет строки тиража / RLS): не рисуем полный тираж как остаток,
+        // иначе карточка обещает «1 000 из 1 000», а покупка отвечает «распродан».
         const stockText = hasStock
             ? `<small class="shop-stock${item.stock <= Math.max(1, Math.round(item.stockTotal * 0.1)) ? ' low' : ''}">Осталось: ${formatCoins(item.stock)} из ${formatCoins(item.stockTotal)}</small>`
-            : '';
+            : (item.stockTotal != null ? `<small class="shop-stock muted">Остаток уточняется</small>` : '');
         const image = shopImageFor(itemId, item);
         const art = image
             ? `<div class="shop-art"><img src="${image}" alt="${escapeHtml(item.name)}" loading="lazy"></div>`
@@ -1000,6 +1002,9 @@ function renderShop() {
             </article>
         `;
     }).join('');
+    // Если сервер прямо говорит, что тираж не ведётся, карточки не должны
+    // показывать «Осталось: 1 000 из 1 000» — это и было причиной ложного
+    // «Товар распродан» после успешной на вид покупки.
 }
 
 async function buyItem(itemId) {
@@ -1027,12 +1032,17 @@ async function buyItem(itemId) {
         playSound('click');
         // Тираж уменьшился — сначала ставим остаток из ответа сервера (видно сразу,
         // даже если следующий запрос не дойдёт), потом перечитываем каталог целиком.
-        shopStockUnreliable = data.stock_ready === false;
-        if (data.stock != null && SHOP_ITEMS[itemId]) {
-            SHOP_ITEMS[itemId].stock = Number(data.stock);
+        // Сервер не смог списать тираж → числам в этой сессии больше не верим:
+        // следующий каталог может прочитать старую строку и снова показать
+        // «1 000 из 1 000» после покупки.
+        if (data.stock_ready === false) shopStockUnreliable = true;
+        else if (data.stock_ready === true) shopStockUnreliable = false;
+        if (SHOP_ITEMS[itemId]) {
+            if (data.stock != null) SHOP_ITEMS[itemId].stock = Number(data.stock);
             SHOP_ITEMS[itemId].stockReady = data.stock_ready !== false && !shopStockUnreliable;
             renderShop();
         }
+        if (data.stock_warning) console.warn('Магазин:', data.stock_warning);
         loadShopItems();
     } catch(e) {
         console.error("Ошибка покупки", e);
@@ -1704,18 +1714,35 @@ function upgradeArrowClearanceDeg(arc) {
     return Math.max(nudge, Math.min(wanted, limit));
 }
 
+// Зазор для ПРОИГРЫША считается от длины красной зоны (360° − дуга):
+// при шансе 99.99% красная зона — это 0.036°, и зазор в 2.16° вынес бы стрелку
+// за 360° (в ноль, то есть обратно в зелёный). Поэтому зазор пропорциональный.
+function upgradeArrowRedClearanceDeg(arc) {
+    const room = Math.max(0, 360 - arc);
+    const nudge = upgradeAngleForPercent(UPGRADE_BOUNDARY_NUDGE_PCT);
+    const wanted = upgradeAngleForPercent(UPGRADE_ARROW_CLEARANCE_PCT);
+    return Math.max(Math.min(nudge, room * 0.5), Math.min(wanted, room * 0.6));
+}
+
 function upgradeArrowTargetFor(won, chance, rollValue) {
     const chanceNumber = Math.max(0, Math.min(100, Number(chance) || 0));
     const arc = Math.max(0.5, Math.min(360, upgradeAngleForPercent(chanceNumber)));
     const clearance = upgradeArrowClearanceDeg(arc);
+    const redClearance = upgradeArrowRedClearanceDeg(arc);
     const rollNumber = Number(rollValue);
     if (Number.isFinite(rollNumber)) {
-        // Угол строго по броску — той же формулой, что и заливка круга.
-        let desired = Math.max(0, Math.min(359.6, upgradeAngleForPercent(rollNumber)));
-        if (Math.abs(desired - arc) < clearance) {
-            desired = won
-                ? Math.max(0, arc - clearance)          // внутрь зелёного
-                : Math.min(359.6, arc + clearance);     // внутрь красного
+        // Угол по броску — той же формулой, что и заливка круга.
+        let desired = Math.max(0, Math.min(359.99, upgradeAngleForPercent(rollNumber)));
+        // Жёсткая гарантия: стрелка ВСЕГДА в зоне, которую назвал вердикт.
+        // Односторонний зажим (а не «сдвиг только у самой границы») закрывает и
+        // случай противоречивых чисел от сервера: победа с броском в красной зоне
+        // всё равно будет показана внутри зелёного.
+        if (won) {
+            if (desired > arc - clearance) desired = Math.max(0, Math.min(arc - clearance, 359.99));
+        } else {
+            // 100% — это всегда победа (roll <= 100), защищаемся от кривого ответа.
+            const minimum = Math.min(359.99, arc + redClearance);
+            if (desired < minimum) desired = minimum;
         }
         return desired;
     }
@@ -2082,6 +2109,12 @@ function finishUpgradeAnimation(data, chance) {
         circle.classList.remove('spinning', 'win', 'lose');
         circle.classList.add(won ? 'win' : 'lose');
         setUpgradeRingPercent(chance);
+    }
+    // Финальная сверка: стрелка обязана стоять в зоне вердикта. Если анимацию
+    // прервали (быстрый повторный клик, уход с экрана) — доводим её сами тем же
+    // расчётом, что и при прокрутке.
+    if (data.roll != null && document.getElementById('up-arrow')) {
+        setUpgradeArrowAngle(((upgradeArrowTargetFor(won, chance, data.roll) % 360) + 360) % 360);
     }
     const chanceEl = document.getElementById('up-chance');
     if (chanceEl) chanceEl.innerText = (Number(chance) || 0).toFixed(2) + '%';

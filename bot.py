@@ -1069,16 +1069,27 @@ async def cmd_services(message: Message):
     elif stock.get("ready"):
         left = stock.get("left") or {}
         preview = ", ".join(f"{k}: {v}" for k, v in list(left.items())[:3])
-        stock_line = (
-            f"🎟️ Тираж: ✅ {preview or 'пусто'}\n"
-            f"   • RPC shop_take_stock: {stock.get('rpc', 'shop_take_stock')}"
-            f" · проверка: {API_URL}/api/stock_debug"
-        )
+        missing = stock.get("missing_rows") or []
+        if missing:
+            # Ровно тот баг, из-за которого карточка обещала «1000 из 1000»,
+            # а покупка отвечала «Товар распродан»: строк тиража нет.
+            stock_line = (
+                f"🎟️ Тираж: ⚠️ нет строк для: {', '.join(missing)}\n"
+                "   • магазин честно пишет «Остаток уточняется», покупка не блокируется\n"
+                "   • лечение: примените supabase/migrations/20261104000000_shop_stock_fix.sql\n"
+                f"   • проверка: {API_URL}/api/stock_debug"
+            )
+        else:
+            stock_line = (
+                f"🎟️ Тираж: ✅ {preview or 'пусто'}\n"
+                f"   • RPC shop_take_stock: {stock.get('rpc', 'shop_take_stock')}"
+                f" · проверка: {API_URL}/api/stock_debug"
+            )
     else:
         stock_line = (
             "🎟️ Тираж: ❌ сервер не читает capsule_stock\n"
             f"   • {str(stock.get('error') or 'таблица недоступна')[:160]}\n"
-            "   • примените supabase/migrations/20261103000000_shop_take_stock_amount.sql\n"
+            "   • примените supabase/migrations/20261104000000_shop_stock_fix.sql\n"
             f"   • диагностика: {API_URL}/api/stock_debug"
         )
 

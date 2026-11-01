@@ -11,13 +11,13 @@ from dotenv import load_dotenv
 from supabase import create_client, Client
 from typing import Optional
 from shop_catalog import SHOP_ITEMS, ShopPurchaseError, is_admin_id, parse_inventory, purchase_shop_item, \
-    serialize_shop_items, shop_stock_snapshot, stock_diagnostics
+    serialize_shop_items, missing_stock_rows, shop_stock_snapshot, stock_diagnostics
 
 load_dotenv()
 
 # Номер сборки: по нему из /api/health видно, что на сервисе НЕ старый код.
 # Если после деплоя здесь прежнее значение — Render ещё не перезапустился.
-API_BUILD = "2026-11-01-stock-rpc-3"
+API_BUILD = "2026-11-01-stock-rows-4"
 
 logger = logging.getLogger("aura-api")
 if not logger.handlers:
@@ -104,6 +104,18 @@ _stock_health_cache = {"at": 0.0, "value": None, "error": None}
 STOCK_HEALTH_TTL = 20.0
 
 
+def _stock_health_hint(stock: dict | None, stock_error: str | None) -> str | None:
+    """Одна короткая подсказка: что именно применить в Supabase."""
+    if stock is None:
+        return ("таблица тиража недоступна: " + stock_error if stock_error else
+                "примените supabase/migrations/20261104000000_shop_stock_fix.sql")
+    missing = missing_stock_rows(stock)
+    if missing:
+        return ("нет строк тиража: " + ", ".join(missing) +
+                " — примените supabase/migrations/20261104000000_shop_stock_fix.sql")
+    return None
+
+
 @app.get("/api/health")
 async def health():
     """Проверка сервиса: Render health check + админская диагностика в боте."""
@@ -137,8 +149,11 @@ async def health():
             "rpc": "shop_take_stock",
             "debug": "/api/stock_debug",
             "error": stock_error,
-            "hint": None if stock is not None else
-            "примените supabase/migrations/20261102000000_stock_and_chest_rpc.sql",
+            # Строки тиража, которых нет в таблице. Непустой список — это ровно тот
+            # случай, когда магазин рисовал «Осталось: 1000 из 1000», а покупка
+            # отвечала «Товар распродан»: списывать было нечего.
+            "missing_rows": missing_stock_rows(stock),
+            "hint": _stock_health_hint(stock, stock_error),
         },
         # MAINTENANCE_MODE объявлен ниже по файлу, но к моменту запроса уже существует.
         "maintenance": MAINTENANCE_MODE,
@@ -1855,6 +1870,7 @@ async def stock_debug():
             "ok": False, "build": API_BUILD,
             "error": f"{type(exc).__name__}: {exc}"[:300],
         })
+    report["missing_rows"] = missing_stock_rows(report.get("snapshot"))
     report["ok"] = bool(report.get("rpc_ready"))
     report["build"] = API_BUILD
     report["how_to_read"] = {
@@ -1881,6 +1897,11 @@ async def buy_item(data: BuyItem):
         print(f"МАГАЗИН: отказ user_id={user_id} item={data.item_id} "
               f"[{exc.status_code}] {exc.message}", flush=True)
         raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
+    if not result.get("stock_ready", True):
+        # Купили, но тираж не списан: говорим прямо, а не делаем вид, что всё хорошо.
+        print(f"МАГАЗИН: ВНИМАНИЕ тираж не списан (stock_ready=false) item={data.item_id} — "
+              f"примените supabase/migrations/20261104000000_shop_stock_fix.sql", flush=True)
+        result["stock_warning"] = "Остаток тиража не обновился: база не дала списать"
     # Одна строка на покупку: по ней видно и баланс, и остаток тиража.
     print(f"МАГАЗИН: куплено user_id={user_id} item={data.item_id} "
           f"баланс→{result.get('new_balance')} остаток→{result.get('stock')} "
