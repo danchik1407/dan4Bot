@@ -392,7 +392,11 @@ main { padding: 0 16px; }
 /* --- центр: круг --- */
 .up-circle { position: relative; width: min(58vw, 200px); aspect-ratio: 1; display: grid; place-items: center; margin-top: 2px; }
 .up-circle-ring { position: absolute; inset: 0; border-radius: 50%; -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 13px), #000 calc(100% - 12px)); mask: radial-gradient(farthest-side, transparent calc(100% - 13px), #000 calc(100% - 12px)); }
-.up-circle-ring { background: conic-gradient(from -90deg, #3b82f6 0 var(--p, 0deg), rgba(59, 130, 246, 0.12) var(--p, 0deg) 360deg); filter: drop-shadow(0 0 12px rgba(59, 130, 246, 0.5)); transition: filter 0.3s, background 0.3s; }
+/* Круг всегда двухцветный и начинается с верхней точки (0°) по часовой:
+   ЗЕЛЁНАЯ зона 0 → шанс, КРАСНАЯ зона шанс → 100%. Раньше успех был синим,
+   а «промах» почти прозрачным — из-за этого стрелка «в тёмной части» и
+   вердикт читались по-разному. */
+.up-circle-ring { background: conic-gradient(from -90deg, #22c55e 0 var(--p, 0deg), #ef4444 var(--p, 0deg) 360deg); filter: drop-shadow(0 0 12px rgba(34, 197, 94, 0.35)); transition: filter 0.3s, background 0.3s; }
 /* Белая стрелка: вращается через JS, в конце плавно замедляется и замирает на результате. */
 .up-arrow-wrap { position: absolute; inset: 0; z-index: 2; transform: rotate(0deg); will-change: transform; pointer-events: none; }
 .up-arrow { position: absolute; left: 50%; bottom: 50%; width: 3px; height: 43%; transform: translateX(-50%); border-radius: 3px; background: linear-gradient(to top, rgba(255, 255, 255, 0.1), #ffffff 40%, #ffffff); box-shadow: 0 0 10px rgba(255, 255, 255, 0.75); }
@@ -402,11 +406,12 @@ main { padding: 0 16px; }
 .up-circle.lose .up-arrow::before { border-bottom-color: #fca5a5; }
 .up-circle.win .up-arrow { box-shadow: 0 0 16px rgba(110, 231, 160, 0.85); }
 .up-circle.lose .up-arrow { box-shadow: 0 0 16px rgba(252, 165, 165, 0.8); }
-.up-circle.win .up-circle-ring { background: conic-gradient(from -90deg, #22c55e 0 var(--p, 0deg), rgba(34, 197, 94, 0.12) var(--p, 0deg) 360deg); filter: drop-shadow(0 0 18px rgba(34, 197, 94, 0.65)); }
-/* Проигрыш: сам СЕКТОР УСПЕХА остаётся подсвеченным, а зона промаха краснеет.
-   Раньше на проигрыш всё кольцо становилось красным, и было невозможно понять,
-   попала стрелка в сектор или нет — отсюда «залетело, но не засчитало». */
-.up-circle.lose .up-circle-ring { background: conic-gradient(from -90deg, rgba(59, 130, 246, 0.9) 0 var(--p, 0deg), rgba(239, 68, 68, 0.7) var(--p, 0deg) 360deg); filter: drop-shadow(0 0 16px rgba(239, 68, 68, 0.4)); }
+/* Победа: зелёная зона горит, красная притушена — видно, куда попала стрелка. */
+.up-circle.win .up-circle-ring { background: conic-gradient(from -90deg, #22c55e 0 var(--p, 0deg), rgba(239, 68, 68, 0.3) var(--p, 0deg) 360deg); filter: drop-shadow(0 0 18px rgba(34, 197, 94, 0.65)); }
+/* Проигрыш: зелёная зона остаётся видимой (чтобы было понятно, мимо чего
+   промахнулись), а красная — яркая. Раньше успех на проигрыш красился синим,
+   и «стрелка в красной зоне» выглядело как расхождение с вердиктом. */
+.up-circle.lose .up-circle-ring { background: conic-gradient(from -90deg, rgba(34, 197, 94, 0.45) 0 var(--p, 0deg), #ef4444 var(--p, 0deg) 360deg); filter: drop-shadow(0 0 16px rgba(239, 68, 68, 0.55)); }
 .up-circle-inner { position: relative; z-index: 3; width: 68%; height: 68%; border-radius: 50%; background: radial-gradient(circle, #0c1520 62%, rgba(10, 17, 25, 0.9) 100%); border: 1px solid rgba(59, 130, 246, 0.18); display: grid; place-content: center; text-align: center; box-shadow: inset 0 0 18px rgba(0, 0, 0, 0.55); }
 .up-chance { font-size: 23px; font-weight: 900; color: #eaf3ff; font-variant-numeric: tabular-nums; letter-spacing: 0.5px; text-shadow: 0 0 18px rgba(59, 130, 246, 0.55); }
 .up-chance-label { font-size: 9px; font-weight: 800; letter-spacing: 1.2px; text-transform: uppercase; color: #6f8bb5; margin-top: 2px; }
@@ -446,7 +451,7 @@ main { padding: 0 16px; }
 
 .up-result { min-height: 18px; text-align: center; font-size: 12px; font-weight: 800; color: #6f8bb5; padding: 0 6px; }
 .up-result.win { color: #34d399; }
-.up-result.lose { color: #f87171; }
+.up-result.lose { color: #ff5b5b; font-size: 13px; font-weight: 900; text-shadow: 0 0 14px rgba(239, 68, 68, 0.45); }
 .up-result.spinning { color: #58a6ff; animation: upPulse 0.9s infinite alternate; }
 @keyframes upPulse { 0% { opacity: 0.5; } 100% { opacity: 1; } }
 

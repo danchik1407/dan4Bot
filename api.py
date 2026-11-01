@@ -1899,15 +1899,20 @@ async def upgrade_action(data: UpgradeAction):
                 inventory.remove(source)
             new_coins = raw_coins
 
-        # Фиксируем сам бросок: его видно в логе, поэтому «не выдалось» проверяемо.
-        # Вердикт железно = «бросок меньше шанса»: стрелка в круге стоит на этом же
-        # броске, поэтому «попал в сектор» и «засчитали победу» всегда совпадают.
-        # 0.00..99.99 — если вернуть ровно 100.00, при шансе 100% запись «roll < chance»
-        # дала бы проигрыш, хотя стрелка стоит в закрашенном секторе.
+        # Вердикт и стрелка считаются по ОДНОМУ числу — по тому, что уходит клиенту.
+        # Клиент рисует границу сектора из округлённого шанса, поэтому сравнивать
+        # надо именно с округлённым. Раньше сравнивали с неокруглённым real_chance:
+        # бросок 55.24 при real_chance 55.244 давал победу, а стрелка вставала ровно
+        # на границу сектора 55.24 — визуально «в красной зоне, но победа».
+        chance_verdict = round(min(100.0, max(0.0, float(real_chance))), 2)
+        # Бросок — тоже до сотых: клиент ставит стрелку на roll * 3.6°.
+        # 0.00..99.99: ровно 100.00 при шансе 100% дало бы проигрыш, хотя стрелка
+        # стоит в закрашенном секторе.
         roll = round(random.random() * 100.0, 2)
         if roll >= 100.0:
             roll = 99.99
-        won = roll < real_chance
+        # СТРОГО: roll < chance — победа, roll >= chance — проигрыш. Без допусков.
+        won = roll < chance_verdict
         win_item = None
         # payout — только для этого круга. Раньше здесь обнулялся сам win_amount:
         # если запись не проходила из-за гонки, следующий круг мог выиграть с
@@ -1934,7 +1939,7 @@ async def upgrade_action(data: UpgradeAction):
             # Лог пишем ПОСЛЕ успешной записи баланса: если она не прошла, розыгрыша не было.
             log_id = _upgrade_log_write(
                 user_id, item_from=source, amount_from=amount, item_to=target,
-                chance=visual_chance, roll=roll, won=won, win_item=win_item,
+                chance=chance_verdict, roll=roll, won=won, win_item=win_item,
                 win_amount=payout,
                 coins_before=raw_coins, coins_after=new_coins, inventory_after=new_inventory,
             )
@@ -1945,7 +1950,10 @@ async def upgrade_action(data: UpgradeAction):
                 "amount_from": amount,
                 "item_to": target,
                 "chance": round(visual_chance, 2),
-                "real_chance": round(real_chance, 2),
+                # Реальный шанс = то же число, что участвовало в сравнении.
+                # Клиент рисует сектор и ставит стрелку именно по нему,
+                # поэтому геометрия круга и вердикт не могут разойтись.
+                "real_chance": chance_verdict,
                 "roll": roll,
                 "log_id": log_id,
                 "win_item": win_item,
