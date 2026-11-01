@@ -669,12 +669,37 @@ async function loadGlobalTop() {
 // /api/claim_chest после кнопки «Забрать». До этого баланс не меняется —
 // раньше коины приходили ещё до анимации рулетки, это был баг.
 let pendingChestClaimId = null, chestFlashTimer = null;
+// Капсула, которую показывает открытый сундук (сервер начислит её по «Забрать»).
+let chestPendingItem = null;
 // true — награда этого сундука начислена сразу при открытии (старая схема,
 // когда chest_claims недоступна): кнопка «Забрать» только закрывает окно.
 let chestRewardCredited = false;
 
-function chestRouletteItemHtml(isKey, amount) {
-    return isKey ? '🔑<span>Ключ</span>' : `${COIN_IMG}<span>${amount}</span>`;
+// Капсула из сундука (задача 22): шансы те же, что на сервере — иначе рулетка
+// врала бы о вероятностях. Золотой сундук 10 %, обычный 0.1 %.
+const CHEST_CAPSULE_ITEM = 'capsule';
+const CHEST_CAPSULE_IMG = 'inv_capsule.png';
+const CHEST_CAPSULE_CHANCE_NORMAL = 0.001;
+const CHEST_CAPSULE_CHANCE_GOLD = 0.10;
+
+function chestCapsuleChance(isGold) {
+    return isGold ? CHEST_CAPSULE_CHANCE_GOLD : CHEST_CAPSULE_CHANCE_NORMAL;
+}
+
+// Ячейка рулетки: ключ / монеты / капсула.
+function chestRouletteItemHtml(kind, amount) {
+    if (kind === 'key') return '🔑<span>Ключ</span>';
+    if (kind === 'capsule') {
+        return `<img class="cap-img" src="${CHEST_CAPSULE_IMG}" alt="капсула" loading="lazy">` +
+               '<span>Капсула</span>';
+    }
+    return `${COIN_IMG}<span>${amount}</span>`;
+}
+
+// Подпись капсулы для окна награды: картинка маленькая, поэтому и в тексте.
+function chestCapsuleText(amount) {
+    const count = Math.max(1, Number(amount) || 1);
+    return `<img class="cap-img" src="${CHEST_CAPSULE_IMG}" alt="капсула"> Обычная капсула × ${count}`;
 }
 
 // Белая вспышка ровно на секунду, затем крутим рулетку.
@@ -712,6 +737,7 @@ function hideChestRoulette() {
     if (modal) modal.classList.remove('active');
     pendingChestClaimId = null;
     chestRewardCredited = false;
+    chestPendingItem = null;
     checkChestCooldown();
 }
 
@@ -726,23 +752,27 @@ const ROULETTE_MIN_TICK_MS = 45;
 const ROULETTE_ITEM_FALLBACK = 84;
 
 function chestRouletteFiller(isGold) {
-    // Соседние ячейки показывают реальный диапазон сундука, чтобы рулетка не врала.
-    if (Math.random() < (isGold ? 0.08 : 0.18)) return { isKey: true, amount: 0 };
+    // Соседние ячейки показывают реальный набор наград, чтобы рулетка не врала:
+    // капсула — 10 % в золотом сундуке и 0.1 % в обычном (как на сервере).
+    if (Math.random() < chestCapsuleChance(isGold)) return { kind: 'capsule', amount: 1 };
+    if (Math.random() < (isGold ? 0.08 : 0.18)) return { kind: 'key', amount: 0 };
     const min = isGold ? 60 : 10, max = isGold ? 180 : 30;
-    return { isKey: false, amount: Math.floor(Math.random() * (max - min + 1)) + min };
+    return { kind: 'coin', amount: Math.floor(Math.random() * (max - min + 1)) + min };
 }
 
-function buildChestRouletteTrack({ isGold, isKey, rewardCoins }) {
+function buildChestRouletteTrack({ isGold, winner }) {
     const track = document.getElementById('roulette-track');
     if (!track) return null;
+    const winItem = winner && winner.kind ? winner : { kind: 'coin', amount: 0 };
     // Выигрыш далеко от края, чтобы полосе было куда ехать.
     const winIndex = Math.floor(Math.random() * 50) + 24;
     const cells = [];
     for (let i = 0; i < ROULETTE_ITEM_COUNT; i++) {
-        const item = i === winIndex ? { isKey, amount: rewardCoins } : chestRouletteFiller(isGold);
+        const item = i === winIndex ? winItem : chestRouletteFiller(isGold);
+        const cls = item.kind === 'key' ? ' is-key' : (item.kind === 'capsule' ? ' is-capsule' : '');
         cells.push(
-            `<div class="roulette-item${item.isKey ? ' is-key' : ''}"${i === winIndex ? ' data-win="1"' : ''}>` +
-            `${chestRouletteItemHtml(item.isKey, item.amount)}</div>`
+            `<div class="roulette-item${cls}"${i === winIndex ? ' data-win="1"' : ''}>` +
+            `${chestRouletteItemHtml(item.kind, item.amount)}</div>`
         );
     }
     track.innerHTML = cells.join('');
@@ -752,10 +782,10 @@ function buildChestRouletteTrack({ isGold, isKey, rewardCoins }) {
 }
 
 // Крутит рулетку и резолвится, когда ячейка встала на место и подсвечена.
-function runChestRoulette({ isGold, isKey, rewardCoins }) {
+function runChestRoulette({ isGold, winner }) {
     return new Promise(resolve => {
         const container = document.getElementById('roulette-container');
-        const built = buildChestRouletteTrack({ isGold, isKey, rewardCoins });
+        const built = buildChestRouletteTrack({ isGold, winner });
         if (!container || !built) return resolve(false);
         const { track, winIndex } = built;
 
@@ -856,6 +886,12 @@ async function openChest(type) {
     const rewardCoins = Number(data.reward_coins) || 0;
     const rewardKeys = Number(data.reward_keys) || 0;
     const isKey = rewardKeys > 0;
+    // Капсула (если выпала) — отдельная награда вдобавок к коинам/ключу.
+    // Начисление всё равно только по «Забрать», здесь мы её лишь показываем.
+    const rewardItem = String(data.reward_item || '');
+    const rewardItemAmount = Number(data.reward_item_amount) || 0;
+    const hasCapsule = rewardItem === CHEST_CAPSULE_ITEM && rewardItemAmount > 0;
+    chestPendingItem = hasCapsule ? { itemId: rewardItem, amount: rewardItemAmount } : null;
     // Баланс меняется ТОЛЬКО по кнопке «Забрать». Сервер всегда присылает
     // claim_id: число (строка в chest_claims) или строку «mem-…» (награда ждёт
     // в памяти процесса, если таблицы нет). Никакого «начислили сразу».
@@ -874,17 +910,31 @@ async function openChest(type) {
     if (winModal) winModal.classList.remove('active');
 
     // Вспышка длится ровно 1 секунду — и только после неё появляется рулетка.
+    // В подсвеченной ячейке — главная награда: капсула, если она выпала.
+    const winner = hasCapsule ? { kind: 'capsule', amount: rewardItemAmount }
+        : (isKey ? { kind: 'key', amount: 0 } : { kind: 'coin', amount: rewardCoins });
     await flashPromise;
-    await runChestRoulette({ isGold, isKey, rewardCoins });
+    await runChestRoulette({ isGold, winner });
     // Небольшая пауза: игрок должен увидеть, что ячейка встала под меткой и
     // подсветилась, а уже потом поверх открывается окно награды.
     await new Promise(r => setTimeout(r, 700));
 
     const iconEl = document.getElementById('chest-win-icon');
     const textEl = document.getElementById('chest-win-text');
-    if (iconEl) iconEl.innerHTML = isKey ? '🔑' : COIN_IMG;
+    if (iconEl) {
+        iconEl.innerHTML = hasCapsule
+            ? `<img class="cap-img" src="${CHEST_CAPSULE_IMG}" alt="капсула">`
+            : (isKey ? '🔑' : COIN_IMG);
+    }
     if (textEl) {
-        textEl.innerHTML = isKey ? 'ЗОЛОТОЙ КЛЮЧ!' : `Вы получили ${coinAmount(rewardCoins)}`;
+        // Показываем ВСЁ, что лежит в сундуке: и капсулу, и коины/ключ.
+        const parts = [];
+        if (isKey) parts.push('🔑 Золотой ключ');
+        if (rewardCoins > 0) parts.push(coinAmount(rewardCoins));
+        if (hasCapsule) parts.push(chestCapsuleText(rewardItemAmount));
+        textEl.innerHTML = parts.length
+            ? `Вы получили ${parts.join(' и ')}`
+            : `Вы получили ${coinAmount(rewardCoins)}`;
     }
     if (winModal) winModal.classList.add('active');
 }
@@ -916,6 +966,12 @@ async function claimChestReward() {
         }
         balance = Number(data.new_balance) || 0; balanceKnown = true;
         keys = Number(data.new_keys) || 0;
+        // Капсула приходит в инвентаре ответа — обновляем сразу, чтобы её было
+        // видно в профиле без перезагрузки.
+        if (Array.isArray(data.inventory)) inventory = data.inventory;
+        else if (data.reward_item && Number(data.reward_item_amount) > 0 && chestPendingItem) {
+            for (let i = 0; i < chestPendingItem.amount; i++) inventory.push(chestPendingItem.itemId);
+        }
         updateUI();
         playSound('win');
     } catch (e) {
