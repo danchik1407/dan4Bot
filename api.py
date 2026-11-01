@@ -268,8 +268,8 @@ async def chest_ready():
     try:
         rows = await asyncio.to_thread(_probe)
     except Exception as exc:
-        # Сундуки при этом всё равно работают: награда начисляется сразу,
-        # без отложенного «Забрать» (см. open_chest).
+        # Сундуки при этом всё равно работают: награда ждёт «Забрать»
+        # в памяти процесса, но не начисляется при открытии (см. open_chest).
         print(f"ОШИБКА СУНДУКА: таблица {CHEST_CLAIMS_TABLE} недоступна: "
               f"{type(exc).__name__}: {exc}", flush=True)
         return JSONResponse(status_code=200, content={
@@ -279,7 +279,7 @@ async def chest_ready():
             "error": f"{type(exc).__name__}: {exc}"[:400],
             "migration": CHEST_CLAIMS_MIGRATION_FILE,
             "rpc_migration": "supabase/migrations/20261102000000_stock_and_chest_rpc.sql",
-            "fallback": "награда начисляется сразу при открытии сундука",
+            "fallback": "награда ждёт «Забрать» в памяти сервера (пропадает при перезапуске)",
             "hint": "Примените миграции и выполните NOTIFY pgrst, 'reload schema'",
         })
 
@@ -1505,8 +1505,9 @@ class ChestUnavailable(Exception):
     """chest_claims недоступна: таблицы/функции нет, RLS или база отказала.
 
     Раньше такая ошибка превращалась в 503 «Сундуки обновляются, попробуйте
-    чуть позже», и сундук нельзя было открыть вообще. Теперь награда просто
-    начисляется сразу (старая схема, без отложенного «Забрать»).
+    чуть позже», и сундук нельзя было открыть вообще. Теперь награда не
+    теряется и не начисляется сразу: она ждёт кнопку «Забрать» в памяти
+    процесса (см. _pending_claim_put).
     """
 
 

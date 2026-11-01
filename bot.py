@@ -1046,15 +1046,15 @@ async def cmd_services(message: Message):
     elif chest.get("ok"):
         chest_line = (
             "📦 Сундуки: ⚠️ таблица есть, SQL-функций нет\n"
-            "   • награда пока начисляется сразу при открытии (без «Забрать»)\n"
+            "   • награда ждёт кнопку «Забрать» в памяти сервера (до его перезапуска)\n"
             "   • примените supabase/migrations/20261102000000_stock_and_chest_rpc.sql "
             "и 20261103000000_shop_take_stock_amount.sql"
         )
     else:
         chest_line = (
-            "📦 Сундуки: ⚠️ таблица chest_claims недоступна — включён старый режим\n"
+            "📦 Сундуки: ⚠️ таблица chest_claims недоступна — включён резервный режим\n"
             f"   • {chest.get('detail', 'ошибка базы')}\n"
-            "   • награда начисляется сразу при открытии сундука (играть можно)\n"
+            "   • играть можно: награда ждёт «Забрать» в памяти сервера (пропадёт при перезапуске)\n"
             "   • чтобы вернуть «Забрать»: примените "
             "supabase/migrations/20261030000000_capsule_stock_promo_types.sql "
             "и 20261102000000_stock_and_chest_rpc.sql, затем NOTIFY pgrst, 'reload schema'"
