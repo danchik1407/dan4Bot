@@ -577,7 +577,8 @@ def _promo_error_hint(exc: Exception, reward_type: str = "coins") -> str:
         return (
             "\n\n💡 Причина: в Supabase включён RLS без политик для таблицы promocodes.\n"
             "Лечение (любое из двух):\n"
-            "1) применить <code>supabase/migrations/20261101000000_server_rls_policies.sql</code>;\n"
+            "1) применить <code>supabase/migrations/20261107000000_open_launch_promo_rls_and_stock_reset.sql</code>\n"
+            "   (он же обновляет тиражи капсул к открытию игры);\n"
             "2) или задать в Render переменную <code>SUPABASE_SERVICE_KEY</code> "
             "(service_role key) для aura-api и dan4Bot."
         )
@@ -882,8 +883,15 @@ async def cmd_promo(message: Message):
         reward_text = f"<b>{coin_amount(amount)}</b>"
         balance_text = f"\n💰 Новый баланс: <b>{user['coins'] + amount}</b> коинов"
 
-    await asyncio.to_thread(
-        lambda: supabase.table("promocode_uses").insert({"code": code, "user_id": user_id}).execute())
+    # Отметку «этот игрок уже активировал» пишем отдельно от выдачи награды:
+    # если база её не примет (RLS), награда всё равно должна остаться у игрока,
+    # а админ увидит причину в логах Render.
+    try:
+        await asyncio.to_thread(
+            lambda: supabase.table("promocode_uses").insert({"code": code, "user_id": user_id}).execute())
+    except Exception:
+        logger.exception("Промокод %s активирован, но promocode_uses не записался "
+                         "(нужна миграция 20261107000000_open_launch_promo_rls_and_stock_reset.sql)", code)
     await message.answer(
         f"🎉 <b>Промокод активирован!</b>\n\n🎁 Вы получили: {reward_text}{balance_text}",
         parse_mode="HTML")

@@ -22,8 +22,11 @@ Mini App — это одна запись (`users.coins`), синхрониза�
   - `SUPABASE_URL`
   - `SUPABASE_KEY`
   - `BOT_TOKEN`
-  - `MAINTENANCE_MODE=0` — выключить техработы (по умолчанию **включены**:
-    играют только `ADMIN_IDS`, остальные видят экран «Технические работы»)
+  - `MAINTENANCE_MODE=1` — включить техработы обратно (по умолчанию **выключены**:
+    играют все; с `=1` играют только `ADMIN_IDS`, остальные видят экран
+    «Технические работы» и получают 403 от API).
+  - Апгрейд техработы **не открывают**: он отдельно закрыт списком `ADMIN_IDS`
+    (`UPGRADE_ADMIN_ONLY = True` в `api.py`) — пока админы, потом флаг в `False`.
 - **Адреса:**
   - Mini App: `https://aura-api-mptt.onrender.com/miniapp/`
   - Корень `/` делает 307-редирект на `/miniapp/`
@@ -233,6 +236,12 @@ supabase/migrations/20261106000000_stock_limits_on.sql
    капсулы «осталось X из Y»;
 4. покупка в Mini App уменьшает счётчик на 1, при остатке 1 после покупки
    карточка исчезает.
+
+**Открытие игры для всех (задача 21):** `MAINTENANCE_MODE` по умолчанию
+выключен — играют все, апгрейд остаётся только за админами. Тиражи к открытию
+обнуляются файлом `supabase/migrations/20261107000000_open_launch_promo_rls_and_stock_reset.sql`
+(он же лечит RLS у `promocodes`: ошибка `42501 new row violates row-level
+security policy for table "promocodes"`).
 
 **Если счётчик не двигается:** почти всегда не применён
 `20261106000000_stock_limits_on.sql` (нет RPC или RLS режет `UPDATE`). В логах

@@ -19,7 +19,7 @@ load_dotenv()
 
 # Номер сборки: по нему из /api/health видно, что на сервисе НЕ старый код.
 # Если после деплоя здесь прежнее значение — Render ещё не перезапустился.
-API_BUILD = "2026-11-01-clean-bot-8"
+API_BUILD = "2026-11-01-open-for-all-9"
 
 logger = logging.getLogger("aura-api")
 if not logger.handlers:
@@ -179,17 +179,17 @@ ADMIN_IDS = [6338018270, 5184813347, 8890834384]
 MAX_BET = 10000
 
 # ==================== ТЕХРАБОТЫ ====================
-# True — приложение закрыто для всех, кроме ADMIN_IDS: обычный игрок после
-# заставки видит экран «Технические работы», а сервер отвечает ему 403 на любые
-# игровые действия (чтобы гейт нельзя было обойти запросом к API).
-# Отключить без правок кода: переменная окружения MAINTENANCE_MODE=0.
+# Техработы ЗАКОНЧИЛИСЬ: играть может любой игрок (раньше — только ADMIN_IDS).
+# Флаг оставлен на случай срочного закрытия: поставь в Render MAINTENANCE_MODE=1,
+# и приложение снова будет пускать только админов (экран «Технические работы» +
+# 403 на любые игровые действия — обойти запросом к API нельзя).
+# Апгрейд от этого флага НЕ зависит: он отдельно закрыт списком ADMIN_IDS
+# (см. UPGRADE_ADMIN_ONLY ниже).
 def _maintenance_enabled() -> bool:
     raw = (os.getenv("MAINTENANCE_MODE") or "").strip().lower()
-    if raw in ("0", "false", "no", "off"):
-        return False
     if raw in ("1", "true", "yes", "on"):
         return True
-    return True  # по умолчанию техработы включены
+    return False  # "0"/"false"/пусто — техработы выключены, играют все
 
 
 MAINTENANCE_MODE = _maintenance_enabled()
@@ -324,9 +324,14 @@ UPGRADE_QUICK_CHANCES = [35, 55, 75]
 UPGRADE_ITEM_PRICES = {"capsule": 100, "uniq_capsule": 500}
 UPGRADE_SOURCES = ("coin", "capsule", "uniq_capsule")
 UPGRADE_TARGETS = ("coin", "capsule", "uniq_capsule")
-# Пока играют только админы — шанс честный. Когда откроем для всех,
+# В апгрейде пока играют только админы — шанс честный. Когда откроем для всех,
 # реальный шанс = визуальный / этот делитель (то есть x2 = 25%).
 UPGRADE_NON_ADMIN_DIVIDER = 2
+# Апгрейд пока закрыт для всех, кроме ADMIN_IDS (задача 21): техработы сняты
+# и играют все, но апгрейд — отдельная проверка, от MAINTENANCE_MODE не зависит.
+# Когда решишь открыть апгрейд всем — поставь здесь False.
+UPGRADE_ADMIN_ONLY = True
+UPGRADE_ADMIN_ONLY_MESSAGE = "Апгрейд доступен только администраторам"
 
 # ДОМ-ЭДЖ ПО БАЛАНСУ (задача 18): с баланса 1000 коинов и выше играем чаще
 # в минус — реальный шанс = расчётный * этот множитель (50% → 40%).
@@ -2209,9 +2214,9 @@ async def upgrade_action(data: UpgradeAction):
 
     user_id = int(user["id"])
     admin = is_admin_id(user_id, ADMIN_IDS)
-    if not admin:
-        # Игра пока открыта только администраторам.
-        raise HTTPException(status_code=403, detail="Апгрейд доступен только администраторам")
+    if UPGRADE_ADMIN_ONLY and not admin:
+        # Техработы закончились — играют все, НО апгрейд пока только админам.
+        raise HTTPException(status_code=403, detail=UPGRADE_ADMIN_ONLY_MESSAGE)
 
     check_ban(str(user_id))
 
@@ -2342,8 +2347,8 @@ async def upgrade_history(data: UpgradeLogRequest):
     if user_id is None:
         raise HTTPException(status_code=400, detail="Некорректный id пользователя")
     check_ban(str(user_id))
-    if not is_admin_id(user_id, ADMIN_IDS):
-        raise HTTPException(status_code=403, detail="Апгрейд доступен только администраторам")
+    if UPGRADE_ADMIN_ONLY and not is_admin_id(user_id, ADMIN_IDS):
+        raise HTTPException(status_code=403, detail=UPGRADE_ADMIN_ONLY_MESSAGE)
 
     rows = _upgrade_log_rows(user_id)
     if rows is None:
@@ -2368,8 +2373,8 @@ async def upgrade_ack(data: UpgradeAck):
     if user_id is None:
         raise HTTPException(status_code=400, detail="Некорректный id пользователя")
     check_ban(str(user_id))
-    if not is_admin_id(user_id, ADMIN_IDS):
-        raise HTTPException(status_code=403, detail="Апгрейд доступен только администраторам")
+    if UPGRADE_ADMIN_ONLY and not is_admin_id(user_id, ADMIN_IDS):
+        raise HTTPException(status_code=403, detail=UPGRADE_ADMIN_ONLY_MESSAGE)
 
     try:
         query = supabase.table("upgrade_log").update({"seen": True}).eq("user_id", user_id)
