@@ -37,11 +37,20 @@ ADMIN_IDS = [6338018270, 5184813347, 8890834384]
 
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+# Необязательный service-role ключ. С ним бот и API пишут в таблицы в обход RLS:
+# именно из-за RLS создание промокода падало с «new row violates row-level
+# security policy for table promocodes». Ключ живёт только в переменных
+# окружения Render — в Mini App он не попадает.
+SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY") or os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 
 if not BOT_TOKEN: raise SystemExit("❌ ОШИБКА: Не найден BOT_TOKEN!")
 if not SUPABASE_URL or not SUPABASE_KEY: raise SystemExit("❌ ОШИБКА: Не найдены SUPABASE_URL или SUPABASE_KEY!")
 
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY or SUPABASE_KEY)
+if SUPABASE_SERVICE_KEY:
+    logger.info("Supabase: используется service-role ключ (RLS обходится)")
+else:
+    logger.info("Supabase: используется обычный ключ (нужны RLS-политики сервера)")
 
 COOLDOWN_SECONDS = 5 * 60 * 60
 
@@ -56,8 +65,8 @@ COOLDOWN_SECONDS = 5 * 60 * 60
 # отвечает 404 «Not Found», поэтому адрес нельзя просто «угадать» в константе:
 # при старте бот сам находит живой и пишет в лог.
 API_URL_CANDIDATES = [
-    "https://aura-api-mppt.onrender.com",
-    "https://aura-api-mptt.onrender.com",
+    "https://aura-api-mptt.onrender.com",   # рабочий сервис Render
+    "https://aura-api-mppt.onrender.com",   # старая опечатка, оставлена для авто-поиска
 ]
 API_URL = (os.getenv("AURA_API_URL") or API_URL_CANDIDATES[0]).rstrip("/")
 # Именно этот адрес должен быть прописан в BotFather → Configure Mini App.
@@ -73,6 +82,27 @@ MINIAPP_SHORT_NAME = (os.getenv("MINIAPP_SHORT_NAME") or "Auragame").strip().str
 BOT_USERNAME = (os.getenv("BOT_USERNAME") or "").strip().lstrip("@")
 # Явный override: если ссылку нужно жёстко зафиксировать.
 MINIAPP_URL = os.getenv("MINIAPP_URL") or ""
+
+
+def miniapp_webapp_url() -> str:
+    """Адрес Mini App для кнопки WebAppInfo — всегда https и всегда …/miniapp/.
+
+    Именно этот адрес открывает Telegram, когда игрок жмёт кнопку: приложение
+    стартует внутри Telegram и получает initData. В ТЕКСТ сообщения он не
+    попадает — по прямой ссылке на Render Mini App открывается без initData,
+    и игрок видит «технические работы» вместо игры.
+    """
+    base = (os.getenv("AURA_WEBAPP_URL") or WEBAPP_URL or "").strip()
+    if not base:
+        base = f"{API_URL}/miniapp/"
+    if "://" not in base:
+        base = "https://" + base
+    if not base.startswith("https://"):
+        base = "https://" + base.split("://", 1)[-1]
+    base = base.rstrip("/")
+    if not base.endswith("/miniapp"):
+        base = f"{base}/miniapp"
+    return base + "/"
 
 
 def miniapp_direct_url() -> str:
@@ -533,6 +563,33 @@ def _insert_promocode(payload: dict):
         raise
 
 
+def _promo_error_hint(exc: Exception, reward_type: str = "coins") -> str:
+    """Что именно чинить, если промокод не записался.
+
+    Самая частая причина сейчас — RLS без политик:
+    «new row violates row-level security policy for table "promocodes"».
+    Раньше на любую ошибку показывалась миграция капсул, и админ правил не то.
+    """
+    message = f"{type(exc).__name__}: {exc}"
+    if "row-level security" in message or "42501" in message:
+        return (
+            "\n\n💡 Причина: в Supabase включён RLS без политик для таблицы promocodes.\n"
+            "Лечение (любое из двух):\n"
+            "1) применить <code>supabase/migrations/20261101000000_server_rls_policies.sql</code>;\n"
+            "2) или задать в Render переменную <code>SUPABASE_SERVICE_KEY</code> "
+            "(service_role key) для aura-api и dan4Bot."
+        )
+    if "PGRST204" in message or "reward_type" in message or "item_id" in message:
+        return ("\n\n💡 Примените миграцию "
+                "<code>20261030000000_capsule_stock_promo_types.sql</code> "
+                "(колонки reward_type и item_id).")
+    if reward_type == "capsule":
+        return ("\n\n💡 Проверьте, что применены миграции "
+                "<code>20261030000000_capsule_stock_promo_types.sql</code> "
+                "и <code>20261101000000_server_rls_policies.sql</code>.")
+    return ""
+
+
 def _promo_capsule_keyboard() -> InlineKeyboardMarkup:
     rows = [
         [InlineKeyboardButton(text=f"{item['emoji']} {item['name']}", callback_data=f"promo_item|{item_id}")]
@@ -691,12 +748,9 @@ async def promo_wizard_uses(message: Message, state: FSMContext):
     except Exception as exc:
         logger.exception("Не удалось создать промокод %s", code)
         await state.clear()
-        hint = ""
-        if reward_type == "capsule":
-            hint = ("\n\n💡 Для капсульных промокодов примените миграцию "
-                    "<code>20261030000000_capsule_stock_promo_types.sql</code>.")
         return await message.answer(
-            f"❌ Не удалось создать промокод: <code>{safe_text(exc)}</code>{hint}", parse_mode="HTML")
+            f"❌ Не удалось создать промокод: <code>{safe_text(exc)}</code>{_promo_error_hint(exc, reward_type)}",
+            parse_mode="HTML")
 
     await state.clear()
     if reward_type == "capsule":
@@ -737,12 +791,17 @@ async def cmd_admin_promocode(message: Message):
         return await message.answer("❌ Активации и сумма должны быть числами.")
 
     def _add():
-        try:
-            _insert_promocode({"code": code, "uses": uses, "amount": amount, "reward_type": "coins"})
-        except Exception as e:
-            logger.warning("Не удалось создать промокод %s: %s", code, e)
+        return _insert_promocode({"code": code, "uses": uses, "amount": amount, "reward_type": "coins"})
 
-    await asyncio.to_thread(_add)
+    try:
+        await asyncio.to_thread(_add)
+    except Exception as e:
+        logger.exception("Не удалось создать промокод %s", code)
+        # Раньше ошибка уходила только в лог Render, а админ видел «создан».
+        return await message.answer(
+            f"❌ Не удалось создать промокод <code>{safe_text(code)}</code>: "
+            f"<code>{safe_text(e)}</code>{_promo_error_hint(e)}", parse_mode="HTML")
+
     await message.answer(f"✅ Промокод <code>{code}</code> создан!\nАктиваций: {uses}\nНаграда: {amount} коинов",
                          parse_mode="HTML")
 
@@ -994,7 +1053,9 @@ async def cmd_services(message: Message):
         "🖥️ <b>СЕРВИСЫ ПРОЕКТА</b>\n━━━━━━━━━━━━━━━━━━━━\n\n"
         f"1️⃣ <b>aura-api</b> (FastAPI): {api_status}{api_details}\n"
         f"   • API: <code>{API_URL}</code>\n"
-        f"   • Mini App: <code>{WEBAPP_URL}</code>\n\n"
+        f"   • Mini App: <code>{WEBAPP_URL}</code> "
+        "ℹ️ (только для BotFather; игрокам эту ссылку не отправляйте — "
+        "у них кнопка в <code>апка</code>)\n\n"
         "2️⃣ <b>dan4Bot</b> (aiogram): ✅ этот процесс\n"
         "   • веб-сервер только для порта Render (start_fake_website)\n"
         "   • игровые данные читает из общей базы Supabase\n\n"
@@ -1198,34 +1259,33 @@ async def cmd_tag(message: Message):
 
 @dp.message(F.text.func(lambda t: strip_prefix(t).lower().startswith("апка")))
 async def cmd_apka(message: Message):
-    """Ссылка на Mini App.
+    """Mini App — ТОЛЬКО через Telegram, без прямых ссылок на Render.
 
-    Раньше кнопка вела на захардкоженный t.me/<старый_бот>/<short_name>: стоило
-    переименовать бота или указать в BotFather другой short_name — и Telegram
-    открывал пустую страницу («ссылка не рабочая»). Теперь:
-      • в личке — кнопка web_app с адресом aura-api (WEBAPP_URL): Telegram сам
-        открывает приложение и передаёт initData, короткое имя не нужно вовсе;
-      • плюс отдельная кнопка с прямой ссылкой t.me/<текущий_бот>/<short_name>
-        (username спрашиваем у Telegram), чтобы переслать другу;
-      • если что-то пошло не так — в тексте есть и обычная https-ссылка.
+    Прямой адрес сервиса (…onrender.com/miniapp/) открывает приложение вне
+    Telegram: initData не передаётся, игры не работают, а игрок видит пустой
+    экран или «технические работы». Поэтому в тексте сообщения адреса сервиса
+    больше нет — только кнопка:
+      • в личке — web_app: Telegram сам открывает приложение и передаёт initData;
+      • в группах web_app запрещён Telegram, поэтому там кнопка-ссылка t.me —
+        она тоже открывает Mini App внутри Telegram, а не в браузере.
     """
-    direct = miniapp_direct_url()
     rows = []
     if message.chat.type == "private":
-        rows.append([InlineKeyboardButton(text="🎮 Открыть AURA GAME", web_app=WebAppInfo(url=WEBAPP_URL))])
-        rows.append([InlineKeyboardButton(text="🔗 Ссылка для друзей", url=direct)])
+        rows.append([InlineKeyboardButton(
+            text="🎮 Открыть AURA GAME",
+            web_app=WebAppInfo(url=miniapp_webapp_url()),
+        )])
     else:
-        # В группах Telegram запрещает кнопки web_app — только обычная ссылка.
-        rows.append([InlineKeyboardButton(text="🎮 Открыть AURA GAME", url=direct)])
+        rows.append([InlineKeyboardButton(
+            text="🎮 Открыть AURA GAME",
+            url=miniapp_direct_url(),
+        )])
 
     text = (
         "📱 <b>Наше Mini App!</b>\n\n"
-        "🎮 Заходи в наше казино прямо из Telegram:\n"
-        f"👉 <a href='{WEBAPP_URL}'>{WEBAPP_URL}</a>\n\n"
+        "🎮 Заходи в наше казино прямо из Telegram — жми кнопку ниже.\n\n"
         "💰 Там тебя ждут сундуки, рулетка, мины и краш с общим балансом!"
     )
-    if message.chat.type != "private":
-        text += f"\n\n🔗 Прямая ссылка: <a href='{direct}'>{direct}</a>"
     kb = InlineKeyboardMarkup(inline_keyboard=rows)
     await message.answer(text, parse_mode="HTML", reply_markup=kb, disable_web_page_preview=True)
 

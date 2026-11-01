@@ -62,20 +62,24 @@ CORS открыт (`allow_origins=["*"]`): в WebView Telegram Origin бывае
 `https://aura-api-mptt.onrender.com/miniapp/` (то есть `WEBAPP_URL` из `bot.py`).
 `short_name` (`Auragame`) даёт прямую ссылку `https://t.me/<ваш_бот>/Auragame`.
 
-**Как бот формирует ссылку в `!апка`:**
+**Как бот формирует ссылку в `!апка` (безопасно):**
 
-1. В личке — кнопка `web_app` с адресом `WEBAPP_URL` (это Mini App на aura-api).
-   Telegram открывает приложение сам и передаёт `initData`, короткое имя тут не
-   участвует — поэтому кнопка работает даже если `short_name` в BotFather другой.
-2. Вторая кнопка — прямая ссылка `t.me/<бот>/<short_name>` для пересылки другу.
-   `<бот>` подставляется из `get_me()` при старте, а не из константы в коде:
-   после переименования бота ссылка не ломается.
-3. В группе (Telegram запрещает там `web_app`) остаётся только эта прямая ссылка.
+В тексте сообщения **нет** адреса сервиса Render — только кнопка:
+
+1. В личке — кнопка `web_app` с адресом `miniapp_webapp_url()` (это
+   `https://aura-api-mptt.onrender.com/miniapp/`). Telegram открывает приложение
+   сам и передаёт `initData`; короткое имя тут не участвует.
+2. В группе Telegram **запрещает** кнопки `web_app`, поэтому там кнопка-ссылка
+   `t.me/<бот>/<short_name>` — она тоже открывает Mini App **внутри Telegram**,
+   а не в браузере. `<бот>` подставляется из `get_me()` при старте.
+
+Прямую ссылку `…onrender.com/miniapp/` игрокам отправлять нельзя: вне Telegram
+не передаётся `initData`, и человек видит «технические работы» или пустой экран.
+В тексте `!апка` её больше нет; в `!сервисе` (админ) она помечена как «только
+для BotFather».
 
 Если в BotFather `short_name` не `Auragame` — задайте `MINIAPP_SHORT_NAME` в
 сервисе dan4Bot или `MINIAPP_URL` целиком; перезапуск бота применит значение.
-Имя бота обязано совпадать с реальным `@username` — иначе `t.me` покажет пустую
-страницу (про это в логах: `🔗 Прямая ссылка Mini App: …`).
 
 ## 3.1. Если видите «Not Found»
 
@@ -111,6 +115,21 @@ curl -sI https://<сервис>.onrender.com/index.html       # 307 → /miniapp
 3. `https://aura-api-mptt.onrender.com/miniapp/` — открывается Mini App
    (без Telegram покажет экран техработ: `initData` отсутствует — это норма).
 4. `https://aura-api-mptt.onrender.com/` — редирект на `/miniapp/`.
+
+## 4.0. Ошибка RLS при создании промокода
+
+`new row violates row-level security policy for table "promocodes"` — в Supabase
+включён RLS, а политик для серверной роли нет. Два способа лечения:
+
+1. **Быстро, без правки базы:** добавить в сервисы `aura-api` и `dan4Bot`
+   переменную `SUPABASE_SERVICE_KEY` = service_role key (Supabase → Settings → API).
+   Код уже поддерживает её (`bot.py`, `api.py`).
+2. **Миграцией:** применить `supabase/migrations/20261101000000_server_rls_policies.sql`
+   (создаёт политики `*_server_all` для promocodes, promocode_uses, chest_claims,
+   capsule_stock, upgrade_log, crash_history, bans) и выполнить
+   `NOTIFY pgrst, 'reload schema';`.
+
+Бот теперь показывает причину и подсказку прямо в чате, а не только в логах Render.
 
 ## 4.1. Сундуки: рулетка и «Сундуки обновляются»
 
