@@ -96,7 +96,10 @@ async def health():
     }
 
 
-supabase: Client = create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_KEY"))
+# service-role ключ (если задан) обходит RLS: без него запись в promocodes,
+# chest_claims и capsule_stock может упасть с «violates row-level security policy».
+SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY") or os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+supabase: Client = create_client(os.getenv("SUPABASE_URL"), SUPABASE_SERVICE_KEY or os.getenv("SUPABASE_KEY"))
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
 ADMIN_IDS = [6338018270, 5184813347, 8890834384]
