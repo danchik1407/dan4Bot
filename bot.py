@@ -7,7 +7,7 @@ import logging
 import json
 from types import SimpleNamespace
 from dotenv import load_dotenv
-from aiogram import Bot, Dispatcher, F, Router
+from aiogram import BaseMiddleware, Bot, Dispatcher, F, Router
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, FSInputFile, WebAppInfo
 from aiogram.enums import ChatMemberStatus
 from aiogram.filters import StateFilter
@@ -1028,9 +1028,14 @@ async def cmd_services(message: Message):
     elif status == 200 and isinstance(data, dict) and data.get("service") == "aura-api":
         static = data.get("static") or {}
         api_status = "✅ онлайн"
+        awake = data.get("awake") or {}
+        uptime = awake.get("uptime_seconds")
+        woke = " — только что проснулся после сна" if awake.get("just_woke") else ""
+        uptime_line = (f"\n• uptime aura-api: {uptime} с{woke}" if isinstance(uptime, int) else "")
         api_details = (
             f"\n• статика miniapp: {'✅' if static.get('ready') else '❌'} ({static.get('url', '/miniapp/')})"
             f"\n• техработы: {'включены' if data.get('maintenance') else 'выключены'}"
+            f"{uptime_line}"
         )
     else:
         api_status = f"⚠️ ответил кодом {status}"
@@ -1055,6 +1060,9 @@ async def cmd_services(message: Message):
             "supabase/migrations/20261030000000_capsule_stock_promo_types.sql "
             "и 20261102000000_stock_and_chest_rpc.sql, затем NOTIFY pgrst, 'reload schema'"
         )
+
+    # Прогрев: включён ли и когда последний раз отвечал aura-api.
+    chest_line = f"{chest_line}\n   • {keepwarm_line()}"
 
     # Шанс обычной капсулы в сундуках (задача 22) — прямо из /api/health, чтобы
     # админ видел реальные числа сервера, а не догадки.
@@ -1526,6 +1534,216 @@ async def resolve_api_url() -> str:
     return API_URL
 
 
+# ================= ПРОГРЕВ aura-api =================
+# Зачем. Render на бесплатном тарифе усыпляет Web Service через 15 минут без
+# ВХОДЯЩИХ запросов. Проснувшемуся сервису нужно ~1 минуту, и всё это время
+# вместо игры игрок видит экран Render «SERVICE WAKING UP / START BUILDING ON
+# RENDER TODAY». Это не баг кода и не ошибка в приложении — это спящий сервис.
+#
+# Лечение: пока бот жив, он раз в KEEPWARM_INTERVAL секунд дёргает дешёвый
+# /api/ping (НЕ /api/health: тот читает тираж капсул из Supabase). Тогда
+# aura-api не успевает уснуть.
+#
+# ВАЖНО про лимиты Render: по умолчанию дефолтный прогрев ВЫКЛЮЧЕН, потому что
+# у бесплатного воркспейса 750 инстанс-часов в месяц, а два всегда-включённых
+# сервиса — это ~1460 часов. Включать так:
+#   KEEPWARM=1              — прогрев aura-api из бота (240 с по умолчанию)
+#   KEEPWARM_INTERVAL=240   — как часто пинговать, секунд
+#   KEEPWARM_SELF=1         — дополнительно пинговать самого бота по
+#                             RENDER_EXTERNAL_URL (держит бота живым);
+#                             вместе с KEEPWARM=1 это ~1460 ч/мес > 750 ч.
+def _env_flag(name: str, default: bool = False) -> bool:
+    raw = (os.getenv(name) or "").strip().lower()
+    if raw in ("1", "true", "yes", "on"):
+        return True
+    if raw in ("0", "false", "no", "off"):
+        return False
+    return default
+
+
+KEEPWARM = _env_flag("KEEPWARM", False)
+KEEPWARM_SELF = _env_flag("KEEPWARM_SELF", False)
+# «Просыпание по активности» — включено по умолчанию и почти ничего не стоит:
+# как только кто-то пишет боту (или жмёт кнопку), бот дёргает /api/ping, и
+# aura-api начинает просыпаться ДО того, как игрок откроет Mini App. Если игрок
+# неактивен — пингов нет, часы Render не тратятся. KEEPWARM_ON_ACTIVITY=0 выключает.
+KEEPWARM_ON_ACTIVITY = _env_flag("KEEPWARM_ON_ACTIVITY", True)
+try:
+    KEEPWARM_INTERVAL = max(60, int(os.getenv("KEEPWARM_INTERVAL") or 240))
+except ValueError:
+    KEEPWARM_INTERVAL = 240
+# Пинг самого себя реже: цель — входящий запрос, а не точность.
+KEEPWARM_SELF_INTERVAL = max(60, KEEPWARM_INTERVAL * 2)
+
+# Состояние прогрева для `!сервисы`: по нему видно, реально ли идут пинги.
+keepwarm_state = {
+    "enabled": KEEPWARM or KEEPWARM_SELF or KEEPWARM_ON_ACTIVITY,
+    "interval": KEEPWARM_INTERVAL,
+    "started_at": 0.0,
+    "last_ping_at": 0.0,     # когда последний раз пинговали aura-api
+    "last_ok_at": 0.0,       # когда aura-api последний раз ответил ok
+    "last_error": "",        # текст последней ошибки (пусто — всё хорошо)
+    "ok_count": 0,
+    "fail_count": 0,
+    "last_uptime": None,     # uptime_seconds из /api/ping: маленький = только проснулся
+}
+
+
+def self_url() -> str:
+    """Публичный адрес этого сервиса: нужен для пинга самого себя.
+
+    Render сам подставляет RENDER_EXTERNAL_URL; можно задать вручную через
+    AURA_SELF_URL или AURA_BOT_URL.
+    """
+    return (os.getenv("AURA_SELF_URL") or os.getenv("AURA_BOT_URL")
+            or os.getenv("RENDER_EXTERNAL_URL") or "").strip().rstrip("/")
+
+
+async def ping_once(url: str, timeout: float = 10.0) -> dict:
+    """Один GET. Возвращает {status, data, error, ms} — не бросает исключений."""
+    started = time.monotonic()
+    try:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=timeout)) as session:
+            async with session.get(url, headers={"User-Agent": "aura-keepwarm/1.0"}) as response:
+                data = None
+                try:
+                    data = await response.json(content_type=None)
+                except Exception:  # noqa: BLE001 — тело может быть не JSON
+                    data = None
+                return {"status": response.status, "data": data, "error": "",
+                        "ms": int((time.monotonic() - started) * 1000)}
+    except Exception as exc:  # noqa: BLE001 — прогрев не должен падать
+        return {"status": None, "data": None, "error": f"{type(exc).__name__}: {exc}"[:200],
+                "ms": int((time.monotonic() - started) * 1000)}
+
+
+async def keep_api_warm():
+    """Фоновой задачей: не даёт aura-api уснуть. Молчит, пока всё хорошо."""
+    if not (KEEPWARM or KEEPWARM_SELF):
+        logger.info("Прогрев aura-api по таймеру выключен (KEEPWARM=1 включает; "
+                    "по активности в боте режим %s)", "включён" if KEEPWARM_ON_ACTIVITY else "выключен")
+        return
+    keepwarm_state["started_at"] = time.time()
+    logger.info("🔥 Прогрев включён: aura-api каждые %s с%s", KEEPWARM_INTERVAL,
+                ", самопинг " + (self_url() or "не задан") if KEEPWARM_SELF else "")
+    was_ok = None
+    while True:
+        if KEEPWARM:
+            url = f"{API_URL.rstrip('/')}/api/ping"
+            result = await ping_once(url)
+            keepwarm_state["last_ping_at"] = time.time()
+            data = result.get("data") or {}
+            ok = result.get("status") == 200 and isinstance(data, dict) and data.get("service") == "aura-api"
+            if ok:
+                keepwarm_state["ok_count"] += 1
+                keepwarm_state["last_ok_at"] = time.time()
+                keepwarm_state["last_error"] = ""
+                uptime = data.get("uptime_seconds")
+                keepwarm_state["last_uptime"] = uptime
+                if was_ok is not True:
+                    logger.info("🔥 aura-api отвечает (%s мс, uptime %s с) — сервис прогрет",
+                                result.get("ms"), uptime)
+                elif isinstance(uptime, int) and uptime < 200:
+                    # Процесс свежий, хотя пинги идут: значит сервис всё-таки спал.
+                    logger.warning("🔥 aura-api только что проснулся (uptime %s с) — "
+                                   "проверьте, не спит ли сервис между пингами", uptime)
+                was_ok = True
+            else:
+                keepwarm_state["fail_count"] += 1
+                keepwarm_state["last_error"] = result.get("error") or f"HTTP {result.get('status')}"
+                if was_ok is not False:
+                    logger.warning("🔥 aura-api не отвечает на прогрев: %s", keepwarm_state["last_error"])
+                was_ok = False
+        if KEEPWARM_SELF:
+            base = self_url()
+            if base:
+                await ping_once(f"{base}/health", timeout=8.0)
+        await asyncio.sleep(KEEPWARM_INTERVAL)
+
+
+# Не чаще одного пинга в минуту: десять сообщений подряд не должны дать
+# десять запросов к серверу.
+WARM_TOUCH_MIN_INTERVAL = 60.0
+_warm_touch = {"at": 0.0, "task": None}
+
+
+def touch_api_warm() -> None:
+    """Разбудить aura-api «по требованию»: вызывается на любое действие в боте.
+
+    Не блокирует обработчик: пинг уходит фоновой задачей, ответ игроку не ждёт.
+    """
+    if not KEEPWARM_ON_ACTIVITY:
+        return
+    now = time.time()
+    if now - _warm_touch["at"] < WARM_TOUCH_MIN_INTERVAL:
+        return
+    task = _warm_touch.get("task")
+    if task is not None and not task.done():
+        return
+    _warm_touch["at"] = now
+
+    async def _ping():
+        result = await ping_once(f"{API_URL.rstrip('/')}/api/ping", timeout=6)
+        data = result.get("data") or {}
+        keepwarm_state["last_ping_at"] = time.time()
+        if result.get("status") == 200 and isinstance(data, dict) and data.get("service") == "aura-api":
+            keepwarm_state["last_ok_at"] = time.time()
+            keepwarm_state["last_uptime"] = data.get("uptime_seconds")
+            keepwarm_state["ok_count"] += 1
+            keepwarm_state["last_error"] = ""
+        else:
+            keepwarm_state["fail_count"] += 1
+            keepwarm_state["last_error"] = result.get("error") or f"HTTP {result.get('status')}"
+
+    try:
+        _warm_touch["task"] = asyncio.create_task(_ping())
+    except RuntimeError:      # нет активного event loop (например, в тестах)
+        _warm_touch["at"] = 0.0
+
+
+class WarmApiMiddleware(BaseMiddleware):
+    """Любое обновление от Telegram = повод разбудить aura-api.
+
+    Именно так игрок не видит экран Render «SERVICE WAKING UP»: к моменту тапа
+    по кнопке Mini App сервис уже просыпается (или уже проснулся).
+    """
+
+    async def __call__(self, handler, event, data):
+        try:
+            touch_api_warm()
+        except Exception:  # noqa: BLE001 — прогрев не должен ломать обработку
+            logger.exception("Прогрев по активности не сработал")
+        return await handler(event, data)
+
+
+def keepwarm_modes() -> str:
+    """Что именно сейчас держит aura-api тёплым — одной строкой."""
+    modes = []
+    if KEEPWARM_ON_ACTIVITY:
+        modes.append("по активности в боте")
+    if KEEPWARM:
+        modes.append(f"таймер {KEEPWARM_INTERVAL} с")
+    if KEEPWARM_SELF:
+        modes.append("самопинг бота")
+    return ", ".join(modes)
+
+
+def keepwarm_line() -> str:
+    """Строка для `!сервисы`: чем греем aura-api и когда был последний ответ."""
+    modes = keepwarm_modes()
+    if not modes:
+        return ("♻️ Прогрев: выключен (Render усыпляет aura-api через 15 минут без запросов —"
+                " игрок увидит экран «SERVICE WAKING UP»; включить: KEEPWARM=1)")
+    last_ok = keepwarm_state["last_ok_at"]
+    if not last_ok:
+        return f"♻️ Прогрев: {modes}, ответа от aura-api ещё не было"
+    ago = int(time.time() - last_ok)
+    uptime = keepwarm_state["last_uptime"]
+    tail = f", uptime {uptime} с" if isinstance(uptime, int) else ""
+    error = f" (последняя ошибка: {keepwarm_state['last_error']})" if keepwarm_state["last_error"] else ""
+    return f"♻️ Прогрев: ✅ aura-api отвечал {ago} с назад{tail} — {modes}{error}"
+
+
 async def start_fake_website():
     """Минимальный HTTP-ответ для Render.
 
@@ -1573,6 +1791,12 @@ async def main():
         BOT_USERNAME = me.username
     logger.info(f"🤖 Бот: @{me.username} | Mini App: {WEBAPP_URL}")
     logger.info(f"🔗 Прямая ссылка Mini App: {miniapp_direct_url()}")
+    # Прогрев aura-api: без него бесплатный Render усыпляет сервис через 15 минут
+    # и игрок вместо игры видит экран «SERVICE WAKING UP».
+    # 1) по активности — любое действие в боте будит API (включено всегда);
+    # 2) по таймеру — только если включили KEEPWARM=1 (тратит часы Render).
+    dp.update.outer_middleware(WarmApiMiddleware())
+    asyncio.create_task(keep_api_warm())
     await dp.start_polling(bot)
 
 

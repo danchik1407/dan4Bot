@@ -19,7 +19,12 @@ load_dotenv()
 
 # Номер сборки: по нему из /api/health видно, что на сервисе НЕ старый код.
 # Если после деплоя здесь прежнее значение — Render ещё не перезапустился.
-API_BUILD = "2026-11-01-chest-capsule-10"
+API_BUILD = "2026-11-02-warmup-11"
+
+# Момент старта процесса. По нему видно, что сервис только что «проснулся»:
+# Render на бесплатном тарифе усыпляет Web Service через 15 минут без входящих
+# запросов, а первый запрос после сна показывает экран «SERVICE WAKING UP».
+APP_STARTED_AT = time.time()
 
 logger = logging.getLogger("aura-api")
 if not logger.handlers:
@@ -101,6 +106,25 @@ async def favicon():
     return Response(status_code=204)
 
 
+@app.get("/api/ping")
+async def ping():
+    """Самый дешёвый ответ: ни базы, ни тиража, ни кэшей.
+
+    Нужен для прогрева: Render на бесплатном тарифе усыпляет сервис через
+    15 минут без входящих запросов, и тогда игрок вместо игры видит экран
+    «SERVICE WAKING UP / START BUILDING ON RENDER TODAY». Пинг раз в несколько
+    минут не даёт уснуть. Именно ЭТОТ путь, а не /api/health: health читает
+    тираж капсул из Supabase, а прогрев не должен тратить на это лимиты.
+    """
+    return {
+        "ok": True,
+        "service": "aura-api",
+        "build": API_BUILD,
+        # Сколько секунд процесс живёт: маленькое число = сервис только что проснулся.
+        "uptime_seconds": int(max(0, time.time() - APP_STARTED_AT)),
+    }
+
+
 # Кэш состояния тиража для /api/health: {at, value, error}.
 _stock_health_cache = {"at": 0.0, "value": None, "error": None}
 STOCK_HEALTH_TTL = 20.0
@@ -143,6 +167,13 @@ async def health():
         "ok": True,
         "service": "aura-api",
         "build": API_BUILD,
+        # Прогрев: по uptime видно, спал ли сервис (Render усыпляет free-инстанс
+        # через 15 минут без запросов и показывает свой экран «SERVICE WAKING UP»).
+        "awake": {
+            "uptime_seconds": int(max(0, now_ts - APP_STARTED_AT)),
+            "just_woke": (now_ts - APP_STARTED_AT) < 180,
+            "warmup_endpoint": "/api/ping",
+        },
         "static": {
             "dir": "miniapp",
             "ready": os.path.isfile(os.path.join(MINIAPP_DIR, "index.html")),
@@ -731,19 +762,29 @@ async def start_hockey_settlement_worker():
 
 @app.on_event("startup")
 async def init_capsule_stock():
-    """Первый запуск: строки глобального тиража капсул создаются сами."""
-    try:
-        stock = await asyncio.to_thread(shop_stock_snapshot, supabase)
-    except Exception:
-        logger.exception("Не удалось инициализировать сток капсул")
-        return
-    if stock is None:
-        logger.warning(
-            "Таблица capsule_stock недоступна — примените миграцию "
-            "20261030000000_capsule_stock_promo_types.sql в Supabase"
-        )
-        return
-    logger.info("Сток капсул: %s", stock)
+    """Первый запуск: строки глобального тиража капсул создаются сами.
+
+    ВАЖНО про скорость пробуждения: FastAPI выполняет startup-обработчики ДО
+    того, как начнёт принимать запросы. Раньше здесь стоял прямой запрос к
+    Supabase, и каждый холодный старт Render дополнительно ждал базу — то есть
+    игрок дольше смотрел на экран «SERVICE WAKING UP». Теперь подготовка идёт
+    фоновой задачей: порт открывается сразу, `uptime` считается с этого момента.
+    """
+    async def _prepare():
+        try:
+            stock = await asyncio.to_thread(shop_stock_snapshot, supabase)
+        except Exception:
+            logger.exception("Не удалось инициализировать сток капсул")
+            return
+        if stock is None:
+            logger.warning(
+                "Таблица capsule_stock недоступна — примените миграцию "
+                "20261030000000_capsule_stock_promo_types.sql в Supabase"
+            )
+            return
+        logger.info("Сток капсул: %s", stock)
+
+    asyncio.create_task(_prepare())
 
 
 # === РАКЕТА (CRASH) ===
