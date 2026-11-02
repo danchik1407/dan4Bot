@@ -3013,6 +3013,33 @@ function hideLoader(force) {
     setTimeout(() => removeLoaderNode(loader), 600);
 }
 
+// ================= ПРОГРЕВ СЕРВЕРА =================
+// Render на бесплатном тарифе усыпляет сервис через 15 минут без входящих
+// запросов. Тогда игрок вместо игры видит экран Render «SERVICE WAKING UP» —
+// это его страница, наше приложение в этот момент ещё не загружено.
+// Пока аппка открыта, раз в 4 минуты дёргаем дешёвый /api/ping: так сервис не
+// успевает уснуть между экранами, и следующий переход не ждёт минуту.
+const API_PING_INTERVAL = 240000;   // 4 минуты (< 15 минут сна у Render)
+let apiPingTimer = null;
+
+function pingServer() {
+    // Никаких await и обработки ошибок: это фоновая «поддержка тепла».
+    try {
+        fetch(`${API_URL}/api/ping`, { cache: 'no-store' }).catch(() => {});
+    } catch (e) {}
+}
+
+function startApiHeartbeat() {
+    if (apiPingTimer) return;
+    apiPingTimer = setInterval(() => {
+        if (document.visibilityState === 'visible') pingServer();
+    }, API_PING_INTERVAL);
+    // Вернулись в аппку после паузы — сразу будим сервер, не ждём таймера.
+    document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'visible') pingServer();
+    });
+}
+
 function startLoaderClock() {
     loaderStartedAt = Date.now();
     if (loaderMaxTimer) clearTimeout(loaderMaxTimer);
@@ -3038,6 +3065,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
     try { await Promise.all([loadUserData(), loadShopItems()]); } catch(e) {}
     hideLoader();
+    // Держим сервер тёплым, пока игрок в приложении (см. API_PING_INTERVAL).
+    startApiHeartbeat();
     // ---- Техработы ----
     // Решение принимаем ПОСЛЕ заставки: профиль уже пришёл, поэтому экран не мигает.
     // Если профиль не загрузился (нет сети / Render спит), доступа не даём —
