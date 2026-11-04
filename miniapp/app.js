@@ -287,9 +287,6 @@ let animFrameId = null;
 let isAnimatingFlight = false;
 let flightStartTime = 0;
 
-// Запасное значение на случай, если /api/season_end не ответил: 02.11.2026 17:00 МСК.
-let lbTimerEnd = Date.parse('2026-11-02T14:00:00Z') || (Date.now() + (30 * 24 * 3600 * 1000));
-
 // ================= ЗВУКИ =================
 const AudioContextClass = window.AudioContext || window.webkitAudioContext;
 const audioCtx = AudioContextClass ? new AudioContextClass() : null;
@@ -578,6 +575,9 @@ function openGame(game) {
     if (!canPlay) { showMaintenance(); return; }
     document.querySelectorAll('.winner-modal, .chest-win-modal').forEach(m => m.classList.remove('active'));
     document.getElementById('main-header').style.display = 'none';
+    // Баннер подписки в игре не нужен: место занимает поле игры.
+    const subBanner = document.getElementById('sub-banner');
+    if (subBanner) subBanner.style.display = 'none';
     document.getElementById('main-nav').style.display = 'none';
     document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
     // Экран может отсутствовать, если index.html и app.js разъехались по кэшу —
@@ -594,6 +594,8 @@ function closeGame() {
     document.querySelectorAll('.winner-modal, .chest-win-modal').forEach(m => m.classList.remove('active'));
     document.querySelectorAll('.game-screen').forEach(s => s.classList.remove('active'));
     document.getElementById('main-header').style.display = 'flex';
+    const subBanner = document.getElementById('sub-banner');
+    if (subBanner) subBanner.style.display = '';
     document.getElementById('main-nav').style.display = 'flex';
     switchTab('play', document.querySelectorAll('.nav-item')[0]);
 }
@@ -602,66 +604,58 @@ function addBet(game, amount) { const input = document.getElementById(game + '-b
 function getBet(game) { const input = document.getElementById(game + '-bet'); if (!input) return 10; let val = parseInt(input.value) || 10; if (val < 1) val = 1; if (val > 100000) val = 100000; return val; }
 
 // ================= ЛИДЕРБОРД =================
-function toggleLbInfo() { document.getElementById('lb-info-modal').classList.toggle('active'); }
+// Вкладка «Топ» — это только список: место | имя | баланс (💎).
+// Никаких таймеров сезона, призовых мест и кнопок «?».
+const CHANNEL_URL = 'https://t.me/Auragameplay_Channel';
 
-async function initLbTimer() {
+// Кнопка подписки в шапке. Внутри Telegram — нативное открытие ссылки,
+// снаружи (браузер/тест) — обычный переход по href.
+function openChannel(event) {
     try {
-        const res = await fetch(`${API_URL}/api/season_end`);
-        const data = await res.json();
-        lbTimerEnd = data.end_timestamp * 1000;
-    } catch(e) { console.error("Не удалось получить время окончания сезона", e); }
-    updateLbTimer();
-    setInterval(updateLbTimer, 1000);
-}
-
-function updateLbTimer() {
-    const now = Date.now();
-    let diff = Math.max(0, lbTimerEnd - now);
-    const h = Math.floor(diff / 3600000); diff -= h * 3600000;
-    const m = Math.floor(diff / 60000); diff -= m * 60000;
-    const s = Math.floor(diff / 1000);
-    const timerVal = document.getElementById('lb-timer-val');
-    const bigTimer = document.getElementById('lb-big-timer');
-    if(timerVal) timerVal.innerText = `${h} ч ${m} м ${s} с`;
-    if(bigTimer) bigTimer.innerText = `${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
+        if (tg && typeof tg.openTelegramLink === 'function') {
+            if (event) event.preventDefault();
+            tg.openTelegramLink(CHANNEL_URL);
+            return false;
+        }
+    } catch (e) { console.error('openTelegramLink недоступен', e); }
+    // Нет Telegram API — пусть ссылка откроется как обычно.
+    return true;
 }
 
 async function loadGlobalTop() {
     const list = document.getElementById('global-top-list');
-    if(!list) return;
-    list.innerHTML = '<p style="text-align: center; color: #888;">Загрузка...</p>';
+    if (!list) return;
+    list.innerHTML = '<p class="lb-empty">Загрузка…</p>';
     try {
         const res = await fetch(`${API_URL}/api/global_top`);
         const payload = await res.json().catch(() => null);
         if (!res.ok) throw new Error((payload && payload.detail) || 'Топ недоступен');
         // Сервер отдаёт массив; ответ-ошибка ({detail}) не должен попадать в forEach.
         const users = Array.isArray(payload) ? payload : (Array.isArray(payload && payload.top) ? payload.top : []);
-        if (users.length === 0) { list.innerHTML = '<p style="text-align: center; color: #888;">Топ пока пуст</p>'; return; }
-        list.innerHTML = '';
-        const prizes = ["NFT", coinAmount(10000), coinAmount(5000), coinAmount(1000), coinAmount(250), coinAmount(250), coinAmount(250)];
-        users.forEach((u, i) => {
-            const div = document.createElement('div');
-            div.className = i < 3 ? `lb-item top-${i + 1}` : 'lb-item';
-            let rankHtml = `<span class="lb-rank">${i + 1}</span>`;
-            if (i === 0) rankHtml = '<span class="lb-rank lb-medal">🥇</span>';
-            if (i === 1) rankHtml = '<span class="lb-rank lb-medal">🥈</span>';
-            if (i === 2) rankHtml = '<span class="lb-rank lb-medal">🥉</span>';
-            const prizeHtml = i < 7 ? `<span class="lb-prize">${prizes[i]}</span>` : '';
-            // Сетка «ранг | ник | (коины + приз)»: ник обрезается многоточием,
-            // коины и приз никогда не выходят за карточку.
-            div.innerHTML = `
-                <div class="lb-main">
-                    ${rankHtml}
+        if (users.length === 0) {
+            list.innerHTML = '<p class="lb-empty">Топ пока пуст</p>';
+            return;
+        }
+        list.innerHTML = users.map((u, i) => {
+            const place = i + 1;
+            const cls = place <= 3 ? `lb-item top-${place}` : 'lb-item';
+            return `
+                <div class="${cls}">
+                    <span class="lb-place">${place}</span>
                     ${nameHtml(u.username)}
-                </div>
-                <div class="lb-right">
-                    <span class="lb-coins">${coinAmount(u.coins)}</span>
-                    ${prizeHtml}
+                    <span class="lb-balance">${formatCoins(_safeCoins(u.coins))} <span class="lb-gem">💎</span></span>
                 </div>
             `;
-            list.appendChild(div);
-        });
-    } catch (e) { list.innerHTML = '<p style="text-align: center; color: #888;">Ошибка загрузки</p>'; }
+        }).join('');
+    } catch (e) {
+        list.innerHTML = '<p class="lb-empty">Не удалось загрузить топ</p>';
+    }
+}
+
+// Баланс из API может прийти числом, строкой или отсутствовать — показываем число.
+function _safeCoins(value) {
+    const number = Number(value);
+    return Number.isFinite(number) ? Math.max(0, Math.floor(number)) : 0;
 }
 
 // ================= СУНДУКИ =================
@@ -764,8 +758,10 @@ function buildChestRouletteTrack({ isGold, winner }) {
     const track = document.getElementById('roulette-track');
     if (!track) return null;
     const winItem = winner && winner.kind ? winner : { kind: 'coin', amount: 0 };
-    // Выигрыш далеко от края, чтобы полосе было куда ехать.
-    const winIndex = Math.floor(Math.random() * 50) + 24;
+    // Выигрышная ячейка КАЖДЫЙ раз на новом месте (20..79 из 90 ячеек) — как в
+    // казино. Раньше индекс был почти фиксированным, и полоса останавливалась
+    // «в одном и том же месте». Края не берём, чтобы полосе было куда ехать.
+    const winIndex = Math.floor(Math.random() * 60) + 20;
     const cells = [];
     for (let i = 0; i < ROULETTE_ITEM_COUNT; i++) {
         const item = i === winIndex ? winItem : chestRouletteFiller(isGold);
@@ -3091,6 +3087,5 @@ document.addEventListener('DOMContentLoaded', async () => {
         });
     }
     renderUpgrade();
-    initLbTimer();
     document.querySelectorAll('.winner-modal, .chest-win-modal').forEach(m => m.classList.remove('active'));
 });

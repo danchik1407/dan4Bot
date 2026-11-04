@@ -9,7 +9,7 @@
     <meta http-equiv="Pragma" content="no-cache">
     <meta http-equiv="Expires" content="0">
     <title>AURA GAME</title>
-    <link rel="stylesheet" href="style.css?v=aura-18">
+    <link rel="stylesheet" href="style.css?v=aura-19">
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
 </head>
 <body>
@@ -32,6 +32,19 @@
             <button class="maint-btn" onclick="location.reload()">Проверить снова</button>
         </div>
     </div>
+
+    <!-- Кнопка подписки на канал: самый верх экрана, над профилем.
+         href — запасной путь: если Telegram API почему-то недоступен, ссылка
+         просто откроется браузером. Основное действие — tg.openTelegramLink. -->
+    <a class="sub-banner" id="sub-banner" href="https://t.me/Auragameplay_Channel"
+       onclick="openChannel(event)" aria-label="Подписаться на канал AURA GAME">
+        <span class="sub-banner-icon" aria-hidden="true">📢</span>
+        <span class="sub-banner-text">
+            <span class="sub-banner-title">Подписаться на канал</span>
+            <span class="sub-banner-sub">Все анонсы и обновления здесь</span>
+        </span>
+        <span class="sub-banner-arrow" aria-hidden="true">›</span>
+    </a>
 
     <header class="top-bar" id="main-header">
         <div class="profile-badge">
@@ -100,17 +113,11 @@
             </div>
         </section>
 
+        <!-- Топ игроков: без таймеров, призов и кнопок «?» — только список.
+             Строка: место | имя | баланс (💎). -->
         <section id="tab-top" class="tab">
-            <div class="lb-header">
-                <h2>ЛИДЕРБОРД</h2>
-                <button class="info-btn" onclick="toggleLbInfo()">?</button>
-            </div>
-            <div class="lb-timer">
-                До конца: <span id="lb-timer-val">...</span>
-            </div>
-            <div class="lb-big-timer" id="lb-big-timer">...</div>
-            <div class="lb-sub">до окончания</div>
-            <div class="leaderboard" id="global-top-list"><p style="text-align: center; color: #888;">Загрузка...</p></div>
+            <div class="page-header"><h2>🏆 Топ игроков</h2></div>
+            <div class="leaderboard" id="global-top-list"><p class="lb-empty">Загрузка…</p></div>
         </section>
 
         <section id="tab-chests" class="tab">
@@ -361,25 +368,6 @@
         </section>
     </main>
 
-    <div id="lb-info-modal" class="winner-modal">
-        <div class="winner-content" style="background: #1c1c1c; border-color: #333; padding: 25px; max-width: 380px; text-align: left;">
-            <h2 style="color: #ffcc00; font-size: 22px; text-align: center; margin-bottom: 20px;">ЛИДЕРБОРД:<br>КАК ЭТО РАБОТАЕТ?</h2>
-            <div style="margin-bottom: 20px;">
-                <h3 style="color: #fff; font-size: 16px; margin-bottom: 5px;">1. ЗАРАБАТЫВАЙТЕ КОИНЫ</h3>
-                <p style="color: #aaa; font-size: 13px; line-height: 1.4;">Играйте и копите как можно больше игровых коинов <img class="coin-img" src="coin.png" alt="монета">, чтобы подняться выше в списке лучших игроков.</p>
-            </div>
-            <div style="margin-bottom: 20px;">
-                <h3 style="color: #fff; font-size: 16px; margin-bottom: 5px;">2. СЛЕДИТЕ ЗА ТАЙМЕРОМ</h3>
-                <p style="color: #aaa; font-size: 13px; line-height: 1.4;">Таймер вверху показывает время до завершения сезона ⏱. Успейте занять лучшее место, пока идет отсчет!</p>
-            </div>
-            <div style="margin-bottom: 25px;">
-                <h3 style="color: #fff; font-size: 16px; margin-bottom: 5px;">3. ПОЛУЧАЙТЕ НАГРАДЫ</h3>
-                <p style="color: #aaa; font-size: 13px; line-height: 1.4;">Когда время истечет, все игроки на призовых местах получат ценные призы — коины <img class="coin-img" src="coin.png" alt="монета">. А тот, кто займет 1-е место 🥇, заберет главный суперприз!</p>
-            </div>
-            <button class="action-btn" style="background: #333; margin: 0; width: 100%;" onclick="toggleLbInfo()">Понятно</button>
-        </div>
-    </div>
-
     <div id="winner-modal" class="winner-modal">
         <div class="winner-content">
             <div class="winner-icon">🏆</div>
@@ -405,12 +393,12 @@
 
     <nav class="bottom-nav" id="main-nav">
         <div class="nav-item active" onclick="switchTab('play', this)"><span class="nav-icon">🎮</span> Играть</div>
-        <div class="nav-item" onclick="switchTab('top', this)"><span class="nav-icon">🏆</span> Лидерборд</div>
+        <div class="nav-item" onclick="switchTab('top', this)"><span class="nav-icon">🏆</span> Топ</div>
         <div class="nav-item" onclick="switchTab('chests', this)"><span class="nav-icon">📦</span> Сундуки</div>
         <div class="nav-item" onclick="switchTab('shop', this)"><span class="nav-icon">🛒</span> Магазин</div>
         <div class="nav-item" onclick="switchTab('profile', this)"><span class="nav-icon">👤</span> Профиль</div>
     </nav>
 
-    <script src="app.js?v=aura-18" defer></script>
+    <script src="app.js?v=aura-19" defer></script>
 </body>
 </html>
