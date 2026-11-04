@@ -19,7 +19,7 @@ load_dotenv()
 
 # Номер сборки: по нему из /api/health видно, что на сервисе НЕ старый код.
 # Если после деплоя здесь прежнее значение — Render ещё не перезапустился.
-API_BUILD = "2026-11-02-warmup-11"
+API_BUILD = "2026-11-02-ux-clean-12"
 
 # Момент старта процесса. По нему видно, что сервис только что «проснулся»:
 # Render на бесплатном тарифе усыпляет Web Service через 15 минут без входящих
@@ -67,12 +67,19 @@ else:  # pragma: no cover — защита от кривого деплоя
 
 
 @app.get("/", include_in_schema=False)
-async def root_redirect():
-    """Корень сервиса ведёт на Mini App.
+async def root_redirect(request: Request):
+    """Корень сервиса: человеку — Mini App, мониторингу — «alive».
 
     Именно 307-редирект, а не отдача index.html с «/»: в index.html пути к
     style.css/app.js относительные, и с корня они превратились бы в /style.css (404).
+
+    Но UptimeRobot и подобные мониторы по умолчанию бьют в корень и просят
+    `Accept: */*`. Им отдаём тот же дешёвый JSON, что /api/ping, иначе после
+    редиректа на HTML монитор с keyword `alive` показывал бы «Down».
     """
+    accept = (request.headers.get("accept") or "").lower()
+    if "text/html" not in accept:
+        return await ping()
     return RedirectResponse(url="/miniapp/", status_code=307)
 
 
@@ -118,11 +125,23 @@ async def ping():
     """
     return {
         "ok": True,
+        # Явный статус для мониторинга (UptimeRobot и т.п.): {"ok": true, "status": "alive"}.
+        "status": "alive",
         "service": "aura-api",
         "build": API_BUILD,
         # Сколько секунд процесс живёт: маленькое число = сервис только что проснулся.
         "uptime_seconds": int(max(0, time.time() - APP_STARTED_AT)),
     }
+
+
+@app.get("/health", include_in_schema=False)
+async def health_alias():
+    """Тот же дешёвый ответ, что /api/ping.
+
+    Многие мониторинги (UptimeRobot в том числе) по умолчанию проверяют `/health`.
+    Ни базы, ни статики — только «жив ли процесс».
+    """
+    return await ping()
 
 
 # Кэш состояния тиража для /api/health: {at, value, error}.
@@ -165,6 +184,8 @@ async def health():
     stock_error = _stock_health_cache["error"]
     return {
         "ok": True,
+        # Мониторинг: UptimeRobot ждёт "status": "alive" (см. §1 DEPLOY.md).
+        "status": "alive",
         "service": "aura-api",
         "build": API_BUILD,
         # Прогрев: по uptime видно, спал ли сервис (Render усыпляет free-инстанс
@@ -427,8 +448,72 @@ def _row_matches_id(row, user_id):
     return str(raw).strip() == str(user_id).strip()
 
 
+# ==================== ПОНЯТНЫЕ ОШИБКИ БАЗЫ ====================
+# Частые поломки Supabase: в таблице users нет колонки (inventory, last_chest,
+# daily_buys, …) или нет самой таблицы. PostgREST отвечает PGRST204/PGRST205/
+# 42703 — раньше игрок видел «Внутренняя ошибка», а админ не понимал, что чинить.
+_USERS_MIGRATION_HINT = ("если колонки нет в базе — сверьте таблицу users с "
+                         "supabase/migrations и добавьте недостающую колонку")
+
+
+def _db_error_detail(exc: Exception, fallback: str = "База временно недоступна") -> str:
+    """Человеческий текст ошибки БД для фронтенда (его показывает tg.showAlert).
+
+    Возвращает готовый `detail` для HTTPException: без SQL-простыней, но с
+    конкретикой — какой колонки/таблицы не хватает и что применить.
+    """
+    message = f"{type(exc).__name__}: {exc}"
+    lower = message.lower()
+
+    # 1) Нет таблицы / устарел кэш схемы PostgREST.
+    if "pgrst205" in lower or "42p01" in lower or "could not find the table" in lower:
+        return ("Таблица users не найдена в базе (или устарел кэш PostgREST). "
+                "Проверьте SUPABASE_URL и выполните NOTIFY pgrst, 'reload schema'")
+
+    # 2) Нет колонки: PostgREST: "Could not find the 'inventory' column of 'users'".
+    column = None
+    if "pgrst204" in lower or "42703" in lower or "column" in lower:
+        import re as _re
+        found = _re.search(r"'([a-z_][a-z0-9_]*)'\s+column", lower) or \
+                _re.search(r"column\s+'?\"?([a-z_][a-z0-9_]*)", lower)
+        if found:
+            column = found.group(1)
+        where = f"колонки «{column}» " if column else ""
+        return (f"В базе не хватает {where}в таблице users. "
+                "Примените миграции из supabase/migrations (или добавьте колонку), "
+                "затем повторите — данные игрока не потеряны")
+
+    # 3) Права: RLS без политики.
+    if "row-level security" in lower or "42501" in lower:
+        return ("База отклонила запись (RLS без политики). Примените "
+                "supabase/migrations/20261107000000_open_launch_promo_rls_and_stock_reset.sql "
+                "или задайте SUPABASE_SERVICE_KEY")
+
+    # 4) Сеть/таймаут.
+    if "timeout" in lower or "connection" in lower or "network" in lower:
+        return f"{fallback}: база не ответила вовремя, попробуйте ещё раз"
+
+    if "pgrst202" in lower or "does not exist" in lower or "schema cache" in lower:
+        return ("База не нашла нужную функцию или таблицу (устарел кэш PostgREST). "
+                "Выполните NOTIFY pgrst, 'reload schema' и повторите")
+
+    return fallback
+
+
+# Последняя ошибка чтения users: _find_user_rows её не пробрасывает (иначе любой
+# сбой базы ломал бы профиль целиком), но обработчики должны показать причину
+# игроку, а не сухое «профиль не найден».
+_LAST_USER_READ_ERROR = None
+
+
+def _last_user_read_error():
+    return _LAST_USER_READ_ERROR
+
+
 def _find_user_rows(user_id):
     """Ищем строку и по int, и по строке: в старой базе user_id мог сохраниться текстом."""
+    global _LAST_USER_READ_ERROR
+    _LAST_USER_READ_ERROR = None      # ошибка должна относиться именно к этому чтению
     uid = _safe_int(user_id, None)
     if uid is None:
         return []
@@ -436,8 +521,9 @@ def _find_user_rows(user_id):
     for key in (uid, str(uid)):
         try:
             res = supabase.table("users").select("*").eq("user_id", key).execute()
-        except Exception:
-            logger.exception("Не удалось прочитать users по user_id=%s", key)
+        except Exception as exc:  # noqa: BLE001
+            _LAST_USER_READ_ERROR = exc
+            logger.error("Не удалось прочитать users по user_id=%s: %s", key, exc)
             continue
         for row in res.data or []:
             if _row_matches_id(row, uid):
@@ -469,8 +555,9 @@ def _db_update_user(user_id, **fields):
     for key in (uid, str(uid)):
         try:
             updated = supabase.table("users").update(payload).eq("user_id", key).select("user_id").execute()
-        except Exception:
-            logger.exception("Не удалось обновить users по user_id=%s", key)
+        except Exception as exc:  # noqa: BLE001
+            logger.error("Не удалось обновить users по user_id=%s (%s): %s",
+                         key, ", ".join(sorted(payload)), exc)
             continue
         if updated.data:
             return True
@@ -1474,22 +1561,30 @@ async def get_user(auth: UserAuth):
 
     try:
         rows = _find_user_rows(user_id)
-    except Exception:
+    except Exception as exc:  # noqa: BLE001 — детали нужны и игроку, и админу
         logger.exception("Ошибка чтения профиля user_id=%s", user_id)
-        raise HTTPException(status_code=503, detail="База временно недоступна, попробуйте ещё раз")
+        raise HTTPException(status_code=503, detail=_db_error_detail(
+            exc, "База временно недоступна, попробуйте ещё раз")) from exc
 
     if not rows:
         # Создаём профиль только если строки действительно нет ни в одном варианте id.
+        # inventory пишем строкой JSON: так его хранит и бот, и магазин.
         new_user = {"user_id": user_id, "coins": 0, "keys": 0,
                     "username": user.get("username", f"id{user_id}"),
                     "last_chest": 0, "chat_id": 0, "inventory": "[]"}
+        create_error = None
         try:
             supabase.table("users").insert(new_user).execute()
-        except Exception:
+        except Exception as exc:  # noqa: BLE001
+            create_error = exc
             logger.exception("Не удалось создать профиль user_id=%s", user_id)
         rows = _find_user_rows(user_id)
         if not rows:
-            raise HTTPException(status_code=503, detail="Профиль не найден в базе, попробуйте позже")
+            detail = "Профиль не найден в базе, попробуйте позже"
+            cause = create_error or _last_user_read_error()
+            if cause is not None:
+                detail = _db_error_detail(cause, detail)
+            raise HTTPException(status_code=503, detail=detail)
 
     # Если в базе оказалось несколько строк (старые дубли), берём ту, где больше коинов —
     # иначе игрок видит 0, хотя в «кармане» бота лежат его деньги.
@@ -1981,7 +2076,12 @@ async def open_chest(auth: OpenChestRequest):
         raise HTTPException(status_code=400, detail="Неизвестный тип сундука")
 
     now = int(time.time())
-    row = _db_user(user_id)
+    try:
+        row = _db_user(user_id)
+    except Exception as exc:  # noqa: BLE001 — иначе игрок увидит голый 500
+        logger.exception("Сундук: не удалось прочитать профиль user_id=%s", user_id)
+        raise HTTPException(status_code=503, detail=_db_error_detail(
+            exc, "Не удалось открыть сундук, попробуйте ещё раз")) from exc
     if row is None: raise HTTPException(status_code=404, detail="User not found")
 
     coins = int(row.get("coins", 0) or 0)
@@ -2104,7 +2204,12 @@ async def claim_chest(auth: "ClaimChestRequest"):
 
     # Профиль читаем ДО «занятия» награды: если строки пользователя нет, выдача
     # останется незабранной и не потеряется.
-    row = _db_user(str(user_id))
+    try:
+        row = _db_user(str(user_id))
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Сундук: не удалось прочитать профиль user_id=%s", user_id)
+        raise HTTPException(status_code=503, detail=_db_error_detail(
+            exc, "Не удалось забрать награду, попробуйте ещё раз")) from exc
     if row is None: raise HTTPException(status_code=404, detail="User not found")
     coins = int(row.get("coins", 0) or 0)
     keys = int(row.get("keys", 0) or 0)
@@ -2246,6 +2351,11 @@ async def buy_item(data: BuyItem):
         print(f"МАГАЗИН: отказ user_id={user_id} item={data.item_id} "
               f"[{exc.status_code}] {exc.message}", flush=True)
         raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
+    except Exception as exc:  # noqa: BLE001 — любая поломка базы должна быть читаемой
+        logger.exception("МАГАЗИН: непредвиденная ошибка покупки user_id=%s item=%s",
+                         user_id, data.item_id)
+        raise HTTPException(status_code=503, detail=_db_error_detail(
+            exc, "Не удалось завершить покупку, попробуйте ещё раз")) from exc
     if STOCK_LIMITS_ENABLED and not result.get("stock_ready", True):
         # Купили, но тираж не списан: говорим прямо, а не делаем вид, что всё хорошо.
         print(f"МАГАЗИН: ВНИМАНИЕ тираж не списан (stock_ready=false) item={data.item_id} — "
