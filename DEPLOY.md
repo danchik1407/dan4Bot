@@ -797,6 +797,153 @@ x1.75 должно быть ровно `51.43%`, у x50 — `1.80%`. Если ч
 уменьшается **сразу**, а не после остановки стрелки; при проигрыше он остаётся
 уменьшенным, при победе — увеличивается на выплату в конце прокрутки.
 
+## 4.3.1.7. Одиночки (Unlove) и `-отн` — задача 30
+
+**Зачем.** Раньше без пары игрок ничего не получал: `поцеловать` отвечало
+«сначала предложи отношения», и половина чата не могла качать Love вообще.
+
+**Как теперь:**
+
+- **Одиночный счёт `Unlove`.** У кого пары нет — тот пишет любую РП-команду
+  (`обнять`, `поцеловать`, `подарить цветы`…) и получает ровно те же
+  `+10`, тот же кулдаун 5 часов и те же этапы, что и пара. Разница одна:
+  награду за этап получает **один человек**, а не двое. Валюта хранится в
+  `solo_love` (одна строка на игрока), оплаченные этапы — в
+  `solo_love_stage_rewards` (PK `user_id, stage`, повтор невозможен).
+- **Передать Love/Unlove другому нельзя.** Ни команды, ни кнопки для этого
+  нет: если одиночка пишет `поцеловать @ник`, ник получает только фразу в
+  чате, а `+10` уходит автору. Награда всегда зарабатывается сама.
+- **Вступление в отношения сжигает одиночный счёт.** `solo_love` удаляется у
+  обоих, история начинается с `Love = 0`. Оплаченные одиночные этапы
+  остаются закрытыми — иначе награды фармились бы по кругу
+  «пара → развод → снова один».
+- **`отн инфа` для одиночки** показывает уровень и `Unlove` вместо пары;
+  чужие отношения по-прежнему видит только админ (`ADMIN_IDS`).
+- **`топ отношений` — только пары.** Одиночки в статистику не попадают
+  вообще, даже с огромным `Unlove`.
+- **`-отн` (алиасы `-отношения`, `-пара`, `-любовь`, `разлюбить`)**
+  **удаляет строку пары**, а не помечает её `broken`: у обоих исчезает
+  статус и весь накопленный Love. Уже выплаченные награды не отзываются —
+  деньги никто не отбирает.
+
+**Профиль Mini App:** зелёная плашка «💚 Свободен/Свободна» дополняется
+`· ур. N · M Unlove` (только когда счёт больше нуля) — данные берёт
+`/api/love_state` (`solo`, `unlove`, `solo_level`, `solo_title`, `solo_days`).
+
+**SQL:** `supabase/migrations/20261122000000_solo_love.sql` — он же заново
+создаёт `passive_income`, если её не было (§4.3.1.8).
+
+## 4.3.1.8. «Таблица passive_income не создана»
+
+**Симптом.** В профиле вместо начисления пассивного дохода висело окно
+«Таблица passive_income не создана. Примените миграцию
+`supabase/migrations/20261109000000_economy_social.sql`».
+
+**Причина.** Миграция `20261109000000_economy_social.sql` действительно не была
+применена (или применилась частично) — таблицы в базе нет.
+
+**Что сделано в коде.** `/api/passive_income` больше не отвечает 503 с текстом
+про миграцию: если таблицы нет, отметка последнего начисления держится в памяти
+процесса (`_PASSIVE_MEMORY`), доход продолжает капать, а в ответе приходит
+`degraded: true`. После перезапуска сервиса отсчёт просто начинается заново —
+начислить лишнего так невозможно.
+
+**Что применить в Supabase (один файл):**
+
+```sql
+-- supabase/migrations/20261122000000_solo_love.sql
+CREATE TABLE IF NOT EXISTS public.passive_income (
+    user_id  BIGINT PRIMARY KEY,
+    last_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS public.solo_love (
+    user_id    BIGINT PRIMARY KEY,
+    love       INTEGER     NOT NULL DEFAULT 0 CHECK (love >= 0),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS public.solo_love_stage_rewards (
+    user_id BIGINT      NOT NULL,
+    stage   INTEGER     NOT NULL,
+    paid_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (user_id, stage)
+);
+
+CREATE INDEX IF NOT EXISTS solo_love_love_idx ON public.solo_love (love DESC);
+
+INSERT INTO public.game_settings (key, value) VALUES
+    ('upgrade_house_edge', '1.0'), ('upgrade_chance_factor', '1.0')
+ON CONFLICT (key) DO NOTHING;
+
+UPDATE public.game_settings SET value = '1.0', updated_at = now()
+ WHERE key IN ('upgrade_house_edge', 'upgrade_chance_factor') AND value <> '1.0';
+
+ALTER TABLE public.solo_love ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS solo_love_service_all ON public.solo_love;
+CREATE POLICY solo_love_service_all ON public.solo_love FOR ALL USING (true) WITH CHECK (true);
+
+ALTER TABLE public.solo_love_stage_rewards ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS solo_love_stage_rewards_service_all ON public.solo_love_stage_rewards;
+CREATE POLICY solo_love_stage_rewards_service_all ON public.solo_love_stage_rewards
+    FOR ALL USING (true) WITH CHECK (true);
+
+ALTER TABLE public.passive_income ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS passive_income_service_all ON public.passive_income;
+CREATE POLICY passive_income_service_all ON public.passive_income
+    FOR ALL USING (true) WITH CHECK (true);
+
+NOTIFY pgrst, 'reload schema';
+```
+
+Проверка: `!бд` в боте → «Схема в порядке»; в профиле кнопка «Забрать» у
+пассивного дохода отвечает без окна про миграцию.
+
+## 4.3.1.9. Кнопка «+» у баланса и Telegram Stars
+
+**Симптом.** Нажатие на «+» рядом с балансом показывало «Пополнение скоро!» и
+ничего не начисляло.
+
+**Что сделано.** «+» открывает нижний экран «⭐ Пополнение»: список пакетов
+приходит с `/api/stars_packages`, счёт создаёт `/api/stars_invoice`
+(`currency = XTR`), начисление делает бот по `successful_payment` (идемпотентно
+по `telegram_payment_charge_id`). Telegram Stars не требуют платёжного
+провайдера, поэтому `STARS_ENABLED` теперь по умолчанию **включён**
+(`STARS_ENABLED=0` — выключить).
+
+Если счёт создать не удалось, игрок видит причину и список пакетов — «тихого»
+нажатия больше нет.
+
+## 4.3.1.10. Иконки: алмаз в минах и чёрный кружок в арене
+
+- **Алмаз в «Минах»** был эмодзи `💎`: на части устройств он приезжал с синей
+  квадратной подложкой и выглядел как сломанная картинка. Теперь это SVG
+  (`MINES_GEM_SVG`, класс `.cell-gem`) — одинаковый на всех клиентах и без
+  фона.
+- **Чёрный кружок в центре командной арены** (`.arena-ring::after`) убран: он
+  закрывал стык секторов и выглядел как «дырка» под стрелкой.
+- **Стрелка командной арены** теперь крутится и тормозит как стрелка апгрейда:
+  `ARENA_POINTER_SPEED = 900` °/с через `requestAnimationFrame`, финиш —
+  минимум 3 полных оборота и одна CSS-кривая
+  `cubic-bezier(0.1, 0.7, 0.1, 1)` на `ARENA_POINTER_LAND_MS = 3200` мс,
+  доводка ровно до сектора победителя (`transitionend` + страховочный таймер).
+
+## 4.3.1.11. Админка: «Шансы апгрейда» убраны
+
+Кнопка «🎛 Шансы апгрейда» позволяла множителем из `game_settings` изменить
+реальный шанс (`upgrade_chance_factor`, `upgrade_house_edge`), хотя игроку
+показывался честный процент — одна кнопка могла молча сломать экономику.
+Теперь:
+
+- кнопки и её обработчика нет (`adm|settings` / `adm|set|…` отвечают
+  «шанс фиксирован: 90 / X»);
+- `upgrade_action` больше не умножает шанс на настройки — `real_chance =
+  visual_chance`, то есть то, что нарисовано в круге, и то, по чему играем,
+  одно и то же число;
+- в панели остались «📊 Статистика», «💰 Выдать коины», «🚫 Бан» и строка
+  «Шанс апгрейда зафиксирован: 90 / X» плюс счётчик одиноких.
+
 ## 4.3.2. Лидерборд: только список игроков
 
 Вкладка «Топ» — это заголовок «🏆 Топ игроков» и строки вида

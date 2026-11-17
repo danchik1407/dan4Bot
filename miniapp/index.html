@@ -9,7 +9,7 @@
     <meta http-equiv="Pragma" content="no-cache">
     <meta http-equiv="Expires" content="0">
     <title>AURA GAME</title>
-    <link rel="stylesheet" href="style.css?v=aura-25">
+    <link rel="stylesheet" href="style.css?v=aura-27">
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
 </head>
 <body>
@@ -55,9 +55,26 @@
         <div class="balance-badge">
             <img class="coin-img" src="coin.png" alt="монета">
             <span id="user-balance">…</span>
-            <button class="plus-btn" onclick="tg.showAlert('Пополнение скоро!')">+</button>
+            <!-- «+» у баланса открывает пополнение (коины за Telegram Stars).
+                 Раньше кнопка показывала «Пополнение скоро!» и не начисляла
+                 ничего — со стороны выглядело, будто нажатие не работает. -->
+            <button class="plus-btn" onclick="openTopUp()" aria-label="Пополнить баланс">+</button>
         </div>
     </header>
+
+    <!-- Пополнение: пакеты коинов за Telegram Stars. Список цен приходит с
+         сервера (/api/stars_packages), счёт создаёт /api/stars_invoice. -->
+    <div class="topup-modal" id="topup-modal" role="dialog" aria-modal="true">
+        <div class="topup-card">
+            <div class="topup-head">
+                <span class="topup-title">⭐ Пополнение</span>
+                <button class="topup-close" onclick="closeTopUp()" aria-label="Закрыть">✕</button>
+            </div>
+            <div class="topup-sub">Коины за Telegram Stars. Придут в бота сразу после оплаты.</div>
+            <div class="topup-list" id="topup-list"><div class="topup-loading">Загрузка…</div></div>
+            <div class="topup-note">Оплата в звёздах: 1 пакет = 1 счёт. Возврат — через поддержку Telegram.</div>
+        </div>
+    </div>
 
     <!-- Если профиль не загрузился, показываем причину и кнопку повтора, а не «0». -->
     <div id="sync-banner" class="sync-banner">
@@ -168,7 +185,7 @@
                 </div>
                 <!-- Свободен/свободна: зелёная плашка вместо пустого места. -->
                 <div class="love-badge love-badge-free" id="profile-love-free" hidden>
-                    💚 <b id="profile-love-free-text">Свободен</b>
+                    💚 <b id="profile-love-free-text">Свободен</b><span class="love-badge-stage" id="profile-love-free-stage"></span>
                 </div>
                 <div class="profile-avatar-large"><img id="profile-avatar-large" src="avatar_placeholder.svg" alt="Avatar"></div>
                 <h2 class="profile-name" id="profile-name">Загрузка...</h2>
@@ -211,8 +228,8 @@
                         <span class="extra-title">⭐ Купить коины</span>
                         <span class="extra-value">Telegram Stars</span>
                     </div>
-                    <div class="extra-hint" id="stars-hint">Пакеты появятся позже</div>
-                    <button class="extra-btn" onclick="openStarsShop()">Открыть магазин Stars</button>
+                    <div class="extra-hint" id="stars-hint">Пополнение коинов за звёзды</div>
+                    <button class="extra-btn" onclick="openTopUp()">Открыть магазин Stars</button>
                 </div>
 
             </div>
@@ -492,6 +509,6 @@
         <div class="nav-item" onclick="switchTab('profile', this)"><span class="nav-icon">👤</span> Профиль</div>
     </nav>
 
-    <script src="app.js?v=aura-25" defer></script>
+    <script src="app.js?v=aura-27" defer></script>
 </body>
 </html>

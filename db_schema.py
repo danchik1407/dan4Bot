@@ -26,6 +26,8 @@ REQUIRED = {
     "idempotency_keys": ["key", "user_id", "endpoint", "response", "created_at"],
     "game_settings": ["key", "value"],
     "relationships": ["id", "user_a", "user_b", "love", "status", "created_at"],
+    "solo_love": ["user_id", "love"],
+    "solo_love_stage_rewards": ["user_id", "stage"],
     "crash_history": ["id", "round_id", "crash_point", "players", "created_at"],
     "upgrade_log": ["id", "user_id", "item_from", "item_to", "chance", "roll",
                     "won", "created_at"],

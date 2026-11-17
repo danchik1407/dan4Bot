@@ -22,9 +22,13 @@ from love import (
     LOVE_ACTION_COOLDOWN,
     LOVE_ICE_COST,
     RP_ACTIONS,
+    SOLO_CURRENCY,
+    add_solo_love,
     claim_stage_rewards,
     public_stage,
+    reset_solo_love,
     rp_action_for,
+    solo_state,
 )
 from db_schema import audit as db_schema_audit, format_report as db_schema_report
 from shop_catalog import (
@@ -1455,7 +1459,7 @@ async def cmd_love_propose(message: Message):
     existing = await get_relationship(proposer_id)
     if existing:
         notice = await _relationship_notice(existing, proposer_id, "Ты", about_self=True)
-        return await message.answer(f"{notice}\nСначала <code>-любовь</code>.", parse_mode="HTML")
+        return await message.answer(f"{notice}\nСначала <code>-отн</code>.", parse_mode="HTML")
     target_relationship = await get_relationship(target_id)
     if target_relationship:
         # Работает в ЛЮБОМ чате: отношения общие, и второй пары быть не может.
@@ -1501,7 +1505,7 @@ async def cb_love_answer(callback: CallbackQuery):
         owner = target_id if own else proposer_id
         partner_name = await _player_display(_partner_of(row, owner))
         return await callback.answer(
-            f"💔 Уже есть пара: {partner_name}. Сначала -любовь.", show_alert=True)
+            f"💔 Уже есть пара: {partner_name}. Сначала -отн.", show_alert=True)
 
     def _create():
         return supabase.table(RELATIONSHIPS_TABLE).insert({
@@ -1515,6 +1519,9 @@ async def cb_love_answer(callback: CallbackQuery):
         logger.error(f"Не удалось создать пару: {e}")
         return await callback.answer("Не удалось создать пару — примените миграцию", show_alert=True)
 
+    # Задача 30: одиночный статус обоих сгорает — начинается общая история пары.
+    await drop_solo_status(proposer_id)
+    await drop_solo_status(target_id)
     love_proposals.pop(target_id, None)
     await callback.message.edit_text(
         f"💗 <b>Теперь вы пара!</b>\n\n{_stage_text(0)}\n\n"
@@ -1525,22 +1532,43 @@ async def cb_love_answer(callback: CallbackQuery):
     await callback.answer("💗")
 
 
-@dp.message(F.text.func(lambda t: strip_prefix(t).lower().startswith(("-любовь", "разлюбить"))))
+# Разрыв: `-отн`, `-отношения`, `-пара`, `-любовь` (и старое `разлюбить`).
+# Удаляем СТРОКУ пары, а не помечаем её broken: у обоих исчезает статус и весь
+# накопленный Love, а заново начать историю можно с чистого листа. Уже
+# выплаченные награды за этапы не отзываются (деньги не отбираем).
+_BREAK_PREFIXES = ("-отн", "-пара", "-любовь", "разлюбить")
+
+
+@dp.message(F.text.func(lambda t: strip_prefix(t).lower().replace("ё", "е").startswith(
+    _BREAK_PREFIXES)))
 async def cmd_love_break(message: Message):
-    if not message.from_user:
+    if not message.from_user or message.from_user.is_bot:
         return
     row = await get_relationship(message.from_user.id)
     if not row:
-        return await message.answer("💔 Ты пока ни с кем не в отношениях.")
+        return await message.answer(
+            "💔 Ты пока ни с кем не в отношениях.\n\n"
+            "Своя пара: <code>отн инфа</code> · РП-команды: <code>все рп</code>",
+            parse_mode="HTML")
     try:
         await asyncio.to_thread(lambda: supabase.table(RELATIONSHIPS_TABLE)
-                                .update({"status": "broken"}).eq("id", row["id"]).execute())
+                                .delete().eq("id", row["id"]).execute())
     except Exception as e:
         logger.error(f"Не удалось разорвать отношения: {e}")
         return await message.answer("❌ Не удалось разорвать отношения, попробуй позже.")
     partner = _partner_of(row, message.from_user.id)
     love_proposals.pop(partner, None)
-    await message.answer(f"💔 Отношения завершены. Накоплено Love: {int(row.get('love') or 0)}.")
+    love_proposals.pop(message.from_user.id, None)
+    partner_name = await _player_display(partner)
+    await message.answer(
+        f"💔 <b>Отношения завершены.</b>\n\n"
+        f"Вы с {safe_text(partner_name)} снова свободны: статус снят у обоих, "
+        f"накопленные Love сброшены.\n"
+        f"Заработанные награды остаются у вас — их никто не отбирает.\n\n"
+        f"Теперь можно копить <b>{SOLO_CURRENCY}</b> в одиночку "
+        f"(<code>отн инфа</code>) или начать новую историю: "
+        f"<code>+любовь @ник</code>.",
+        parse_mode="HTML")
 
 
 def _love_int(value):
@@ -1629,7 +1657,8 @@ async def cmd_top_love(message: Message):
             f"    💗 {coin_amount(score)} Love · вместе {_days_text(days)}")
     if len(rows) > 10:
         lines.append(f"\n…и ещё {len(rows) - 10} пар(ы).")
-    lines.append("\n<i>Отношения общие для всех чатов. Второй пары быть не может.</i>")
+    lines.append("\n<i>Отношения общие для всех чатов. Второй пары быть не может.\n"
+                 f"Одиночки в топ не попадают — здесь только пары.</i>")
     await message.answer("\n".join(lines), parse_mode="HTML")
 
 
@@ -1654,9 +1683,15 @@ async def cmd_love_status(message: Message):
         return
     row = await get_relationship(message.from_user.id)
     if not row:
+        solo = await get_solo_love(message.from_user.id)
+        info = public_stage(solo)
         return await message.answer(
-            "💗 Ты пока один(а).\n\nПредложить отношения: <code>+любовь @username</code>\n"
-            "РП-команды: <code>все рп</code>", parse_mode="HTML")
+            f"💔 <b>Пока один(а)</b> · {SOLO_CURRENCY}: <b>{coin_amount(solo)}</b>\n"
+            f"🏅 Уровень: <b>{info['level']} · {safe_text(info['title'])}</b>\n\n"
+            f"РП-команды работают и без пары — {SOLO_CURRENCY} капает только тебе.\n"
+            f"Предложить отношения: <code>+любовь @username</code>\n"
+            f"Все РП-команды: <code>все рп</code> · подробно: <code>отн инфа</code>",
+            parse_mode="HTML")
     partner_id = _partner_of(row, message.from_user.id)
     partner_name = await _player_display(partner_id)
     score = int(row.get("love") or 0)
@@ -1695,12 +1730,26 @@ async def cmd_love_info(message: Message):
     header = ("ТВОИ ОТНОШЕНИЯ" if target_id == viewer_id
               else f"ОТНОШЕНИЯ · {who.lstrip('@').upper()}")
     if not row:
+        solo = await get_solo_love(target_id)
+        info = public_stage(solo)
         if target_id == viewer_id:
             return await message.answer(
-                "💗 Ты пока один(а).\n\nПредложить отношения: <code>+любовь @username</code>\n"
-                "РП-команды: <code>все рп</code>", parse_mode="HTML")
+                f"💔 <b>ТВОИ ОТНОШЕНИЯ</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"Пока ни с кем — и это нормально.\n"
+                f"🏅 Уровень: <b>{info['level']} · {safe_text(info['title'])}</b>\n"
+                f"💔 {SOLO_CURRENCY}: <b>{coin_amount(solo)}</b>\n\n"
+                f"РП-команды работают и в одиночку: просто напиши <code>обнять</code>, "
+                f"<code>поцеловать</code>, <code>подарить цветы</code>… — "
+                f"+{LOVE_ACTION_BONUS} {SOLO_CURRENCY} только тебе.\n"
+                f"Передать {SOLO_CURRENCY} другому нельзя — только заработать.\n"
+                f"Вступишь в отношения — одиночный счёт сгорит, начнёте общий.\n\n"
+                f"Список РП: <code>все рп</code> · предложить пару: <code>+любовь @ник</code>",
+                parse_mode="HTML")
         return await message.answer(
-            f"💔 У этого игрока сейчас нет отношений.", parse_mode="HTML")
+            f"💔 У этого игрока сейчас нет отношений.\n"
+            f"{SOLO_CURRENCY}: <b>{coin_amount(solo)}</b> · уровень {info['level']}",
+            parse_mode="HTML")
 
     partner_id = _partner_of(row, target_id)
     partner_name = await _player_display(partner_id)
@@ -1730,6 +1779,8 @@ async def cmd_rp_list(message: Message):
     lines.append("")
     lines.append(f"💗 За РП-действие пара получает +{LOVE_ACTION_BONUS} Love "
                  f"(бонус не чаще, чем раз в {LOVE_ACTION_COOLDOWN // 3600} ч).")
+    lines.append(f"💔 Без пары то же действие даёт +{LOVE_ACTION_BONUS} {SOLO_CURRENCY} "
+                 f"— и только тому, кто пишет: передать Love другому нельзя.")
     lines.append("💞 Своя пара: <code>отн инфа</code> · все пары: <code>топ отношений</code>")
     await message.answer("\n".join(lines), parse_mode="HTML")
 
@@ -1785,6 +1836,45 @@ async def add_love_points(row, amount: int):
     return new_score, granted
 
 
+# ================= ОДИНОКИЕ: UNLOVE =================
+# Задача 30: у кого пары нет — тот не «застревает», а качает свою ветку.
+# Экономика та же (те же +10, тот же кулдаун, те же этапы), но награду за этап
+# получает один человек, а не двое. Как только игрок вступает в отношения,
+# одиночный счёт сгорает (см. reset_solo_love).
+async def get_solo_love(user_id) -> int:
+    """Сколько Unlove накопил одиночка (нет таблицы — 0)."""
+    try:
+        state = await asyncio.to_thread(solo_state, supabase, user_id)
+    except Exception as e:
+        logger.warning(f"Unlove недоступен: {e}")
+        return 0
+    return int((state or {}).get("love") or 0)
+
+
+async def add_solo_points(user_id, amount: int):
+    """+Unlove и (тихо) награды за перешагнутые этапы. Возвращает (счёт, награды)."""
+    try:
+        return await asyncio.to_thread(add_solo_love, supabase, user_id, amount)
+    except Exception as e:
+        logger.warning(f"Не удалось начислить Unlove: {e}")
+        return await get_solo_love(user_id), []
+
+
+async def drop_solo_status(user_id):
+    """Вступление в отношения: одиночный счёт сгорает."""
+    try:
+        await asyncio.to_thread(reset_solo_love, supabase, user_id)
+    except Exception as e:
+        logger.warning(f"Не удалось сбросить Unlove: {e}")
+
+
+def _cooldown_keyboard(user_id) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text=f"⚡ За {LOVE_ICE_COST} i¢",
+                             callback_data=f"love_ice|{user_id}")
+    ]])
+
+
 @dp.message(F.text.func(lambda t: rp_action_for(strip_prefix(t))[0] is not None))
 async def cmd_rp_action(message: Message):
     if not message.from_user or message.from_user.is_bot:
@@ -1792,39 +1882,69 @@ async def cmd_rp_action(message: Message):
     action, meta = rp_action_for(strip_prefix(message.text))
     if not action:
         return
-    row = await get_relationship(message.from_user.id)
+    actor_id = message.from_user.id
+    target_id, target_name = await resolve_partner_target(message)
+    row = await get_relationship(actor_id)
+
     if not row:
-        return await message.answer(
-            "💗 Сначала предложи отношения: <code>+любовь @username</code>", parse_mode="HTML")
-    partner_id = _partner_of(row, message.from_user.id)
-    target_id, _ = await resolve_partner_target(message)
+        return await solo_rp_action(message, meta, target_id, target_name)
+
+    partner_id = _partner_of(row, actor_id)
     if target_id and target_id != partner_id:
         return await message.answer("💔 Это не твой партнёр — РП-команды работают только для пары.")
 
-    text = (f"{meta['emoji']} <a href=\"tg://user?id={message.from_user.id}\">"
+    text = (f"{meta['emoji']} <a href=\"tg://user?id={actor_id}\">"
             f"{safe_text(message.from_user.full_name)}</a> {meta['text']} "
             f"<a href=\"tg://user?id={partner_id}\">партнёра</a>")
 
-    left = await love_cooldown_left(message.from_user.id)
+    left = await love_cooldown_left(actor_id)
     if left > 0:
         # Кулдаун: +10 Love уже получены недавно. Можно «докупить» действие за i¢.
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[[
-            InlineKeyboardButton(text=f"⚡ За {LOVE_ICE_COST} i¢", callback_data=f"love_ice|{message.from_user.id}")
-        ]])
         hours = left // 3600
         minutes = (left % 3600) // 60
         return await message.answer(
             f"{text}\n\n⏳ Love-бонус через {hours}ч {minutes}м. "
             f"Можно не ждать — выполнить действие за {LOVE_ICE_COST} i¢ (донат-валюта).",
-            parse_mode="HTML", reply_markup=keyboard)
+            parse_mode="HTML", reply_markup=_cooldown_keyboard(actor_id))
 
     new_score, granted = await add_love_points(row, LOVE_ACTION_BONUS)
-    await love_cooldown_touch(message.from_user.id)
+    await love_cooldown_touch(actor_id)
     reply = f"{text}\n\n💗 +{LOVE_ACTION_BONUS} Love (всего {new_score})"
-    # Задача 29: этапы и награды — секрет. Бот не объявляет «новый этап» и не
-    # показывает суммы: награда начисляется тихо, игроки узнают о ней по балансу.
+    # Этапы и награды — секрет. Бот не объявляет «новый этап» и не показывает
+    # суммы: награда начисляется тихо, игроки узнают о ней по балансу.
     if granted:
         reply += "\n💞 Ваша пара стала ещё ближе."
+    await message.answer(reply, parse_mode="HTML")
+
+
+async def solo_rp_action(message: Message, meta: dict, target_id, target_name):
+    """РП-действие без пары: Unlove копится только автору.
+
+    «Любовные моменты передавать невозможно»: получатель (если его упомянули)
+    не получает ни Love, ни Unlove — награда есть только у того, кто пишет.
+    """
+    actor_id = message.from_user.id
+    text = (f"{meta['emoji']} <a href=\"tg://user?id={actor_id}\">"
+            f"{safe_text(message.from_user.full_name)}</a> {meta['text']}")
+    if target_id and target_id != actor_id:
+        text += f" <a href=\"tg://user?id={target_id}\">{safe_text(target_name or 'игрока')}</a>"
+    text += (f"\n\n💔 Пока один(а) — копится <b>{SOLO_CURRENCY}</b>. "
+             f"Передать Love/Unlove другому нельзя, только заработать.")
+
+    left = await love_cooldown_left(actor_id)
+    if left > 0:
+        hours = left // 3600
+        minutes = (left % 3600) // 60
+        return await message.answer(
+            f"{text}\n\n⏳ Unlove-бонус через {hours}ч {minutes}м. "
+            f"Можно не ждать — выполнить действие за {LOVE_ICE_COST} i¢ (донат-валюта).",
+            parse_mode="HTML", reply_markup=_cooldown_keyboard(actor_id))
+
+    score, granted = await add_solo_points(actor_id, LOVE_ACTION_BONUS)
+    await love_cooldown_touch(actor_id)
+    reply = f"{text}\n\n💔 +{LOVE_ACTION_BONUS} {SOLO_CURRENCY} (всего {score})"
+    if granted:
+        reply += "\n💗 Стало теплее — загляни в <code>отн инфа</code>."
     await message.answer(reply, parse_mode="HTML")
 
 
@@ -1833,9 +1953,6 @@ async def cb_love_ice(callback: CallbackQuery):
     owner_id = int((callback.data or "").split("|", 1)[1] or 0)
     if callback.from_user.id != owner_id:
         return await callback.answer("Это не твоя кнопка", show_alert=True)
-    row = await get_relationship(owner_id)
-    if not row:
-        return await callback.answer("Отношения не найдены", show_alert=True)
 
     def _spend():
         res = supabase.table("users").select("ice").eq("user_id", int(owner_id)).execute()
@@ -1853,6 +1970,17 @@ async def cb_love_ice(callback: CallbackQuery):
     if not ok:
         return await callback.answer(f"Недостаточно i¢ (нужно {LOVE_ICE_COST}, есть {balance_left})", show_alert=True)
 
+    row = await get_relationship(owner_id)
+    if not row:
+        # Одиночка: ускорение работает так же, только в свою копилку Unlove.
+        score, granted = await add_solo_points(owner_id, LOVE_ACTION_BONUS)
+        await love_cooldown_touch(owner_id)
+        text = (f"⚡ Готово за {LOVE_ICE_COST} i¢. 💔 +{LOVE_ACTION_BONUS} "
+                f"{SOLO_CURRENCY} (всего {score})")
+        if granted:
+            text += "\n💗 Стало теплее."
+        return await callback.answer(text[:190], show_alert=True)
+
     new_score, granted = await add_love_points(row, LOVE_ACTION_BONUS)
     await love_cooldown_touch(owner_id)
     text = f"⚡ Действие выполнено за {LOVE_ICE_COST} i¢. 💗 +{LOVE_ACTION_BONUS} Love (всего {new_score})"
@@ -1861,18 +1989,16 @@ async def cb_love_ice(callback: CallbackQuery):
     await callback.answer(text[:190], show_alert=True)
 
 
-
 # ================= АДМИН-ПАНЕЛЬ (/admin) =================
 # Скрытая команда: работает только для ADMIN_IDS. В общую справку `помощь`
 # она не попадает — админы узнают о ней из `адм помощь`.
-GAME_SETTINGS_TABLE = "game_settings"
 UPGRADE_ITEM_PRICES_BOT = {"capsule": 100, "uniq_capsule": 500}
 
 
 def _admin_stats_sync():
     """Статистика для панели. Любая недоступная таблица — просто ноль."""
     data = {"users": 0, "coins": 0, "spins": 0, "bets": 0, "paid": 0,
-            "crash_rounds": 0, "pairs": 0, "referrals": 0}
+            "crash_rounds": 0, "pairs": 0, "referrals": 0, "solo": 0}
     try:
         users = supabase.table("users").select("user_id, coins").execute().data or []
         data["users"] = len(users)
@@ -1898,33 +2024,26 @@ def _admin_stats_sync():
     except Exception:
         pass
     try:
+        data["solo"] = len(supabase.table("solo_love").select("user_id").execute().data or [])
+    except Exception:
+        pass
+    try:
         data["referrals"] = len(supabase.table("referrals").select("referred_id").execute().data or [])
     except Exception:
         pass
     return data
 
 
-def _settings_sync():
-    try:
-        rows = supabase.table(GAME_SETTINGS_TABLE).select("key, value").execute().data or []
-    except Exception:
-        return {}
-    return {str(row.get("key")): row.get("value") for row in rows}
-
-
-def _settings_text(values: dict) -> str:
-    chance = values.get("upgrade_chance_factor", "1.0")
-    edge = values.get("upgrade_house_edge", "1.0")
-    return (f"🎛 <b>ШАНСЫ</b>\n"
-            f"• множитель шанса апгрейда: <b>{chance}</b> (1.0 — как задумано, 0.5 — вдвое строже)\n"
-            f"• дом-эдж апгрейда: <b>{edge}</b> (1.0 — шанс ровно 90/X)\n"
-            f"• шанс = <b>90 / X</b>: x1.75 → 51.43%, x3.7 → 24.32%")
-
-
 def _admin_keyboard():
+    """Панель без «Шансов апгрейда»: шанс апгрейда фиксирован (90 / X).
+
+    Кнопка-крутилка жила здесь с задачи 25 и позволяла множителем изменить
+    реальный шанс. Игроку при этом показывался честный процент, а играли по
+    другому — то есть одна кнопка могла молча сломать экономику. Теперь шанс
+    один и тот же на сервере и на экране, крутить его нечем.
+    """
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📊 Статистика", callback_data="adm|stats")],
-        [InlineKeyboardButton(text="🎛 Шансы апгрейда", callback_data="adm|settings")],
         [InlineKeyboardButton(text="💰 Выдать коины", callback_data="adm|give"),
          InlineKeyboardButton(text="🚫 Бан", callback_data="adm|ban")],
     ])
@@ -1937,15 +2056,16 @@ async def cmd_admin_panel(message: Message):
         # Не админ — молчим: команда скрытая, палить её незачем.
         return
     stats = await asyncio.to_thread(_admin_stats_sync)
-    values = await asyncio.to_thread(_settings_sync)
     text = (
         "👑 <b>АДМИН-ПАНЕЛЬ</b>\n━━━━━━━━━━━━━━━━━━━━\n\n"
         f"👥 Игроков: <b>{stats['users']}</b>\n"
         f"💰 Коинов в системе: <b>{stats['coins']:,}</b>\n"
         f"🛠️ Апгрейдов: <b>{stats['spins']}</b> (поставлено {stats['bets']:,}, выплачено {stats['paid']:,})\n"
         f"🚀 Раундов Ракеты: <b>{stats['crash_rounds']}</b>\n"
-        f"💗 Пар: <b>{stats['pairs']}</b> · 👥 Рефералов: <b>{stats['referrals']}</b>\n\n"
-        + _settings_text(values) + "\n\n"
+        f"💗 Пар: <b>{stats['pairs']}</b> · 💔 Одиноких: <b>{stats['solo']}</b> · "
+        f"👥 Рефералов: <b>{stats['referrals']}</b>\n\n"
+        "🎛 Шанс апгрейда зафиксирован: <b>90 / X</b> (x1.75 → 51.43%). "
+        "Крутить его нечем — что видит игрок, по тому и играем.\n\n"
         "Команды: <code>+пополнить карман @user 500</code>, <code>бан @user причина</code>, "
         "<code>разбан @user</code>"
     )
@@ -1973,31 +2093,11 @@ async def cb_admin_panel(callback: CallbackQuery):
             parse_mode="HTML")
         return await callback.answer()
 
-    if action == "settings":
-        values = await asyncio.to_thread(_settings_sync)
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="− шанс", callback_data="adm|set|upgrade_chance_factor|0.8"),
-             InlineKeyboardButton(text="1.0", callback_data="adm|set|upgrade_chance_factor|1.0"),
-             InlineKeyboardButton(text="+ шанс", callback_data="adm|set|upgrade_chance_factor|1.2")],
-            [InlineKeyboardButton(text="дом-эдж 0.8", callback_data="adm|set|upgrade_house_edge|0.8"),
-             InlineKeyboardButton(text="1.0", callback_data="adm|set|upgrade_house_edge|1.0"),
-             InlineKeyboardButton(text="1.2", callback_data="adm|set|upgrade_house_edge|1.2")],
-        ])
-        await callback.message.answer(_settings_text(values), parse_mode="HTML", reply_markup=keyboard)
-        return await callback.answer()
-
-    if action == "set" and len(parts) >= 4:
-        key, value = parts[2], parts[3]
-        if key not in ("upgrade_chance_factor", "upgrade_house_edge", "crash_house_edge"):
-            return await callback.answer("Неизвестная настройка", show_alert=True)
-        try:
-            await asyncio.to_thread(lambda: supabase.table(GAME_SETTINGS_TABLE).upsert(
-                {"key": key, "value": str(value)}, on_conflict="key").execute())
-        except Exception as e:
-            logger.error(f"Настройки недоступны: {e}")
-            return await callback.answer("Примените миграцию game_settings", show_alert=True)
-        await callback.message.answer(f"✅ <b>{key}</b> = <b>{value}</b>", parse_mode="HTML")
-        return await callback.answer("Сохранено")
+    if action in ("settings", "set"):
+        # Старые сообщения с кнопкой «Шансы апгрейда» могли остаться в чате —
+        # отвечаем честно, а не молчим.
+        return await callback.answer(
+            "Шанс апгрейда фиксирован: 90 / X, менять его нечем", show_alert=True)
 
     if action == "give":
         await callback.message.answer(
@@ -2136,7 +2236,7 @@ async def cmd_db_schema(message: Message):
     F.text.func(lambda t: strip_prefix(t).lower().startswith("помощь") or strip_prefix(t).lower().startswith("help")))
 async def cmd_help(message: Message):
     text = (
-        "📖 <b>СПИСОК КОМАНД БОТА</b>\n━━━━━━━━━━━━━━━━━━━━\n\n🎟️ <b>Промокоды:</b>\n• <code>промо код</code> — активировать промокод\n\n💰 <b>Экономика:</b>\n• <code>карман</code> — твой баланс\n• <code>карман @user</code> — баланс другого\n• <code>перевод @user сумма</code> — перевести\n• <code>перевод сумма</code> (ответом) — быстрый перевод\n• <code>топ</code> — топ-10 богачей\n• <code>магазин</code> — магазин\n\n🎲 <b>Игры:</b>\n• <code>кубы @user ставка</code> — дуэль в кости\n• <code>кубы ставка</code> (ответом) — быстрый вызов\n\n💗 <b>Отношения:</b>\n• <code>+любовь @user</code> — предложить отношения\n• <code>все рп</code> — список всех РП-команд\n• <code>поцеловать</code>, <code>обнять</code>, <code>погладить</code>… — РП-команды (+10 Love паре)\n• <code>отн инфа</code> — с кем, сколько дней, уровень и Love коины (только своё)\n• <code>топ отношений</code> — все пары и их Love\n• <code>-любовь</code> — завершить отношения\n\n• <code>тег</code> — проверка бота\n• <code>помощь</code> — эта справка")
+        "📖 <b>СПИСОК КОМАНД БОТА</b>\n━━━━━━━━━━━━━━━━━━━━\n\n🎟️ <b>Промокоды:</b>\n• <code>промо код</code> — активировать промокод\n\n💰 <b>Экономика:</b>\n• <code>карман</code> — твой баланс\n• <code>карман @user</code> — баланс другого\n• <code>перевод @user сумма</code> — перевести\n• <code>перевод сумма</code> (ответом) — быстрый перевод\n• <code>топ</code> — топ-10 богачей\n• <code>магазин</code> — магазин\n\n🎲 <b>Игры:</b>\n• <code>кубы @user ставка</code> — дуэль в кости\n• <code>кубы ставка</code> (ответом) — быстрый вызов\n\n💗 <b>Отношения:</b>\n• <code>+любовь @user</code> — предложить отношения\n• <code>все рп</code> — список всех РП-команд\n• <code>поцеловать</code>, <code>обнять</code>, <code>погладить</code>… — РП-команды (+10 Love паре)\n• <code>отн инфа</code> — с кем, сколько дней, уровень и Love (только своё)\n• <code>топ отношений</code> — все пары и их Love (одиночки не показываются)\n• <code>-отн</code> — разорвать отношения (у обоих сгорает статус и Love)\n• одному РП-команда даёт +10 Unlove — награды только тебе\n\n• <code>тег</code> — проверка бота\n• <code>помощь</code> — эта справка")
     await message.answer(text, parse_mode="HTML")
 
 

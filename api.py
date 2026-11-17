@@ -16,8 +16,9 @@ from shop_catalog import SHOP_ITEMS, ShopPurchaseError, is_admin_id, parse_inven
     serialize_shop_items, missing_stock_rows, shop_stock_snapshot, stock_diagnostics, \
     sold_out_items, STOCK_LIMITS_ENABLED
 from love import (LOVE_ACTION_BONUS, LOVE_ACTION_COOLDOWN, LOVE_ICE_COST,
-                  RP_ACTIONS, claim_stage_rewards, public_stage as love_public_stage,
-                  public_stages as love_public_stages)
+                  RP_ACTIONS, SOLO_CURRENCY, claim_solo_stage_rewards,
+                  claim_stage_rewards, public_stage as love_public_stage,
+                  public_stages as love_public_stages, solo_state as love_solo_state)
 
 load_dotenv()
 
@@ -83,7 +84,7 @@ async def _http_json(url, method: str = "GET", params=None, payload=None, timeou
 
 # Номер сборки: по нему из /api/health видно, что на сервисе НЕ старый код.
 # Если после деплоя здесь прежнее значение — Render ещё не перезапустился.
-API_BUILD = "2026-11-21-arena-love-17"
+API_BUILD = "2026-11-22-solo-love-18"
 
 # Момент старта процесса. По нему видно, что сервис только что «проснулся»:
 # Render на бесплатном тарифе усыпляет Web Service через 15 минут без входящих
@@ -391,9 +392,11 @@ REFERRAL_REWARD_PREMIUM = 2000      # premium с рейтингом и 1+ NFT
 REFERRAL_NFT_ITEMS = {"galactic", "diamond"}
 
 # ==================== TELEGRAM STARS (донат) ====================
-# Заглушка прайса: цены согласуем позже. Пока пакеты описаны здесь, а покупка
-# включается переменной окружения STARS_ENABLED=1.
-STARS_ENABLED = _env_flag("STARS_ENABLED", False)
+# Пакеты коинов за Telegram Stars. Покупка ВКЛЮЧЕНА по умолчанию: кнопка «+»
+# у баланса раньше показывала «Пополнение скоро!» и не начисляла ничего.
+# Звёзды не требуют платёжного провайдера (currency = XTR), поэтому счёт
+# создаётся сразу. Выключить можно переменной окружения STARS_ENABLED=0.
+STARS_ENABLED = _env_flag("STARS_ENABLED", True)
 STARS_PACKAGES = [
     {"id": "coins_1000", "coins": 1000, "stars": 5},
     {"id": "coins_5000", "coins": 5000, "stars": 20},
@@ -905,8 +908,10 @@ def _upgrade_economy_config() -> dict:
         "mult_max": UPGRADE_MAX_MULTIPLIER,
         "item_prices": UPGRADE_ITEM_PRICES,
         "sources": list(UPGRADE_SOURCES),
-        "house_edge": game_setting_float("upgrade_house_edge", UPGRADE_HOUSE_EDGE_FACTOR),
-        "chance_factor": game_setting_float("upgrade_chance_factor", 1.0),
+        # Шанс фиксирован: 90 / X. Никаких множителей из game_settings больше нет —
+        # то, что видит игрок в круге, и то, по чему играем, теперь одно число.
+        "house_edge": 1.0,
+        "chance_factor": 1.0,
         "admin_only": UPGRADE_ADMIN_ONLY,
     }
 
@@ -3414,13 +3419,11 @@ async def upgrade_action(data: UpgradeAction):
                 inventory.remove(source)
             new_coins = raw_coins
 
-        # ДОМ-ЭДЖ больше не зависит от баланса (он уже в таблице множителей).
-        # Значение из game_settings применяется ко ВСЕМ и уходит клиенту в
-        # /api/user, поэтому круг рисует ровно тот шанс, по которому играем.
-        edge = game_setting_float("upgrade_house_edge", UPGRADE_HOUSE_EDGE_FACTOR)
-        real_chance = visual_chance * edge
-        # Админ может подкрутить шансы без деплоя (таблица game_settings).
-        real_chance *= game_setting_float("upgrade_chance_factor", 1.0)
+        # Шанс = ровно 90 / X, без дом-эджа и без множителей из game_settings.
+        # Раньше их можно было подкрутить кнопкой «Шансы апгрейда» в админке:
+        # игрок видел один процент, а бросок шёл по другому. Теперь это одно
+        # число и на сервере, и в круге.
+        real_chance = visual_chance
         if not admin:
             real_chance /= UPGRADE_NON_ADMIN_DIVIDER
 
@@ -3479,7 +3482,7 @@ async def upgrade_action(data: UpgradeAction):
                 "chance": chance_verdict,
                 # Расчётный (рекламный) шанс без дом-эджа — только для диагностики.
                 "advertised_chance": round(visual_chance, 2),
-                "house_edge": edge,
+                "house_edge": 1.0,   # дом-эджа больше нет: шанс фиксирован 90/X
                 # Реальный шанс = то же число, что участвовало в сравнении.
                 # Клиент рисует сектор и ставит стрелку именно по нему,
                 # поэтому геометрия круга и вердикт не могут разойтись.
@@ -3816,13 +3819,24 @@ def _passive_rate_for(inventory) -> tuple[float, dict]:
     return round(rate, 4), breakdown
 
 
+# Резерв, если таблицы passive_income нет (миграция не применена): держим
+# отметку времени в памяти процесса. Раньше в этом случае игрок получал окно
+# «Примените миграцию» и не мог забрать пассивку вообще. С памятью доход
+# работает, а после перезапуска сервиса просто отсчитывается заново — начислить
+# лишнего так невозможно.
+_PASSIVE_MEMORY: dict = {}
+_PASSIVE_WARNED = {"once": False}
+
+
 def _passive_last_at(user_id):
-    """Момент последнего начисления. None — ещё не начисляли, 'error' — нет таблицы."""
+    """Момент последнего начисления. None — не начисляли, 'error' — нет таблицы."""
     try:
         res = (supabase.table(PASSIVE_INCOME_TABLE).select("last_at")
                .eq("user_id", int(user_id)).limit(1).execute())
     except Exception as exc:  # noqa: BLE001
-        logger.warning("passive_income недоступна: %s", exc)
+        if not _PASSIVE_WARNED["once"]:
+            logger.warning("passive_income недоступна (работаю на памяти): %s", exc)
+            _PASSIVE_WARNED["once"] = True
         return "error"
     if not res.data:
         return None
@@ -3830,13 +3844,18 @@ def _passive_last_at(user_id):
 
 
 def _passive_touch(user_id, stamp: float) -> bool:
+    # Память пишем всегда: если база недоступна, отметка всё равно не потеряется
+    # до перезапуска процесса.
+    _PASSIVE_MEMORY[int(user_id)] = float(stamp)
     try:
         supabase.table(PASSIVE_INCOME_TABLE).upsert(
             {"user_id": int(user_id), "last_at": _iso_from_timestamp(stamp)},
             on_conflict="user_id").execute()
         return True
     except Exception as exc:  # noqa: BLE001
-        logger.warning("Не удалось сохранить passive_income %s: %s", user_id, exc)
+        if not _PASSIVE_WARNED["once"]:
+            logger.warning("Не удалось сохранить passive_income %s: %s", user_id, exc)
+            _PASSIVE_WARNED["once"] = True
         return False
 
 
@@ -3861,14 +3880,15 @@ async def passive_income(data: PassiveIncomeRequest):
     now = time.time()
 
     last = _passive_last_at(uid)
-    if last == "error":
-        raise HTTPException(status_code=503, detail=(
-            "Таблица passive_income не создана. Примените миграцию "
-            "supabase/migrations/20261109000000_economy_social.sql"))
+    degraded = last == "error"
+    if degraded:
+        # Таблицы нет — считаем по отметке в памяти, а не показываем ошибку.
+        last = _PASSIVE_MEMORY.get(int(uid))
     if last is None:
         _passive_touch(uid, now)
         return {"ok": True, "accrued": 0, "rate": rate, "hours": 0.0,
                 "breakdown": breakdown, "new_balance": _safe_int(row.get("coins"), 0),
+                "degraded": degraded,
                 "detail": "Пассивный доход запущен — заходите позже"}
 
     hours = max(0.0, min(PASSIVE_INCOME_MAX_HOURS, (now - float(last)) / 3600.0))
@@ -3878,7 +3898,7 @@ async def passive_income(data: PassiveIncomeRequest):
     if accrued < 1 or rate <= 0:
         return {"ok": True, "accrued": 0, "rate": rate, "hours": round(hours, 3),
                 "entitled": round(entitled, 3), "breakdown": breakdown,
-                "new_balance": coins_now,
+                "new_balance": coins_now, "degraded": degraded,
                 "detail": "Накопление идёт" if rate > 0 else "Нет капсул для пассивного дохода"}
 
     new_coins = award_coins(uid, accrued)
@@ -3888,7 +3908,7 @@ async def passive_income(data: PassiveIncomeRequest):
     consumed_hours = accrued / rate
     _passive_touch(uid, min(now, float(last) + consumed_hours * 3600.0))
     return {"ok": True, "accrued": accrued, "rate": rate, "hours": round(hours, 3),
-            "breakdown": breakdown, "new_balance": new_coins,
+            "breakdown": breakdown, "new_balance": new_coins, "degraded": degraded,
             "detail": f"+{accrued} коинов пассивного дохода"}
 
 
@@ -4112,8 +4132,10 @@ async def admin_settings(data: UserAuth):
         "ok": True,
         "settings": values,
         "effective": {
-            "upgrade_chance_factor": game_setting_float("upgrade_chance_factor", 1.0),
-            "upgrade_house_edge": game_setting_float("upgrade_house_edge", UPGRADE_HOUSE_EDGE_FACTOR),
+            # Апгрейд не настраивается: 90 / X — жёстко. Поля оставлены, чтобы
+            # старый клиент/админка не падали.
+            "upgrade_chance_factor": 1.0,
+            "upgrade_house_edge": 1.0,
             "crash_house_edge": game_setting_float("crash_house_edge", 1.0),
         },
         "admin_only_app": ADMIN_ONLY_APP,
@@ -4238,19 +4260,42 @@ def _love_partner_name(partner_id):
     return str(row.get("username") or f"id{partner_id}")
 
 
+def _love_solo_for(user_id) -> dict:
+    """Одиночная ветка (Unlove): счёт и уровень без наград."""
+    try:
+        raw = love_solo_state(supabase, user_id) or {}
+    except Exception:
+        raw = {}
+    score = _safe_int(raw.get("love"), 0)
+    level = love_public_stage(score)
+    return {
+        "solo": True,
+        "unlove": score,
+        "solo_currency": SOLO_CURRENCY,
+        "solo_level": level["level"],
+        "solo_title": level["title"],
+        "solo_progress": level["progress"],
+        "solo_days": _love_days({"created_at": raw.get("created_at")}),
+    }
+
+
 def love_state_for(user_id) -> dict:
     """Состояние отношений: партнёр, Love коины и текущий уровень.
 
-    Задача 29: этапы и награды за них — СЕКРЕТНАЯ механика. Клиенту уходят
-    только уровень, Love и прогресс: никаких сумм наград и «следующего этапа»,
-    иначе игроки считают таблицу выплат вместо того, чтобы играть.
+    Этапы и награды за них — СЕКРЕТНАЯ механика. Клиенту уходят только уровень,
+    Love и прогресс: никаких сумм наград и «следующего этапа», иначе игроки
+    считают таблицу выплат вместо того, чтобы играть.
+
+    Задача 30: если пары нет, отдаём одиночную ветку (Unlove) — она копится у
+    одного человека и сгорает при вступлении в отношения.
     """
     row = _love_relationship_for(user_id)
     if not row:
         return {"ok": True, "in_relationship": False, "available": True,
                 "stages": love_public_stages(), "action_bonus": LOVE_ACTION_BONUS,
                 "cooldown_hours": round(LOVE_ACTION_COOLDOWN / 3600, 1),
-                "ice_cost": LOVE_ICE_COST, "rpc_actions": list(RP_ACTIONS)}
+                "ice_cost": LOVE_ICE_COST, "rpc_actions": list(RP_ACTIONS),
+                **_love_solo_for(user_id)}
     score = _safe_int(row.get("love"), 0)
     partner_id = _love_partner_id(row, user_id)
     level = love_public_stage(score)
@@ -4280,16 +4325,27 @@ async def love_state(data: UserAuth):
     """Плашка «В отношениях» и прогресс этапа для профиля Mini App."""
     uid = _auth_user_id(data.initData)
     state = love_state_for(uid)
-    if state.get("in_relationship"):
-        # Страховка: если пара перешагнула этап, а бот не успел начислить
-        # награду (например, действие пришло без интернета), наградим здесь.
-        row = _love_relationship_for(uid)
-        if row:
-            granted = claim_stage_rewards(supabase, row)
-            # Награда начислена, но её размер и название этапа клиенту не уходят:
-            # этапы — секретная механика (задача 29). Только флаг «стало теплее».
+    if not state.get("in_relationship"):
+        # Одиночка: страховка как у пар — если этап перешагнули, а бот не успел
+        # начислить (действие без интернета), награждаем здесь. Размер награды
+        # и название этапа наружу не уходят, только флаг «стало теплее».
+        score = _safe_int(state.get("unlove"), 0)
+        if score > 0:
+            try:
+                granted = claim_solo_stage_rewards(supabase, uid, score)
+            except Exception:
+                granted = []
             if granted:
                 state["stage_up"] = True
+        return state
+    # Пара: та же страховка через общую таблицу наград.
+    row = _love_relationship_for(uid)
+    if row:
+        granted = claim_stage_rewards(supabase, row)
+        # Награда начислена, но её размер и название этапа клиенту не уходят:
+        # этапы — секретная механика. Только флаг «стало теплее».
+        if granted:
+            state["stage_up"] = True
     return state
 
 @app.get("/api/global_top")

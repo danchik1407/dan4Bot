@@ -208,3 +208,105 @@ def claim_stage_rewards(supabase, relationship) -> list:
                 continue
         granted.append({"stage": stage["index"], "title": stage["title"], "reward": stage["reward"]})
     return granted
+
+
+# ==================== ОДИНОКИЕ (UNLOVE) ====================
+# Задача 30: если пары нет — игрок не «застревает», а качает свою ветку.
+# Экономика ровно та же (те же +10 за действие, тот же кулдаун, те же этапы и
+# те же награды), но:
+#   • валюта называется Unlove и принадлежит одному человеку;
+#   • награду за этап получает только этот один человек;
+#   • передать Love/Unlove другому нельзя — только заработать самим;
+#   • как только игрок вступает в отношения, вся его одиночная ветка сгорает
+#     (счёт обнуляется), а этапы, за которые награда уже выдана, остаются
+#     закрытыми — иначе награды можно было бы фармить «пара — развод — пара».
+SOLO_LOVE_TABLE = "solo_love"
+SOLO_REWARDS_TABLE = "solo_love_stage_rewards"
+SOLO_CURRENCY = "Unlove"
+
+
+def solo_state(supabase, user_id) -> dict:
+    """Счёт одиночки. Нет таблицы/строки — просто нули, а не падение."""
+    uid = _safe_int(user_id, 0)
+    if uid <= 0:
+        return {"love": 0, "created_at": None}
+    try:
+        res = (supabase.table(SOLO_LOVE_TABLE).select("love, created_at")
+               .eq("user_id", uid).limit(1).execute())
+    except Exception:
+        return {"love": 0, "created_at": None}
+    row = (res.data or [None])[0]
+    if not row:
+        return {"love": 0, "created_at": None}
+    return {"love": _safe_int(row.get("love"), 0), "created_at": row.get("created_at")}
+
+
+def add_solo_love(supabase, user_id, amount: int) -> tuple:
+    """+Unlove одиночке. Возвращает (новый счёт, выданные награды)."""
+    uid = _safe_int(user_id, 0)
+    if uid <= 0:
+        return 0, []
+    current = solo_state(supabase, uid)["love"]
+    new_score = current + int(amount)
+    try:
+        supabase.table(SOLO_LOVE_TABLE).upsert(
+            {"user_id": uid, "love": new_score}, on_conflict="user_id").execute()
+    except Exception:
+        # Таблицы нет (миграция не применена) — считаем, что начислять некуда.
+        return new_score, []
+    return new_score, claim_solo_stage_rewards(supabase, uid, new_score)
+
+
+def reset_solo_love(supabase, user_id) -> bool:
+    """Вступление в отношения: одиночный счёт сгорает.
+
+    Таблицу выданных наград НЕ трогаем: она защищает от повторного получения
+    тех же этапов после «пара → развод → снова один».
+    """
+    uid = _safe_int(user_id, 0)
+    if uid <= 0:
+        return False
+    try:
+        supabase.table(SOLO_LOVE_TABLE).delete().eq("user_id", uid).execute()
+        return True
+    except Exception:
+        return False
+
+
+def solo_paid_stages(supabase, user_id) -> set:
+    try:
+        res = (supabase.table(SOLO_REWARDS_TABLE).select("stage")
+               .eq("user_id", int(user_id)).execute())
+    except Exception:
+        return set()
+    return {_safe_int(row.get("stage"), -1) for row in (res.data or [])}
+
+
+def claim_solo_stage_rewards(supabase, user_id, score) -> list:
+    """Награды за этапы одиночке: один человек, один раз на этап."""
+    uid = _safe_int(user_id, 0)
+    if uid <= 0:
+        return []
+    current_index = stage_index(score)
+    already = solo_paid_stages(supabase, uid)
+    granted = []
+    for stage in LOVE_STAGES:
+        if stage["index"] > current_index or stage["index"] in already:
+            continue
+        # Отметку — ДО начисления: гонка двух действий не выдаст награду дважды.
+        try:
+            supabase.table(SOLO_REWARDS_TABLE).insert({
+                "user_id": uid, "stage": stage["index"],
+            }).execute()
+        except Exception:
+            continue
+        try:
+            res = supabase.table("users").select("coins").eq("user_id", uid).execute()
+            if res.data:
+                coins = _safe_int(res.data[0].get("coins"), 0) + int(stage["reward"])
+                supabase.table("users").update({"coins": coins}).eq("user_id", uid).execute()
+        except Exception:
+            pass
+        granted.append({"stage": stage["index"], "title": stage["title"],
+                        "reward": stage["reward"]})
+    return granted
