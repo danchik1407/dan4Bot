@@ -9,7 +9,7 @@
     <meta http-equiv="Pragma" content="no-cache">
     <meta http-equiv="Expires" content="0">
     <title>AURA GAME</title>
-    <link rel="stylesheet" href="style.css?v=aura-31">
+    <link rel="stylesheet" href="style.css?v=aura-32">
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
 </head>
 <body>
@@ -41,7 +41,7 @@
         <span class="sub-banner-icon" aria-hidden="true">📢</span>
         <span class="sub-banner-text">
             <span class="sub-banner-title">Подписаться на канал</span>
-            <span class="sub-banner-sub">Все анонсы и обновления здесь</span>
+            <span class="sub-banner-sub">Задание придёт в личку бота</span>
             <span class="sub-banner-reward" id="sub-banner-reward">🎁 Награда за подписку: 200 коинов</span>
         </span>
         <span class="sub-banner-arrow" aria-hidden="true">›</span>
@@ -212,7 +212,7 @@
                 <div class="profile-extra" id="referral-card">
                     <div class="extra-head">
                         <span class="extra-title">👥 Рефералы</span>
-                        <span class="extra-value" id="ref-earned">0 🪙</span>
+                        <span class="extra-value" id="ref-earned">0 <img class="coin-img" src="coin.png" alt="AG"></span>
                     </div>
                     <div class="extra-hint">Приглашено: <b id="ref-count">0</b> · за друга дают от 500 до 2 000 коинов</div>
                     <div class="ref-link-row">
@@ -317,8 +317,8 @@
                 <!-- Командный режим: отдельные кнопки. Вторую блокируем, если
                      ставка уже сделана за противоположную команду. -->
                 <div class="arena-team-buttons" id="arena-team-buttons" hidden>
-                    <button class="team-btn team-red" id="team-red-btn" onclick="placeHockeyBet('red')">🔴 За красных</button>
                     <button class="team-btn team-blue" id="team-blue-btn" onclick="placeHockeyBet('blue')">🔵 За синих</button>
+                    <button class="team-btn team-red" id="team-red-btn" onclick="placeHockeyBet('red')">🔴 За красных</button>
                 </div>
             </div>
             <!-- Задача 32: в командной арене участники — не одна лента, а две
@@ -358,7 +358,7 @@
                     <!-- Чёткий заголовок под предметом: игрок должен сразу видеть,
                          откуда берётся ставка (задача 25). -->
                     <div class="up-slot">
-                        <div class="up-slot-icon" id="up-from-icon">💰</div>
+                        <div class="up-slot-icon" id="up-from-icon"><img class="coin-img" src="coin.png" alt="AG"></div>
                         <div class="up-slot-name" id="up-from-name">Коины</div>
                         <div class="up-slot-value" id="up-from-value">100 <img class="coin-img" src="coin.png" alt="монета"></div>
                     </div>
@@ -530,6 +530,6 @@
         <div class="nav-item" onclick="switchTab('profile', this)"><span class="nav-icon">👤</span> Профиль</div>
     </nav>
 
-    <script src="app.js?v=aura-31" defer></script>
+    <script src="app.js?v=aura-32" defer></script>
 </body>
 </html>

@@ -321,6 +321,134 @@ async def cmd_admin_help(message: Message):
     await message.answer(text, parse_mode="HTML")
 
 
+# ================= ЗАДАНИЕ: ПОДПИСКА НА КАНАЛ =================
+# Задача 35: задание выполняется в личке бота. Mini App только открывает канал и
+# просит сервер прислать сюда сообщение с кнопкой «Проверить подписку» — бонус
+# начисляется по этой кнопке, а задание после этого из аппки исчезает навсегда.
+CHANNEL_USERNAME = (os.getenv("CHANNEL_USERNAME") or "Auragameplay_Channel").strip().lstrip("@")
+CHANNEL_URL = f"https://t.me/{CHANNEL_USERNAME}"
+try:
+    SUBSCRIPTION_BONUS = int(os.getenv("SUBSCRIPTION_BONUS") or 200)
+except ValueError:
+    SUBSCRIPTION_BONUS = 200
+SUBSCRIPTIONS_TABLE = "subscriptions_history"
+
+
+def _sub_claimed_sync(user_id) -> bool:
+    try:
+        res = (supabase.table(SUBSCRIPTIONS_TABLE).select("user_id")
+               .eq("user_id", int(user_id)).limit(1).execute())
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"subscriptions_history недоступна: {e}")
+        return False
+    return bool(res.data)
+
+
+def _sub_claim_and_award_sync(user_id, bonus: int):
+    """Отметка «бонус получен» + начисление. (new_balance, error)."""
+    uid = int(user_id)
+    try:
+        from datetime import datetime, timezone
+        row = {"user_id": uid, "bonus_claimed": True, "reward": int(bonus),
+               "created_at": datetime.now(timezone.utc).isoformat()}
+        try:
+            supabase.table(SUBSCRIPTIONS_TABLE).insert(row).execute()
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"Подписка: вставка с created_at не прошла ({e}), повторяю без неё")
+            row.pop("created_at", None)
+            supabase.table(SUBSCRIPTIONS_TABLE).insert(row).execute()
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"Не удалось зафиксировать бонус за подписку: {e}")
+        # Если строка уже есть — бонус просто был получен раньше.
+        if _sub_claimed_sync(uid):
+            return None, "claimed"
+        return None, str(e)
+
+    try:
+        res = supabase.table("users").select("coins").eq("user_id", uid).execute()
+        if not res.data:
+            username = f"id{uid}"
+            supabase.table("users").insert({"user_id": uid, "coins": 0, "username": username}).execute()
+            coins = 0
+        else:
+            coins = int(res.data[0].get("coins") or 0)
+        new_coins = coins + int(bonus)
+        supabase.table("users").update({"coins": new_coins}).eq("user_id", uid).execute()
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"Не удалось начислить бонус за подписку: {e}")
+        try:
+            supabase.table(SUBSCRIPTIONS_TABLE).delete().eq("user_id", uid).execute()
+        except Exception:
+            pass
+        return None, str(e)
+    return new_coins, ""
+
+
+def _sub_status_text(user_id) -> str:
+    return (f"🎁 <b>Бонус за подписку получен!</b>\n\n"
+            f"Начислено: <b>+{SUBSCRIPTION_BONUS} коинов</b>\n\n"
+            f"Задание выполнено — в приложении оно больше не появится.")
+
+
+async def _chat_member_subscribed(user_id):
+    """(subscribed, check_failed) — подписан ли игрок на канал."""
+    try:
+        member = await bot.get_chat_member(chat_id=f"@{CHANNEL_USERNAME}", user_id=int(user_id))
+        status = getattr(member, "status", None)
+        raw = getattr(status, "value", status)
+        return (str(raw) in ("creator", "administrator", "member")), False
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"getChatMember не сработал: {e}")
+        return False, True
+
+
+@dp.callback_query(F.data.startswith("sub_check|"))
+async def cb_sub_check(callback: CallbackQuery):
+    """Кнопка «Проверить подписку» в личке бота."""
+    target = (callback.data or "").split("|", 1)[1] if "|" in (callback.data or "") else ""
+    if str(callback.from_user.id) != str(target):
+        return await callback.answer("Это не твоё задание", show_alert=True)
+    uid = int(callback.from_user.id)
+
+    if await asyncio.to_thread(_sub_claimed_sync, uid):
+        try:
+            await callback.message.edit_text(_sub_status_text(uid), reply_markup=None)
+        except Exception:
+            pass
+        return await callback.answer("Бонус уже получен — второй раз он не начисляется.", show_alert=True)
+
+    subscribed, check_failed = await _chat_member_subscribed(uid)
+    if not subscribed and not check_failed:
+        return await callback.answer("Вы ещё не подписаны на канал. Подпишитесь и нажмите кнопку снова.",
+                                     show_alert=True)
+
+    new_balance, error = await asyncio.to_thread(_sub_claim_and_award_sync, uid, SUBSCRIPTION_BONUS)
+    if error == "claimed":
+        try:
+            await callback.message.edit_text(_sub_status_text(uid), reply_markup=None)
+        except Exception:
+            pass
+        return await callback.answer("Бонус уже получен.", show_alert=True)
+    if error:
+        return await callback.answer("Не удалось начислить бонус. Попробуйте ещё раз чуть позже.",
+                                     show_alert=True)
+
+    text = _sub_status_text(uid)
+    if new_balance is not None:
+        text = (f"🎁 <b>Бонус за подписку получен!</b>\n\n"
+                f"Начислено: <b>+{SUBSCRIPTION_BONUS} коинов</b>\n"
+                f"Баланс: <b>{new_balance}</b>\n\n"
+                f"Задание выполнено — в приложении оно больше не появится.")
+    try:
+        await callback.message.edit_text(text, reply_markup=None)
+    except Exception:
+        try:
+            await callback.message.answer(text, parse_mode="HTML")
+        except Exception:
+            pass
+    await callback.answer(f"✅ +{SUBSCRIPTION_BONUS} коинов зачислено!")
+
+
 # ================= КУЛДАУН НАГРАДЫ ЗА РП (секретная админ-команда) =================
 # Задача 34: кулдаун награды за РП временно выключен, чтобы можно было за один
 # вечер поднять уровень и проверить награды. Команда в общую справку не входит.
