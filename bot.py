@@ -20,14 +20,18 @@ from supabase import create_client, Client
 from love import (
     LOVE_ACTION_BONUS,
     LOVE_ACTION_COOLDOWN,
+    LOVE_ACTION_COOLDOWN_DEFAULT,
     LOVE_ICE_COST,
     RP_ACTIONS,
     SOLO_CURRENCY,
     add_solo_love,
     claim_stage_rewards,
+    format_love_cooldown,
+    love_cooldown_seconds,
     public_stage,
     reset_solo_love,
     rp_action_for,
+    set_love_cooldown_seconds,
     solo_state,
 )
 from db_schema import audit as db_schema_audit, format_report as db_schema_report
@@ -303,6 +307,10 @@ async def cmd_admin_help(message: Message):
         "• <code>all Текст</code> — пингануть всех в чате\n"
         "• <code>админы</code> — пингануть админов чата\n"
         "• <code>стоп</code> — остановить созыв\n\n"
+        "💗 <b>Отношения:</b>\n"
+        "• <code>кд</code> — показать текущий кулдаун награды за РП\n"
+        "• <code>кд 5ч</code> / <code>кд 30м</code> / <code>кд 3600</code> — поставить кулдаун\n"
+        "• <code>кд 0</code> — выключить кулдаун совсем\n\n"
         "📊 <b>Статистика:</b>\n"
         "• <code>стата бота</code> — общая статистика (работает только в ЛС)\n"
         "• <code>бд</code> — проверка схемы базы: каких миграций не хватает\n\n"
@@ -311,6 +319,119 @@ async def cmd_admin_help(message: Message):
         "💡 <i>Совет: писать команды лучше в ЛС с ботом, чтобы не спалить промокоды.</i>"
     )
     await message.answer(text, parse_mode="HTML")
+
+
+# ================= КУЛДАУН НАГРАДЫ ЗА РП (секретная админ-команда) =================
+# Задача 34: кулдаун награды за РП временно выключен, чтобы можно было за один
+# вечер поднять уровень и проверить награды. Команда в общую справку не входит.
+#   кд            — показать текущее значение
+#   кд 0          — выключить (награда за каждое действие)
+#   кд 5ч / 30м / 3600 / 2д — поставить кулдаун
+LOVE_COOLDOWN_SETTING_KEY = "love_cooldown_seconds"
+_COOLDOWN_LOADED = {"done": False}
+
+
+def _cooldown_load_sync():
+    """Прочитать сохранённый кулдаун из game_settings (None — не задан)."""
+    try:
+        res = (supabase.table("game_settings").select("value")
+               .eq("key", LOVE_COOLDOWN_SETTING_KEY).limit(1).execute())
+    except Exception as e:  # noqa: BLE001
+        logger.debug(f"game_settings недоступна для кулдауна: {e}")
+        return None
+    if not res.data:
+        return None
+    try:
+        return max(0, int(float(res.data[0].get("value"))))
+    except (TypeError, ValueError):
+        return None
+
+
+def _cooldown_save_sync(seconds: int):
+    try:
+        supabase.table("game_settings").upsert(
+            {"key": LOVE_COOLDOWN_SETTING_KEY, "value": str(int(seconds))},
+            on_conflict="key").execute()
+        return True
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"Не удалось сохранить кулдаун в game_settings: {e}")
+        return False
+
+
+async def ensure_love_cooldown_loaded():
+    """Один раз за запуск подтягиваем значение из базы (после рестарта)."""
+    if _COOLDOWN_LOADED["done"]:
+        return love_cooldown_seconds()
+    _COOLDOWN_LOADED["done"] = True
+    stored = await asyncio.to_thread(_cooldown_load_sync)
+    if stored is not None:
+        set_love_cooldown_seconds(stored)
+    return love_cooldown_seconds()
+
+
+def parse_cooldown_text(raw: str):
+    """«5ч», «30м», «3600», «2д», «выкл» → секунды. None — не разобрали."""
+    text = (raw or "").strip().lower().replace("ё", "е").replace(",", ".")
+    if not text:
+        return None
+    if text in ("выкл", "off", "нет", "0", "без", "без кулдауна", "none"):
+        return 0
+    text = text.replace(" ", "")
+    # Длинные суффиксы — первыми: иначе «1час» поймается коротким «с».
+    units = (
+        ("секунд", 1), ("сек", 1),
+        ("минут", 60), ("мин", 60),
+        ("часов", 3600), ("час", 3600), ("ч", 3600), ("h", 3600),
+        ("дней", 86400), ("дня", 86400), ("день", 86400), ("д", 86400), ("d", 86400),
+        ("с", 1), ("м", 60),
+    )
+    for suffix, factor in units:
+        if text.endswith(suffix):
+            number = text[: len(text) - len(suffix)].strip()
+            try:
+                return max(0, int(round(float(number) * factor)))
+            except (TypeError, ValueError):
+                return None
+    try:
+        return max(0, int(float(text)))
+    except (TypeError, ValueError):
+        return None
+
+
+@dp.message(F.text.func(lambda t: strip_prefix(t).lower().replace("ё", "е").split(" ")[0] in
+                        ("кд", "кулдаун", "cooldown")))
+async def cmd_love_cooldown(message: Message):
+    """Секретная админ-команда: посмотреть/поменять кулдаун награды за РП."""
+    if not message.from_user or not is_admin(message.from_user.id):
+        return      # не админ — молчим, команда скрытая
+    parts = strip_prefix(message.text or "").split()
+    if len(parts) < 2:
+        current = await ensure_love_cooldown_loaded()
+        default_text = format_love_cooldown(LOVE_ACTION_COOLDOWN_DEFAULT)
+        return await message.answer(
+            f"⏳ <b>Кулдаун награды за РП:</b> {format_love_cooldown(current)}\n\n"
+            f"Поставить: <code>кд 5ч</code>, <code>кд 30м</code>, <code>кд 3600</code>, "
+            f"<code>кд 2д</code>.\nВыключить: <code>кд 0</code> "
+            f"(задумано было {default_text}).",
+            parse_mode="HTML")
+
+    raw = " ".join(parts[1:])
+    seconds = parse_cooldown_text(raw)
+    if seconds is None:
+        return await message.answer(
+            "❌ Не понял значение. Примеры: <code>кд 0</code>, <code>кд 30м</code>, "
+            "<code>кд 5ч</code>, <code>кд 3600</code>.", parse_mode="HTML")
+
+    applied = set_love_cooldown_seconds(seconds)
+    saved = await asyncio.to_thread(_cooldown_save_sync, applied)
+    note = "" if saved else "\n<i>⚠️ В базу не сохранилось — после рестарта сбросится.</i>"
+    if applied <= 0:
+        text = ("✅ Кулдаун выключен: награда за РП начисляется за каждое действие.\n"
+                "Вернуть: <code>кд 5ч</code>.")
+    else:
+        text = (f"✅ Кулдаун награды за РП: <b>{format_love_cooldown(applied)}</b> "
+                f"({applied} сек).\nВыключить: <code>кд 0</code>.")
+    await message.answer(text + note, parse_mode="HTML")
 
 
 # ================= БАНЫ =================
@@ -1846,8 +1967,13 @@ async def cmd_rp_list(message: Message):
         meta = RP_ACTIONS[key]
         lines.append(f"{meta['emoji']} <code>{key}</code> — {meta['text']}")
     lines.append("")
-    lines.append(f"💗 За РП-действие пара получает +{LOVE_ACTION_BONUS} Love "
-                 f"(бонус не чаще, чем раз в {LOVE_ACTION_COOLDOWN // 3600} ч).")
+    cooldown_text = format_love_cooldown()
+    if cooldown_text == "без ограничения":
+        lines.append(f"💗 За РП-действие пара получает +{LOVE_ACTION_BONUS} Love "
+                     f"(сейчас бонус без ограничения по времени).")
+    else:
+        lines.append(f"💗 За РП-действие пара получает +{LOVE_ACTION_BONUS} Love "
+                     f"(бонус не чаще, чем раз в {cooldown_text}).")
     lines.append(f"💔 Без пары то же действие даёт +{LOVE_ACTION_BONUS} {SOLO_CURRENCY} "
                  f"— и только тому, кто пишет: передать Love другому нельзя.")
     lines.append("💞 Своя пара: <code>отн инфа</code> · все пары: <code>топ отношений</code>")
@@ -1871,7 +1997,10 @@ async def love_cooldown_left(user_id) -> int:
         stamp = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
         if stamp.tzinfo is None:
             stamp = stamp.replace(tzinfo=timezone.utc)
-        left = LOVE_ACTION_COOLDOWN - (time.time() - stamp.timestamp())
+        cooldown = love_cooldown_seconds()
+        if cooldown <= 0:
+            return 0            # кулдаун временно выключен (задача 34)
+        left = cooldown - (time.time() - stamp.timestamp())
         return max(0, int(left))
     except Exception:
         return 0
@@ -2799,6 +2928,11 @@ async def main():
     # и игрок вместо игры видит экран «SERVICE WAKING UP».
     # 1) по активности — любое действие в боте будит API (включено всегда);
     # 2) по таймеру — только если включили KEEPWARM=1 (тратит часы Render).
+    try:
+        await ensure_love_cooldown_loaded()
+        logger.info(f"⏳ Кулдаун награды за РП: {format_love_cooldown()}")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"Кулдаун РП не загрузился: {exc}")
     dp.update.outer_middleware(WarmApiMiddleware())
     asyncio.create_task(keep_api_warm())
     await dp.start_polling(bot)

@@ -15,7 +15,8 @@ from db_schema import audit as db_schema_audit
 from shop_catalog import SHOP_ITEMS, ShopPurchaseError, is_admin_id, parse_inventory, purchase_shop_item, \
     serialize_shop_items, missing_stock_rows, shop_stock_snapshot, stock_diagnostics, \
     sold_out_items, STOCK_LIMITS_ENABLED
-from love import (LOVE_ACTION_BONUS, LOVE_ACTION_COOLDOWN, LOVE_ICE_COST,
+from love import (LOVE_ACTION_BONUS, LOVE_ICE_COST,
+                  love_cooldown_seconds,
                   RP_ACTIONS, SOLO_CURRENCY, claim_solo_stage_rewards,
                   claim_stage_rewards, public_stage as love_public_stage,
                   public_stages as love_public_stages, solo_state as love_solo_state)
@@ -84,7 +85,7 @@ async def _http_json(url, method: str = "GET", params=None, payload=None, timeou
 
 # Номер сборки: по нему из /api/health видно, что на сервисе НЕ старый код.
 # Если после деплоя здесь прежнее значение — Render ещё не перезапустился.
-API_BUILD = "2026-11-25-love-fix-21"
+API_BUILD = "2026-11-26-arena-smooth-22"
 
 # Момент старта процесса. По нему видно, что сервис только что «проснулся»:
 # Render на бесплатном тарифе усыпляет Web Service через 15 минут без входящих
@@ -1250,7 +1251,12 @@ history = []
 
 HOCKEY_ROLL_DURATION = 9.0
 HOCKEY_WAIT_DURATION = 15.0
-HOCKEY_ROUND_PERIOD = HOCKEY_WAIT_DURATION + HOCKEY_ROLL_DURATION + 5.0
+# Задача 34: после броска раунд висит в «finished» не 5, а 9 секунд. Стрелка в
+# командной арене тормозит ровно как в апгрейде (5 с), и только потом выезжает
+# плашка победителя — раньше новый раунд начинался раньше, чем заканчивался
+# финиш, и анимация обрывалась на середине.
+HOCKEY_FINISH_HOLD = 9.0
+HOCKEY_ROUND_PERIOD = HOCKEY_WAIT_DURATION + HOCKEY_ROLL_DURATION + HOCKEY_FINISH_HOLD
 HOCKEY_SIMULATION_STEP = 0.05
 HOCKEY_SPEED_EASE_POWER = 1.7   # чем больше — тем резвее старт и мягче финиш
 
@@ -1870,7 +1876,7 @@ async def get_hockey_state():
             _payout_hockey_winner()
         elif not game_state["is_paid"] and not game_state.get("payouts"):
             game_state["is_paid"] = True      # некому платить — раунд закрыт
-        if now - game_state["last_update"] > 5 and game_state["is_paid"]:
+        if now - game_state["last_update"] > HOCKEY_FINISH_HOLD and game_state["is_paid"]:
             game_state = _new_arena_state()
             game_state["last_update"] = now
             game_state["last_bot_added"] = now
@@ -4552,6 +4558,31 @@ def _love_solo_for(user_id) -> dict:
     }
 
 
+# Кулдаун награды за РП живёт в game_settings (его меняет админ-команда «кд» в
+# боте). Читаем с кешем на минуту: значение меняется редко, а любовь открывают
+# часто. Если база недоступна — берём значение из модуля love (там же дефолт).
+_LOVE_COOLDOWN_CACHE = {"value": None, "at": 0.0}
+
+
+def _love_cooldown_seconds() -> int:
+    cached = _LOVE_COOLDOWN_CACHE.get("value")
+    now = time.time()
+    if cached is not None and now - float(_LOVE_COOLDOWN_CACHE.get("at") or 0) < 60:
+        return int(cached)
+    seconds = None
+    try:
+        res = (supabase.table("game_settings").select("value")
+               .eq("key", "love_cooldown_seconds").limit(1).execute())
+        if res.data:
+            seconds = max(0, int(float(res.data[0].get("value"))))
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("game_settings недоступна для кулдауна РП: %s", exc)
+    if seconds is None:
+        seconds = love_cooldown_seconds()
+    _LOVE_COOLDOWN_CACHE.update({"value": seconds, "at": now})
+    return seconds
+
+
 def love_state_for(user_id) -> dict:
     """Состояние отношений: партнёр, Love коины и текущий уровень.
 
@@ -4566,7 +4597,9 @@ def love_state_for(user_id) -> dict:
     if not row:
         return {"ok": True, "in_relationship": False, "available": True,
                 "stages": love_public_stages(), "action_bonus": LOVE_ACTION_BONUS,
-                "cooldown_hours": round(LOVE_ACTION_COOLDOWN / 3600, 1),
+                # 0 — кулдаун выключен (сейчас так и есть, см. love.py).
+                "cooldown_hours": round(_love_cooldown_seconds() / 3600, 1),
+                "cooldown_seconds": _love_cooldown_seconds(),
                 "ice_cost": LOVE_ICE_COST, "rpc_actions": list(RP_ACTIONS),
                 **_love_solo_for(user_id)}
     score = _safe_int(row.get("love"), 0)
@@ -4587,7 +4620,8 @@ def love_state_for(user_id) -> dict:
         "stage_title": level["title"],
         "progress": level["progress"],
         "action_bonus": LOVE_ACTION_BONUS,
-        "cooldown_hours": round(LOVE_ACTION_COOLDOWN / 3600, 1),
+        "cooldown_hours": round(_love_cooldown_seconds() / 3600, 1),
+        "cooldown_seconds": _love_cooldown_seconds(),
         "ice_cost": LOVE_ICE_COST,
         "rpc_actions": list(RP_ACTIONS),
     }
