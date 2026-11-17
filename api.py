@@ -6,7 +6,7 @@ from pydantic import BaseModel
 import asyncio
 import uuid
 import logging
-import os, hashlib, hmac, json, time, random, secrets, uvicorn, datetime, math, aiohttp
+import os, hashlib, hmac, json, time, random, secrets, uvicorn, datetime, math, urllib.request, urllib.parse
 from urllib.parse import parse_qsl
 from dotenv import load_dotenv
 from supabase import create_client, Client
@@ -19,6 +19,66 @@ from love import (LOVE_STAGES, LOVE_ACTION_BONUS, LOVE_ACTION_COOLDOWN, LOVE_ICE
                   next_stage as love_next_stage)
 
 load_dotenv()
+
+# ==================== HTTP-КЛИЕНТ ДЛЯ TELEGRAM ====================
+# aiohttp НЕ обязателен. Сервис aura-api на Render собирается командой
+# `pip install fastapi uvicorn supabase python-dotenv` (без requirements.txt),
+# и там aiohttp нет — из-за `import aiohttp` на верхнем уровне uvicorn падал
+# на старте с ModuleNotFoundError. Клиент выбирается в рантайме:
+# httpx (ставится вместе с supabase) → aiohttp (если всё-таки установлен) →
+# стандартный urllib в отдельном потоке.
+try:
+    import httpx as _httpx
+except Exception:  # pragma: no cover - зависит от сборки Render
+    _httpx = None
+try:
+    import aiohttp as _aiohttp
+except Exception:  # pragma: no cover - зависит от сборки Render
+    _aiohttp = None
+HTTP_CLIENT = "httpx" if _httpx is not None else ("aiohttp" if _aiohttp is not None else "urllib")
+
+
+async def _http_json(url, method: str = "GET", params=None, payload=None, timeout: float = 8.0):
+    """Запросить JSON у Telegram Bot API любым доступным клиентом.
+
+    Ошибки сети пробрасываются наружу: вызывающий код сам решает, отдать ли
+    игроку «попробуйте позже» (см. telegram_chat_member_status / stars_invoice).
+    """
+    limit = float(timeout or 8.0)
+    method = (method or "GET").upper()
+
+    if _httpx is not None:
+        async with _httpx.AsyncClient(timeout=limit) as client:
+            if method == "POST":
+                response = await client.post(url, json=payload)
+            else:
+                response = await client.get(url, params=params)
+            return response.json()
+
+    if _aiohttp is not None:
+        client_timeout = _aiohttp.ClientTimeout(total=limit)
+        async with _aiohttp.ClientSession(timeout=client_timeout) as session:
+            if method == "POST":
+                async with session.post(url, json=payload) as response:
+                    return await response.json(content_type=None)
+            async with session.get(url, params=params) as response:
+                return await response.json(content_type=None)
+
+    def _blocking():
+        if method == "POST":
+            body = json.dumps(payload or {}).encode("utf-8")
+            request = urllib.request.Request(url, data=body,
+                                             headers={"Content-Type": "application/json"})
+        else:
+            full = url
+            if params:
+                full = f"{url}?{urllib.parse.urlencode(params)}"
+            request = urllib.request.Request(full)
+        with urllib.request.urlopen(request, timeout=limit) as response:
+            return json.loads(response.read().decode("utf-8"))
+
+    return await asyncio.to_thread(_blocking)
+
 
 # Номер сборки: по нему из /api/health видно, что на сервисе НЕ старый код.
 # Если после деплоя здесь прежнее значение — Render ещё не перезапустился.
@@ -191,6 +251,9 @@ async def health():
         "status": "alive",
         "service": "aura-api",
         "build": API_BUILD,
+        # Какой HTTP-клиент достался сборке: httpx/aiohttp/urllib. Если тут
+        # urllib — на сервисе нет ни httpx, ни aiohttp (проверьте build command).
+        "http_client": HTTP_CLIENT,
         # Прогрев: по uptime видно, спал ли сервис (Render усыпляет free-инстанс
         # через 15 минут без запросов и показывает свой экран «SERVICE WAKING UP»).
         "awake": {
@@ -3422,10 +3485,7 @@ async def telegram_chat_member_status(user_id) -> dict:
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/getChatMember"
     params = {"chat_id": f"@{CHANNEL_USERNAME}", "user_id": int(user_id)}
     try:
-        timeout = aiohttp.ClientTimeout(total=8)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.get(url, params=params) as response:
-                payload = await response.json(content_type=None)
+        payload = await _http_json(url, params=params, timeout=8)
     except Exception as exc:  # noqa: BLE001
         logger.warning("getChatMember недоступен: %s", exc)
         return {"ok": False, "status": "", "subscribed": False,
@@ -3772,10 +3832,7 @@ async def stars_invoice(data: StarsInvoiceRequest):
         "prices": [{"label": f"{package['coins']} коинов", "amount": int(package["stars"])}],
     }
     try:
-        timeout = aiohttp.ClientTimeout(total=10)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.post(url, json=payload) as response:
-                result = await response.json(content_type=None)
+        result = await _http_json(url, method="POST", payload=payload, timeout=10)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=503, detail="Telegram недоступен, попробуйте позже") from exc
     if not isinstance(result, dict) or not result.get("ok"):

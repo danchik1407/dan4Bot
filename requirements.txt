@@ -4,3 +4,5 @@ aiohttp>=3.9.0
 supabase
 fastapi
 uvicorn
+# aura-api ставит httpx вместе с supabase; aiohttp нужен боту (aiogram).
+httpx>=0.26
