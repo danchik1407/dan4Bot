@@ -323,7 +323,10 @@ let hockeyInterval = null, hasShownWinner = false;
 let crashPollFailures = 0;
 // Круглая арена (задача 25): вместо квадратного поля и прыгающего мяча —
 // пирог из секторов и указатель, который крутится и плавно останавливается.
-let arenaPointer = { angle: 0, roundId: null, spinning: false };
+// Стрелка командной арены: angle — текущий угол (0..360), rafId — кадр
+// непрерывного вращения, landedRound — раунд, за который стрелка уже встала
+// на победителя (чтобы не «доезжать» повторно на каждом опросе).
+let arenaPointer = { angle: 0, roundId: null, landedRound: null, spinning: false, rafId: null };
 let arenaState = { mode: 'normal', sectors: [], teams: [], myTeam: null, players: [] };
 let hockeyServerOffsetMs = 0, hockeyClockSynced = false;
 
@@ -918,14 +921,16 @@ async function loadLoveState() {
         loveState = await apiPost('/api/love_state', {});
         renderLoveBadge();
         if (loveState && todayStageRewards(loveState)) {
-            tg.showAlert('💗 Вы дошли до нового этапа отношений — награда начислена обоим!');
+            // Этапы и награды — секретная механика: не раскрываем ни название,
+            // ни сумму, только мягко сообщаем, что стало теплее.
+            tg.showAlert('💗 Ваши отношения стали ещё крепче!');
             await loadUserData().catch(() => {});
         }
     } catch (e) { console.warn('love_state', e); }
 }
 
 function todayStageRewards(state) {
-    if (!state || !Array.isArray(state.stage_rewards) || !state.stage_rewards.length) return false;
+    if (!state || !state.stage_up) return false;
     if (state._shownRewards) return false;
     state._shownRewards = true;
     return true;
@@ -956,8 +961,9 @@ function renderLoveBadge() {
     if (partner) partner.textContent = loveState.partner_name || 'партнёр';
     if (stage) {
         const score = Number(loveState.love) || 0;
-        const title = loveState.stage ? ` · ${loveState.stage.title}` : '';
-        stage.textContent = `${title} · ${score} Love`;
+        const title = loveState.stage && loveState.stage.title ? ` · ${loveState.stage.title}` : '';
+        const days = Number(loveState.days) > 0 ? ` · ${loveState.days} дн.` : '';
+        stage.textContent = `${title}${days} · ${score} Love`;
     }
 }
 
@@ -1586,6 +1592,11 @@ function upgradeCanStart() {
 
 // Если капсул выбранного типа не осталось (например, после апгрейда) — уходим на коины.
 function ensureUpgradeSourceValid() {
+    // Пока идёт раунд, форма заморожена: ставка уже списана (и показана
+    // списанной), поэтому нельзя «уводить» источник на коины или уменьшать
+    // количество — подпись «Выигрыш» и круг разошлись бы с тем, что реально
+    // ушло на сервер. После раунда renderUpgrade всё поправит сам.
+    if (upgradeBusy) return;
     if (upgradeFrom === 'coin') {
         upgradeFromAmount = Math.min(UPGRADE_MAX_COINS, Math.max(upgradeFromAmount, UPGRADE_MIN_COINS));
         return;
@@ -2380,6 +2391,52 @@ function landUpgradeArrow(won, chance, duration, token, onDone, rollValue) {
     fallbackTimer = setTimeout(finish, total + 300);
 }
 
+// ================= СПИСАНИЕ СТАВКИ СРАЗУ =================
+// Задача 29: деньги должны уходить в момент ставки, а не после анимации.
+// Сервер списывает ставку ДО броска (upgrade_action), но клиент показывал
+// старый баланс все 3.4 секунды прокрутки — со стороны это выглядело так,
+// будто ставка не списалась. Показываем списание сразу, а итоговый баланс
+// всё равно приходит с сервера в applyUpgradeServerState.
+let upgradeStakePreview = null;
+
+function applyUpgradeStakePreview() {
+    const amount = Math.max(0, Math.round(Number(upgradeFromAmount) || 0));
+    if (!amount || upgradeStakePreview) return null;
+    const preview = { source: upgradeFrom, amount, inventory: null };
+    if (upgradeFrom === 'coin') {
+        // Без известного баланса «минусовать» нечего — ждём сервер.
+        if (!balanceKnown || balance < amount) return null;
+        preview.balanceBefore = balance;
+        balance -= amount;
+    } else {
+        let left = amount;
+        const next = [];
+        inventory.forEach(item => {
+            if (item === upgradeFrom && left > 0) { left -= 1; return; }
+            next.push(item);
+        });
+        if (left > 0) return null;             // столько капсул нет — сервер откажет
+        preview.inventoryBefore = inventory;
+        inventory = next;
+    }
+    upgradeStakePreview = preview;
+    updateUI();
+    return preview;
+}
+
+function restoreUpgradeStakePreview() {
+    const preview = upgradeStakePreview;
+    upgradeStakePreview = null;
+    if (!preview) return;
+    if (preview.source === 'coin' && Number.isFinite(preview.balanceBefore)) {
+        balance = preview.balanceBefore;
+        balanceKnown = true;
+    } else if (preview.inventoryBefore) {
+        inventory = preview.inventoryBefore;
+    }
+    updateUI();
+}
+
 async function startUpgrade() {
     if (upgradeBusy) return;
     if (!upgradeAccessGranted()) { updateUpgradeAccess(); return tg.showAlert('Скоро...'); }
@@ -2432,6 +2489,9 @@ async function startUpgrade() {
     };
     if (upgradeTarget.kind === 'mult') payload.target_multiplier = Number(upgradeTarget.value);
     if (upgradeTarget.kind === 'chance') payload.target_chance = Number(upgradeTarget.value);
+
+    // Ставка уходит с баланса сразу — до анимации и до ответа сервера.
+    applyUpgradeStakePreview();
 
     const chance = upgradeChance();
     // Пока стрелка крутится, дуга может показывать текущую форму — это не важно.
@@ -2501,6 +2561,8 @@ async function startUpgrade() {
 
     if (errorText || !data) {
         stopUpgradeArrow();
+        // Ставка не сыграла — возвращаем показанный баланс/капсулы на место.
+        restoreUpgradeStakePreview();
         if (circle) circle.classList.remove('spinning', 'win', 'lose');
         releaseUpgradeBusy();
         setUpgradeResult(errorText || 'Не удалось запустить апгрейд', 'error');
@@ -2535,6 +2597,7 @@ async function startUpgrade() {
 // чтобы любая ветка (успех, отмена раунда, восстановление из лога) давала одно и то же.
 function applyUpgradeServerState(data) {
     if (!data) return false;
+    upgradeStakePreview = null;      // пришло серверное состояние — превью не нужно
     const nextBalance = Number(data.new_balance);
     if (Number.isFinite(nextBalance)) {
         balance = nextBalance;
@@ -2934,6 +2997,8 @@ async function placeHockeyBet(team) {
 }
 
 const HOCKEY_ROLL_DURATION = 9.0;
+// Шаг симуляции мяча на сервере (api.py): 0.05 с на точку траектории.
+const HOCKEY_SIMULATION_STEP = 0.05;
 
 // Доля круга (проценты) → градусы. 0° — верх круга, по часовой стрелке.
 function arenaAngleForShare(percent) {
@@ -2947,6 +3012,22 @@ function arenaShapes(state) {
     return sectors.filter(item => Number(item.bet) > 0);
 }
 
+// ================= ОБЩЕЕ ДЛЯ ОБОИХ АРЕН =================
+// Задача 29: главный баг «иконки дёргаются, анимаций нет» — арена
+// перерисовывалась ЦЕЛИКОМ каждые 200 мс (опрос состояния). Каждый новый
+// элемент заново запускал CSS-анимацию появления, поэтому вместо анимации
+// был рывок. Теперь у обеих арен есть «подпись» состояния: если игроки и
+// ставки не изменились, DOM не трогаем вообще.
+function arenaSignature(list, extra) {
+    return list.map(item => [
+        item.id, item.bet, item.color, item.team || '', item.avatar || '',
+        (item.name || '').length,
+    ].join(':')).join('|') + '||' + (extra || '');
+}
+
+// ================= КОМАНДНАЯ АРЕНА: КРУГ =================
+const arenaCircleCache = { signature: null };
+
 // Рисует круг: conic-gradient из секторов (размер = доля ставки) + аватарки
 // внутри каждого сектора. Чем больше ставка — тем больше сектор и аватарка.
 function renderArenaCircle(state) {
@@ -2957,9 +3038,21 @@ function renderArenaCircle(state) {
     const sectors = arenaShapes(state);
     if (!sectors.length) {
         pie.style.background = 'radial-gradient(circle at 50% 50%, #1c1c1c 0 62%, #0f0f0f 63%)';
-        chips.innerHTML = '<span class="arena-empty">Ждём ставок…</span>';
+        if (arenaCircleCache.signature !== 'empty') {
+            arenaCircleCache.signature = 'empty';
+            chips.innerHTML = '<span class="arena-empty">Ждём ставок…</span>';
+        }
         return;
     }
+
+    const finalX = state && state.status === 'finished' && state.roll_data
+        ? Number(state.roll_data.final_x) : null;
+    const winnerId = state && state.winner_team
+        ? state.winner_team
+        : (state && state.winner ? String(state.winner.id) : null);
+    const signature = arenaSignature(sectors, `${winnerId || ''}:${state && state.status}`);
+    if (signature === arenaCircleCache.signature) return;   // ничего не изменилось
+    arenaCircleCache.signature = signature;
 
     const totalBet = sectors.reduce((sum, sector) => sum + Math.max(0, Number(sector.bet) || 0), 0) || 1;
     let cursor = 0;
@@ -2975,12 +3068,7 @@ function renderArenaCircle(state) {
         cursor = end;
     });
     pie.style.background = `conic-gradient(from 0deg, ${stops.join(', ')})`;
-
-    const finalX = state && state.status === 'finished' && state.roll_data
-        ? Number(state.roll_data.final_x) : null;
-    const winnerId = state && state.winner_team
-        ? state.winner_team
-        : (state && state.winner ? String(state.winner.id) : null);
+    pie.classList.toggle('settled', finalX !== null || Boolean(winnerId));
 
     chips.innerHTML = geometry.map(item => {
         const mid = (item.start + item.end) / 2;               // процент круга
@@ -3004,38 +3092,74 @@ function renderArenaCircle(state) {
                     <span class="arena-chip-label">${label}</span>
                 </div>`;
     }).join('');
+}
 
-    // Подсветка победившего сектора прямо на круге.
-    if (finalX !== null || winnerId) {
-        pie.classList.toggle('settled', true);
-    } else {
-        pie.classList.remove('settled');
-    }
+// ================= КОМАНДНАЯ АРЕНА: СТРЕЛКА =================
+// Стрелка непрерывно крутится весь бросок (rAF), а на финише плавно тормозит
+// ровно на выигрышном секторе — это и есть «выбор победителя».
+// Было: round_id записывался ещё на «Ставки», и на броске проверка «раунд
+// сменился» уже не срабатывала — стрелка не двигалась вообще.
+const ARENA_POINTER_SPEED = 520;          // градусов в секунду во время броска
+const ARENA_POINTER_LAND_MS = 1300;       // столько тормозим на победителе
+
+function arenaPointerNode() { return document.getElementById('arena-pointer'); }
+
+function arenaPointerApply() {
+    const pointer = arenaPointerNode();
+    if (pointer) pointer.style.transform = `rotate(${arenaPointer.angle.toFixed(2)}deg)`;
 }
 
 function arenaResetPointer() {
-    const pointer = document.getElementById('arena-pointer');
+    if (arenaPointer.rafId) cancelAnimationFrame(arenaPointer.rafId);
+    arenaPointer.rafId = null;
     arenaPointer.angle = 0;
     arenaPointer.spinning = false;
+    arenaPointer.landedRound = null;
+    const pointer = arenaPointerNode();
     if (pointer) {
         pointer.style.transition = 'none';
         pointer.style.transform = 'rotate(0deg)';
+        pointer.classList.remove('landing');
     }
 }
 
-// Финиш указателя: несколько оборотов и плавное затухание (как рулетка).
-function arenaRotateTo(finalX, durationMs) {
-    const pointer = document.getElementById('arena-pointer');
+function arenaStartPointerSpin() {
+    if (arenaPointer.rafId || arenaPointer.spinning) return;
+    const pointer = arenaPointerNode();
     if (!pointer) return;
+    pointer.style.transition = 'none';
+    pointer.classList.add('spinning');
+    arenaPointer.spinning = true;
+    let last = performance.now();
+    const step = (now) => {
+        if (!arenaPointer.spinning) { arenaPointer.rafId = null; return; }
+        const dt = Math.min(0.08, Math.max(0, (now - last) / 1000));
+        last = now;
+        arenaPointer.angle = (arenaPointer.angle + ARENA_POINTER_SPEED * dt) % 360;
+        arenaPointerApply();
+        arenaPointer.rafId = requestAnimationFrame(step);
+    };
+    arenaPointer.rafId = requestAnimationFrame(step);
+}
+
+// Финиш: несколько оборотов + плавное затухание (как рулетка) в точку сектора.
+function arenaLandPointer(finalX, durationMs) {
+    const pointer = arenaPointerNode();
+    if (!pointer) return;
+    arenaPointer.spinning = false;
+    if (arenaPointer.rafId) cancelAnimationFrame(arenaPointer.rafId);
+    arenaPointer.rafId = null;
+    pointer.classList.remove('spinning');
+
     const targetAngle = arenaAngleForShare(Math.max(0, Math.min(100, Number(finalX) || 0)));
     const current = ((arenaPointer.angle % 360) + 360) % 360;
     const delta = ((targetAngle - current) % 360 + 360) % 360;
-    const target = arenaPointer.angle + 4 * 360 + delta;
-    const total = Math.max(700, Number(durationMs) || HOCKEY_ROLL_DURATION * 1000);
-    pointer.style.transition = `transform ${total}ms cubic-bezier(0.08, 0.62, 0.15, 1)`;
-    pointer.style.transform = `rotate(${target}deg)`;
-    arenaPointer.angle = target;
-    arenaPointer.spinning = true;
+    const total = Math.max(600, Number(durationMs) || ARENA_POINTER_LAND_MS);
+    const absolute = current + 2 * 360 + delta;
+    pointer.style.transition = `transform ${total}ms cubic-bezier(0.12, 0.72, 0.12, 1)`;
+    pointer.style.transform = `rotate(${absolute.toFixed(2)}deg)`;
+    pointer.classList.add('landing');
+    arenaPointer.angle = absolute % 360;
 }
 
 function updateArenaModeUI(mode, myTeam) {
@@ -3078,10 +3202,20 @@ async function setArenaMode(mode) {
 }
 
 // ================= ОБЫЧНАЯ АРЕНА: ПОЛЕ С МЯЧИКОМ =================
-// Сектора — вертикальные полосы по доле ставки (как было до круглого поля),
-// мяч летит по траектории, которую посчитал СЕРВЕР (/api/hockey_roll/{id}).
-// Клиент только рисует точки: результат не зависит от телефона игрока.
-const arenaBall = { roundId: null, path: null, loading: false, rafId: null, startedAt: 0 };
+// Задача 29: арена возвращена к виду «до командной» — вертикальные сектора по
+// ставке игрока, круглые аватарки внутри (размер зависит от ширины сектора) и
+// мяч, который летит по траектории СЕРВЕРА (/api/hockey_roll/{id}) с плавным
+// наездом камеры на концовке. Клиент ничего не решает: он только рисует.
+const arenaBall = {
+    roundId: null, path: null, loading: false, rafId: null,
+    startedAt: 0, active: false, lastThudAt: 0, zoom: 1,
+};
+const arenaFieldCache = { signature: null };
+
+// Куда смотрит камера: точка мяча остаётся на месте (transform-origin в ней),
+// поэтому увеличенное поле не «уезжает» и не выходит за края арены.
+const ARENA_CAMERA_ZOOM_START = 4.5;   // с этой секунды начинаем приближать
+const ARENA_CAMERA_MAX_ZOOM = 1.55;    // предел наезда
 
 function normalArenaPlayers(state) {
     const players = Array.isArray(state && state.players) ? state.players : [];
@@ -3096,63 +3230,33 @@ function updateArenaView(mode) {
     if (circle) circle.hidden = !isTeam;
     if (isTeam) {
         stopArenaBall();
-        resetArenaCamera();
         const fieldEl = document.getElementById('hockey-field');
         if (fieldEl) fieldEl.classList.remove('rolling', 'settled');
-    } else if (circle) {
-        circle.classList.remove('rolling', 'settled');
+        if (circle) circle.classList.remove('rolling', 'settled');
+    } else {
+        arenaResetPointer();
+        if (circle) circle.classList.remove('rolling', 'settled');
     }
 }
 
-function renderNormalArena(state) {
-    const box = document.getElementById('hockey-sectors');
-    if (!box) return;
-    const players = normalArenaPlayers(state);
-    if (!players.length) {
-        box.innerHTML = '<div class="arena-empty">Ждём ставок…</div>';
-        return;
-    }
-    const total = players.reduce((sum, player) => sum + Math.max(0, Number(player.bet) || 0), 0) || 1;
-    const finished = state && state.status === 'finished';
-    const winnerId = state && state.winner ? String(state.winner.id) : null;
-    box.innerHTML = players.map(player => {
-        const share = Math.max(0, Number(player.bet) || 0) / total * 100;
-        const color = player.color || '#5856d6';
-        const isWinner = finished && winnerId && String(player.id) === winnerId;
-        const name = String(player.name || '?');
-        const avatar = player.avatar && String(player.avatar).startsWith('http')
-            ? `<img src="${escapeHtml(player.avatar)}" alt="">`
-            : `<span class="arena-chip-letter">${escapeHtml(name.slice(0, 1).toUpperCase())}</span>`;
-        // Чем больше ставка — тем крупнее аватарка в полосе.
-        const size = Math.max(22, Math.min(44, 16 + share * 0.62));
-        // Было color + '26' (15% альфы) — из-за этого сектора выглядели
-        // «тусклыми». Теперь плотный градиент своего цвета + подсветка сверху.
-        const tint = escapeHtml(color);
-        return `<div class="hockey-sector${isWinner ? ' win' : ''}"
-                     style="width:${share.toFixed(3)}%; background:linear-gradient(180deg, ${tint}cc 0%, ${tint}88 45%, ${tint}55 100%);">
-                    <div class="sector-label">
-                        <span class="sector-avatar" style="--sector-avatar:${size.toFixed(0)}px">${avatar}</span>
-                        <span class="sector-name">${escapeHtml(shortName(name, 10))}</span>
-                        <span class="sector-bet">${share.toFixed(0)}%</span>
-                    </div>
-                </div>`;
-    }).join('');
+function applyHockeyCamera(x, y, elapsedSeconds) {
+    const camera = document.getElementById('hockey-camera');
+    if (!camera) return;
+    const span = Math.max(0.001, HOCKEY_ROLL_DURATION - ARENA_CAMERA_ZOOM_START);
+    const progress = Math.max(0, Math.min(1, (Number(elapsedSeconds) - ARENA_CAMERA_ZOOM_START) / span));
+    const eased = progress * progress * (3 - 2 * progress);   // smoothstep
+    const scale = 1 + (ARENA_CAMERA_MAX_ZOOM - 1) * eased;
+    arenaBall.zoom = scale;
+    camera.style.transformOrigin = `${Math.max(0, Math.min(100, Number(x) || 0))}% ${Math.max(0, Math.min(100, Number(y) || 0))}%`;
+    camera.style.transform = `scale(${scale.toFixed(4)})`;
 }
 
-function stopArenaBall() {
-    if (arenaBall.rafId) cancelAnimationFrame(arenaBall.rafId);
-    arenaBall.rafId = null;
-}
-
-function hideArenaBall() {
-    stopArenaBall();
-    const ball = document.getElementById('hockey-ball');
-    if (ball) ball.hidden = true;
-    const field = document.getElementById('hockey-field');
-    if (field) field.classList.remove('rolling', 'settled');
-    resetArenaCamera();
-    arenaBall.roundId = null;
-    arenaBall.path = null;
+function resetArenaCamera() {
+    const camera = document.getElementById('hockey-camera');
+    if (!camera) return;
+    arenaBall.zoom = 1;
+    camera.style.transform = 'scale(1)';
+    camera.style.transformOrigin = '50% 50%';
 }
 
 function placeArenaBall(x, y) {
@@ -3163,111 +3267,207 @@ function placeArenaBall(x, y) {
     ball.style.top = `${Math.max(0, Math.min(100, Number(y) || 0)).toFixed(2)}%`;
 }
 
-// ================= КАМЕРА =================
-// Как в старом поле: во время броска картинка приближается и едет за мячом,
-// после раунда плавно возвращается. Математика простая: точку мяча (x,y в %)
-// ставим в центр поля — тогда мяч «в кадре», а полосы уходят за края.
-const ARENA_CAMERA_ZOOM = 1.32;      // рабочий зум во время броска
-const ARENA_CAMERA_FINISH = 1.55;    // короткий «дожим» на финише
+// Полосы: аватарка по центру сектора, без подписей — как было до командной
+// арены. Перерисовываем только когда действительно изменились игроки/ставки,
+// иначе анимации стартовали заново и «дёргались».
+function renderNormalArena(state) {
+    const scene = document.getElementById('hockey-scene');
+    if (!scene) return;
+    const players = normalArenaPlayers(state);
+    const finished = Boolean(state && state.status === 'finished');
+    const winnerId = state && state.winner ? String(state.winner.id) : null;
+    const signature = arenaSignature(players, `${finished}:${winnerId || ''}`);
+    if (signature === arenaFieldCache.signature) return;
+    arenaFieldCache.signature = signature;
 
-function setArenaCamera(x, y, scale) {
-    const camera = document.getElementById('hockey-camera');
+    // Убираем прежние сектора, оставляя угловую подсветку и мяч.
+    scene.querySelectorAll('.hockey-sector').forEach(el => el.remove());
+    const emptyEl = scene.querySelector('.arena-empty');
+    if (!players.length) {
+        if (!emptyEl) {
+            const empty = document.createElement('div');
+            empty.className = 'arena-empty';
+            empty.textContent = 'Ждём ставок…';
+            scene.appendChild(empty);
+        }
+        return;
+    }
+    if (emptyEl) emptyEl.remove();
+
+    const arena = document.getElementById('hockey-field');
+    const arenaWidth = (arena && arena.clientWidth) || 350;
+    const total = players.reduce((sum, player) => sum + Math.max(0, Number(player.bet) || 0), 0) || 1;
+    let usedWidth = 0;
+    players.forEach((player, index) => {
+        // Последний сектор добирает остаток: сумма ширин всегда ровно 100%.
+        let width = index === players.length - 1
+            ? 100 - usedWidth
+            : Math.max(0, Number(player.bet) || 0) / total * 100;
+        if (index === players.length - 1) width = Math.max(0.5, width);
+        else usedWidth += width;
+
+        const sector = document.createElement('div');
+        sector.className = 'hockey-sector';
+        sector.style.width = `${width.toFixed(4)}%`;
+        sector.style.background = player.color || '#5856d6';
+        sector.dataset.playerId = String(player.id);
+        if (finished && winnerId && String(player.id) === winnerId) sector.classList.add('win');
+
+        const wrap = document.createElement('div');
+        wrap.className = 'player-shape-wrapper';
+        const shape = document.createElement('div');
+        shape.className = 'player-shape';
+        const size = Math.max(25, Math.min(60, (width / 100) * arenaWidth * 0.7));
+        shape.style.width = `${size.toFixed(0)}px`;
+        shape.style.height = `${size.toFixed(0)}px`;
+        const name = String(player.name || '?');
+        if (player.avatar && String(player.avatar).startsWith('http')) {
+            shape.innerHTML = `<img src="${escapeHtml(player.avatar)}" alt="">`;
+            shape.style.background = 'transparent';
+        } else {
+            shape.style.backgroundColor = player.color || '#5856d6';
+            shape.innerHTML = `<span class="player-shape-letter" style="font-size:${(size * 0.5).toFixed(0)}px">`
+                + `${escapeHtml(name.slice(0, 1).toUpperCase())}</span>`;
+        }
+        wrap.appendChild(shape);
+        sector.appendChild(wrap);
+        scene.appendChild(sector);
+    });
+    const ball = document.getElementById('hockey-ball');
+    if (ball) scene.appendChild(ball);   // мяч всегда поверх секторов
+}
+
+function stopArenaBall() {
+    if (arenaBall.rafId) cancelAnimationFrame(arenaBall.rafId);
+    arenaBall.rafId = null;
+    arenaBall.active = false;
+}
+
+function hideArenaBall() {
+    stopArenaBall();
+    const ball = document.getElementById('hockey-ball');
+    if (ball) { ball.hidden = true; ball.style.left = '50%'; ball.style.top = '50%'; }
     const field = document.getElementById('hockey-field');
-    if (!camera || !field) return;
-    const width = field.clientWidth || 1;
-    const height = field.clientHeight || 1;
-    const zoom = Math.max(1, Math.min(2.2, Number(scale) || 1));
-    const px = Math.max(0, Math.min(100, Number(x) || 0)) / 100;
-    const py = Math.max(0, Math.min(100, Number(y) || 0)) / 100;
-    const tx = -(px - 0.5) * width * zoom;
-    const ty = -(py - 0.5) * height * zoom;
-    camera.style.transform = `translate3d(${tx.toFixed(2)}px, ${ty.toFixed(2)}px, 0) scale(${zoom.toFixed(3)})`;
+    if (field) field.classList.remove('rolling', 'settled');
+    resetArenaCamera();
+    arenaBall.roundId = null;
+    arenaBall.path = null;
+    arenaBall.loading = false;
 }
 
-function resetArenaCamera() {
-    const camera = document.getElementById('hockey-camera');
-    if (camera) camera.style.transform = 'translate3d(0, 0, 0) scale(1)';
-}
+// Траектория раунда: один запрос на раунд, ответ кэшируем.
+const arenaPathCache = { roundId: null, path: null, pending: null };
 
 async function loadArenaRollPath(roundId) {
-    try {
+    if (arenaPathCache.roundId === roundId && arenaPathCache.path) return arenaPathCache.path;
+    if (arenaPathCache.roundId === roundId && arenaPathCache.pending) return arenaPathCache.pending;
+    arenaPathCache.roundId = roundId;
+    arenaPathCache.path = null;
+    const pending = (async () => {
         const res = await fetch(`${API_URL}/api/hockey_roll/${encodeURIComponent(roundId)}`);
-        const data = await res.json().catch(() => null);
-        if (res.ok && data && Array.isArray(data.path) && data.path.length > 1) {
-            return data.path;
-        }
-    } catch (e) {
-        // Траектория не критична: без неё мяч просто покажет финальную точку.
-    }
-    return null;
+        if (!res.ok) throw new Error('Не удалось получить траекторию мяча');
+        const data = await res.json();
+        if (!data || !Array.isArray(data.path) || data.path.length < 2) throw new Error('Нет траектории');
+        const path = data.path.map(point => [Number(point[0]), Number(point[1])]);
+        if (arenaPathCache.roundId === roundId) arenaPathCache.path = path;
+        return path;
+    })();
+    arenaPathCache.pending = pending.catch(error => {
+        if (arenaPathCache.roundId === roundId) arenaPathCache.pending = null;
+        throw error;
+    });
+    return arenaPathCache.pending;
+}
+
+// Сколько секунд прошло с начала броска по СЕРВЕРНЫМ часам: мяч окажется ровно
+// там, где он сейчас, даже если экран открыли на середине раунда.
+function arenaElapsedSeconds() {
+    const startedAt = Number(arenaBall.startedAt) || 0;
+    if (!startedAt) return 0;
+    const serverNowMs = performance.now() + hockeyServerOffsetMs;
+    return Math.max(0, (serverNowMs - startedAt * 1000) / 1000);
+}
+
+// Глухой удар, когда мяч меняет направление (отскок от борта).
+function playArenaBounceSound(points, frame) {
+    if (!points || frame < 2 || !points[frame] || !points[frame - 1] || !points[frame - 2]) return;
+    const dx1 = points[frame][0] - points[frame - 1][0];
+    const dx2 = points[frame - 1][0] - points[frame - 2][0];
+    const dy1 = points[frame][1] - points[frame - 1][1];
+    const dy2 = points[frame - 1][1] - points[frame - 2][1];
+    const bounced = (Math.abs(dx1) > 0.4 && Math.abs(dx2) > 0.4 && Math.sign(dx1) !== Math.sign(dx2))
+        || (Math.abs(dy1) > 0.4 && Math.abs(dy2) > 0.4 && Math.sign(dy1) !== Math.sign(dy2));
+    if (!bounced) return;
+    const now = Date.now();
+    if (now - arenaBall.lastThudAt < 140) return;   // не строчим звуком на каждом кадре
+    arenaBall.lastThudAt = now;
+    playSound('thud');
 }
 
 function startArenaBall(state) {
+    const roundId = state && state.round_id ? String(state.round_id) : null;
+    if (!roundId) return;
     stopArenaBall();
     const field = document.getElementById('hockey-field');
-    if (field) {
-        field.classList.add('rolling');
-        field.classList.remove('settled');
-    }
+    if (field) { field.classList.add('rolling'); field.classList.remove('settled'); }
     resetArenaCamera();
-    const roundId = state && state.round_id ? String(state.round_id) : null;
     arenaBall.roundId = roundId;
     arenaBall.path = null;
-    // Время старта серверное: если игрок открыл экран на середине раунда,
-    // мяч окажется ровно там, где он сейчас, а не начнёт путь заново.
+    arenaBall.loading = true;
+    arenaBall.active = true;
     arenaBall.startedAt = Number(state && state.rolling_started_at) || (Date.now() / 1000);
     placeArenaBall(50, 50);
-    if (!roundId) return;
     loadArenaRollPath(roundId).then(path => {
-        if (arenaBall.roundId !== roundId) return;   // раунд уже сменился
+        if (!arenaBall.active || arenaBall.roundId !== roundId) return;
         arenaBall.path = path;
+        arenaBall.loading = false;
         animateArenaBall();
-    });
+    }).catch(() => { arenaBall.loading = false; });
 }
 
 function animateArenaBall() {
-    stopArenaBall();
     const roundId = arenaBall.roundId;
     const step = () => {
-        if (arenaBall.roundId !== roundId) return;
-        const elapsed = Math.max(0, (Date.now() / 1000) - arenaBall.startedAt);
-        const progress = Math.min(1, elapsed / HOCKEY_ROLL_DURATION);
-        const path = arenaBall.path;
-        if (path && path.length > 1) {
-            const raw = progress * (path.length - 1);
-            const index = Math.min(path.length - 2, Math.floor(raw));
-            const t = raw - index;
-            const a = path[index] || path[0];
-            const b = path[index + 1] || a;
-            const bx = a[0] + (b[0] - a[0]) * t;
-            const by = a[1] + (b[1] - a[1]) * t;
+        if (!arenaBall.active || arenaBall.roundId !== roundId) return;
+        const elapsed = arenaElapsedSeconds();
+        const points = arenaBall.path;
+        if (points && points.length > 1) {
+            // Шаг симуляции 0.05 с — ровно как отдаёт сервер, поэтому мяч
+            // движется с той же скоростью, с какой считалась траектория.
+            const framePosition = Math.max(0, Math.min(points.length - 1, elapsed / HOCKEY_SIMULATION_STEP));
+            const frame = Math.floor(framePosition);
+            const next = Math.min(points.length - 1, frame + 1);
+            const fraction = framePosition - frame;
+            const bx = points[frame][0] + (points[next][0] - points[frame][0]) * fraction;
+            const by = points[frame][1] + (points[next][1] - points[frame][1]) * fraction;
             placeArenaBall(bx, by);
-            // Камера едет за мячом: в начале раунда зум мягко набирается,
-            // к финишу чуть приближается — как в прежней арене.
-            setArenaCamera(bx, by, ARENA_CAMERA_ZOOM + progress * 0.18);
+            applyHockeyCamera(bx, by, elapsed);
+            playArenaBounceSound(points, frame);
         }
-        if (progress < 1) arenaBall.rafId = requestAnimationFrame(step);
+        if (elapsed < HOCKEY_ROLL_DURATION) {
+            arenaBall.rafId = requestAnimationFrame(step);
+        } else {
+            arenaBall.active = false;
+            arenaBall.rafId = null;
+        }
     };
     arenaBall.rafId = requestAnimationFrame(step);
 }
 
-// Финальная точка мяча (по серверу): после раунда он замирает на выигрышном секторе.
+// Финальная точка мяча (по серверу): мяч замирает на выигрышном секторе,
+// камера остаётся на нём, победная полоса подсвечивается.
 function freezeArenaBall(state) {
+    stopArenaBall();
+    const field = document.getElementById('hockey-field');
+    if (field) { field.classList.remove('rolling'); field.classList.add('settled'); }
     const roll = state && state.roll_data;
     if (!roll) return;
     const x = Number(roll.final_x);
     const y = Number(roll.final_y);
-    stopArenaBall();
-    const field = document.getElementById('hockey-field');
-    if (field) { field.classList.remove('rolling'); field.classList.add('settled'); }
     if (!Number.isFinite(x)) return;
     const fy = Number.isFinite(y) ? y : 50;
     placeArenaBall(x, fy);
-    // Короткий «дожим» камеры на победном секторе, затем плавный возврат.
-    setArenaCamera(x, fy, ARENA_CAMERA_FINISH);
-    setTimeout(() => {
-        if (field && field.classList.contains('settled')) setArenaCamera(x, fy, 1.12);
-    }, 700);
+    applyHockeyCamera(x, fy, HOCKEY_ROLL_DURATION);
 }
 
 async function pollHockeyState() {
@@ -3306,6 +3506,8 @@ async function pollHockeyState() {
             document.getElementById('hockey-controls').style.display = 'flex';
             hasShownWinner = false;
             hideArenaBall();
+            // Новый раунд — стрелка в исходное положение. Проверяем по
+            // round_id, чтобы не сбрасывать её на каждом опросе.
             if (arenaPointer.roundId !== state.round_id) {
                 arenaPointer.roundId = state.round_id;
                 arenaResetPointer();
@@ -3316,16 +3518,13 @@ async function pollHockeyState() {
             statusEl.innerText = 'Идёт бросок...'; statusEl.style.color = '#007aff';
             document.getElementById('hockey-controls').style.display = 'none';
             if (isTeamMode) {
-                // Командная арена: указатель едет к серверной точке круга.
+                // Командная арена: стрелка крутится весь бросок и на финише
+                // сама тормозит на выигрышном секторе (см. arenaLandPointer).
                 if (arenaPointer.roundId !== state.round_id) {
                     arenaPointer.roundId = state.round_id;
                     arenaResetPointer();
-                    const startedAt = Number(state.rolling_started_at) || (Date.now() / 1000);
-                    const elapsed = Math.max(0, (Date.now() / 1000) - startedAt);
-                    const left = Math.max(0.8, HOCKEY_ROLL_DURATION - elapsed);
-                    const finalX = state.roll_data && state.roll_data.final_x !== undefined ? state.roll_data.final_x : null;
-                    arenaRotateTo(finalX === null ? 50 : finalX, left * 1000);
                 }
+                arenaStartPointerSpin();
             } else if (arenaBall.roundId !== String(state.round_id)) {
                 // Обычная арена: один раз на раунд берём траекторию и запускаем мяч.
                 startArenaBall(state);
@@ -3333,11 +3532,11 @@ async function pollHockeyState() {
         } else if (state.status === 'finished') {
             statusEl.innerText = 'Раунд окончен!'; statusEl.style.color = '#ff3b30';
             if (isTeamMode) {
-                if (arenaPointer.roundId !== state.round_id) {
-                    arenaPointer.roundId = state.round_id;
-                    arenaResetPointer();
+                // Победитель уже известен серверу — стрелка доезжает до него.
+                if (arenaPointer.landedRound !== state.round_id) {
+                    arenaPointer.landedRound = state.round_id;
                     const finalX = state.roll_data ? state.roll_data.final_x : 0;
-                    arenaRotateTo(Number(finalX) || 0, 900);
+                    arenaLandPointer(Number(finalX) || 0, ARENA_POINTER_LAND_MS);
                 }
             } else {
                 freezeArenaBall(state);
@@ -3390,29 +3589,41 @@ async function pollHockeyState() {
             arena.classList.toggle('settled', isTeamMode && state.status === 'finished');
         }
         const list = document.getElementById('hockey-participants');
-        if (list) list.innerHTML = '';
         const players = arenaState.players;
-        players.forEach((p, i) => {
-            if (!list) return;
-            const div = document.createElement('div'); div.className = 'part-item';
-            const width = Number(p.percent) || (state.bank ? (Number(p.bet) || 0) / state.bank * 100 : 0);
-            let iconHtml = '';
-            if (!p.is_bot && p.avatar && p.avatar.startsWith('http')) { iconHtml = `<img src="${p.avatar}" style="width:20px; height:20px; border-radius:50%; margin-right:5px; vertical-align:middle;">`; }
-            else { const letter = p.name ? p.name[0].toUpperCase() : '?'; iconHtml = `<span style="display:inline-flex; justify-content:center; align-items:center; width:20px; height:20px; border-radius:50%; background:${p.color}; color:white; font-size:10px; font-weight:bold; margin-right:5px;">${letter}</span>`; }
-            const teamMark = p.team === 'red' ? '🔴 ' : p.team === 'blue' ? '🔵 ' : '';
-            div.innerHTML = `<div class="name"><span>#${i+1}</span>${iconHtml}<span title="${escapeHtml(p.name)}">${teamMark}${escapeHtml(shortName(p.name))}</span></div><div class="stats">${width.toFixed(1)}% | ${coinAmount(p.bet)}</div>`;
-            list.appendChild(div);
-        });
+        // Список участников тоже перерисовывался каждый опрос: аватарки
+        // пересоздавались 5 раз в секунду и «дёргались». Обновляем только
+        // при реальном изменении состава/ставок.
+        const listSignature = arenaSignature(players, state.bank);
+        if (list && list.dataset.signature !== listSignature) {
+            list.dataset.signature = listSignature;
+            list.innerHTML = '';
+            players.forEach((p, i) => {
+                const div = document.createElement('div'); div.className = 'part-item';
+                const width = Number(p.percent) || (state.bank ? (Number(p.bet) || 0) / state.bank * 100 : 0);
+                let iconHtml = '';
+                if (!p.is_bot && p.avatar && p.avatar.startsWith('http')) { iconHtml = `<img src="${p.avatar}" style="width:20px; height:20px; border-radius:50%; margin-right:5px; vertical-align:middle;">`; }
+                else { const letter = p.name ? p.name[0].toUpperCase() : '?'; iconHtml = `<span style="display:inline-flex; justify-content:center; align-items:center; width:20px; height:20px; border-radius:50%; background:${p.color}; color:white; font-size:10px; font-weight:bold; margin-right:5px;">${letter}</span>`; }
+                const teamMark = p.team === 'red' ? '🔴 ' : p.team === 'blue' ? '🔵 ' : '';
+                div.innerHTML = `<div class="name"><span>#${i+1}</span>${iconHtml}<span title="${escapeHtml(p.name)}">${teamMark}${escapeHtml(shortName(p.name))}</span></div><div class="stats">${width.toFixed(1)}% | ${coinAmount(p.bet)}</div>`;
+                list.appendChild(div);
+            });
+        }
     } catch (e) { console.error(e); }
 }
 
-function startHockeyPolling() { if (hockeyInterval) clearInterval(hockeyInterval); pollHockeyState(); hockeyInterval = setInterval(pollHockeyState, 200); }
+function startHockeyPolling() {
+    if (hockeyInterval) clearInterval(hockeyInterval);
+    pollHockeyState();
+    hockeyInterval = setInterval(pollHockeyState, 200);
+}
 function stopHockeyPolling() {
     if (hockeyInterval) clearInterval(hockeyInterval);
     hockeyInterval = null;
-    // Указатель и мяч останавливаем вместе с опросом: иначе они продолжали бы
+    // Стрелку и мяч останавливаем вместе с опросом: иначе они продолжали бы
     // двигаться на уже скрытом экране и жгли батарею.
     arenaPointer.spinning = false;
+    if (arenaPointer.rafId) cancelAnimationFrame(arenaPointer.rafId);
+    arenaPointer.rafId = null;
     stopArenaBall();
 }
 function closeWinnerModal() { document.getElementById('winner-modal').classList.remove('active'); }

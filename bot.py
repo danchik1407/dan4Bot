@@ -21,11 +21,10 @@ from love import (
     LOVE_ACTION_BONUS,
     LOVE_ACTION_COOLDOWN,
     LOVE_ICE_COST,
-    LOVE_STAGES,
+    RP_ACTIONS,
     claim_stage_rewards,
-    next_stage,
+    public_stage,
     rp_action_for,
-    stage_info,
 )
 from db_schema import audit as db_schema_audit, format_report as db_schema_report
 from shop_catalog import (
@@ -1357,16 +1356,72 @@ def _partner_of(row, user_id):
 
 
 def _stage_text(score: int) -> str:
-    info = stage_info(score)
-    nxt = next_stage(score)
-    ceiling = "∞" if info["max"] is None else f"{info['max']}"
-    text = (f"💗 <b>{info['title']}</b>\n"
-            f"Love: <b>{score}</b> / {ceiling} ({info['progress']:.0f}%)\n"
-            f"Награда этапа: <b>{info['reward']:,}</b> коинов каждому")
-    if nxt:
-        text += (f"\n➡️ Следующий: {nxt['title']} с {nxt['min']} Love "
-                 f"(награда {nxt['reward']:,})")
-    return text
+    """Уровень пары для самих партнёров.
+
+    Задача 29: этапы и награды за них — секретная механика. Показываем только
+    текущий уровень и Love коины: игрок не должен считать «сколько дадут за
+    следующий этап», иначе теряется смысл заводить отношения.
+    """
+    info = public_stage(score)
+    return (f"💗 <b>Уровень {info['level']} · {safe_text(info['title'])}</b>\n"
+            f"Love коинов: <b>{coin_amount(info['love'])}</b>")
+
+
+def _love_days(row) -> int:
+    """Сколько дней пара вместе (день создания = 1-й день)."""
+    raw = row.get("created_at") if row else None
+    if not raw:
+        return 0
+    try:
+        from datetime import datetime, timezone
+        stamp = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        if stamp.tzinfo is None:
+            stamp = stamp.replace(tzinfo=timezone.utc)
+        days = int((datetime.now(timezone.utc) - stamp).total_seconds() // 86400)
+        return max(0, days)
+    except Exception:
+        return 0
+
+
+def _days_text(days: int) -> str:
+    """«1 день», «3 дня», «21 день», «31 день», «12 дней» — без «31 дней»."""
+    if days <= 0:
+        return "сегодня"
+    tail = days % 100
+    if 11 <= tail <= 14:
+        word = "дней"
+    else:
+        last = tail % 10
+        word = "день" if last == 1 else "дня" if last in (2, 3, 4) else "дней"
+    return f"{days} {word}"
+
+
+async def _player_display(user_id) -> str:
+    """Как показать игрока: @username из базы, иначе id<число>."""
+    if not user_id:
+        return "игрок"
+    def _read():
+        res = supabase.table("users").select("username").eq("user_id", int(user_id)).execute()
+        return (res.data[0].get("username") if res.data else None)
+
+    try:
+        raw = await asyncio.to_thread(_read)
+    except Exception:
+        raw = None
+    name = str(raw or "").strip().lstrip("@")
+    return f"@{name}" if name else f"id{int(user_id)}"
+
+
+async def _relationship_notice(row, user_id, subject: str, about_self: bool = False) -> str:
+    """«Этот игрок состоит с этим-то в отношениях» — с ником партнёра.
+
+    Раньше бот писал просто «этот игрок уже в отношениях»: в каком чате ни
+    спроси, было непонятно, с кем именно, и игроки не верили, что пара реальна.
+    """
+    partner_id = _partner_of(row, user_id) if row else None
+    partner_name = await _player_display(partner_id)
+    verb = "уже состоишь" if about_self else "уже состоит"
+    return f"💔 {subject} {verb} в отношениях с <b>{safe_text(partner_name)}</b>."
 
 
 async def resolve_partner_target(message: Message):
@@ -1393,16 +1448,20 @@ async def cmd_love_propose(message: Message):
     if target_id is None:
         return await message.answer(
             "💗 Формат: <code>+любовь @username</code> (или ответом на сообщение).\n"
-            "Узнать этапы: <code>любовь</code>", parse_mode="HTML")
+            "Все РП-команды: <code>все рп</code> · своя пара: <code>отн инфа</code>",
+            parse_mode="HTML")
     if target_id == proposer_id:
         return await message.answer("🙃 Себя любить можно, но пару так не создать.")
     existing = await get_relationship(proposer_id)
     if existing:
-        partner = _partner_of(existing, proposer_id)
-        return await message.answer(f"💗 Ты уже в отношениях (id{partner}). Сначала <code>-любовь</code>.",
-                                    parse_mode="HTML")
-    if await get_relationship(target_id):
-        return await message.answer("💔 Этот игрок уже в отношениях.")
+        notice = await _relationship_notice(existing, proposer_id, "Ты", about_self=True)
+        return await message.answer(f"{notice}\nСначала <code>-любовь</code>.", parse_mode="HTML")
+    target_relationship = await get_relationship(target_id)
+    if target_relationship:
+        # Работает в ЛЮБОМ чате: отношения общие, и второй пары быть не может.
+        subject = f"<a href=\"tg://user?id={target_id}\">{safe_text(target_name or 'Этот игрок')}</a>"
+        notice = await _relationship_notice(target_relationship, target_id, subject)
+        return await message.answer(notice, parse_mode="HTML")
 
     love_proposals[target_id] = {"from": proposer_id, "at": time.time()}
     keyboard = InlineKeyboardMarkup(inline_keyboard=[[
@@ -1414,8 +1473,8 @@ async def cmd_love_propose(message: Message):
         f"<a href=\"tg://user?id={target_id}\">{safe_text(target_name or 'Игрок')}</a>, "
         f"<a href=\"tg://user?id={proposer_id}\">{safe_text(message.from_user.full_name)}</a> "
         f"зовёт тебя в пару!\n\n"
-        f"За РП-команды пара получает +{LOVE_ACTION_BONUS} Love коинов, "
-        f"а на каждом этапе — награду коинами (до {LOVE_STAGES[-1]['reward']:,}).",
+        f"За РП-команды пара получает +{LOVE_ACTION_BONUS} Love коинов. "
+        f"Список команд: <code>все рп</code>.",
         parse_mode="HTML", reply_markup=keyboard)
 
 
@@ -1434,9 +1493,15 @@ async def cb_love_answer(callback: CallbackQuery):
         await callback.message.edit_text("💔 Предложение отклонено. Ничего страшного — впереди ещё много игроков.")
         return await callback.answer()
 
-    if await get_relationship(target_id) or await get_relationship(proposer_id):
+    own = await get_relationship(target_id)
+    other = await get_relationship(proposer_id)
+    if own or other:
         love_proposals.pop(target_id, None)
-        return await callback.answer("Кто-то из вас уже в отношениях", show_alert=True)
+        row = own or other
+        owner = target_id if own else proposer_id
+        partner_name = await _player_display(_partner_of(row, owner))
+        return await callback.answer(
+            f"💔 Уже есть пара: {partner_name}. Сначала -любовь.", show_alert=True)
 
     def _create():
         return supabase.table(RELATIONSHIPS_TABLE).insert({
@@ -1454,7 +1519,8 @@ async def cb_love_answer(callback: CallbackQuery):
     await callback.message.edit_text(
         f"💗 <b>Теперь вы пара!</b>\n\n{_stage_text(0)}\n\n"
         f"Пишите друг другу РП-команды: <code>поцеловать</code>, <code>обнять</code>, "
-        f"<code>прижать</code>… — так копится Love.",
+        f"<code>прижать</code>… — так копится Love.\n"
+        f"Весь список: <code>все рп</code> · ваша пара: <code>отн инфа</code>",
         parse_mode="HTML")
     await callback.answer("💗")
 
@@ -1542,46 +1608,130 @@ async def cmd_top_love(message: Message):
             parse_mode="HTML")
 
     total_love = sum(int(row.get("love") or 0) for row in rows)
-    top_stage = max((stage_info(int(row.get("love") or 0)) for row in rows),
-                    key=lambda info: info["index"])
+    # Задача 29: этапы и награды — секретная механика. В топе только пары и
+    # Love коины: иначе игроки считали бы «сколько дадут за следующий этап».
     lines = [
         "💗 <b>ТОП ОТНОШЕНИЙ</b>",
         "━━━━━━━━━━━━━━━━━━━━",
         f"👥 Пар: <b>{len(rows)}</b> · всего Love: <b>{coin_amount(total_love)}</b>",
-        f"🏆 Высший этап: <b>{safe_text(top_stage['title'])}</b>",
         "",
     ]
     medals = ["🥇", "🥈", "🥉"]
     for index, row in enumerate(rows[:10]):
         score = int(row.get("love") or 0)
-        info = stage_info(score)
         partner_a = names.get(_love_int(row.get("user_a")), "игрок")
         partner_b = names.get(_love_int(row.get("user_b")), "игрок")
         place = medals[index] if index < 3 else f"{index + 1}."
+        days = _love_days(row)
         lines.append(
             f"{place} <b>{safe_text(_love_short(partner_a))}</b> 💞 "
             f"<b>{safe_text(_love_short(partner_b))}</b>\n"
-            f"    💗 {coin_amount(score)} Love · этап «{safe_text(info['title'])}»")
+            f"    💗 {coin_amount(score)} Love · вместе {_days_text(days)}")
     if len(rows) > 10:
         lines.append(f"\n…и ещё {len(rows) - 10} пар(ы).")
     lines.append("\n<i>Отношения общие для всех чатов. Второй пары быть не может.</i>")
     await message.answer("\n".join(lines), parse_mode="HTML")
 
 
-@dp.message(F.text.func(lambda t: strip_prefix(t).lower().startswith("любовь")
-                        or strip_prefix(t).lower().startswith(("пара", "отношения"))))
+# Команды «инфо» и «список РП» начинаются со слов, которые этот фильтр тоже
+# ловит («отношения инфо»), поэтому исключаем их явно — иначе до своего
+# обработчика дело не доходило бы: aiogram берёт первый совпавший хендлер.
+_LOVE_INFO_PREFIXES = ("отн инфа", "отн инфо", "инфа отношений",
+                       "отношения инфа", "отношения инфо")
+_RP_LIST_PREFIXES = ("все рп", "рп команды", "рп список", "список рп")
+
+
+def _love_status_filter(text: str) -> bool:
+    clean = strip_prefix(text or "").lower().replace("ё", "е")
+    if clean.startswith(_LOVE_INFO_PREFIXES) or clean.startswith(_RP_LIST_PREFIXES):
+        return False
+    return clean.startswith("любовь") or clean.startswith(("пара", "отношения"))
+
+
+@dp.message(F.text.func(_love_status_filter))
 async def cmd_love_status(message: Message):
     if not message.from_user:
         return
     row = await get_relationship(message.from_user.id)
     if not row:
         return await message.answer(
-            "💗 Ты пока один(а).\n\nПредложить отношения: <code>+любовь @username</code>",
-            parse_mode="HTML")
-    partner = _partner_of(row, message.from_user.id)
+            "💗 Ты пока один(а).\n\nПредложить отношения: <code>+любовь @username</code>\n"
+            "РП-команды: <code>все рп</code>", parse_mode="HTML")
+    partner_id = _partner_of(row, message.from_user.id)
+    partner_name = await _player_display(partner_id)
     score = int(row.get("love") or 0)
-    await message.answer(f"💗 <b>В отношениях</b> с id{partner}\n\n{_stage_text(score)}",
-                         parse_mode="HTML")
+    await message.answer(
+        f"💗 <b>В отношениях</b> с <b>{safe_text(partner_name)}</b>\n\n{_stage_text(score)}\n\n"
+        f"Подробно: <code>отн инфа</code> · РП: <code>все рп</code>",
+        parse_mode="HTML")
+
+
+# ================= ОТНОШЕНИЯ: ИНФО И СПИСОК РП =================
+@dp.message(F.text.func(lambda t: strip_prefix(t).lower().replace("ё", "е").startswith(
+    _LOVE_INFO_PREFIXES)))
+async def cmd_love_info(message: Message):
+    """Информация об отношениях: своя — всем, чужая — только админам.
+
+    «Заглядывать в чужой карман» можно, а в отношения — нет: это личное,
+    поэтому бот отвечает только за себя, а админ может проверить любого
+    (например, по жалобе «он пишет, что мы в паре»).
+    """
+    if not message.from_user or message.from_user.is_bot:
+        return
+    viewer_id = message.from_user.id
+    target_id, target_name = await resolve_partner_target(message)
+    if target_id is None:
+        target_id = viewer_id
+    is_admin_viewer = is_admin(viewer_id)
+
+    if target_id != viewer_id and not is_admin_viewer:
+        return await message.answer(
+            "🔒 Отношения — личное. Этот игрок должен написать "
+            "<code>отн инфа</code> сам, чужие отношения видят только админы.",
+            parse_mode="HTML")
+
+    row = await get_relationship(target_id)
+    who = "твои" if target_id == viewer_id else await _player_display(target_id)
+    header = ("ТВОИ ОТНОШЕНИЯ" if target_id == viewer_id
+              else f"ОТНОШЕНИЯ · {who.lstrip('@').upper()}")
+    if not row:
+        if target_id == viewer_id:
+            return await message.answer(
+                "💗 Ты пока один(а).\n\nПредложить отношения: <code>+любовь @username</code>\n"
+                "РП-команды: <code>все рп</code>", parse_mode="HTML")
+        return await message.answer(
+            f"💔 У этого игрока сейчас нет отношений.", parse_mode="HTML")
+
+    partner_id = _partner_of(row, target_id)
+    partner_name = await _player_display(partner_id)
+    score = int(row.get("love") or 0)
+    info = public_stage(score)
+    days = _love_days(row)
+    await message.answer(
+        f"💗 <b>{header}</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"💞 В паре с: <b>{safe_text(partner_name)}</b>\n"
+        f"📅 Вместе: <b>{_days_text(days)}</b>\n"
+        f"🏅 Уровень: <b>{info['level']} · {safe_text(info['title'])}</b>\n"
+        f"💗 Love коинов: <b>{coin_amount(score)}</b>",
+        parse_mode="HTML")
+
+
+@dp.message(F.text.func(lambda t: strip_prefix(t).lower().replace("ё", "е").startswith(
+    _RP_LIST_PREFIXES)))
+async def cmd_rp_list(message: Message):
+    """Список всех РП-команд одной командой: «все рп»."""
+    lines = ["💞 <b>ВСЕ РП-КОМАНДЫ</b>", "━━━━━━━━━━━━━━━━━━━━",
+             "Пиши команду и ник партнёра: <code>поцеловать @ник</code> "
+             "(или ответом на его сообщение).", ""]
+    for key in RP_ACTIONS:
+        meta = RP_ACTIONS[key]
+        lines.append(f"{meta['emoji']} <code>{key}</code> — {meta['text']}")
+    lines.append("")
+    lines.append(f"💗 За РП-действие пара получает +{LOVE_ACTION_BONUS} Love "
+                 f"(бонус не чаще, чем раз в {LOVE_ACTION_COOLDOWN // 3600} ч).")
+    lines.append("💞 Своя пара: <code>отн инфа</code> · все пары: <code>топ отношений</code>")
+    await message.answer("\n".join(lines), parse_mode="HTML")
 
 
 async def love_cooldown_left(user_id) -> int:
@@ -1671,10 +1821,10 @@ async def cmd_rp_action(message: Message):
     new_score, granted = await add_love_points(row, LOVE_ACTION_BONUS)
     await love_cooldown_touch(message.from_user.id)
     reply = f"{text}\n\n💗 +{LOVE_ACTION_BONUS} Love (всего {new_score})"
+    # Задача 29: этапы и награды — секрет. Бот не объявляет «новый этап» и не
+    # показывает суммы: награда начисляется тихо, игроки узнают о ней по балансу.
     if granted:
-        for stage in granted:
-            reply += (f"\n🏆 Новый этап: <b>{stage['title']}</b> — "
-                      f"по {stage['reward']:,} коинов каждому!")
+        reply += "\n💞 Ваша пара стала ещё ближе."
     await message.answer(reply, parse_mode="HTML")
 
 
@@ -1707,7 +1857,7 @@ async def cb_love_ice(callback: CallbackQuery):
     await love_cooldown_touch(owner_id)
     text = f"⚡ Действие выполнено за {LOVE_ICE_COST} i¢. 💗 +{LOVE_ACTION_BONUS} Love (всего {new_score})"
     if granted:
-        text += "\n🏆 " + ", ".join(f"{s['title']} +{s['reward']:,}" for s in granted)
+        text += "\n💞 Ваша пара стала ещё ближе."
     await callback.answer(text[:190], show_alert=True)
 
 
@@ -1986,7 +2136,7 @@ async def cmd_db_schema(message: Message):
     F.text.func(lambda t: strip_prefix(t).lower().startswith("помощь") or strip_prefix(t).lower().startswith("help")))
 async def cmd_help(message: Message):
     text = (
-        "📖 <b>СПИСОК КОМАНД БОТА</b>\n━━━━━━━━━━━━━━━━━━━━\n\n🎟️ <b>Промокоды:</b>\n• <code>промо код</code> — активировать промокод\n\n💰 <b>Экономика:</b>\n• <code>карман</code> — твой баланс\n• <code>карман @user</code> — баланс другого\n• <code>перевод @user сумма</code> — перевести\n• <code>перевод сумма</code> (ответом) — быстрый перевод\n• <code>топ</code> — топ-10 богачей\n• <code>магазин</code> — магазин\n\n🎲 <b>Игры:</b>\n• <code>кубы @user ставка</code> — дуэль в кости\n• <code>кубы ставка</code> (ответом) — быстрый вызов\n\n💗 <b>Отношения:</b>\n• <code>+любовь @user</code> — предложить отношения\n• <code>поцеловать</code>, <code>обнять</code>, <code>прижать</code>, <code>погладить</code>… — РП-команды (+10 Love паре)\n• <code>любовь</code> — этап и Love коины пары\n• <code>топ отношений</code> — все пары, Love и этапы\n• <code>-любовь</code> — завершить отношения\n\n• <code>тег</code> — проверка бота\n• <code>помощь</code> — эта справка")
+        "📖 <b>СПИСОК КОМАНД БОТА</b>\n━━━━━━━━━━━━━━━━━━━━\n\n🎟️ <b>Промокоды:</b>\n• <code>промо код</code> — активировать промокод\n\n💰 <b>Экономика:</b>\n• <code>карман</code> — твой баланс\n• <code>карман @user</code> — баланс другого\n• <code>перевод @user сумма</code> — перевести\n• <code>перевод сумма</code> (ответом) — быстрый перевод\n• <code>топ</code> — топ-10 богачей\n• <code>магазин</code> — магазин\n\n🎲 <b>Игры:</b>\n• <code>кубы @user ставка</code> — дуэль в кости\n• <code>кубы ставка</code> (ответом) — быстрый вызов\n\n💗 <b>Отношения:</b>\n• <code>+любовь @user</code> — предложить отношения\n• <code>все рп</code> — список всех РП-команд\n• <code>поцеловать</code>, <code>обнять</code>, <code>погладить</code>… — РП-команды (+10 Love паре)\n• <code>отн инфа</code> — с кем, сколько дней, уровень и Love коины (только своё)\n• <code>топ отношений</code> — все пары и их Love\n• <code>-любовь</code> — завершить отношения\n\n• <code>тег</code> — проверка бота\n• <code>помощь</code> — эта справка")
     await message.answer(text, parse_mode="HTML")
 
 

@@ -317,17 +317,6 @@ main { padding: 0 16px; }
     0% { box-shadow: 0 0 10px #fff, 0 0 26px rgba(255, 204, 0, 0.9); }
     100% { box-shadow: 0 0 22px #fff, 0 0 60px rgba(255, 204, 0, 0.95), 0 0 90px rgba(255, 204, 0, 0.6); }
 }
-.hockey-sector.win { animation: arenaSectorWin 0.9s ease-in-out infinite alternate; }
-@keyframes arenaSectorWin {
-    from { box-shadow: inset 0 0 0 2px rgba(255, 204, 0, 0.75), inset 0 0 24px rgba(255, 204, 0, 0.3); }
-    to { box-shadow: inset 0 0 0 3px #ffd83d, inset 0 0 46px rgba(255, 204, 0, 0.55); }
-}
-/* Полосы появляются плавно при смене раунда — без «телепорта» цвета. */
-.hockey-sectors .hockey-sector { animation: arenaSectorIn 0.32s ease-out both; }
-@keyframes arenaSectorIn {
-    from { opacity: 0.35; transform: translateY(6px); }
-    to { opacity: 1; transform: none; }
-}
 .corner { position: absolute; width: 30px; height: 30px; border: 3px solid transparent; transition: all 0.3s; z-index: 15; border-radius: 50%; pointer-events: none; }
 #corner-tl { top: 0; left: 0; }
 #corner-tr { top: 0; right: 0; }
@@ -799,39 +788,37 @@ body.maintenance { overflow: hidden; }
         #141c2c;
     box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.06), inset 0 0 40px rgba(0, 0, 0, 0.55);
 }
-/* Слой «камеры»: едет за мячом и зумится. Трансформ ставит JS. */
+/* Слой «камеры»: приближается на концовке броска. transform-origin ставит JS
+   в точку мяча, поэтому мяч остаётся на месте, а поле «наезжает» на него —
+   ровно как было в арене до командной. Переход не нужен: кадры идут каждый
+   rAF, а CSS-transition давал бы отставание камеры. */
 .hockey-camera {
     position: absolute; inset: 0; transform-origin: 50% 50%;
-    will-change: transform; transition: transform 0.12s linear;
+    will-change: transform;
 }
-.hockey-sectors { position: absolute; inset: 0; z-index: 1; display: flex; align-items: stretch; }
-.hockey-sector { transition: box-shadow 0.25s ease, filter 0.25s ease; }
-.hockey-field.rolling .hockey-sectors { animation: arenaBreath 2.4s ease-in-out infinite; }
+/* Пока идёт бросок, поле чуть «дышит» (яркость). Класс переключается по
+   статусу раунда, поэтому анимация не перезапускается на каждом опросе. */
+.hockey-field.rolling .hockey-scene { animation: arenaBreath 2.4s ease-in-out infinite; }
 @keyframes arenaBreath {
     0%, 100% { filter: brightness(1); }
-    50% { filter: brightness(1.12); }
+    50% { filter: brightness(1.1); }
 }
-.hockey-sectors .hockey-sector { flex: 0 0 auto; }
-.hockey-sector .sector-label {
-    position: absolute; inset: 0; display: flex; flex-direction: column;
-    justify-content: center; align-items: center; gap: 2px; padding: 4px 2px;
-    text-align: center; pointer-events: none;
+/* Сектор — вертикальная полоса на всю высоту поля, цвет = цвет игрока. */
+.hockey-scene .hockey-sector { flex: 0 0 auto; transition: box-shadow 0.25s ease; }
+.hockey-sector .player-shape-letter {
+    color: #fff; font-weight: 900; line-height: 1;
+    text-shadow: 0 2px 4px rgba(0, 0, 0, 0.55);
 }
-.hockey-sector .sector-avatar {
-    width: var(--sector-avatar, 26px); height: var(--sector-avatar, 26px);
-    border-radius: 50%; overflow: hidden; display: flex; align-items: center;
-    justify-content: center; border: 2px solid rgba(255, 255, 255, 0.55);
-    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.45); background: rgba(0, 0, 0, 0.25);
+/* Победившая полоса пульсирует золотом; класс ставится один раз на раунд. */
+.hockey-sector.win { animation: arenaSectorWin 0.9s ease-in-out infinite alternate; }
+@keyframes arenaSectorWin {
+    from { box-shadow: inset 0 0 0 2px rgba(255, 204, 0, 0.75), inset 0 0 24px rgba(255, 204, 0, 0.3); }
+    to { box-shadow: inset 0 0 0 3px #ffd83d, inset 0 0 46px rgba(255, 204, 0, 0.55); }
 }
-.hockey-sector .sector-avatar img { width: 100%; height: 100%; object-fit: cover; }
-.hockey-sector .sector-name {
-    max-width: 90%; font-size: 9px; font-weight: 800; color: #fff;
-    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-    text-shadow: 0 1px 3px rgba(0, 0, 0, 0.8);
+.hockey-sector.win .player-shape {
+    border-color: #ffd83d;
+    box-shadow: 0 0 0 3px rgba(255, 204, 0, 0.35), 0 0 22px rgba(255, 204, 0, 0.65);
 }
-.hockey-sector .sector-bet { font-size: 9px; font-weight: 700; color: rgba(255, 255, 255, 0.85); }
-.hockey-sector.win { box-shadow: inset 0 0 0 2px #ffcc00, inset 0 0 24px rgba(255, 204, 0, 0.35); }
-.hockey-sector.win .sector-name { color: #ffe79a; }
 
 /* Круг: сектора рисуются conic-gradient из JS, аватарки — поверх. */
 .arena-circle {
@@ -858,9 +845,7 @@ body.maintenance { overflow: hidden; }
     from { filter: saturate(1.15) brightness(1.02); }
     to { filter: saturate(1.5) brightness(1.16); }
 }
-.arena-circle.rolling .arena-pointer-head {
-    filter: drop-shadow(0 0 12px rgba(255, 255, 255, 1));
-}
+
 /* Фишки игроков появляются с «поп»-эффектом и не мигают при каждом опросе. */
 .arena-chip { animation: arenaChipIn 0.35s cubic-bezier(0.22, 1.2, 0.4, 1) both; }
 @keyframes arenaChipIn {
@@ -882,6 +867,15 @@ body.maintenance { overflow: hidden; }
     position: absolute; inset: 0; z-index: 4; pointer-events: none;
     transform-origin: 50% 50%;
     will-change: transform;
+    transition: none;
+}
+/* Пока стрелка крутится — светящийся след, на посадке — золотая вспышка. */
+.arena-pointer.spinning .arena-pointer-head {
+    filter: drop-shadow(0 0 10px rgba(255, 255, 255, 0.95));
+}
+.arena-pointer.landing .arena-pointer-head {
+    border-top-color: #ffd83d;
+    filter: drop-shadow(0 0 16px rgba(255, 204, 0, 1));
 }
 .arena-pointer-head {
     position: absolute; left: 50%; top: 2px; transform: translateX(-50%);
