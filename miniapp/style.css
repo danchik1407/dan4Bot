@@ -735,6 +735,11 @@ body.maintenance { overflow: hidden; }
     transition: background 0.15s ease, color 0.15s ease;
 }
 .arena-mode-btn.active { background: var(--accent, #007aff); color: #fff; }
+/* Задача 31: обе арены идут одновременно, переключаться можно в любой момент. */
+.arena-mode-hint {
+    width: 100%; max-width: 350px; margin: -4px 0 10px;
+    font-size: 11px; line-height: 1.35; color: #8a8f98; text-align: center;
+}
 
 /* Свой множитель апгрейда (ползунок x1.12 … x50). */
 .up-custom-mult {

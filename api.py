@@ -84,7 +84,7 @@ async def _http_json(url, method: str = "GET", params=None, payload=None, timeou
 
 # Номер сборки: по нему из /api/health видно, что на сервисе НЕ старый код.
 # Если после деплоя здесь прежнее значение — Render ещё не перезапустился.
-API_BUILD = "2026-11-22-solo-love-18"
+API_BUILD = "2026-11-23-two-arenas-19"
 
 # Момент старта процесса. По нему видно, что сервис только что «проснулся»:
 # Render на бесплатном тарифе усыпляет Web Service через 15 минут без входящих
@@ -323,7 +323,9 @@ async def health():
             },
             "stars_enabled": STARS_ENABLED,
             "upgrade": _upgrade_economy_config(),
-            "arena_mode": game_state.get("mode", "normal"),
+            # Задача 31: арен две и они идут параллельно; mode оставлен для совместимости.
+            "arena_mode": _arena_mode(),
+            "arena_views": list(ARENA_VIEWS),
         },
     }
 
@@ -1166,17 +1168,44 @@ ARENA_TEAMS = {
 }
 
 
-def _new_arena_state(mode: str = "normal") -> dict:
+# Задача 31: в одном раунде живут ДВЕ независимые арены.
+#   • normal — «сектор на каждого игрока» (полосы + мяч);
+#   • team   — «красные против синих» (круг со стрелкой).
+# Раньше режим был один на весь сервер и переключался только между раундами,
+# поэтому нельзя было посмотреть вторую арену, пока идёт бой. Теперь оба котла
+# считаются одновременно, а переключатель в Mini App — это только выбор того,
+# что рисовать: он работает в любой момент и ничего не блокирует.
+ARENA_VIEWS = ("normal", "team")
+ARENA_MAX_PLAYERS = 20          # на каждый котёл отдельно
+
+
+def _player_arena(player) -> str:
+    """К какому котлу относится запись игрока (старые записи — обычная арена)."""
+    return "team" if player.get("arena") == "team" else "normal"
+
+
+def _arena_players(arena: str) -> list:
+    arena = "team" if arena == "team" else "normal"
+    return [player for player in game_state["players"] if _player_arena(player) == arena]
+
+
+def _arena_bank(arena: str) -> int:
+    return sum(max(0, int(player.get("bet", 0))) for player in _arena_players(arena))
+
+
+def _new_arena_state(mode: str = "both") -> dict:
+    # mode оставлен для совместимости со старым клиентом; по умолчанию оба котла.
     return {
         "status": "waiting", "timer": 15, "bank": 0, "players": [], "winner": None,
         "last_update": time.time(), "last_bot_added": time.time(),
         "target_bots": _random_arena_bot_count(), "is_paid": False,
         "payout_attempt_at": 0, "round_id": str(int(time.time())), "whales_added": 0,
         "roll_data": None, "rolling_started_at": None, "whale_decided": False,
-        "whale_join": False, "whale_trigger_at": None,
-        # mode: 'normal' — сектор на каждого игрока, 'team' — красные против синих
-        "mode": mode if mode in ("normal", "team") else "normal",
+        "whale_join": False, "whale_trigger_at": None, "whale_arena": "normal",
+        "mode": "both",
         "winner_team": None, "payouts": [], "paid_users": [],
+        # Победители каждого котла: {"normal": {...}|None, "team": {...}|None}
+        "arena_winners": {"normal": None, "team": None},
     }
 
 
@@ -1237,6 +1266,8 @@ def _prepare_hockey_roll(now):
     start_x, start_y = 50.0, 50.0
     path = _simulate_hockey_roll(start_angle, speed, start_x, start_y)
     game_state["winner"] = None
+    game_state["winner_team"] = None
+    game_state["arena_winners"] = {"normal": None, "team": None}
     game_state["rolling_started_at"] = now
     game_state["roll_data"] = {
         "start_angle": start_angle,
@@ -1250,38 +1281,51 @@ def _prepare_hockey_roll(now):
 
 
 def _update_hockey_percentages():
-    total = sum(max(0, int(player.get("bet", 0))) for player in game_state["players"])
-    game_state["bank"] = total
-    for player in game_state["players"]:
-        player["percent"] = (max(0, int(player.get("bet", 0))) / total * 100) if total else 0
+    """Проценты считаются внутри котла: доли на полосах и в круге независимы."""
+    game_state["bank"] = sum(max(0, int(player.get("bet", 0))) for player in game_state["players"])
+    for arena in ARENA_VIEWS:
+        pool = _arena_players(arena)
+        total = sum(max(0, int(player.get("bet", 0))) for player in pool)
+        for player in pool:
+            player["percent"] = (max(0, int(player.get("bet", 0))) / total * 100) if total else 0
 
 
-def _unique_hockey_color(palette):
-    used = {player.get("color") for player in game_state["players"]}
+def _unique_hockey_color(palette, arena="normal"):
+    used = {player.get("color") for player in _arena_players(arena)}
     available = [color for color in palette if color not in used]
     if available:
         return random.choice(available)
     return f"hsl({random.randint(0, 360)}, 80%, 50%)"
 
 
-def _add_hockey_bot(is_whale=False):
-    if len(game_state["players"]) >= 20:
+def _add_hockey_bot(is_whale=False, arena="normal"):
+    """Бот в конкретный котёл: у каждой арены свои участники."""
+    arena = "team" if arena == "team" else "normal"
+    if len(_arena_players(arena)) >= ARENA_MAX_PLAYERS:
         return False
 
     if is_whale:
         name = "Лудик" + str(random.randint(1, 99))
         bet = random.randint(500, 2000)
-        color = _unique_hockey_color(WHALE_COLORS)
+        color = _unique_hockey_color(WHALE_COLORS, arena)
     else:
         name = random.choice(BOT_NAMES) + str(random.randint(1, 99))
         bet = random.randint(10, 100)
-        color = _unique_hockey_color(BOT_COLORS)
+        color = _unique_hockey_color(BOT_COLORS, arena)
 
-    team = secure_choice(["red", "blue"]) if game_state.get("mode") == "team" else None
+    team = None
+    if arena == "team":
+        # Команды держим примерно равными: иначе боты сбиваются в одну сторону
+        # и круг командной арены выглядит как один сплошной сектор.
+        counts = {"red": 0, "blue": 0}
+        for mate in _arena_players("team"):
+            if mate.get("team") in counts:
+                counts[mate["team"]] += 1
+        team = secure_choice([side for side in ("red", "blue") if counts[side] == min(counts.values())])
     game_state["players"].append({
         "id": f"bot_{random.randint(10000, 99999)}", "name": name, "avatar": "",
         "bet": bet, "color": ARENA_TEAMS[team]["color"] if team else color,
-        "is_bot": True, "team": team,
+        "is_bot": True, "team": team, "arena": arena,
     })
     _update_hockey_percentages()
     return True
@@ -1291,27 +1335,37 @@ def _maybe_add_hockey_bots(now, time_left):
     if time_left <= 0:
         return
 
-    current_bots = sum(1 for player in game_state["players"] if player.get("is_bot") and player.get("bet", 0) < 500)
-    if (current_bots < game_state["target_bots"] and len(game_state["players"]) < 20
-            and now - game_state["last_bot_added"] >= random.uniform(0.6, 1.5)):
-        if _add_hockey_bot():
-            game_state["last_bot_added"] = now
+    # Боты набегают в ОБА котла одновременно (задача 31): при переключении
+    # арена не должна быть пустой. Раньше здесь стоял break — он наполнял
+    # только первую арену, и командная к середине раунда оставалась пустой.
+    added = False
+    for arena in ARENA_VIEWS:
+        pool = _arena_players(arena)
+        current_bots = sum(1 for p in pool if p.get("is_bot") and p.get("bet", 0) < 500)
+        if (current_bots < game_state["target_bots"] and len(pool) < ARENA_MAX_PLAYERS
+                and now - game_state["last_bot_added"] >= random.uniform(0.6, 1.5)):
+            if _add_hockey_bot(arena=arena):
+                added = True
+    if added:
+        game_state["last_bot_added"] = now
 
+    whale_arena = game_state.get("whale_arena") or "normal"
     if (game_state["whale_join"] and not game_state["whales_added"]
-            and time_left <= game_state["whale_trigger_at"] and len(game_state["players"]) < 20):
-        if _add_hockey_bot(is_whale=True):
+            and time_left <= game_state["whale_trigger_at"]
+            and len(_arena_players(whale_arena)) < ARENA_MAX_PLAYERS):
+        if _add_hockey_bot(is_whale=True, arena=whale_arena):
             game_state["whales_added"] = 1
 
 
 def _arena_mode() -> str:
-    """'team' — красные против синих, 'normal' — сектор на каждого игрока."""
-    return "team" if game_state.get("mode") == "team" else "normal"
+    """Совместимость со старым клиентом: теперь всегда работают оба котла."""
+    return "both"
 
 
 def _hockey_teams() -> list:
-    """Сводка по командам: сумма ставок и доля круга в процентах."""
+    """Сводка по командам командного котла: сумма ставок и доля круга."""
     totals = {"red": 0, "blue": 0}
-    for player in game_state["players"]:
+    for player in _arena_players("team"):
         team = player.get("team")
         if team in totals:
             totals[team] += max(0, int(player.get("bet", 0)))
@@ -1325,22 +1379,21 @@ def _hockey_teams() -> list:
     ]
 
 
-def _hockey_sectors() -> list:
-    """Сектора круга ровно в том порядке, в котором по ним ходит бросок.
+def _hockey_sectors(arena: str = "normal") -> list:
+    """Сектора котла в том порядке, в котором по ним ходит бросок.
 
-    В обычном режиме — по игроку на сектор (как раньше), в командном — два
-    сектора, чьи размеры пропорциональны ставкам команд.
+    normal — по игроку на сектор, team — два сектора по ставкам команд.
+    Порядок один и тот же на сервере и на клиенте, поэтому финальная точка
+    траектории всегда попадает в тот сектор, который подсвечен победителем.
     """
-    if _arena_mode() == "team" and any(player.get("team") for player in game_state["players"]):
-        teams = _hockey_teams()
-        if teams:
-            return teams
-    return [dict(player) for player in game_state["players"]]
+    if arena == "team":
+        return _hockey_teams()
+    return [dict(player) for player in _arena_players("normal")]
 
 
-def _hockey_winner_at_x(x):
-    """Resolve a final ball x-coordinate to the bet-weighted arena sector."""
-    sectors = _hockey_sectors()
+def _hockey_winner_at_x(x, arena: str = "normal"):
+    """Resolve a final ball x-coordinate to the bet-weighted sector of one pool."""
+    sectors = _hockey_sectors(arena)
     total_bets = sum(max(0, int(sector.get("bet", 0))) for sector in sectors)
     if total_bets <= 0:
         return None
@@ -1355,42 +1408,48 @@ def _hockey_winner_at_x(x):
 
 
 def _hockey_payout_plan() -> list:
-    """Кому и сколько платим. Считается один раз на раунд.
+    """Кому и сколько платим. Считается один раз на раунд, по каждому котлу.
 
-    Обычный режим: весь банк одному победителю (как было).
-    Командный режим: банк делится между реальными игроками победившей команды
-    пропорционально их ставкам. Доля ботов из банка не выплачивается — это и
-    есть дом-эдж арены.
+    Обычная арена: банк этого котла целиком одному победителю (как было).
+    Командная: банк котла делится между реальными игроками победившей команды
+    пропорционально их ставкам. Доля ботов не выплачивается — это дом-эдж.
+    Деньги котлов не смешиваются, поэтому «поставить в обе» не даёт арбитража.
     """
     plan = game_state.get("payouts") or []
     if plan:
         return plan
-    bank = int(game_state.get("bank") or 0)
-    winner_team = game_state.get("winner_team")
-    if winner_team:
-        team_players = [p for p in game_state["players"] if p.get("team") == winner_team]
+    winners = game_state.get("arena_winners") or {}
+
+    normal_bank = _arena_bank("normal")
+    normal_winner = winners.get("normal")
+    if normal_winner and not normal_winner.get("is_bot") and normal_bank > 0:
+        try:
+            numeric_id = int(normal_winner["id"])
+        except (TypeError, ValueError):
+            numeric_id = None
+        if numeric_id is not None:
+            plan.append({"user_id": numeric_id, "amount": int(normal_bank),
+                         "name": normal_winner.get("name"), "arena": "normal"})
+
+    team_winner = winners.get("team")
+    team_bank = _arena_bank("team")
+    if team_winner and team_bank > 0:
+        winner_team = team_winner.get("team") or team_winner.get("id")
+        team_players = [p for p in _arena_players("team") if p.get("team") == winner_team]
         team_total = sum(max(0, int(p.get("bet", 0))) for p in team_players)
-        if team_total <= 0:
-            return []
-        for player in team_players:
-            if player.get("is_bot"):
-                continue
-            try:
-                numeric_id = int(player["id"])
-            except (TypeError, ValueError):
-                continue
-            amount = int(bank * max(0, int(player.get("bet", 0))) / team_total)
-            if amount > 0:
-                plan.append({"user_id": numeric_id, "amount": amount, "name": player.get("name")})
-    else:
-        winner = game_state.get("winner")
-        if winner and not winner.get("is_bot"):
-            try:
-                numeric_id = int(winner["id"])
-            except (TypeError, ValueError):
-                numeric_id = None
-            if numeric_id is not None:
-                plan.append({"user_id": numeric_id, "amount": bank, "name": winner.get("name")})
+        if team_total > 0:
+            for player in team_players:
+                if player.get("is_bot"):
+                    continue
+                try:
+                    numeric_id = int(player["id"])
+                except (TypeError, ValueError):
+                    continue
+                amount = int(team_bank * max(0, int(player.get("bet", 0))) / team_total)
+                if amount > 0:
+                    plan.append({"user_id": numeric_id, "amount": amount,
+                                 "name": player.get("name"), "arena": "team"})
+
     game_state["payouts"] = plan
     return plan
 
@@ -1413,7 +1472,10 @@ def _payout_hockey_winner():
     try:
         for entry in plan:
             uid = entry["user_id"]
-            if uid in (game_state.get("paid_users") or []):
+            # Один и тот же игрок может выиграть в обоих котлах — ключ включает арену,
+            # иначе вторая выплата была бы ошибочно пропущена как дубль.
+            key = f"{entry.get('arena', 'normal')}:{uid}"
+            if key in (game_state.get("paid_users") or []):
                 continue
             res = supabase.table("users").select("coins").eq("user_id", uid).execute()
             if not res.data:
@@ -1423,7 +1485,7 @@ def _payout_hockey_winner():
                 "user_id", uid).select("user_id").execute()
             if not updated.data:
                 raise RuntimeError(f"Supabase не подтвердил выплату user_id={uid}")
-            game_state.setdefault("paid_users", []).append(uid)
+            game_state.setdefault("paid_users", []).append(key)
         game_state["is_paid"] = True
     except Exception as e:
         # Keep the round unsettled so the background worker can retry instead of losing the payout.
@@ -1431,48 +1493,40 @@ def _payout_hockey_winner():
 
 
 def _finish_hockey_round():
-    """Resolve from the server-simulated final x and pay exactly once."""
+    """Разрешает ОБА котла по одной серверной финальной точке и платит один раз."""
     if game_state["status"] != "rolling":
         return False
-    # The winner receives the entire displayed pot, including bot wagers.
     game_state["bank"] = sum(int(player["bet"]) for player in game_state["players"])
     roll_data = game_state.get("roll_data") or {}
-    game_state["winner_team"] = None
-    if not game_state["players"] or game_state["bank"] <= 0 or "final_x" not in roll_data:
-        game_state["winner"] = None
-    else:
-        sector = _hockey_winner_at_x(float(roll_data["final_x"]))
-        if sector is not None and sector.get("is_team"):
-            # Командный режим: банк забирает команда, а «победитель» для модалки —
-            # самый крупный реальный игрок этой команды.
-            game_state["winner_team"] = sector["id"]
-            team_players = [p for p in game_state["players"] if p.get("team") == sector["id"]]
-            human_players = [p for p in team_players if not p.get("is_bot")] or team_players
-            game_state["winner"] = (max(human_players, key=lambda p: int(p.get("bet", 0)))
-                                    if human_players else None)
-        else:
-            game_state["winner"] = sector
+    final_x = float(roll_data["final_x"]) if "final_x" in roll_data else None
+
+    normal_winner = _hockey_winner_at_x(final_x, "normal") if final_x is not None else None
+    team_sector = _hockey_winner_at_x(final_x, "team") if final_x is not None else None
+    game_state["arena_winners"] = {"normal": normal_winner, "team": team_sector}
+    game_state["winner"] = normal_winner          # совместимость со старым клиентом
+    game_state["winner_team"] = team_sector["id"] if team_sector else None
+
     game_state["payouts"] = []
     game_state["paid_users"] = []
-    _hockey_payout_plan()
+    plan = _hockey_payout_plan()
+
+    # Лента истории: пишем самую крупную выплату раунда, чтобы она не пустела
+    # и не дублировала записи из двух котлов.
+    if plan:
+        best = max(plan, key=lambda entry: int(entry.get("amount") or 0))
+        history.insert(0, {
+            "round_id": game_state["round_id"],
+            "winner_name": f"{best.get('name') or 'игрок'}",
+            "winner_team": game_state.get("winner_team") if best.get("arena") == "team" else None,
+            "amount": int(best.get("amount") or 0),
+            "players": [{"name": p["name"], "bet": p["bet"],
+                         "is_winner": str(p["id"]) == str(best.get("user_id"))}
+                        for p in game_state["players"]],
+        })
+        del history[10:]
 
     game_state["status"] = "finished"
     game_state["last_update"] = time.time()
-    if game_state["winner"]:
-        history.insert(0, {
-            "round_id": game_state["round_id"],
-            "winner_name": (f"{ARENA_TEAMS[game_state['winner_team']]['name']} · "
-                            f"{game_state['winner']['name']}" if game_state.get("winner_team")
-                            else game_state["winner"]["name"]),
-            "winner_team": game_state.get("winner_team"),
-            "amount": game_state["bank"],
-            "players": [
-                {"name": p["name"], "bet": p["bet"], "is_winner": p["id"] == game_state["winner"]["id"]}
-                for p in game_state["players"]
-            ],
-        })
-        del history[10:]
-        _payout_hockey_winner()
     return True
 
 
@@ -1483,7 +1537,9 @@ async def start_hockey_settlement_worker():
             await asyncio.sleep(0.2)
             if game_state["status"] == "rolling" and time.time() - game_state["last_update"] >= HOCKEY_ROLL_DURATION:
                 _finish_hockey_round()
-            elif game_state["status"] == "finished" and game_state.get("winner") and not game_state["is_paid"]:
+            elif game_state["status"] == "finished" and not game_state["is_paid"]:
+                # Победитель обычной арены может быть пустым (например, там никто
+                # не ставил), а командная при этом выиграла — платим по плану.
                 _payout_hockey_winner()
 
     asyncio.create_task(settle_expired_rounds())
@@ -1637,8 +1693,11 @@ class ShopCatalogRequest(BaseModel): initData: str
 class PlaceBet(BaseModel):
     initData: str
     amount: int
-    # 'red'/'blue' — командная арена (задача 25). В обычном режиме игнорируется.
+    # 'red'/'blue' — команда командной арены (имеет смысл только при arena='team').
     team: Optional[str] = None
+    # Какая арена: 'normal' (полосы + мяч) или 'team' (красные/синие).
+    # Задача 31: котлы независимы, поэтому в одном раунде можно поставить в оба.
+    arena: Optional[str] = None
     request_id: Optional[str] = None
 
 
@@ -1703,13 +1762,44 @@ class UpgradeAction(BaseModel):
 
 # ==================== АРЕНА (ХОККЕЙ) ====================
 def _hockey_state_response():
+    """Состояние раунда сразу для ДВУХ арен: клиент рисует ту, что выбрана."""
     response = game_state.copy()
-    # Derive the public pot from the same participants shown in the arena, including bots.
-    response["bank"] = sum(max(0, int(player.get("bet", 0))) for player in response["players"])
+    normal_players = _arena_players("normal")
+    team_players = _arena_players("team")
+    normal_bank = sum(max(0, int(player.get("bet", 0))) for player in normal_players)
+    team_bank = sum(max(0, int(player.get("bet", 0))) for player in team_players)
+
+    response["bank"] = normal_bank + team_bank
+    response["normal_bank"] = normal_bank
+    response["team_bank"] = team_bank
+    # Полные списки участников каждого котла (ставки, проценты, команды).
+    response["normal_players"] = normal_players
+    response["team_players"] = team_players
+    # Совместимость: старый клиент ждал players = участники текущего режима.
+    response["players"] = normal_players
     # Круглая арена: клиент рисует сектора ровно в этом порядке (доли круга).
-    response["sectors"] = _hockey_sectors()
+    response["sectors"] = _hockey_sectors("normal")
     response["teams"] = _hockey_teams()
-    response["mode"] = _arena_mode()
+    response["team_sectors"] = _hockey_sectors("team")
+    winners = game_state.get("arena_winners") or {}
+    normal_winner = winners.get("normal")
+    team_winner = winners.get("team")
+    response["arena_winners"] = {"normal": normal_winner, "team": team_winner}
+    # Готовые блоки по аренам: клиент просто рисует state.arenas[view].
+    response["arenas"] = {
+        "normal": {
+            "id": "normal", "players": normal_players, "sectors": _hockey_sectors("normal"),
+            "bank": normal_bank, "winner": normal_winner, "winner_team": None,
+            "players_count": len(normal_players),
+        },
+        "team": {
+            "id": "team", "players": team_players, "sectors": _hockey_sectors("team"),
+            "teams": _hockey_teams(), "bank": team_bank, "winner": team_winner,
+            "winner_team": team_winner["id"] if team_winner else None,
+            "players_count": len(team_players),
+        },
+    }
+    response["mode"] = "both"
     response["payouts"] = game_state.get("payouts") or []
     if response.get("roll_data"):
         response["roll_data"] = {key: value for key, value in response["roll_data"].items() if key != "path"}
@@ -1739,11 +1829,14 @@ async def get_hockey_state():
             _finish_hockey_round()
 
     elif game_state["status"] == "finished":
-        if game_state.get("winner") and not game_state["is_paid"]:
+        # Платим за ОБА котла: победитель обычной арены и выигравшая команда
+        # независимы, поэтому проверяем не «есть ли winner», а «есть ли план».
+        if not game_state["is_paid"] and (game_state.get("payouts") or _hockey_payout_plan()):
             _payout_hockey_winner()
-        if now - game_state["last_update"] > 5 and (not game_state.get("winner") or game_state["is_paid"]):
-            previous_mode = game_state.get("mode", "normal")
-            game_state = _new_arena_state(previous_mode)
+        elif not game_state["is_paid"] and not game_state.get("payouts"):
+            game_state["is_paid"] = True      # некому платить — раунд закрыт
+        if now - game_state["last_update"] > 5 and game_state["is_paid"]:
+            game_state = _new_arena_state()
             game_state["last_update"] = now
             game_state["last_bot_added"] = now
             return _hockey_state_response()
@@ -1776,28 +1869,35 @@ async def place_bet(data: PlaceBet):
     if (game_state["status"] != "waiting"
             or time.time() - game_state["last_update"] >= 15):
         raise HTTPException(status_code=400, detail="Ставки закрыты")
-    # Команда (только в командном режиме): 'red' / 'blue'. В обычном игнорируется.
+    # Какая арена: если команда указана без arena — значит командная (старый клиент).
     team = (data.team or "").strip().lower() or None
     if team not in (None, "red", "blue"):
         raise HTTPException(status_code=400, detail="Неизвестная команда")
-    if _arena_mode() != "team":
-        team = None
+    arena = (data.arena or "").strip().lower() or None
+    if arena is None:
+        arena = "team" if team else "normal"
+    if arena not in ARENA_VIEWS:
+        raise HTTPException(status_code=400, detail="Неизвестная арена")
+    if arena != "team":
+        team = None                       # в обычной арене команд нет
 
+    # Запись уникальна в пределах котла: можно иметь ставку и в обычной, и в
+    # командной арене одновременно, но не две записи в одной.
     existing_player = next(
-        (p for p in game_state["players"] if p["id"] == user_id and not p.get("is_bot")),
+        (p for p in _arena_players(arena) if p["id"] == user_id and not p.get("is_bot")),
         None,
     )
-    # Нельзя ставить за обе команды в одном раунде: иначе игрок «страхуется»
+    # Нельзя ставить за обе команды в одном котле: иначе игрок «страхуется»
     # и выигрывает всегда. Отказ понятный, чтобы UI мог подсветить кнопку.
     if (existing_player is not None and team
             and existing_player.get("team") and existing_player.get("team") != team):
         blocked = ARENA_TEAMS.get(existing_player["team"], {}).get("name", "другую команду")
         raise HTTPException(status_code=400, detail=f"Вы уже ставите за {blocked} — дождитесь конца раунда")
-    # Лимит считается по ОБЩЕЙ ставке игрока в раунде, а не по одному запросу —
-    # иначе он обходится десятью ставками по 1 000.
+    # Лимит считается по ОБЩЕЙ ставке игрока в этом котле, а не по одному
+    # запросу — иначе он обходится десятью ставками по 1 000.
     total_after_bet = int(existing_player["bet"] if existing_player else 0) + int(data.amount)
     _enforce_bet_limit(user_id, total_after_bet)
-    if existing_player is None and len(game_state["players"]) >= 20:
+    if existing_player is None and len(_arena_players(arena)) >= ARENA_MAX_PLAYERS:
         raise HTTPException(status_code=400, detail="Комната заполнена")
 
     res = supabase.table("users").select("coins").eq("user_id", int(user_id)).execute()
@@ -1816,12 +1916,12 @@ async def place_bet(data: PlaceBet):
         name = user.get("username", user.get("first_name", f"id{user_id}"))
         avatar = user.get("photo_url", "")
         player_color = "#007aff"
-        while any(p["color"] == player_color for p in game_state["players"]):
+        while any(p["color"] == player_color for p in _arena_players(arena)):
             player_color = f"hsl({random.randint(0, 360)}, 80%, 50%)"
         existing_player = {
             "id": user_id, "name": name, "avatar": avatar, "bet": data.amount,
             "color": ARENA_TEAMS[team]["color"] if team else player_color,
-            "is_bot": False, "team": team,
+            "is_bot": False, "team": team, "arena": arena,
         }
         game_state["players"].append(existing_player)
 
@@ -1829,6 +1929,7 @@ async def place_bet(data: PlaceBet):
     if existing_player["bet"] >= 1000 and not game_state["whale_decided"]:
         game_state["whale_decided"] = True
         game_state["whale_join"] = random.random() < 0.10
+        game_state["whale_arena"] = arena     # кит придёт в тот котёл, где куш
         if game_state["whale_join"]:
             game_state["whale_trigger_at"] = random.uniform(1.0, 2.0)
 
@@ -1847,7 +1948,12 @@ async def finish_hockey(data: FinishHockey):
         return {"success": False, "detail": "Раунд ещё идёт"}
 
     _finish_hockey_round()
-    return {"success": True, "winner": game_state["winner"], "bank": game_state["bank"]}
+    # Возвращаем победителей обоих котлов: клиенту может быть нужна любая арена.
+    return {"success": True, "winner": game_state["winner"],
+            "winner_team": game_state.get("winner_team"),
+            "arena_winners": game_state.get("arena_winners") or {"normal": None, "team": None},
+            "normal_bank": _arena_bank("normal"), "team_bank": _arena_bank("team"),
+            "bank": game_state["bank"]}
 
 
 @app.get("/api/hockey_history")
@@ -1856,33 +1962,23 @@ async def get_hockey_history(): return history
 
 @app.post("/api/arena_mode")
 async def arena_mode(data: ArenaModeRequest):
-    """Переключение «Обычная арена» / «Командная арена».
+    """Совместимость со старым клиентом.
 
-    Меняем режим только в фазе ожидания и только пока в раунде нет живых
-    ставок: иначе у игрока уже стоит сектор по старой модели. Боты получают
-    команду автоматически при следующем входе в круг.
+    Задача 31: обе арены живут одновременно, а какой из них смотрит игрок —
+    решает клиент локально. Эндпоинт ничего не блокирует и ничего не ломает:
+    раньше он запрещал переключение во время раунда и при живых ставках, из-за
+    чего «посмотреть вторую арену, пока идёт катка» было невозможно.
     """
     user = verify_telegram_data(data.initData)
     if not user:
         raise HTTPException(status_code=401, detail="Invalid auth data")
     require_play_access(user)
     mode = (data.mode or "").strip().lower()
-    if mode not in ("normal", "team"):
+    if mode not in ARENA_VIEWS:
         raise HTTPException(status_code=400, detail="Неизвестный режим арены")
-    if game_state["status"] != "waiting":
-        raise HTTPException(status_code=400, detail="Режим переключим после этого раунда")
-    if any(not p.get("is_bot") for p in game_state["players"]):
-        raise HTTPException(status_code=400, detail="Режим переключим после этого раунда")
-    game_state["mode"] = mode
-    # Уже набежавших ботов раскладываем по командам, чтобы круг не был пустым.
-    for player in game_state["players"]:
-        if mode == "team":
-            player["team"] = player.get("team") or secure_choice(["red", "blue"])
-            player["color"] = ARENA_TEAMS[player["team"]]["color"]
-        else:
-            player["team"] = None
-    _update_hockey_percentages()
-    return {"ok": True, "mode": mode, "teams": _hockey_teams()}
+    return {"ok": True, "mode": "both", "view": mode,
+            "teams": _hockey_teams(), "normal_players": _arena_players("normal"),
+            "team_players": _arena_players("team")}
 
 
 # ==================== РАКЕТА (CRASH) ====================
