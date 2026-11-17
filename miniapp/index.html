@@ -9,7 +9,7 @@
     <meta http-equiv="Pragma" content="no-cache">
     <meta http-equiv="Expires" content="0">
     <title>AURA GAME</title>
-    <link rel="stylesheet" href="style.css?v=aura-29">
+    <link rel="stylesheet" href="style.css?v=aura-30">
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
 </head>
 <body>
@@ -222,14 +222,16 @@
                     <div class="extra-hint" id="ref-detail"></div>
                 </div>
 
-                <!-- Донат: Telegram Stars (прайс — заглушка, включается на сервере). -->
-                <div class="profile-extra" id="stars-card">
+                <!-- Донат: Telegram Stars. Пока выключен — карточка размыта и
+                     честно подписана «Скоро…», чтобы игрок не искал кнопку. -->
+                <div class="profile-extra is-soon" id="stars-card">
                     <div class="extra-head">
                         <span class="extra-title">⭐ Купить коины</span>
                         <span class="extra-value">Telegram Stars</span>
                     </div>
                     <div class="extra-hint" id="stars-hint">Пополнение коинов за звёзды</div>
-                    <button class="extra-btn" onclick="openTopUp()">Открыть магазин Stars</button>
+                    <button class="extra-btn" id="stars-btn" type="button">Скоро…</button>
+                    <div class="soon-overlay" id="stars-soon"><span>Скоро…</span></div>
                 </div>
 
             </div>
@@ -273,7 +275,6 @@
                 <button class="arena-mode-btn active" id="arena-mode-normal" onclick="setArenaMode('normal')">Обычная арена</button>
                 <button class="arena-mode-btn" id="arena-mode-team" onclick="setArenaMode('team')">Командная арена</button>
             </div>
-            <div class="arena-mode-hint" id="arena-mode-hint">Две арены идут параллельно — переключайся когда угодно и ставь хоть в обе</div>
 
             <!-- ОБЫЧНАЯ АРЕНА: поле с мячиком (как было раньше). Сектора — по
                  ставке каждого игрока, мяч летает по серверной траектории и
@@ -529,6 +530,6 @@
         <div class="nav-item" onclick="switchTab('profile', this)"><span class="nav-icon">👤</span> Профиль</div>
     </nav>
 
-    <script src="app.js?v=aura-29" defer></script>
+    <script src="app.js?v=aura-30" defer></script>
 </body>
 </html>

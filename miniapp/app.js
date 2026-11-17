@@ -1022,6 +1022,11 @@ function renderLoveBadge() {
 // клиент деньги не рисует.
 let topUpPackages = null;
 let topUpBusy = false;
+// Покупка коинов за Telegram Stars пока выключена: в профиле карточка размыта
+// с надписью «Скоро…», а кнопка «+» у баланса честно говорит то же самое.
+// Когда включим — достаточно поставить true и вернуть кнопке обработчик.
+let STARS_SOON = true;
+const STARS_SOON_TEXT = 'Скоро… Пополнение за Telegram Stars ещё готовится.';
 
 function topUpModal() { return document.getElementById('topup-modal'); }
 
@@ -1050,7 +1055,31 @@ function renderTopUpList(message) {
     });
 }
 
+function applyStarsSoonState() {
+    const card = document.getElementById('stars-card');
+    if (!card) return;
+    card.classList.toggle('is-soon', STARS_SOON);
+    const overlay = document.getElementById('stars-soon');
+    if (overlay) overlay.hidden = !STARS_SOON;
+    const button = document.getElementById('stars-btn');
+    if (button) {
+        button.textContent = STARS_SOON ? 'Скоро…' : 'Открыть магазин Stars';
+        button.onclick = STARS_SOON ? showStarsSoon : openTopUp;
+    }
+    // Кнопка «+» у баланса: пока «скоро» — не открывает пустую модалку.
+    const plus = document.querySelector('.plus-btn');
+    if (plus) {
+        plus.title = STARS_SOON ? 'Скоро…' : 'Пополнить баланс';
+        plus.classList.toggle('soon', STARS_SOON);
+    }
+}
+
+function showStarsSoon() {
+    if (tg && tg.showAlert) tg.showAlert(STARS_SOON_TEXT);
+}
+
 async function openTopUp() {
+    if (STARS_SOON) { showStarsSoon(); return; }
     const modal = topUpModal();
     if (!modal) {
         // index.html и app.js разъехались по кэшу — не молчим, а говорим причину.
@@ -3594,25 +3623,22 @@ function setArenaMode(mode) {
     }
     arenaState.view = view;
     arenaState.mode = view;
-    // Анимации другой арены должны проиграться заново, а не «доехать» до точки,
-    // на которой мы её оставили.
-    if (view === 'team') {
-        stopArenaBall();
-        arenaBall.roundId = null;
-        arenaPointer.landedRound = null;
-    } else {
-        arenaBall.roundId = null;
-        arenaPointer.landedRound = null;
-    }
+    // Задача 33: анимации у арен ТАКИЕ ЖЕ, как всегда. Переключение не сбрасывает
+    // раунд и не перезапускает движение: мяч и стрелка продолжают раунд с того
+    // момента, где он идёт по серверному времени. Раньше при каждом переходе
+    // мяч начинал путь заново, а стрелка второй раз «доезжала» до победителя.
     syncArenaView();
     // Догоняем статус раунда сразу, не дожидаясь следующего опроса (200 мс).
+    // instant=true: раунд уже разыгран, поэтому стрелку ставим сразу на
+    // победителя, а мяч — в финальную точку. Так переход не выглядит как
+    // «ещё один финиш», а анимации остаются такими же, как всегда.
     const state = arenaState.last;
-    if (state) replayArenaAnimation(state);
+    if (state) replayArenaAnimation(state, true);
     return Promise.resolve({ mode: view, view });
 }
 
 // Запускает анимацию выбранной арены по последнему известному состоянию.
-function replayArenaAnimation(state) {
+function replayArenaAnimation(state, instant) {
     if (!state || !state.round_id) return;
     if (state.status === 'rolling') {
         if (arenaState.view === 'team') {
@@ -3621,20 +3647,42 @@ function replayArenaAnimation(state) {
                 arenaResetPointer();
             }
             arenaStartPointerSpin();
-        } else if (arenaBall.roundId !== String(state.round_id)) {
+        } else if (arenaBall.roundId !== String(state.round_id) || !arenaBall.active) {
             startArenaBall(arenaStateForView(state, 'normal'));
         }
     } else if (state.status === 'finished') {
+        const finalX = state.roll_data ? Number(state.roll_data.final_x) || 0 : 0;
         if (arenaState.view === 'team') {
-            if (arenaPointer.landedRound !== state.round_id) {
+            if (instant && arenaPointer.landedRound !== state.round_id) {
+                // Переключились уже после финиша: стрелка сразу на победителе,
+                // без второго «доезда» на 3 секунды.
                 arenaPointer.landedRound = state.round_id;
-                const finalX = state.roll_data ? state.roll_data.final_x : 0;
-                arenaLandPointer(Number(finalX) || 0, ARENA_POINTER_LAND_MS);
+                arenaPointerJumpTo(finalX);
+            } else if (arenaPointer.landedRound !== state.round_id) {
+                arenaPointer.landedRound = state.round_id;
+                arenaLandPointer(finalX, ARENA_POINTER_LAND_MS);
+            } else if (instant) {
+                arenaPointerJumpTo(finalX);
             }
         } else {
+            // Мяч замирает в финальной точке — ровно как после обычного финиша.
             freezeArenaBall(arenaStateForView(state, 'normal'));
         }
     }
+}
+
+// Стрелка сразу на нужном угле: тот же визуальный результат, что после
+// arenaLandPointer, но без повторной прокрутки (для возврата на арену).
+function arenaPointerJumpTo(finalX) {
+    arenaPointerStopSpin();
+    arenaPointer.landToken = (arenaPointer.landToken || 0) + 1;
+    const pointer = arenaPointerNode();
+    if (!pointer) return;
+    const desired = ((arenaAngleForShare(Math.max(0, Math.min(100, Number(finalX) || 0))) % 360) + 360) % 360;
+    arenaPointer.angle = desired;
+    pointer.classList.add('landing');
+    pointer.style.transition = 'none';
+    pointer.style.transform = `rotate(${desired.toFixed(2)}deg)`;
 }
 
 // ================= ОБЫЧНАЯ АРЕНА: ПОЛЕ С МЯЧИКОМ =================
@@ -3665,12 +3713,16 @@ function updateArenaView(mode) {
     if (field) field.hidden = isTeam;
     if (circle) circle.hidden = !isTeam;
     if (isTeam) {
+        // Мяч останавливаем (его не видно), но roundId НЕ сбрасываем: вернёмся —
+        // продолжим с той же точки траектории по серверному времени.
         stopArenaBall();
         const fieldEl = document.getElementById('hockey-field');
         if (fieldEl) fieldEl.classList.remove('rolling', 'settled');
         if (circle) circle.classList.remove('rolling', 'settled');
     } else {
-        arenaResetPointer();
+        // Стрелку только останавливаем, угол и «раунд разыгран» сохраняем,
+        // иначе при возврате на командную арену она крутилась бы заново.
+        arenaPointerStopSpin();
         if (circle) circle.classList.remove('rolling', 'settled');
     }
 }
@@ -3959,9 +4011,10 @@ async function pollHockeyState() {
                     arenaResetPointer();
                 }
                 arenaStartPointerSpin();
-            } else if (arenaBall.roundId !== String(state.round_id)) {
+            } else if (arenaBall.roundId !== String(state.round_id) || !arenaBall.active) {
                 // Обычная арена: один раз на раунд берём траекторию и запускаем мяч.
-                startArenaBall(state);
+                // !active — вернулись с другой арены: продолжаем с текущей точки.
+                startArenaBall(arenaStateForView(state, 'normal'));
             }
         } else if (state.status === 'finished') {
             statusEl.innerText = 'Раунд окончен!'; statusEl.style.color = '#ff3b30';
@@ -4375,6 +4428,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     // Карточку Апгрейда запираем/отпираем сразу по списку ADMIN_IDS, не дожидаясь
     // профиля: иначе админ видел серую карточку до ответа сервера.
     updateUpgradeAccess();
+    // Покупка коинов за звёзды пока выключена — размываем карточку и кнопку «+».
+    applyStarsSoonState();
     // Тап по балансу — ручная синхронизация (полезно, если Render «просыпается»).
     ['user-balance', 'profile-coins'].forEach(id => {
         const el = document.getElementById(id);

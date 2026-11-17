@@ -1351,6 +1351,78 @@ async def get_relationship(user_id):
         return None
 
 
+# Попытка создать пару. Раньше любой сбой базы превращался в бесполезное
+# «примените миграцию», хотя причин может быть три: нет таблицы, нет колонки
+# (старая схема) или RLS без политики. Теперь пишем, что именно случилось, и
+# сами повторяем вставку без «украшающих» колонок, если их нет в таблице.
+_RELATIONSHIP_COLUMNS_DROPPABLE = ("bank", "status", "love", "updated_at")
+
+
+def _relationship_error_text(exc) -> str:
+    return str(exc or "")
+
+
+def _missing_column_from_error(text: str):
+    """PGRST204: "Could not find the 'bank' column of 'relationships'..." → bank."""
+    import re as _re
+    patterns = (
+        r"could not find the '([a-z_]+)' column",
+        r"column [\"']?(?:public\.)?relationships\.([a-z_]+)[\"']? does not exist",
+        r"column [\"']([a-z_]+)[\"'] of relation",
+    )
+    low = text.lower()
+    for pattern in patterns:
+        match = _re.search(pattern, low)
+        if match:
+            return match.group(1)
+    return None
+
+
+def _create_relationship(proposer_id, target_id, logger_prefix="ПАРА: "):
+    """Вставка пары с повтором без колонок, которых нет в старой таблице."""
+    payload = {
+        "user_a": int(proposer_id), "user_b": int(target_id),
+        "love": 0, "bank": 0, "status": "active",
+    }
+    last_error = None
+    for _ in range(len(_RELATIONSHIP_COLUMNS_DROPPABLE) + 1):
+        try:
+            return supabase.table(RELATIONSHIPS_TABLE).insert(dict(payload)).execute()
+        except Exception as exc:  # noqa: BLE001
+            last_error = exc
+            text = _relationship_error_text(exc)
+            column = _missing_column_from_error(text)
+            if column and column in payload and column in _RELATIONSHIP_COLUMNS_DROPPABLE:
+                logger.warning("%sколонки «%s» нет в relationships — пишем без неё (%s)",
+                               logger_prefix, column, text[:200])
+                payload.pop(column, None)
+                continue
+            raise
+    if last_error:
+        raise last_error
+    return None
+
+
+def _relationship_failure_message(exc) -> str:
+    """Человеческая причина, почему пара не создалась (и что делать)."""
+    text = _relationship_error_text(exc)
+    low = text.lower()
+    if "row-level security" in low or "42501" in low or "permission denied" in low:
+        return ("⚠️ База не даёт записать пару (RLS). Примените миграцию "
+                "20261124000000_love_fix.sql в Supabase SQL Editor.")
+    if ("could not find the table" in low or "does not exist" in low and "relationship" in low
+            or "pgrst205" in low or "42p01" in low):
+        return ("⚠️ Таблицы relationships нет. Примените миграцию "
+                "20261124000000_love_fix.sql в Supabase SQL Editor.")
+    if "уже состоит в активных отношениях" in low or "single active" in low:
+        return "💔 Кто-то из вас уже в паре — сначала <code>-отны</code>."
+    column = _missing_column_from_error(text)
+    if column:
+        return ("⚠️ В таблице relationships нет колонки «%s». Примените миграцию "
+                "20261124000000_love_fix.sql." % column)
+    return "❌ Не удалось создать пару. Попробуйте позже."
+
+
 def _partner_of(row, user_id):
     try:
         a, b = int(row.get("user_a")), int(row.get("user_b"))
@@ -1507,17 +1579,11 @@ async def cb_love_answer(callback: CallbackQuery):
         return await callback.answer(
             f"💔 Уже есть пара: {partner_name}. Сначала -отны.", show_alert=True)
 
-    def _create():
-        return supabase.table(RELATIONSHIPS_TABLE).insert({
-            "user_a": int(proposer_id), "user_b": int(target_id),
-            "love": 0, "bank": 0, "status": "active",
-        }).execute()
-
     try:
-        await asyncio.to_thread(_create)
+        await asyncio.to_thread(_create_relationship, proposer_id, target_id)
     except Exception as e:
         logger.error(f"Не удалось создать пару: {e}")
-        return await callback.answer("Не удалось создать пару — примените миграцию", show_alert=True)
+        return await callback.answer(_relationship_failure_message(e), show_alert=True)
 
     # Задача 30: одиночный статус обоих сгорает — начинается общая история пары.
     await drop_solo_status(proposer_id)
