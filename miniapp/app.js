@@ -326,7 +326,7 @@ let crashPollFailures = 0;
 // Стрелка командной арены: angle — текущий угол (0..360), rafId — кадр
 // непрерывного вращения, landedRound — раунд, за который стрелка уже встала
 // на победителя (чтобы не «доезжать» повторно на каждом опросе).
-let arenaPointer = { angle: 0, roundId: null, landedRound: null, spinning: false, rafId: null };
+let arenaPointer = { angle: 0, roundId: null, landedRound: null, spinning: false, rafId: null, landToken: 0 };
 let arenaState = { mode: 'normal', sectors: [], teams: [], myTeam: null, players: [] };
 let hockeyServerOffsetMs = 0, hockeyClockSynced = false;
 
@@ -720,7 +720,13 @@ function openChannel(event) {
 // поэтому повторная подписка после отписки денег не даёт.
 async function checkSubscription(options) {
     const alert = Boolean(options && options.alert);
-    if (!tg.initData) return;
+    if (!tg.initData) {
+        // Вне Telegram проверить подписку невозможно — говорим это, а не молчим.
+        if (alert && tg && tg.showAlert) {
+            tg.showAlert('Откройте приложение через Telegram — без initData начислить бонус нельзя.');
+        }
+        return;
+    }
     try {
         const data = await apiPost('/api/channel_check', {}, { fallback: 'Не удалось проверить подписку' });
         subscriptionChecked = true;
@@ -733,6 +739,10 @@ async function checkSubscription(options) {
         // поэтому никаких «Bad Request: member list is inaccessible».
         if (data.bonus_claimed) {
             if (reward) reward.textContent = '✅ Бонус за подписку уже получен';
+        } else if (data.ok === false) {
+            // Проверка не удалась (бот не админ канала и т.п.) — не обещаем
+            // «200 коинов» молча: пишем причину прямо в плашку.
+            if (reward) reward.textContent = `⚠️ ${data.detail || 'Подписку не удалось проверить'}`;
         } else if (reward) {
             reward.textContent = `🎁 Награда за подписку: ${data.bonus || 200} коинов`;
         }
@@ -950,12 +960,22 @@ function renderLoveBadge() {
     const partner = document.getElementById('profile-love-partner');
     const stage = document.getElementById('profile-love-stage');
     const freeText = document.getElementById('profile-love-free-text');
+    const freeStageEl = document.getElementById('profile-love-free-stage');
     if (!badge && !freeBadge) return;
     const inRelationship = Boolean(loveState && loveState.in_relationship);
     if (badge) badge.hidden = !inRelationship;
     if (freeBadge) freeBadge.hidden = inRelationship;
     if (!inRelationship) {
         if (freeText) freeText.textContent = freeLoveLabel();
+        // Задача 30: у одиночки своя валюта (Unlove). Показываем её только если
+        // она уже накоплена — на нуле плашка остаётся короткой, как раньше.
+        if (freeStageEl) {
+            const unlove = Number(loveState && loveState.unlove) || 0;
+            const level = Number(loveState && loveState.solo_level) || 1;
+            freeStageEl.textContent = unlove > 0
+                ? ` · ур. ${level} · ${formatCoins(unlove)} Unlove`
+                : '';
+        }
         return;
     }
     if (partner) partner.textContent = loveState.partner_name || 'партнёр';
@@ -967,23 +987,101 @@ function renderLoveBadge() {
     }
 }
 
-// ================= TELEGRAM STARS =================
-async function openStarsShop() {
+// ================= ПОПОЛНЕНИЕ / TELEGRAM STARS =================
+// Кнопка «+» у баланса и карточка «Telegram Stars» открывают один и тот же
+// экран с пакетами. Список цен приходит с сервера (/api/stars_packages), счёт
+// создаёт /api/stars_invoice, а начисление делает бот по successful_payment —
+// клиент деньги не рисует.
+let topUpPackages = null;
+let topUpBusy = false;
+
+function topUpModal() { return document.getElementById('topup-modal'); }
+
+function closeTopUp() {
+    const modal = topUpModal();
+    if (modal) modal.classList.remove('active');
+}
+
+function renderTopUpList(message) {
+    const list = document.getElementById('topup-list');
+    if (!list) return;
+    const packages = Array.isArray(topUpPackages) ? topUpPackages : [];
+    if (!packages.length) {
+        list.innerHTML = `<div class="topup-loading">${message || 'Пакеты недоступны'}</div>`;
+        return;
+    }
+    list.innerHTML = packages.map(pkg => `
+        <button class="topup-item" data-package="${escapeHtml(pkg.id)}">
+            <span class="topup-item-coins">
+                <img src="coin.png" alt="монета"> ${formatCoins(pkg.coins)}
+            </span>
+            <span class="topup-item-price">⭐ ${Number(pkg.stars) || 0}</span>
+        </button>`).join('');
+    list.querySelectorAll('.topup-item').forEach(btn => {
+        btn.addEventListener('click', () => buyCoinPackage(btn.dataset.package, btn));
+    });
+}
+
+async function openTopUp() {
+    const modal = topUpModal();
+    if (!modal) {
+        // index.html и app.js разъехались по кэшу — не молчим, а говорим причину.
+        if (tg && tg.showAlert) tg.showAlert('Обновите приложение: экран пополнения ещё не загрузился.');
+        return;
+    }
+    modal.classList.add('active');
+    const list = document.getElementById('topup-list');
+    if (list) list.innerHTML = '<div class="topup-loading">Загрузка…</div>';
     try {
-        const data = await apiPost('/api/stars_invoice', { package_id: 'coins_1000' });
-        if (!data.enabled) {
-            const list = (data.packages || []).map(p => `⭐ ${p.stars} → ${formatCoins(p.coins)} коинов`).join('\n');
-            tg.showAlert(`Магазин Stars пока закрыт.\n\nПланируемые пакеты:\n${list || '—'}`);
+        const res = await fetch(`${API_URL}/api/stars_packages`);
+        const data = await res.json().catch(() => ({}));
+        topUpPackages = Array.isArray(data.packages) ? data.packages : [];
+        if (data.enabled === false && topUpPackages.length) {
+            renderTopUpList('Пополнение временно выключено');
             return;
         }
-        if (data.url) tg.openInvoice && tg.openInvoice(data.url, () => {});
-        else tg.openTelegramLink(data.url);
+        renderTopUpList('Пакеты недоступны');
     } catch (e) {
-        const hint = document.getElementById('stars-hint');
-        if (hint) hint.textContent = e.message || 'Stars пока недоступны';
-        tg.showAlert(e.message || 'Stars пока недоступны');
+        renderTopUpList('Не удалось загрузить пакеты. Проверьте соединение.');
     }
 }
+
+async function buyCoinPackage(packageId, button) {
+    if (!packageId || topUpBusy) return;
+    topUpBusy = true;
+    const label = button ? button.innerHTML : '';
+    if (button) { button.disabled = true; button.innerHTML = '<span class="topup-item-coins">Создаём счёт…</span>'; }
+    try {
+        const data = await apiPost('/api/stars_invoice', { package_id: packageId });
+        if (!data || data.enabled === false || !data.url) {
+            const list = (data && data.packages ? data.packages : topUpPackages) || [];
+            const text = list.map(p => `⭐ ${p.stars} → ${formatCoins(p.coins)} коинов`).join('\n');
+            tg.showAlert(`${(data && data.detail) || 'Пополнение пока недоступно'}\n\n${text}`);
+            return;
+        }
+        closeTopUp();
+        if (tg.openInvoice) {
+            tg.openInvoice(data.url, (status) => {
+                if (status === 'paid') {
+                    tg.showAlert('⭐ Оплата прошла! Коины придут в бот сообщением.');
+                    loadUserData().catch(() => {});
+                }
+            });
+        } else if (tg.openTelegramLink) {
+            tg.openTelegramLink(data.url);
+        } else {
+            window.open(data.url, '_blank');
+        }
+    } catch (e) {
+        tg.showAlert(e.message || 'Не удалось создать счёт');
+    } finally {
+        topUpBusy = false;
+        if (button) { button.disabled = false; button.innerHTML = label; }
+    }
+}
+
+// Совместимость: старые места звали openStarsShop().
+function openStarsShop() { return openTopUp(); }
 
 // ================= СУНДУКИ =================
 // Сервер только РАЗЫГРЫВАЕТ награду (/api/open_chest), а начисляет её
@@ -2827,6 +2925,17 @@ function updateMinesInfo(coef, cashout) {
     if (coefEl) coefEl.innerText = `x${Number(coef || 1).toFixed(2)}`;
     if (cashEl) cashEl.innerHTML = coinAmount(cashout || 0);
 }
+// Алмаз в безопасной клетке рисуем SVG, а не эмодзи 💎: на части устройств
+// эмодзи приезжает с синим квадратом-подложкой, и открытая клетка выглядела
+// как «сломанная иконка». Векторный кристалл одинаковый везде.
+const MINES_GEM_SVG = `<svg class="cell-gem" viewBox="0 0 32 32" aria-hidden="true">
+    <polygon points="8,6 24,6 30,13 16,29 2,13" fill="#bfefff" stroke="rgba(255,255,255,0.9)" stroke-width="1.2" stroke-linejoin="round"/>
+    <polygon points="8,6 24,6 21,13 11,13" fill="#eaffff" opacity="0.95"/>
+    <polygon points="2,13 11,13 16,29" fill="#7fd8ff"/>
+    <polygon points="21,13 30,13 16,29" fill="#4bb6f5"/>
+    <polygon points="11,13 21,13 16,29" fill="#9fe6ff"/>
+</svg>`;
+
 function resetMinesCells() {
     document.querySelectorAll('.cell').forEach(c => {
         c.className = 'cell'; c.innerHTML = ''; c.style.pointerEvents = 'auto';
@@ -2958,7 +3067,7 @@ async function clickMineCell(cell) {
             return;
         }
         cell.classList.add('good');
-        cell.innerHTML = '💎';
+        cell.innerHTML = MINES_GEM_SVG;
         minesSafeOpened = Number(data.opened_count) || 0;
         minesCoef = Number(data.coef) || 1;
         const cashout = Number(data.cashout) || 0;
@@ -3095,25 +3204,38 @@ function renderArenaCircle(state) {
 }
 
 // ================= КОМАНДНАЯ АРЕНА: СТРЕЛКА =================
-// Стрелка непрерывно крутится весь бросок (rAF), а на финише плавно тормозит
-// ровно на выигрышном секторе — это и есть «выбор победителя».
-// Было: round_id записывался ещё на «Ставки», и на броске проверка «раунд
-// сменился» уже не срабатывала — стрелка не двигалась вообще.
-const ARENA_POINTER_SPEED = 520;          // градусов в секунду во время броска
-const ARENA_POINTER_LAND_MS = 1300;       // столько тормозим на победителе
+// Крутится и останавливается ровно как стрелка Апгрейда: пока идёт бросок —
+// ровное вращение (requestAnimationFrame, 900°/с), на финише — несколько полных
+// оборотов и плавное затухание одной CSS-кривой cubic-bezier(0.1, 0.7, 0.1, 1)
+// точно на выигрышном секторе. Никаких «рывков» на стыке фаз: переход один.
+const ARENA_POINTER_SPEED = 900;          // °/с — как UPGRADE_ARROW_SPEED
+const ARENA_POINTER_LAND_MS = 3200;       // столько длится финишная прокрутка
+const ARENA_POINTER_LAND_EASING = 'cubic-bezier(0.1, 0.7, 0.1, 1)';
 
 function arenaPointerNode() { return document.getElementById('arena-pointer'); }
 
-function arenaPointerApply() {
+// Угол ставится мгновенно (фаза вращения и сброс); плавный финиш включает
+// transition сам и зовёт этот хелпер с keepTransition.
+function arenaPointerSetAngle(deg, keepTransition) {
+    arenaPointer.angle = deg;
     const pointer = arenaPointerNode();
-    if (pointer) pointer.style.transform = `rotate(${arenaPointer.angle.toFixed(2)}deg)`;
+    if (!pointer) return;
+    if (!keepTransition) pointer.style.transition = 'none';
+    pointer.style.transform = `rotate(${deg.toFixed(2)}deg)`;
+}
+
+function arenaPointerStopSpin() {
+    arenaPointer.spinning = false;
+    if (arenaPointer.rafId) cancelAnimationFrame(arenaPointer.rafId);
+    arenaPointer.rafId = null;
+    const pointer = arenaPointerNode();
+    if (pointer) pointer.classList.remove('spinning');
 }
 
 function arenaResetPointer() {
-    if (arenaPointer.rafId) cancelAnimationFrame(arenaPointer.rafId);
-    arenaPointer.rafId = null;
+    arenaPointerStopSpin();
+    arenaPointer.landToken = (arenaPointer.landToken || 0) + 1;   // отменяем незавершённый финиш
     arenaPointer.angle = 0;
-    arenaPointer.spinning = false;
     arenaPointer.landedRound = null;
     const pointer = arenaPointerNode();
     if (pointer) {
@@ -3124,42 +3246,72 @@ function arenaResetPointer() {
 }
 
 function arenaStartPointerSpin() {
-    if (arenaPointer.rafId || arenaPointer.spinning) return;
+    if (arenaPointer.spinning || arenaPointer.rafId) return;
     const pointer = arenaPointerNode();
     if (!pointer) return;
     pointer.style.transition = 'none';
+    pointer.classList.remove('landing');
     pointer.classList.add('spinning');
     arenaPointer.spinning = true;
-    let last = performance.now();
-    const step = (now) => {
+    const nowMs = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
+    let last = nowMs();
+    const step = () => {
         if (!arenaPointer.spinning) { arenaPointer.rafId = null; return; }
-        const dt = Math.min(0.08, Math.max(0, (now - last) / 1000));
+        const now = nowMs();
+        const dt = Math.max(0, Math.min(now - last, 120)) / 1000;
         last = now;
         arenaPointer.angle = (arenaPointer.angle + ARENA_POINTER_SPEED * dt) % 360;
-        arenaPointerApply();
-        arenaPointer.rafId = requestAnimationFrame(step);
+        arenaPointerSetAngle(arenaPointer.angle);
+        arenaPointer.rafId = typeof requestAnimationFrame === 'function'
+            ? requestAnimationFrame(step)
+            : setTimeout(step, 16);
     };
-    arenaPointer.rafId = requestAnimationFrame(step);
+    arenaPointer.rafId = typeof requestAnimationFrame === 'function'
+        ? requestAnimationFrame(step)
+        : setTimeout(step, 16);
 }
 
-// Финиш: несколько оборотов + плавное затухание (как рулетка) в точку сектора.
+// Финиш: минимум три полных оборота + доводка до сектора победителя.
+// Токен защищает от гонки: новый раунд сбрасывает стрелку, а старый
+// transitionend не должен ничего «дорисовать».
 function arenaLandPointer(finalX, durationMs) {
     const pointer = arenaPointerNode();
+    arenaPointerStopSpin();
     if (!pointer) return;
-    arenaPointer.spinning = false;
-    if (arenaPointer.rafId) cancelAnimationFrame(arenaPointer.rafId);
-    arenaPointer.rafId = null;
-    pointer.classList.remove('spinning');
+    const token = (arenaPointer.landToken || 0) + 1;
+    arenaPointer.landToken = token;
 
-    const targetAngle = arenaAngleForShare(Math.max(0, Math.min(100, Number(finalX) || 0)));
+    const desired = ((arenaAngleForShare(Math.max(0, Math.min(100, Number(finalX) || 0))) % 360) + 360) % 360;
     const current = ((arenaPointer.angle % 360) + 360) % 360;
-    const delta = ((targetAngle - current) % 360 + 360) % 360;
-    const total = Math.max(600, Number(durationMs) || ARENA_POINTER_LAND_MS);
-    const absolute = current + 2 * 360 + delta;
-    pointer.style.transition = `transform ${total}ms cubic-bezier(0.12, 0.72, 0.12, 1)`;
-    pointer.style.transform = `rotate(${absolute.toFixed(2)}deg)`;
+    const delta = ((desired - current) % 360 + 360) % 360;
+    const total = Math.max(1200, Number(durationMs) || ARENA_POINTER_LAND_MS);
+    const turns = Math.max(3, Math.ceil(total / 900));
+    const target = arenaPointer.angle + turns * 360 + delta;
+
+    let finished = false;
+    let fallbackTimer = null;
+    const finish = () => {
+        if (finished) return;
+        finished = true;
+        if (pointer.removeEventListener) pointer.removeEventListener('transitionend', onTransitionEnd);
+        if (fallbackTimer) clearTimeout(fallbackTimer);
+        if (token !== arenaPointer.landToken) return;
+        arenaPointerSetAngle(target);          // фиксируем конечный угол
+    };
+    const onTransitionEnd = (event) => {
+        if (!event || event.target === pointer) finish();
+    };
+
+    // 1) стартовый угол без анимации, 2) reflow (иначе браузер склеит
+    // transform и transition не запустится), 3) один плавный переход.
+    arenaPointerSetAngle(arenaPointer.angle);
+    void pointer.offsetWidth;
     pointer.classList.add('landing');
-    arenaPointer.angle = absolute % 360;
+    pointer.style.transition = `transform ${total}ms ${ARENA_POINTER_LAND_EASING}`;
+    arenaPointer.angle = target;
+    pointer.style.transform = `rotate(${target.toFixed(2)}deg)`;
+    if (pointer.addEventListener) pointer.addEventListener('transitionend', onTransitionEnd);
+    fallbackTimer = setTimeout(finish, total + 300);
 }
 
 function updateArenaModeUI(mode, myTeam) {

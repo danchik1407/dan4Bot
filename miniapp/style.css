@@ -858,11 +858,8 @@ body.maintenance { overflow: hidden; }
     box-shadow: inset 0 0 0 10px rgba(0, 0, 0, 0.25);
     pointer-events: none;
 }
-.arena-ring::after {
-    content: ''; position: absolute; left: 50%; top: 50%; width: 16px; height: 16px;
-    margin: -8px 0 0 -8px; border-radius: 50%;
-    background: #1c1c1c; border: 2px solid rgba(255, 255, 255, 0.3);
-}
+/* Чёрный кружок в центре убран: он закрывал стык секторов и выглядел как
+   «дырка» под стрелкой. Центр круга теперь чистый. */
 .arena-pointer {
     position: absolute; inset: 0; z-index: 4; pointer-events: none;
     transform-origin: 50% 50%;
@@ -944,4 +941,58 @@ body.maintenance { overflow: hidden; }
 .team-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 @media (prefers-reduced-motion: reduce) {
     .arena-chip.win .arena-chip-avatar { animation: none; }
+}
+
+/* ================= ПОПОЛНЕНИЕ (Telegram Stars) ================= */
+/* Экран, который открывает «+» у баланса. Раньше кнопка только показывала
+   «Пополнение скоро!», поэтому нажатие выглядело как «ничего не происходит». */
+.topup-modal {
+    position: fixed; inset: 0; z-index: 1100; display: none;
+    align-items: flex-end; justify-content: center;
+    background: rgba(0, 0, 0, 0.72); backdrop-filter: blur(6px);
+}
+.topup-modal.active { display: flex; animation: fadeIn 0.2s ease; }
+.topup-card {
+    width: 100%; max-width: 420px; box-sizing: border-box;
+    background: #1c1c1c; border: 1px solid #2c2c2e;
+    border-radius: 22px 22px 0 0; padding: 18px 16px calc(18px + env(safe-area-inset-bottom, 0px));
+    box-shadow: 0 -12px 40px rgba(0, 0, 0, 0.55);
+    animation: topUpSheet 0.26s cubic-bezier(0.22, 1.1, 0.4, 1);
+}
+@keyframes topUpSheet {
+    from { transform: translateY(24px); opacity: 0.4; }
+    to { transform: translateY(0); opacity: 1; }
+}
+.topup-head { display: flex; align-items: center; justify-content: space-between; }
+.topup-title { font-size: 17px; font-weight: 900; color: #fff; }
+.topup-close {
+    width: 32px; height: 32px; border-radius: 50%; border: none; cursor: pointer;
+    background: #2c2c2e; color: #c7c7cc; font-size: 15px; font-weight: 900;
+}
+.topup-sub { margin-top: 6px; font-size: 12px; color: #8e8e93; line-height: 1.4; }
+.topup-list { margin-top: 14px; display: flex; flex-direction: column; gap: 8px; }
+.topup-loading { padding: 14px 0; text-align: center; font-size: 12px; color: #8e8e93; }
+.topup-item {
+    display: flex; align-items: center; justify-content: space-between; gap: 10px;
+    padding: 14px 14px; border-radius: 14px; cursor: pointer; text-align: left;
+    background: linear-gradient(180deg, #232526, #191a1b);
+    border: 1px solid #2f3132; color: #fff; font-family: inherit;
+    transition: transform 0.12s ease, border-color 0.2s ease;
+}
+.topup-item:active { transform: scale(0.98); }
+.topup-item:disabled { opacity: 0.55; }
+.topup-item-coins { display: flex; align-items: center; gap: 8px; font-size: 16px; font-weight: 900; }
+.topup-item-coins img { width: 22px; height: 22px; object-fit: contain; background: transparent; }
+.topup-item-price {
+    display: flex; align-items: center; gap: 6px;
+    font-size: 13px; font-weight: 800; color: #ffd60a; white-space: nowrap;
+}
+.topup-note { margin-top: 12px; font-size: 10.5px; color: #636366; line-height: 1.4; }
+
+/* Алмаз в открытой клетке мин: SVG вместо эмодзи (у эмодзи на части
+   устройств была синяя квадратная подложка). */
+.cell .cell-gem {
+    width: 62%; height: 62%; display: block;
+    filter: drop-shadow(0 2px 6px rgba(0, 0, 0, 0.45));
+    pointer-events: none;
 }
