@@ -318,7 +318,7 @@ let upgradeResultState = '';
 // id результатов, которые уже показывали в этой сессии: если ack не дошёл,
 // один и тот же прошлый раунд не должен всплывать снова и снова.
 const upgradeShownLogIds = new Set();
-let hockeyInterval = null, hasShownWinner = false;
+let hockeyInterval = null, hasShownWinner = false, shownWinnerKey = null;
 // Счётчик подряд идущих неудачных опросов состояния Краша (для тихого лога).
 let crashPollFailures = 0;
 // Круглая арена (задача 25): вместо квадратного поля и прыгающего мяча —
@@ -327,7 +327,17 @@ let crashPollFailures = 0;
 // непрерывного вращения, landedRound — раунд, за который стрелка уже встала
 // на победителя (чтобы не «доезжать» повторно на каждом опросе).
 let arenaPointer = { angle: 0, roundId: null, landedRound: null, spinning: false, rafId: null, landToken: 0 };
-let arenaState = { mode: 'normal', sectors: [], teams: [], myTeam: null, players: [] };
+// Задача 31: сервер держит ДВЕ арены одновременно. Здесь только то, какую из
+// них смотрит игрок (view) и последний снимок обеих арен (arenas).
+// mode — синоним view, оставлен для совместимости с прежним кодом и тестами.
+let arenaState = {
+    view: 'normal', mode: 'normal',
+    arenas: {
+        normal: { players: [], sectors: [], bank: 0, winner: null, winner_team: null },
+        team: { players: [], sectors: [], teams: [], bank: 0, winner: null, winner_team: null },
+    },
+    players: [], sectors: [], teams: [], myTeam: null, status: 'waiting', last: null,
+};
 let hockeyServerOffsetMs = 0, hockeyClockSynced = false;
 
 let crashInterval = null;
@@ -3093,11 +3103,14 @@ async function placeHockeyBet(team) {
     try {
         // team передаём только в командном режиме: сервер сам проверит, что
         // игрок не ставит за обе команды в одном раунде.
-        const payload = { amount: bet, request_id: requestId() };
+        // Арена ставки: командная (если нажата красная/синяя кнопка) или та,
+        // что открыта. Котлы независимы, поэтому в одном раунде можно
+        // поставить и в обычную, и в командную арену.
+        const payload = { amount: bet, request_id: requestId(), arena: team ? 'team' : arenaState.view };
         if (team) payload.team = team;
         const data = await apiPost('/api/place_bet', payload, { fallback: "Ставки закрыты!" });
         balance = data.new_balance; balanceKnown = true; updateUI(); playSound('click');
-        if (team) { arenaState.myTeam = team; updateArenaModeUI(arenaState.mode, team); }
+        if (team) { arenaState.myTeam = team; updateArenaModeUI(arenaState.view, team); }
         pollHockeyState();
     } catch (e) {
         tg.showAlert(e.message || "Ошибка соединения");
@@ -3340,16 +3353,204 @@ function updateArenaModeUI(mode, myTeam) {
     if (blueBtn) blueBtn.classList.toggle('picked', team === 'blue');
 }
 
-async function setArenaMode(mode) {
-    try {
-        const data = await apiPost('/api/arena_mode', { mode }, { fallback: 'Не удалось переключить арену' });
-        arenaState.mode = data.mode || mode;
-        updateArenaModeUI(arenaState.mode, null);
-        // Поле с мячиком / круг переключаем сразу, не дожидаясь опроса.
-        updateArenaView(arenaState.mode);
-        pollHockeyState();
-    } catch (e) {
-        tg.showAlert(e.message || 'Не удалось переключить арену');
+// ================= ДВЕ АРЕНЫ ОДНОВРЕМЕННО (задача 31) =================
+// Арены живут на сервере параллельно, поэтому переключение — чисто локальное:
+// ни запроса, ни ожидания конца раунда, ни запрета при живой ставке.
+function arenaPool(view) {
+    const pools = arenaState.arenas || {};
+    return pools[view === 'team' ? 'team' : 'normal']
+        || { players: [], sectors: [], teams: [], bank: 0, winner: null, winner_team: null };
+}
+
+// Снимок обеих арен из ответа /api/hockey_state. Плоские поля оставлены как
+// запасной путь: если сервер старой сборки, клиент всё равно не падает.
+function arenaPoolsFromState(state) {
+    const normal = {
+        id: 'normal',
+        players: Array.isArray(state.normal_players) ? state.normal_players
+            : (Array.isArray(state.players) ? state.players : []),
+        sectors: Array.isArray(state.sectors) ? state.sectors : [],
+        bank: Number(state.normal_bank != null ? state.normal_bank : state.bank) || 0,
+        winner: state.winner || null,
+        winner_team: null,
+    };
+    const team = {
+        id: 'team',
+        players: Array.isArray(state.team_players) ? state.team_players : [],
+        sectors: Array.isArray(state.team_sectors) ? state.team_sectors
+            : (Array.isArray(state.teams) ? state.teams : []),
+        teams: Array.isArray(state.teams) ? state.teams : [],
+        bank: Number(state.team_bank) || 0,
+        winner: (state.arena_winners && state.arena_winners.team) || null,
+        winner_team: state.winner_team || null,
+    };
+    const fromServer = state.arenas && typeof state.arenas === 'object' ? state.arenas : {};
+    return {
+        normal: Object.assign({}, normal, fromServer.normal || {}),
+        team: Object.assign({}, team, fromServer.team || {}),
+    };
+}
+
+function arenaSelfIn(view) {
+    const me = String((user && user.id) || '');
+    if (!me) return null;
+    const players = arenaPool(view).players || [];
+    return players.find(p => String(p.id) === me && !p.is_bot) || null;
+}
+
+// Пересобирает «активную» арену (ту, что смотрит игрок) из снимка обеих и
+// перерисовывает поле/круг и список участников. Вызывается и из опроса, и при
+// локальном переключении — поэтому переключение не ждёт сети.
+function syncArenaView() {
+    const view = arenaState.view === 'team' ? 'team' : 'normal';
+    arenaState.view = view;
+    arenaState.mode = view;
+    arenaState.players = arenaPool(view).players || [];
+    arenaState.sectors = arenaPool(view).sectors || [];
+    arenaState.teams = arenaPool('team').teams || [];
+    const mine = arenaSelfIn('team');
+    arenaState.myTeam = mine ? (mine.team || null) : null;
+    updateArenaModeUI(view, arenaState.myTeam);
+    updateArenaView(view);
+    renderArenaActive();
+    renderArenaParticipants();
+    const bankEl = document.getElementById('hockey-bank');
+    if (bankEl) bankEl.innerHTML = `Банк: ${coinAmount(arenaPool(view).bank)}`;
+}
+
+// Список участников активной арены. Раньше он перерисовывался на каждом
+// опросе (аватарки дёргались), теперь — только при изменении состава/ставок.
+// Функция общая для опроса и локального переключения арены.
+function renderArenaParticipants() {
+    const list = document.getElementById('hockey-participants');
+    if (!list) return;
+    const players = arenaState.players || [];
+    const poolBank = Number(arenaPool(arenaState.view).bank) || 0;
+    const listSignature = arenaSignature(players, `${arenaState.view}:${poolBank}`);
+    if (list.dataset.signature === listSignature) return;
+    list.dataset.signature = listSignature;
+    list.innerHTML = '';
+    players.forEach((p, i) => {
+        const div = document.createElement('div'); div.className = 'part-item';
+        const width = Number(p.percent) || (poolBank ? (Number(p.bet) || 0) / poolBank * 100 : 0);
+        let iconHtml = '';
+        if (!p.is_bot && p.avatar && p.avatar.startsWith('http')) { iconHtml = `<img src="${p.avatar}" style="width:20px; height:20px; border-radius:50%; margin-right:5px; vertical-align:middle;">`; }
+        else { const letter = p.name ? p.name[0].toUpperCase() : '?'; iconHtml = `<span style="display:inline-flex; justify-content:center; align-items:center; width:20px; height:20px; border-radius:50%; background:${p.color}; color:white; font-size:10px; font-weight:bold; margin-right:5px;">${letter}</span>`; }
+        const teamMark = p.team === 'red' ? '🔴 ' : p.team === 'blue' ? '🔵 ' : '';
+        div.innerHTML = `<div class="name"><span>#${i+1}</span>${iconHtml}<span title="${escapeHtml(p.name)}">${teamMark}${escapeHtml(shortName(p.name))}</span></div><div class="stats">${width.toFixed(1)}% | ${coinAmount(p.bet)}</div>`;
+        list.appendChild(div);
+    });
+}
+
+function renderArenaActive() {
+    const state = arenaState.last;
+    if (!state || !state.status) return;
+    if (arenaState.view === 'team') {
+        if (arenaShapes(arenaPool('team')).length || state.status === 'waiting') {
+            renderArenaCircle(arenaStateForView(state, 'team'));
+        }
+    } else {
+        renderNormalArena(arenaStateForView(state, 'normal'));
+    }
+}
+
+// Состояние одного котла в форме, которую ждут рендереры арен.
+function arenaStateForView(state, view) {
+    const pool = arenaPool(view);
+    return Object.assign({}, state, {
+        players: pool.players || [],
+        sectors: pool.sectors || [],
+        teams: view === 'team' ? (pool.teams || []) : [],
+        bank: Number(pool.bank) || 0,
+        winner: pool.winner || null,
+        winner_team: view === 'team' ? (pool.winner_team || (pool.winner && pool.winner.id) || null) : null,
+    });
+}
+
+// Кто и сколько выиграл в конкретном котле — для модалки.
+// Обычная арена: победитель-игрок забирает весь банк котла (или банк уходит
+// боту — тогда выплаты нет). Командная: банк делят игроки победившей команды,
+// поэтому «выигрыш» считаем пропорционально своей ставке.
+function arenaWinnerInfo(poolView, state) {
+    const pool = arenaPool(poolView);
+    if (!pool.winner) return null;
+    if (poolView === 'team') {
+        const teamId = pool.winner_team || pool.winner.id;
+        const players = (pool.players || []).filter(p => p.team === teamId);
+        const humans = players.filter(p => !p.is_bot);
+        const top = humans.length
+            ? humans.reduce((best, p) => ((Number(p.bet) || 0) > (Number(best.bet) || 0) ? p : best))
+            : null;
+        const total = players.reduce((sum, p) => sum + (Number(p.bet) || 0), 0) || 1;
+        const mine = players.find(p => String(p.id) === String(user && user.id));
+        const share = mine ? Math.round((Number(pool.bank) || 0) * (Number(mine.bet) || 0) / total) : 0;
+        return {
+            key: `team:${teamId}`, team: teamId, arena: 'team',
+            name: top ? top.name : (pool.winner.name || ARENA_TEAM_NAMES[teamId] || 'Команда'),
+            amount: share, bank: Number(pool.bank) || 0,
+        };
+    }
+    const winner = pool.winner;
+    const mineWin = String(winner.id) === String(user && user.id);
+    const isBot = Boolean(winner.is_bot) || !/^\d+$/.test(String(winner.id));
+    return {
+        key: `normal:${winner.id}`, team: null, arena: 'normal',
+        name: winner.name || 'Игрок',
+        amount: mineWin && !isBot ? (Number(pool.bank) || 0) : 0,
+        bank: Number(pool.bank) || 0,
+    };
+}
+
+const ARENA_TEAM_NAMES = { red: 'Красные', blue: 'Синие' };
+
+function setArenaMode(mode) {
+    const view = mode === 'team' ? 'team' : 'normal';
+    if (arenaState.view === view) {
+        updateArenaModeUI(view, arenaState.myTeam);
+        return Promise.resolve({ mode: view, view });
+    }
+    arenaState.view = view;
+    arenaState.mode = view;
+    // Анимации другой арены должны проиграться заново, а не «доехать» до точки,
+    // на которой мы её оставили.
+    if (view === 'team') {
+        stopArenaBall();
+        arenaBall.roundId = null;
+        arenaPointer.landedRound = null;
+    } else {
+        arenaBall.roundId = null;
+        arenaPointer.landedRound = null;
+    }
+    syncArenaView();
+    // Догоняем статус раунда сразу, не дожидаясь следующего опроса (200 мс).
+    const state = arenaState.last;
+    if (state) replayArenaAnimation(state);
+    return Promise.resolve({ mode: view, view });
+}
+
+// Запускает анимацию выбранной арены по последнему известному состоянию.
+function replayArenaAnimation(state) {
+    if (!state || !state.round_id) return;
+    if (state.status === 'rolling') {
+        if (arenaState.view === 'team') {
+            if (arenaPointer.roundId !== state.round_id) {
+                arenaPointer.roundId = state.round_id;
+                arenaResetPointer();
+            }
+            arenaStartPointerSpin();
+        } else if (arenaBall.roundId !== String(state.round_id)) {
+            startArenaBall(arenaStateForView(state, 'normal'));
+        }
+    } else if (state.status === 'finished') {
+        if (arenaState.view === 'team') {
+            if (arenaPointer.landedRound !== state.round_id) {
+                arenaPointer.landedRound = state.round_id;
+                const finalX = state.roll_data ? state.roll_data.final_x : 0;
+                arenaLandPointer(Number(finalX) || 0, ARENA_POINTER_LAND_MS);
+            }
+        } else {
+            freezeArenaBall(arenaStateForView(state, 'normal'));
+        }
     }
 }
 
@@ -3643,20 +3844,18 @@ async function pollHockeyState() {
         const bankEl = document.getElementById('hockey-bank');
         const arena = document.getElementById('hockey-arena');
 
-        arenaState.mode = state.mode === 'team' ? 'team' : 'normal';
-        arenaState.teams = Array.isArray(state.teams) ? state.teams : [];
-        arenaState.sectors = Array.isArray(state.sectors) ? state.sectors : [];
-        arenaState.players = Array.isArray(state.players) ? state.players : [];
-        const mine = arenaState.players.find(p => String(p.id) === String(user && user.id));
-        arenaState.myTeam = mine ? (mine.team || null) : null;
-        updateArenaModeUI(arenaState.mode, arenaState.myTeam);
-        updateArenaView(arenaState.mode);
-        const isTeamMode = arenaState.mode === 'team';
+        // Обе арены приходят одним ответом; какую рисуем — решает игрок.
+        arenaState.last = state;
+        arenaState.status = state.status;
+        arenaState.arenas = arenaPoolsFromState(state);
+        syncArenaView();
+        const isTeamMode = arenaState.view === 'team';
 
         if (state.status === 'waiting') {
             statusEl.innerText = `Ставки: ${state.timer} сек`; statusEl.style.color = '#ffcc00';
             document.getElementById('hockey-controls').style.display = 'flex';
             hasShownWinner = false;
+            shownWinnerKey = null;
             hideArenaBall();
             // Новый раунд — стрелка в исходное положение. Проверяем по
             // round_id, чтобы не сбрасывать её на каждом опросе.
@@ -3694,71 +3893,53 @@ async function pollHockeyState() {
                 freezeArenaBall(state);
             }
             const modal = document.getElementById('winner-modal');
-            if (state.winner && !hasShownWinner) {
+            // Победителя показываем по той арене, которую игрок смотрит; если в
+            // ней ставок не было — по другой, чтобы результат не пропадал.
+            const shownPool = arenaState.view === 'team' ? 'team' : 'normal';
+            const otherPool = shownPool === 'team' ? 'normal' : 'team';
+            const primary = arenaPool(shownPool).winner ? shownPool : (arenaPool(otherPool).winner ? otherPool : null);
+            const winnerKey = primary ? `${state.round_id}:${primary}` : null;
+            if (primary && shownWinnerKey !== winnerKey) {
+                shownWinnerKey = winnerKey;
                 hasShownWinner = true;
+                const info = arenaWinnerInfo(primary, state);
                 setTimeout(() => {
                     const nameEl = document.getElementById('winner-modal-name');
                     const amountEl = document.getElementById('winner-modal-amount');
+                    if (!info) return;
                     // Ник — текстом (не HTML), сумма — innerHTML, потому что внутри картинка монеты.
-                    const teamLabel = state.winner_team
-                        ? (state.winner_team === 'red' ? '🔴 Красные · ' : '🔵 Синие · ')
+                    const teamLabel = info.team
+                        ? (info.team === 'red' ? '🔴 Красные · ' : '🔵 Синие · ')
                         : '';
                     if (nameEl) {
-                        nameEl.innerText = teamLabel + shortName(state.winner.name, 18);
-                        nameEl.title = String(state.winner.name || '');
+                        nameEl.innerText = teamLabel + shortName(info.name, 18);
+                        nameEl.title = String(info.name || '');
                     }
                     if (amountEl) {
-                        // Ботам банк не выплачивается — им показываем «Банк», а не «+выигрыш».
-                        amountEl.classList.toggle('muted', Boolean(state.winner.is_bot));
-                        amountEl.innerHTML = state.winner.is_bot
-                            ? `Банк: ${coinAmount(state.bank)}`
-                            : `+${coinAmount(state.bank)}`;
+                        // Ботам банк не выплачивается, а проигравшему нечего
+                        // показывать как «+» — в этих случаях пишем размер банка.
+                        amountEl.classList.toggle('muted', info.amount <= 0);
+                        amountEl.innerHTML = info.amount > 0
+                            ? `+${coinAmount(info.amount)}`
+                            : `Банк: ${coinAmount(info.bank)}`;
                         amountEl.style.display = '';
                     }
                     modal.classList.add('active');
 
                     // The database is the only balance source; never optimistically add the pot here.
                     loadUserData();
-                    if (state.winner.id === String(user.id)) { playSound('win'); } else { playSound('arena_lose'); }
+                    if (info.amount > 0) { playSound('win'); } else { playSound('arena_lose'); }
                 }, 1000);
             }
         }
-        bankEl.innerHTML = `Банк: ${coinAmount(state.bank)}`;
-        // Рисуем то поле, которое выбрано переключателем: полосы с мячиком
-        // (обычная) или круг с секторами и аватарками (командная).
-        if (isTeamMode) {
-            if (arenaShapes(state).length || state.status === 'waiting') {
-                renderArenaCircle(state);
-            }
-        } else {
-            renderNormalArena(state);
-        }
+        // Банк и поле переключились выше, в syncArenaView() — рисуем ровно ту
+        // арену, которая открыта, из её собственного котла.
         if (arena) {
             arena.classList.toggle('team-mode', isTeamMode);
             // Анимации командной арены: «бегущее» кольцо во время броска и
             // золотая пульсация круга после него.
             arena.classList.toggle('rolling', isTeamMode && state.status === 'rolling');
             arena.classList.toggle('settled', isTeamMode && state.status === 'finished');
-        }
-        const list = document.getElementById('hockey-participants');
-        const players = arenaState.players;
-        // Список участников тоже перерисовывался каждый опрос: аватарки
-        // пересоздавались 5 раз в секунду и «дёргались». Обновляем только
-        // при реальном изменении состава/ставок.
-        const listSignature = arenaSignature(players, state.bank);
-        if (list && list.dataset.signature !== listSignature) {
-            list.dataset.signature = listSignature;
-            list.innerHTML = '';
-            players.forEach((p, i) => {
-                const div = document.createElement('div'); div.className = 'part-item';
-                const width = Number(p.percent) || (state.bank ? (Number(p.bet) || 0) / state.bank * 100 : 0);
-                let iconHtml = '';
-                if (!p.is_bot && p.avatar && p.avatar.startsWith('http')) { iconHtml = `<img src="${p.avatar}" style="width:20px; height:20px; border-radius:50%; margin-right:5px; vertical-align:middle;">`; }
-                else { const letter = p.name ? p.name[0].toUpperCase() : '?'; iconHtml = `<span style="display:inline-flex; justify-content:center; align-items:center; width:20px; height:20px; border-radius:50%; background:${p.color}; color:white; font-size:10px; font-weight:bold; margin-right:5px;">${letter}</span>`; }
-                const teamMark = p.team === 'red' ? '🔴 ' : p.team === 'blue' ? '🔵 ' : '';
-                div.innerHTML = `<div class="name"><span>#${i+1}</span>${iconHtml}<span title="${escapeHtml(p.name)}">${teamMark}${escapeHtml(shortName(p.name))}</span></div><div class="stats">${width.toFixed(1)}% | ${coinAmount(p.bet)}</div>`;
-                list.appendChild(div);
-            });
         }
     } catch (e) { console.error(e); }
 }

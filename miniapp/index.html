@@ -9,7 +9,7 @@
     <meta http-equiv="Pragma" content="no-cache">
     <meta http-equiv="Expires" content="0">
     <title>AURA GAME</title>
-    <link rel="stylesheet" href="style.css?v=aura-27">
+    <link rel="stylesheet" href="style.css?v=aura-28">
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
 </head>
 <body>
@@ -267,11 +267,13 @@
                 <div id="hockey-status" style="color: #34c759; font-weight: bold;">Ожидание...</div>
                 <div id="hockey-bank" style="font-size: 20px; font-weight: 900;">Банк: 0 <img class="coin-img" src="coin.png" alt="монета"></div>
             </div>
-            <!-- Переключение режимов арены (задача 25). -->
+            <!-- Переключение арен (задача 31): обе идут одновременно, смотреть
+                 можно любую в любой момент — и во время броска тоже. -->
             <div class="arena-mode-switch" id="arena-mode-switch">
                 <button class="arena-mode-btn active" id="arena-mode-normal" onclick="setArenaMode('normal')">Обычная арена</button>
                 <button class="arena-mode-btn" id="arena-mode-team" onclick="setArenaMode('team')">Командная арена</button>
             </div>
+            <div class="arena-mode-hint" id="arena-mode-hint">Две арены идут параллельно — переключайся когда угодно и ставь хоть в обе</div>
 
             <!-- ОБЫЧНАЯ АРЕНА: поле с мячиком (как было раньше). Сектора — по
                  ставке каждого игрока, мяч летает по серверной траектории и
@@ -509,6 +511,6 @@
         <div class="nav-item" onclick="switchTab('profile', this)"><span class="nav-icon">👤</span> Профиль</div>
     </nav>
 
-    <script src="app.js?v=aura-27" defer></script>
+    <script src="app.js?v=aura-28" defer></script>
 </body>
 </html>
