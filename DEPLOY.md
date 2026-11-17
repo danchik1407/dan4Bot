@@ -645,6 +645,52 @@ chance 50.00   roll 22.10   won true    coins_before  640   ← баланс < 1
   останавливается в одном и том же месте. Награда по-прежнему начисляется
   сервером только по кнопке «Забрать».
 
+## 4.6. aura-api падает на старте: `ModuleNotFoundError: No module named 'aiohttp'`
+
+**Симптом.** В логах Render: build successful, затем
+
+```
+==> Running 'uvicorn api:app --host 0.0.0.0 --port $PORT'
+ModuleNotFoundError: No module named 'aiohttp'
+```
+
+(в логе build видно `Running build command 'pip install fastapi uvicorn supabase
+python-dotenv'` — значит, сервис собирается **не** по `requirements.txt`).
+
+**Причина.** `api.py` импортировал `aiohttp` на верхнем уровне, а в этой сборке
+его нет: `aiohttp` ставится только из `requirements.txt`, который Render в
+данном случае не читает.
+
+**Что уже сделано (код).** `api.py` больше не требует `aiohttp`: клиент для
+Telegram выбирается в рантайме — `httpx` (приходит вместе с `supabase`) →
+`aiohttp` (если установлен) → стандартный `urllib`. Проверить, что попало на
+сборку:
+
+```bash
+curl -s https://aura-api-mptt.onrender.com/api/health | grep -o '"http_client":"[a-z]*"'
+```
+
+`"http_client":"httpx"` — всё в порядке. `"urllib"` — нет ни `httpx`, ни
+`aiohttp`: тогда точно поправьте Build Command (ниже).
+
+**Что лучше поправить в Render (Dashboard → aura-api → Settings → Build &
+Deploy).** Поставить Build Command:
+
+```
+pip install -r requirements.txt
+```
+
+и нажать **Manual Deploy → Clear build cache & deploy**. Тогда сервис получает
+весь список целиком, включая `fastapi`, `uvicorn`, `supabase`, `python-dotenv`,
+`aiohttp`. `requirements.txt` лежит в корне репозитория и подходит для обоих
+сервисов.
+
+**Правило на будущее.** Любую библиотеку, которую использует `api.py`, нужно
+либо импортировать «мягко» (как теперь `httpx`/`aiohttp`), либо держать в
+Build Command сервиса: при сборке без `requirements.txt` ломается не сборка, а
+именно старт процесса, и Render показывает только «Application failed to
+respond» / бесконечный деплой.
+
 ## 4.5. Задача 25: экономика, соцсеть и админ-панель
 
 ### 4.5.1. Что применить в Supabase (один файл, можно повторно)
