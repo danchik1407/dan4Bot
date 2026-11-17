@@ -162,6 +162,32 @@ const COIN_IMG = `<img class="coin-img" src="${COIN_IMG_SRC}" alt="монета"
 const ADMIN_UI_IDS = [6338018270, 5184813347, 8890834384];
 function isAdminId(id) { return Boolean(id) && ADMIN_UI_IDS.includes(Number(id)); }
 
+// Ключ идемпотентности для финансовых операций. Сервер хранит ответ по этому
+// ключу, поэтому двойной тап / ретрай после таймаута не спишет деньги дважды.
+function requestId() {
+    try {
+        if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') return crypto.randomUUID();
+    } catch (e) {}
+    return `rid-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+// Универсальный POST к API: JSON-ответ + понятная ошибка.
+async function apiPost(path, payload, options) {
+    const res = await fetch(`${API_URL}${path}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(Object.assign({ initData: tg.initData }, payload || {})),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+        const error = new Error((data && data.detail) || (options && options.fallback) || 'Ошибка сервера');
+        error.status = res.status;
+        error.data = data;
+        throw error;
+    }
+    return data;
+}
+
 // ================= ТЕХРАБОТЫ =================
 // Играть могут только ADMIN_IDS. Остальные после приветственной заставки видят
 // экран «Технические работы»: ни игры, ни магазин, ни сундуки им не открываются.
@@ -171,6 +197,14 @@ let serverMaintenance = false;       // включены ли техработы
 let accessKnown = false;             // знаем ли мы, можно ли играть
 let canPlay = false;                 // итоговое решение
 let maintenanceMessage = '';         // текст с сервера (если он его прислал)
+
+// ================= НОВАЯ ЭКОНОМИКА (задача 25) =================
+let passiveRates = { capsule: 0.1, uniq_capsule: 0.5, ruby: 5, diamond: 20, galactic: 50 };
+let passiveTimer = null;
+let subscriptionChecked = false;
+let loveState = null;
+let referralBound = false;
+const PASSIVE_INTERVAL = 15 * 60 * 1000;      // раз в 15 минут, пока аппка открыта
 
 function showMaintenance() {
     if (maintenanceActive) return;
@@ -237,19 +271,23 @@ function nameHtml(name) { return `<span class="lb-name" title="${escapeHtml(name
 let upgradeFrom = 'coin';                                   // 'coin' | 'capsule' | 'uniq_capsule'
 let upgradeFromAmount = 100;                                // коины или количество капсул
 let upgradeToTab = 'coin';                                  // вкладка правой панели
-let upgradeTarget = { kind: 'mult', value: 2 };             // mult | chance | item
+let upgradeTarget = { kind: 'mult', value: 1.35 };          // mult | chance | item
 let upgradeBusy = false, upgradeStartedAt = 0;
 // Белая стрелка: угол в градусах (0 = вверх), rAF-цикл и «поколение» прогона,
 // чтобы запоздавшие колбэки от прошлого спина не перетирали новый результат.
 let upgradeArrowAngle = 0, upgradeArrowRaf = null, upgradeSpinToken = 0;
 let upgradeFetchPending = false;     // ждём ответ сервера по текущей ставке
 let upgradeBusyTimer = null;         // сторож «кнопка залипла»
-const UPGRADE_DURATION = 3400;        // 3–4 секунды: быстрый спин + торможение
+const UPGRADE_DURATION = 5400;        // полный раунд: быстрый спин + плавное затухание
 const UPGRADE_ARROW_SPEED = 900;      // градусов в секунду в фазе ожидания ответа сервера
-const UPGRADE_ARROW_MIN_LAND = 650;   // минимум времени на торможение, мс
-const UPGRADE_MIN_COINS = 50, UPGRADE_MAX_COINS = 5000, UPGRADE_MAX_CAPSULES = 50;
+const UPGRADE_ARROW_MIN_LAND = 3800;  // минимум времени на «рулеточное» затухание, мс
+const UPGRADE_MIN_COINS = 50, UPGRADE_MAX_COINS = 10000, UPGRADE_MAX_CAPSULES = 50;
 const UPGRADE_MAX_CHANCE = 95;
-const UPGRADE_MULTS = [2, 4, 5, 8, 10];
+// Задача 25: x4 и x8 убраны. x1.12…x1.75 — «почти монетка», x20/x50 — риск.
+const UPGRADE_MULTS = [1.12, 1.35, 1.55, 1.75, 20, 50];
+// Куда именно крутится стрелка: одна CSS-кривая на весь финиш, без рывков.
+const UPGRADE_LAND_MS = 5000;
+const UPGRADE_LAND_EASING = 'cubic-bezier(0.1, 0.7, 0.1, 1)';
 const UPGRADE_FALLBACK_PRICES = { capsule: 100, uniq_capsule: 500 };
 const upgradeStats = { total: 0, wins: 0, best: 0 };
 // Шанс, с которым реально играет текущий раунд. Пока он зафиксирован, круг и
@@ -269,12 +307,10 @@ const upgradeShownLogIds = new Set();
 let hockeyInterval = null, hasShownWinner = false;
 // Счётчик подряд идущих неудачных опросов состояния Краша (для тихого лога).
 let crashPollFailures = 0;
-// Камера арены: плавный наезд на мяч в концовке. Арена обрезает сцену (overflow: hidden),
-// поэтому увеличенное поле не вылезает за экран.
-const HOCKEY_ZOOM_START = 4.5;      // с этой секунды начинаем приближать
-const HOCKEY_MAX_ZOOM = 1.55;       // предел наезда
-let hockeyLastThudAt = 0;
-let ball = { x: 50, y: 50, active: false, animationId: null, hasStartedAnim: false, roundId: null, path: null };
+// Круглая арена (задача 25): вместо квадратного поля и прыгающего мяча —
+// пирог из секторов и указатель, который крутится и плавно останавливается.
+let arenaPointer = { angle: 0, roundId: null, spinning: false };
+let arenaState = { mode: 'normal', sectors: [], teams: [], myTeam: null, players: [] };
 let hockeyServerOffsetMs = 0, hockeyClockSynced = false;
 
 let crashInterval = null;
@@ -425,6 +461,9 @@ function applyProfile(data) {
     inventory = Array.isArray(data.inventory) ? data.inventory : [];
     lastChestTime = Number(data.last_chest) || 0;
     daysInGame = Math.max(0, Number(data.days_in_game) || 0);
+    if (data.passive_rates && typeof data.passive_rates === 'object') {
+        passiveRates = Object.assign({}, passiveRates, data.passive_rates);
+    }
     // Список ADMIN_IDS — главный источник; флаг сервера его подтверждает.
     isAdmin = isAdminId(user && user.id) || Boolean(data.is_admin);
     userDataLoaded = true;
@@ -443,6 +482,8 @@ function applyProfile(data) {
     updateUpgradeAccess();
     updateUI();
     try { checkChestCooldown(); } catch (e) { console.error(e); }
+    renderPassiveCard();
+    renderLoveBadge();
 }
 
 // Что именно не так — спрашиваем у сервера, чтобы в баннере была реальная причина.
@@ -568,6 +609,7 @@ function switchTab(tabId, element) {
     document.querySelectorAll('.nav-item').forEach(nav => nav.classList.remove('active'));
     if (element) element.classList.add('active');
     if (tabId === 'top') { loadGlobalTop(); }
+    if (tabId === 'profile') { loadReferralStats(); loadLoveState(); }
 }
 
 function openGame(game) {
@@ -615,11 +657,39 @@ function openChannel(event) {
         if (tg && typeof tg.openTelegramLink === 'function') {
             if (event) event.preventDefault();
             tg.openTelegramLink(CHANNEL_URL);
-            return false;
         }
     } catch (e) { console.error('openTelegramLink недоступен', e); }
-    // Нет Telegram API — пусть ссылка откроется как обычно.
+    // После возвращения из канала проверяем подписку и, если она есть,
+    // начисляем одноразовый бонус (сервер сам решает, положен ли он).
+    setTimeout(() => checkSubscription({ alert: true }), 1200);
     return true;
+}
+
+// Проверка подписки через getChatMember (на сервере) + бонус 200 коинов.
+// Бонус строго одноразовый: факт начисления хранится в subscriptions_history,
+// поэтому повторная подписка после отписки денег не даёт.
+async function checkSubscription(options) {
+    const alert = Boolean(options && options.alert);
+    if (!tg.initData) return;
+    try {
+        const data = await apiPost('/api/channel_check', {}, { fallback: 'Не удалось проверить подписку' });
+        subscriptionChecked = true;
+        const reward = document.getElementById('sub-banner-reward');
+        if (data.bonus_claimed) {
+            if (reward) reward.textContent = '✅ Подписка получена, бонус начислен';
+        } else if (reward) {
+            reward.textContent = `🎁 Награда за подписку: ${data.bonus || 200} коинов`;
+        }
+        if (data.granted) {
+            playSound('win');
+            tg.showAlert(`🎉 Спасибо за подписку! Начислено ${data.granted} коинов.`);
+            await loadUserData().catch(() => {});
+        } else if (alert) {
+            tg.showAlert(data.detail || 'Подпишитесь на канал, чтобы получить бонус.');
+        }
+    } catch (e) {
+        if (alert) tg.showAlert(e.message || 'Не удалось проверить подписку');
+    }
 }
 
 async function loadGlobalTop() {
@@ -656,6 +726,176 @@ async function loadGlobalTop() {
 function _safeCoins(value) {
     const number = Number(value);
     return Number.isFinite(number) ? Math.max(0, Math.floor(number)) : 0;
+}
+
+
+// ================= ПАССИВНЫЙ ДОХОД =================
+// Ставки живут на сервере (PASSIVE_INCOME_RATES в api.py) и приходят в профиле.
+// Клиент НИЧЕГО не начисляет: он только показывает «в час» и просит сервер
+// начислить накопленное (/api/passive_income).
+function passiveRateFor(items) {
+    const counts = {};
+    (items || inventory).forEach(itemId => { counts[itemId] = (counts[itemId] || 0) + 1; });
+    return Object.keys(counts).reduce((sum, itemId) => {
+        const rate = Number(passiveRates[itemId] || 0);
+        return sum + rate * counts[itemId];
+    }, 0);
+}
+
+function renderPassiveCard() {
+    const rateEl = document.getElementById('passive-rate');
+    const hintEl = document.getElementById('passive-hint');
+    const button = document.getElementById('passive-btn');
+    if (!rateEl) return;
+    const rate = passiveRateFor();
+    rateEl.textContent = `${rate.toFixed(1)} 🪙 / час`;
+    if (hintEl) {
+        hintEl.textContent = rate > 0
+            ? `Твой инвентарь приносит ${rate.toFixed(1)} коинов каждый час. Начисление идёт, пока аппка открыта.`
+            : 'Купи капсулы — они приносят коины каждый час.';
+    }
+    if (button) button.disabled = rate <= 0;
+}
+
+async function claimPassiveIncome(options) {
+    const silent = Boolean(options && options.silent);
+    if (!tg.initData) return null;
+    const button = document.getElementById('passive-btn');
+    if (button && !silent) { button.disabled = true; button.textContent = 'Начисляем…'; }
+    try {
+        const data = await apiPost('/api/passive_income', {}, { fallback: 'Пассивный доход недоступен' });
+        if (data.accrued > 0) {
+            playSound('coin');
+            if (!silent) tg.showAlert(`💤 Пассивный доход: +${data.accrued} коинов`);
+            balance = Number(data.new_balance) || balance;
+            balanceKnown = true;
+            updateUI();
+        } else if (!silent) {
+            const hint = data.detail || 'Пока нечего забирать — капсулы копят коины.';
+            tg.showAlert(hint);
+        }
+        return data;
+    } catch (e) {
+        if (!silent) tg.showAlert(e.message || 'Не удалось начислить пассивный доход');
+        return null;
+    } finally {
+        if (button) { button.textContent = 'Забрать'; renderPassiveCard(); }
+    }
+}
+
+function startPassiveIncomeTimer() {
+    if (passiveTimer) return;
+    passiveTimer = setInterval(() => {
+        if (document.visibilityState === 'visible' && canPlay) claimPassiveIncome({ silent: true });
+    }, PASSIVE_INTERVAL);
+}
+
+// ================= РЕФЕРАЛЫ =================
+// Код приглашения — ref_<id>; ссылка вида
+// https://t.me/<бот>?startapp=ref_<id>. Награда начисляется пригласившему,
+// когда приглашённый заходит в Mini App (сервер проверяет его NFT/premium).
+function referralCodeFor(userId) { return `ref_${Number(userId) || 0}`; }
+
+async function bindReferralFromStartParam() {
+    if (referralBound) return;
+    const params = (tg.initDataUnsafe && tg.initDataUnsafe.start_param) || '';
+    if (!params || !String(params).toLowerCase().includes('ref')) return;
+    referralBound = true;
+    try {
+        await apiPost('/api/referral_bind', { ref_code: params });
+    } catch (e) { console.warn('Не удалось привязать реферала', e); }
+}
+
+async function checkReferralStatus() {
+    if (!tg.initData) return;
+    try {
+        const data = await apiPost('/api/referral_check', {});
+        if (data && data.paid && data.reward) {
+            console.info('Реферальная награда начислена:', data.reward);
+        }
+    } catch (e) { console.warn('referral_check', e); }
+}
+
+async function loadReferralStats() {
+    if (!tg.initData) return;
+    try {
+        const data = await apiPost('/api/referrals', {});
+        const countEl = document.getElementById('ref-count');
+        const earnedEl = document.getElementById('ref-earned');
+        const linkEl = document.getElementById('ref-link');
+        const detailEl = document.getElementById('ref-detail');
+        if (countEl) countEl.textContent = String(data.count || 0);
+        if (earnedEl) earnedEl.textContent = `${formatCoins(data.earned || 0)} 🪙`;
+        const botName = (tg.initDataUnsafe && tg.initDataUnsafe.bot_username) || 'AuragameBot';
+        const link = data.link
+            ? data.link.replace('{bot}', botName)
+            : `https://t.me/${botName}?startapp=${referralCodeFor(user && user.id)}`;
+        if (linkEl) linkEl.value = link;
+        if (detailEl) detailEl.textContent = data.available === false ? (data.detail || '') : '';
+    } catch (e) { console.warn('referrals', e); }
+}
+
+function copyReferralLink() {
+    const linkEl = document.getElementById('ref-link');
+    const link = linkEl ? linkEl.value : '';
+    if (!link) return;
+    const copy = (text) => {
+        try {
+            if (navigator.clipboard && navigator.clipboard.writeText) return navigator.clipboard.writeText(text);
+        } catch (e) {}
+        return Promise.reject(e);
+    };
+    copy(link).then(() => tg.showAlert('Ссылка скопирована — отправь её другу'))
+        .catch(() => tg.showAlert(`Скопируй ссылку вручную: ${link}`));
+}
+
+// ================= ОТНОШЕНИЯ =================
+async function loadLoveState() {
+    if (!tg.initData) return;
+    try {
+        loveState = await apiPost('/api/love_state', {});
+        renderLoveBadge();
+        if (loveState && todayStageRewards(loveState)) {
+            tg.showAlert('💗 Вы дошли до нового этапа отношений — награда начислена обоим!');
+            await loadUserData().catch(() => {});
+        }
+    } catch (e) { console.warn('love_state', e); }
+}
+
+function todayStageRewards(state) {
+    if (!state || !Array.isArray(state.stage_rewards) || !state.stage_rewards.length) return false;
+    if (state._shownRewards) return false;
+    state._shownRewards = true;
+    return true;
+}
+
+function renderLoveBadge() {
+    const badge = document.getElementById('profile-love-badge');
+    const partner = document.getElementById('profile-love-partner');
+    const stage = document.getElementById('profile-love-stage');
+    if (!badge) return;
+    if (!loveState || !loveState.in_relationship) { badge.hidden = true; return; }
+    badge.hidden = false;
+    if (partner) partner.textContent = loveState.partner_name || 'партнёр';
+    if (stage) stage.textContent = loveState.stage ? ` · ${loveState.stage.title}` : '';
+}
+
+// ================= TELEGRAM STARS =================
+async function openStarsShop() {
+    try {
+        const data = await apiPost('/api/stars_invoice', { package_id: 'coins_1000' });
+        if (!data.enabled) {
+            const list = (data.packages || []).map(p => `⭐ ${p.stars} → ${formatCoins(p.coins)} коинов`).join('\n');
+            tg.showAlert(`Магазин Stars пока закрыт.\n\nПланируемые пакеты:\n${list || '—'}`);
+            return;
+        }
+        if (data.url) tg.openInvoice && tg.openInvoice(data.url, () => {});
+        else tg.openTelegramLink(data.url);
+    } catch (e) {
+        const hint = document.getElementById('stars-hint');
+        if (hint) hint.textContent = e.message || 'Stars пока недоступны';
+        tg.showAlert(e.message || 'Stars пока недоступны');
+    }
 }
 
 // ================= СУНДУКИ =================
@@ -858,7 +1098,8 @@ async function openChest(type) {
     try {
         const response = await fetch(`${API_URL}/api/open_chest`, {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ initData: tg.initData, chest_type: isGold ? 'gold' : 'normal' })
+            body: JSON.stringify({ initData: tg.initData, chest_type: isGold ? 'gold' : 'normal',
+                                   request_id: requestId() })
         });
         data = await response.json().catch(() => ({}));
         if (!response.ok) {
@@ -1085,7 +1326,7 @@ async function buyItem(itemId) {
         const res = await fetch(`${API_URL}/api/buy_item`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ initData: tg.initData, item_id: itemId })
+            body: JSON.stringify({ initData: tg.initData, item_id: itemId, request_id: requestId() })
         });
         const data = await res.json().catch(() => ({}));
         if (!res.ok) {
@@ -1773,10 +2014,14 @@ async function openUpgrade() {
 }
 
 // ================= БЕЛАЯ СТРЕЛКА =================
-function setUpgradeArrowAngle(deg) {
+function setUpgradeArrowAngle(deg, options) {
     upgradeArrowAngle = deg;
     const arrow = document.getElementById('up-arrow');
-    if (arrow) arrow.style.transform = `rotate(${deg}deg)`;
+    if (!arrow) return;
+    // По умолчанию угол ставится мгновенно (фаза спина, сброс). Плавный финиш
+    // включает transition сам и вызывает этот хелпер с keepTransition.
+    if (!(options && options.keepTransition)) arrow.style.transition = 'none';
+    arrow.style.transform = `rotate(${deg}deg)`;
 }
 
 function stopUpgradeArrow() {
@@ -1872,73 +2117,55 @@ function upgradeArrowTargetFor(won, chance, rollValue) {
     return arc + free * 0.18 + Math.random() * free * 0.64;
 }
 
-// Фаза 2: плавно тормозим и останавливаемся ровно на выпавшем числе.
+// Фаза 2 — «как в рулетке»: несколько полных оборотов и плавное затухание
+// ровно на выпавшем числе. Раньше торможение считалось вручную кусками, и на
+// стыке фаз стрелка дёргалась. Теперь один CSS-transition с кривой
+// cubic-bezier(0.1, 0.7, 0.1, 1) на 5 секунд — без рывков и без «доводки».
 function landUpgradeArrow(won, chance, duration, token, onDone, rollValue) {
     stopUpgradeArrow();
+    const arrow = document.getElementById('up-arrow');
     const desired = ((upgradeArrowTargetFor(won, chance, rollValue) % 360) + 360) % 360;
-
     const current = ((upgradeArrowAngle % 360) + 360) % 360;
     const delta = ((desired - current) % 360 + 360) % 360;
-    const turns = duration >= 2500 ? 5 : duration >= 1200 ? 3 : 1;
+    // Обороты: не меньше трёх — иначе при совпадении углов стрелка «не крутится».
+    const turns = Math.max(3, Math.ceil(UPGRADE_LAND_MS / 900));
     const target = upgradeArrowAngle + turns * 360 + delta;
-
-    const startAngle = upgradeArrowAngle;
-    const startTime = typeof performance !== 'undefined' ? performance.now() : Date.now();
-    const total = Math.max(0, duration);
+    const total = Math.max(1500, Math.min(UPGRADE_LAND_MS, Number(duration) || UPGRADE_LAND_MS));
     let finished = false;
-    let lastAngle = startAngle;
+    let fallbackTimer = null;      // объявлен до finish: иначе TDZ при раннем выходе
 
-    const complete = () => {
+    const finish = () => {
         if (finished) return;
         finished = true;
-        // Раунд отменён — не трогаем ни стрелку, ни rAF: за это время мог
-        // начаться новый спин, и страховочный таймер не должен его ломать.
+        if (arrow && arrow.removeEventListener) arrow.removeEventListener('transitionend', onTransitionEnd);
+        if (fallbackTimer) clearTimeout(fallbackTimer);
         if (token !== upgradeSpinToken) return;
-        stopUpgradeArrow();
-        // Докручиваем ВПЕРЁД до ближайшего угла, дающего выпавшее число.
-        // Раньше здесь стоял «голый» desired (0..360): стрелка мгновенно
-        // отматывалась назад на несколько оборотов, и вместе с ней на миг
-        // пропадал итог раунда.
-        const aligned = lastAngle + (((desired - lastAngle) % 360) + 360) % 360;
-        setUpgradeArrowAngle(aligned);
+        // Фиксируем конечный угол: он уже кратен нужному (target ≡ desired mod 360).
+        setUpgradeArrowAngle(target);
         if (typeof onDone === 'function') onDone();
     };
+    const onTransitionEnd = (event) => {
+        if (!event || event.target === arrow) finish();
+    };
 
-    // Профиль движения: сначала стрелка крутится ровным быстрым ходом
-    // (SPIN_SHARE времени), затем плавно тормозит и гаснет в нуле ровно на
-    // выпавшем числе. Стык фаз без рывка: скорость в конце спина совпадает
-    // со стартовой скоростью торможения (S1 = 3·us / (1 + 2·us)).
-    const SPIN_SHARE = 0.34;
-    const spinDistance = (3 * SPIN_SHARE) / (1 + 2 * SPIN_SHARE);
-    const spinVelocity = spinDistance / SPIN_SHARE;
-    const ease = (t) => {
-        if (t <= 0) return 0;
-        if (t >= 1) return 1;
-        if (t < SPIN_SHARE) return spinVelocity * t;
-        const x = (t - SPIN_SHARE) / (1 - SPIN_SHARE);
-        return spinDistance + (1 - spinDistance) * (1 - Math.pow(1 - x, 3));
-    };
-    const step = () => {
-        if (token !== upgradeSpinToken) {
-            finished = true;
-            // Раунд отменён посреди торможения: кнопка не должна остаться «КРУТИМ...».
-            releaseUpgradeBusy();
-            return;
-        }
-        const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
-        const progress = total > 0 ? Math.min(1, (now - startTime) / total) : 1;
-        lastAngle = startAngle + (target - startAngle) * ease(progress);
-        setUpgradeArrowAngle(lastAngle);
-        if (progress >= 1) { complete(); return; }
-        upgradeArrowRaf = typeof requestAnimationFrame === 'function'
-            ? requestAnimationFrame(step)
-            : setTimeout(() => step(), 16);
-    };
-    upgradeArrowRaf = typeof requestAnimationFrame === 'function'
-        ? requestAnimationFrame(step)
-        : setTimeout(() => step(), 16);
-    // Страховка: если вкладка была свёрнута и rAF «замёрз», завершаем по таймеру.
-    setTimeout(complete, total + 260);
+    if (!arrow || typeof arrow.style.transition !== 'string') {
+        upgradeArrowAngle = target;
+        finish();
+        return;
+    }
+
+    // 1) Стартовый угол без анимации.
+    setUpgradeArrowAngle(upgradeArrowAngle);
+    // 2) Форсируем reflow: без него браузер склеит два transform и transition
+    //    не запустится (стрелка телепортируется).
+    void arrow.offsetWidth;
+    // 3) Плавный финиш одной кривой.
+    arrow.style.transition = `transform ${total}ms ${UPGRADE_LAND_EASING}`;
+    upgradeArrowAngle = target;
+    arrow.style.transform = `rotate(${target}deg)`;
+    if (arrow.addEventListener) arrow.addEventListener('transitionend', onTransitionEnd);
+    // Страховка: вкладка была свёрнута и transition не доехал.
+    fallbackTimer = setTimeout(finish, total + 300);
 }
 
 async function startUpgrade() {
@@ -1987,7 +2214,9 @@ async function startUpgrade() {
         initData: tg.initData,
         item_from: upgradeFrom,
         amount_from: Math.round(upgradeFromAmount),
-        item_to: upgradeTarget.kind === 'item' ? upgradeTarget.value : 'coin'
+        item_to: upgradeTarget.kind === 'item' ? upgradeTarget.value : 'coin',
+        // Ключ идемпотентности: повторная отправка не спишет ставку второй раз.
+        request_id: requestId()
     };
     if (upgradeTarget.kind === 'mult') payload.target_multiplier = Number(upgradeTarget.value);
     if (upgradeTarget.kind === 'chance') payload.target_chance = Number(upgradeTarget.value);
@@ -2369,7 +2598,8 @@ async function startMines() {
     try {
         const res = await fetch(`${API_URL}/api/mines_start`, {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ initData: tg.initData, amount: bet, mines: selectedMines })
+            body: JSON.stringify({ initData: tg.initData, amount: bet, mines: selectedMines,
+                                   request_id: requestId() })
         });
         const data = await res.json().catch(() => ({}));
         if (!res.ok) { tg.showAlert(data.detail || "Не удалось начать игру"); return; }
@@ -2468,130 +2698,162 @@ async function clickMineCell(cell) {
 }
 
 // ================= АРЕНА (ХОККЕЙ) =================
-async function placeHockeyBet() {
+async function placeHockeyBet(team) {
     if (isProcessing) return;
-    const bet = parseInt(document.getElementById('hockey-bet').value) || 10;
+    const input = document.getElementById('hockey-bet');
+    const bet = parseInt(input && input.value) || 10;
     if (balance < bet) return tg.showAlert("Недостаточно коинов!");
     if (!isAdminId(user && user.id) && bet > 10000) return tg.showAlert("Максимальная ставка 10 000 коинов");
 
     isProcessing = true;
     try {
-        const res = await fetch(`${API_URL}/api/place_bet`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ initData: tg.initData, amount: bet }) });
-        if (!res.ok) { isProcessing = false; const e = await res.json().catch(()=>({})); return tg.showAlert(e.detail || "Ставки закрыты!"); }
-        const data = await res.json();
+        // team передаём только в командном режиме: сервер сам проверит, что
+        // игрок не ставит за обе команды в одном раунде.
+        const payload = { amount: bet, request_id: requestId() };
+        if (team) payload.team = team;
+        const data = await apiPost('/api/place_bet', payload, { fallback: "Ставки закрыты!" });
         balance = data.new_balance; balanceKnown = true; updateUI(); playSound('click');
-    } catch(e) { tg.showAlert("Ошибка соединения"); }
+        if (team) { arenaState.myTeam = team; updateArenaModeUI(arenaState.mode, team); }
+        pollHockeyState();
+    } catch (e) {
+        tg.showAlert(e.message || "Ошибка соединения");
+    }
     isProcessing = false;
 }
 
 const HOCKEY_ROLL_DURATION = 9.0;
-const HOCKEY_SIMULATION_STEP = 0.05;
-let hockeyPathCache = { roundId: null, path: null, pending: null };
 
-async function loadHockeyPath(roundId) {
-    if (hockeyPathCache.roundId === roundId && hockeyPathCache.path) return hockeyPathCache.path;
-    if (hockeyPathCache.roundId === roundId && hockeyPathCache.pending) return hockeyPathCache.pending;
+// Доля круга (проценты) → градусы. 0° — верх круга, по часовой стрелке.
+function arenaAngleForShare(percent) {
+    return Math.max(0, Math.min(360, (Number(percent) || 0) * 3.6));
+}
 
-    hockeyPathCache = { roundId, path: null, pending: null };
-    const pending = (async () => {
-        const response = await fetch(`${API_URL}/api/hockey_roll/${encodeURIComponent(roundId)}`);
-        if (!response.ok) throw new Error('Не удалось получить траекторию мяча');
-        const data = await response.json();
-        if (data.round_id !== roundId || !Array.isArray(data.path)) throw new Error('Траектория другого раунда');
-        const path = data.path.map(([x, y]) => ({ x: Number(x), y: Number(y) }));
-        if (hockeyPathCache.roundId === roundId) hockeyPathCache.path = path;
-        return path;
-    })();
-    hockeyPathCache.pending = pending.catch(error => {
-        if (hockeyPathCache.roundId === roundId) hockeyPathCache.pending = null;
-        throw error;
+function arenaShapes(state) {
+    const sectors = (state && Array.isArray(state.sectors) && state.sectors.length)
+        ? state.sectors
+        : ((state && Array.isArray(state.players)) ? state.players : []);
+    return sectors.filter(item => Number(item.bet) > 0);
+}
+
+// Рисует круг: conic-gradient из секторов (размер = доля ставки) + аватарки
+// внутри каждого сектора. Чем больше ставка — тем больше сектор и аватарка.
+function renderArenaCircle(state) {
+    const pie = document.getElementById('arena-pie');
+    const chips = document.getElementById('arena-players');
+    if (!pie || !chips) return;
+
+    const sectors = arenaShapes(state);
+    if (!sectors.length) {
+        pie.style.background = 'radial-gradient(circle at 50% 50%, #1c1c1c 0 62%, #0f0f0f 63%)';
+        chips.innerHTML = '<span class="arena-empty">Ждём ставок…</span>';
+        return;
+    }
+
+    const totalBet = sectors.reduce((sum, sector) => sum + Math.max(0, Number(sector.bet) || 0), 0) || 1;
+    let cursor = 0;
+    const stops = [];
+    const geometry = [];
+    sectors.forEach(sector => {
+        const share = Math.max(0, Number(sector.bet) || 0) / totalBet * 100;
+        const start = cursor;
+        const end = Math.min(100, cursor + share);
+        const color = sector.color || (sector.id === 'red' ? '#ff3b30' : sector.id === 'blue' ? '#007aff' : '#5856d6');
+        stops.push(`${color} ${arenaAngleForShare(start).toFixed(2)}deg ${arenaAngleForShare(end).toFixed(2)}deg`);
+        geometry.push({ sector, start, end, share, color });
+        cursor = end;
     });
-    return hockeyPathCache.pending;
+    pie.style.background = `conic-gradient(from 0deg, ${stops.join(', ')})`;
+
+    const finalX = state && state.status === 'finished' && state.roll_data
+        ? Number(state.roll_data.final_x) : null;
+    const winnerId = state && state.winner_team
+        ? state.winner_team
+        : (state && state.winner ? String(state.winner.id) : null);
+
+    chips.innerHTML = geometry.map(item => {
+        const mid = (item.start + item.end) / 2;               // процент круга
+        const angle = arenaAngleForShare(mid) * Math.PI / 180; // радианы от верха
+        // Чип ставим на 33% радиуса: внутри своего сектора, но не в центре.
+        const radius = 0.33;
+        const left = 50 + Math.sin(angle) * radius * 100;
+        const top = 50 - Math.cos(angle) * radius * 100;
+        const size = Math.max(26, Math.min(46, 20 + item.share * 0.62));
+        const name = item.sector.name || item.sector.username || 'Игрок';
+        const isWinner = Boolean(winnerId) && (String(item.sector.id) === String(winnerId)
+            || (item.sector.is_team && String(item.sector.id) === String(state.winner_team)));
+        const avatar = !item.sector.is_team && item.sector.avatar && String(item.sector.avatar).startsWith('http')
+            ? `<img src="${escapeHtml(item.sector.avatar)}" alt="">`
+            : `<span class="arena-chip-letter">${escapeHtml(String(name).slice(0, 1).toUpperCase())}</span>`;
+        const label = item.sector.is_team
+            ? `${escapeHtml(name)} · ${item.share.toFixed(0)}%`
+            : `${escapeHtml(shortName(name, 10))}`;
+        return `<div class="arena-chip${isWinner ? ' win' : ''}" style="left:${left.toFixed(2)}%; top:${top.toFixed(2)}%; --chip-size:${size.toFixed(0)}px; --chip-color:${escapeHtml(item.color)};">
+                    <span class="arena-chip-avatar">${avatar}</span>
+                    <span class="arena-chip-label">${label}</span>
+                </div>`;
+    }).join('');
+
+    // Подсветка победившего сектора прямо на круге.
+    if (finalX !== null || winnerId) {
+        pie.classList.toggle('settled', true);
+    } else {
+        pie.classList.remove('settled');
+    }
 }
 
-function renderHockeyFinal(rollData) {
-    if (!rollData) return;
-    ball.x = Number(rollData.final_x);
-    ball.y = Number(rollData.final_y);
-    const ballEl = document.getElementById('hockey-ball');
-    const scene = document.getElementById('hockey-scene');
-    if (ballEl) { ballEl.style.left = `${ball.x}%`; ballEl.style.top = `${ball.y}%`; }
-    if (scene) applyHockeyCamera(scene, HOCKEY_ROLL_DURATION);
+function arenaResetPointer() {
+    const pointer = document.getElementById('arena-pointer');
+    arenaPointer.angle = 0;
+    arenaPointer.spinning = false;
+    if (pointer) {
+        pointer.style.transition = 'none';
+        pointer.style.transform = 'rotate(0deg)';
+    }
 }
 
-function renderHockeyBall(elapsedSeconds) {
-    const points = ball.path;
-    if (!points) return;
-    const framePosition = Math.max(0, Math.min(points.length - 1, elapsedSeconds / HOCKEY_SIMULATION_STEP));
-    const frame = Math.floor(framePosition);
-    const next = Math.min(points.length - 1, frame + 1);
-    const fraction = framePosition - frame;
-    ball.x = points[frame].x + (points[next].x - points[frame].x) * fraction;
-    ball.y = points[frame].y + (points[next].y - points[frame].y) * fraction;
-
-    const ballEl = document.getElementById('hockey-ball');
-    const scene = document.getElementById('hockey-scene');
-    if (ballEl) { ballEl.style.left = `${ball.x}%`; ballEl.style.top = `${ball.y}%`; }
-    if (scene) applyHockeyCamera(scene, elapsedSeconds);
-    playHockeyBounceSound(points, frame);
+// Финиш указателя: несколько оборотов и плавное затухание (как рулетка).
+function arenaRotateTo(finalX, durationMs) {
+    const pointer = document.getElementById('arena-pointer');
+    if (!pointer) return;
+    const targetAngle = arenaAngleForShare(Math.max(0, Math.min(100, Number(finalX) || 0)));
+    const current = ((arenaPointer.angle % 360) + 360) % 360;
+    const delta = ((targetAngle - current) % 360 + 360) % 360;
+    const target = arenaPointer.angle + 4 * 360 + delta;
+    const total = Math.max(700, Number(durationMs) || HOCKEY_ROLL_DURATION * 1000);
+    pointer.style.transition = `transform ${total}ms cubic-bezier(0.08, 0.62, 0.15, 1)`;
+    pointer.style.transform = `rotate(${target}deg)`;
+    arenaPointer.angle = target;
+    arenaPointer.spinning = true;
 }
 
-// Плавный ease-in-out наезд камеры строго на мяч: точка мяча остаётся на месте,
-// поэтому поле не «уезжает» и не выходит за границы арены.
-function applyHockeyCamera(scene, elapsedSeconds) {
-    if (!scene) return;
-    const span = Math.max(0.001, HOCKEY_ROLL_DURATION - HOCKEY_ZOOM_START);
-    const progress = Math.max(0, Math.min(1, (elapsedSeconds - HOCKEY_ZOOM_START) / span));
-    const eased = progress * progress * (3 - 2 * progress);
-    const scale = 1 + (HOCKEY_MAX_ZOOM - 1) * eased;
-    scene.style.transform = `scale(${scale.toFixed(4)})`;
-    scene.style.transformOrigin = `${ball.x}% ${ball.y}%`;
+function updateArenaModeUI(mode, myTeam) {
+    const isTeam = mode === 'team';
+    const normalBtn = document.getElementById('arena-mode-normal');
+    const teamBtn = document.getElementById('arena-mode-team');
+    if (normalBtn) normalBtn.classList.toggle('active', !isTeam);
+    if (teamBtn) teamBtn.classList.toggle('active', isTeam);
+    const teamRow = document.getElementById('arena-team-buttons');
+    const singleBtn = document.getElementById('hockey-btn');
+    if (teamRow) teamRow.hidden = !isTeam;
+    if (singleBtn) singleBtn.style.display = isTeam ? 'none' : '';
+    const redBtn = document.getElementById('team-red-btn');
+    const blueBtn = document.getElementById('team-blue-btn');
+    const team = myTeam || arenaState.myTeam;
+    // Нельзя ставить за обе команды: «чужая» кнопка блокируется до конца раунда.
+    if (redBtn) redBtn.disabled = team === 'blue';
+    if (blueBtn) blueBtn.disabled = team === 'red';
+    if (redBtn) redBtn.classList.toggle('picked', team === 'red');
+    if (blueBtn) blueBtn.classList.toggle('picked', team === 'blue');
 }
 
-// Глухой удар, когда мяч меняет направление (отскок от борта).
-function playHockeyBounceSound(points, frame) {
-    if (frame < 2 || !points[frame] || !points[frame - 1] || !points[frame - 2]) return;
-    const dx1 = points[frame].x - points[frame - 1].x;
-    const dx2 = points[frame - 1].x - points[frame - 2].x;
-    const dy1 = points[frame].y - points[frame - 1].y;
-    const dy2 = points[frame - 1].y - points[frame - 2].y;
-    const bounced = (Math.abs(dx1) > 0.4 && Math.abs(dx2) > 0.4 && Math.sign(dx1) !== Math.sign(dx2))
-        || (Math.abs(dy1) > 0.4 && Math.abs(dy2) > 0.4 && Math.sign(dy1) !== Math.sign(dy2));
-    if (!bounced) return;
-    const now = Date.now();
-    if (now - hockeyLastThudAt < 140) return;   // не строчим звуком на каждом кадре
-    hockeyLastThudAt = now;
-    playSound('thud');
-}
-
-async function startBallPhysics(state) {
-    if (ball.active && ball.roundId === state.round_id) return;
-    if (ball.animationId) cancelAnimationFrame(ball.animationId);
-    ball.roundId = state.round_id;
-    ball.path = null;
-    ball.hasStartedAnim = true;
-    ball.active = true;
-
+async function setArenaMode(mode) {
     try {
-        const path = await loadHockeyPath(state.round_id);
-        if (!ball.active || ball.roundId !== state.round_id) return;
-        ball.path = path;
-
-        const step = () => {
-            if (!ball.active || ball.roundId !== state.round_id) return;
-            const serverNowMs = performance.now() + hockeyServerOffsetMs;
-            const elapsed = Math.max(0, (serverNowMs - Number(state.rolling_started_at) * 1000) / 1000);
-            renderHockeyBall(Math.min(HOCKEY_ROLL_DURATION, elapsed));
-            if (elapsed >= HOCKEY_ROLL_DURATION) {
-                ball.active = false;
-                return;
-            }
-            ball.animationId = requestAnimationFrame(step);
-        };
-        ball.animationId = requestAnimationFrame(step);
-    } catch (error) {
-        ball.active = false;
-        console.error(error);
+        const data = await apiPost('/api/arena_mode', { mode }, { fallback: 'Не удалось переключить арену' });
+        arenaState.mode = data.mode || mode;
+        updateArenaModeUI(arenaState.mode, null);
+        pollHockeyState();
+    } catch (e) {
+        tg.showAlert(e.message || 'Не удалось переключить арену');
     }
 }
 
@@ -2615,28 +2877,48 @@ async function pollHockeyState() {
         const statusEl = document.getElementById('hockey-status');
         const bankEl = document.getElementById('hockey-bank');
         const arena = document.getElementById('hockey-arena');
-        const scene = document.getElementById('hockey-scene');
+
+        arenaState.mode = state.mode === 'team' ? 'team' : 'normal';
+        arenaState.teams = Array.isArray(state.teams) ? state.teams : [];
+        arenaState.sectors = Array.isArray(state.sectors) ? state.sectors : [];
+        arenaState.players = Array.isArray(state.players) ? state.players : [];
+        const mine = arenaState.players.find(p => String(p.id) === String(user && user.id));
+        arenaState.myTeam = mine ? (mine.team || null) : null;
+        updateArenaModeUI(arenaState.mode, arenaState.myTeam);
 
         if (state.status === 'waiting') {
             statusEl.innerText = `Ставки: ${state.timer} сек`; statusEl.style.color = '#ffcc00';
             document.getElementById('hockey-controls').style.display = 'flex';
-            hasShownWinner = false; ball.active = false; ball.hasStartedAnim = false;
-            ball.roundId = null; ball.path = null;
-            if (ball.animationId) cancelAnimationFrame(ball.animationId);
-            const ballEl = document.getElementById('hockey-ball');
-            if (ballEl) { ballEl.style.left = '50%'; ballEl.style.top = '50%'; }
-            if (scene) { scene.style.transform = 'scale(1)'; scene.style.transformOrigin = 'center center'; scene.querySelectorAll('.hockey-sector').forEach(s => s.style.boxShadow = 'none'); }
+            hasShownWinner = false;
+            if (arenaPointer.roundId !== state.round_id) {
+                arenaPointer.roundId = state.round_id;
+                arenaResetPointer();
+            }
             document.getElementById('winner-modal').classList.remove('active');
+            document.getElementById('hockey-btn').disabled = false;
         } else if (state.status === 'rolling') {
-            statusEl.innerText = 'Идёт бросок...'; statusEl.style.color = '#007aff'; document.getElementById('hockey-controls').style.display = 'none';
-            if (!ball.active || ball.roundId !== state.round_id) startBallPhysics(state);
+            statusEl.innerText = 'Идёт бросок...'; statusEl.style.color = '#007aff';
+            document.getElementById('hockey-controls').style.display = 'none';
+            // Указатель стартует один раз на раунд и едет к серверной точке.
+            if (arenaPointer.roundId !== state.round_id) {
+                arenaPointer.roundId = state.round_id;
+                arenaResetPointer();
+                const startedAt = Number(state.rolling_started_at) || (Date.now() / 1000);
+                const elapsed = Math.max(0, (Date.now() / 1000) - startedAt);
+                const left = Math.max(0.8, HOCKEY_ROLL_DURATION - elapsed);
+                const finalX = state.roll_data && state.roll_data.final_x !== undefined ? state.roll_data.final_x : null;
+                // Если final_x ещё не пришёл (старый сервер) — указатель просто
+                // доедет до случайной точки и встанет после завершения раунда.
+                arenaRotateTo(finalX === null ? 50 : finalX, left * 1000);
+            }
         } else if (state.status === 'finished') {
-            statusEl.innerText = 'Раунд окончен!'; statusEl.style.color = '#ff3b30'; ball.active = false;
-            if (ball.animationId) cancelAnimationFrame(ball.animationId);
-            ball.roundId = state.round_id;
-            if (!ball.path && hockeyPathCache.roundId === state.round_id) ball.path = hockeyPathCache.path;
-            if (ball.path) renderHockeyBall(HOCKEY_ROLL_DURATION);
-            else renderHockeyFinal(state.roll_data);
+            statusEl.innerText = 'Раунд окончен!'; statusEl.style.color = '#ff3b30';
+            if (arenaPointer.roundId !== state.round_id) {
+                arenaPointer.roundId = state.round_id;
+                arenaResetPointer();
+                const finalX = state.roll_data ? state.roll_data.final_x : 0;
+                arenaRotateTo(Number(finalX) || 0, 900);
+            }
             const modal = document.getElementById('winner-modal');
             if (state.winner && !hasShownWinner) {
                 hasShownWinner = true;
@@ -2644,7 +2926,13 @@ async function pollHockeyState() {
                     const nameEl = document.getElementById('winner-modal-name');
                     const amountEl = document.getElementById('winner-modal-amount');
                     // Ник — текстом (не HTML), сумма — innerHTML, потому что внутри картинка монеты.
-                    if (nameEl) { nameEl.innerText = shortName(state.winner.name, 18); nameEl.title = String(state.winner.name || ''); }
+                    const teamLabel = state.winner_team
+                        ? (state.winner_team === 'red' ? '🔴 Красные · ' : '🔵 Синие · ')
+                        : '';
+                    if (nameEl) {
+                        nameEl.innerText = teamLabel + shortName(state.winner.name, 18);
+                        nameEl.title = String(state.winner.name || '');
+                    }
                     if (amountEl) {
                         // Ботам банк не выплачивается — им показываем «Банк», а не «+выигрыш».
                         amountEl.classList.toggle('muted', Boolean(state.winner.is_bot));
@@ -2662,45 +2950,24 @@ async function pollHockeyState() {
             }
         }
         bankEl.innerHTML = `Банк: ${coinAmount(state.bank)}`;
-        // players может не прийти (старый сервер, частичный ответ) — тогда не
-        // стираем уже нарисованную арену.
-        const players = Array.isArray(state.players) ? state.players : [];
-        if (!players.length && scene.querySelectorAll('.hockey-sector').length) return;
-        scene.querySelectorAll('.hockey-sector').forEach(el => el.remove());
-        let totalWidth = 0;
-        players.forEach((p, index) => {
-            const sector = document.createElement('div');
-            sector.className = 'hockey-sector';
-            let width = Number(p.percent) || 0;
-            if (index === players.length - 1) { width = 100 - totalWidth; } else { totalWidth += width; }
-            sector.style.width = width + '%'; sector.style.background = p.color; sector.style.borderRight = '1px solid rgba(0,0,0,0.5)'; sector.style.overflow = 'hidden';
-            const shapeWrap = document.createElement('div'); shapeWrap.className = 'player-shape-wrapper';
-            const shape = document.createElement('div'); shape.className = `player-shape shape-circle`;
-            const sectorPixelWidth = (width / 100) * arena.offsetWidth;
-            let size = Math.min(sectorPixelWidth * 0.7, 60); if (size < 25) size = 25;
-            shape.style.width = size + 'px'; shape.style.height = size + 'px';
-            if (!p.is_bot && p.avatar && p.avatar.startsWith('http')) {
-                shape.innerHTML = `<img src="${p.avatar}" style="width:100%; height:100%; object-fit:cover; border-radius:50%;">`;
-                shape.style.background = 'transparent'; shape.style.border = '2px solid #fff';
-            } else {
-                const letter = p.name ? p.name[0].toUpperCase() : '?';
-                shape.innerHTML = `<span style="color:white; font-weight:900; font-size:${size*0.5}px; text-shadow: 0 2px 4px rgba(0,0,0,0.5);">${letter}</span>`;
-                shape.style.backgroundColor = p.color; shape.style.border = '2px solid rgba(255,255,255,0.5)';
-            }
-            shapeWrap.appendChild(shape); sector.appendChild(shapeWrap); scene.appendChild(sector);
-        });
-        if (!document.getElementById('hockey-ball')) {
-            const ballEl = document.createElement('div'); ballEl.className = 'hockey-ball'; ballEl.id = 'hockey-ball'; scene.appendChild(ballEl);
+        // Круг рисуем из серверных секторов: в обычном режиме — по игроку, в
+        // командном — два сектора. Пустой ответ не стирает уже нарисованный круг.
+        if (arenaShapes(state).length || state.status === 'waiting') {
+            renderArenaCircle(state);
         }
+        if (arena) arena.classList.toggle('team-mode', arenaState.mode === 'team');
         const list = document.getElementById('hockey-participants');
         if (list) list.innerHTML = '';
+        const players = arenaState.players;
         players.forEach((p, i) => {
+            if (!list) return;
             const div = document.createElement('div'); div.className = 'part-item';
             const width = Number(p.percent) || (state.bank ? (Number(p.bet) || 0) / state.bank * 100 : 0);
             let iconHtml = '';
             if (!p.is_bot && p.avatar && p.avatar.startsWith('http')) { iconHtml = `<img src="${p.avatar}" style="width:20px; height:20px; border-radius:50%; margin-right:5px; vertical-align:middle;">`; }
             else { const letter = p.name ? p.name[0].toUpperCase() : '?'; iconHtml = `<span style="display:inline-flex; justify-content:center; align-items:center; width:20px; height:20px; border-radius:50%; background:${p.color}; color:white; font-size:10px; font-weight:bold; margin-right:5px;">${letter}</span>`; }
-            div.innerHTML = `<div class="name"><span>#${i+1}</span>${iconHtml}<span title="${escapeHtml(p.name)}">${escapeHtml(shortName(p.name))}</span></div><div class="stats">${width.toFixed(1)}% | ${coinAmount(p.bet)}</div>`;
+            const teamMark = p.team === 'red' ? '🔴 ' : p.team === 'blue' ? '🔵 ' : '';
+            div.innerHTML = `<div class="name"><span>#${i+1}</span>${iconHtml}<span title="${escapeHtml(p.name)}">${teamMark}${escapeHtml(shortName(p.name))}</span></div><div class="stats">${width.toFixed(1)}% | ${coinAmount(p.bet)}</div>`;
             list.appendChild(div);
         });
     } catch (e) { console.error(e); }
@@ -2710,10 +2977,9 @@ function startHockeyPolling() { if (hockeyInterval) clearInterval(hockeyInterval
 function stopHockeyPolling() {
     if (hockeyInterval) clearInterval(hockeyInterval);
     hockeyInterval = null;
-    ball.active = false;
-    ball.hasStartedAnim = false;
-    if (ball.animationId) cancelAnimationFrame(ball.animationId);
-    ball.animationId = null;
+    // Указатель останавливаем вместе с опросом: иначе он продолжал бы крутиться
+    // на уже скрытом экране.
+    arenaPointer.spinning = false;
 }
 function closeWinnerModal() { document.getElementById('winner-modal').classList.remove('active'); }
 
@@ -3088,4 +3354,15 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
     renderUpgrade();
     document.querySelectorAll('.winner-modal, .chest-win-modal').forEach(m => m.classList.remove('active'));
+
+    // ---- Задача 25: новая экономика ----
+    // Реферальная привязка и награда пригласившему (проверяется при входе).
+    bindReferralFromStartParam().then(checkReferralStatus).catch(() => {});
+    // Подписка на канал: тихая проверка, чтобы баннер сразу показал «бонус получен».
+    checkSubscription({ alert: false });
+    // Пассивный доход: начисляем накопленное при входе и далее раз в 15 минут.
+    claimPassiveIncome({ silent: true });
+    startPassiveIncomeTimer();
+    // Отношения — для плашки в профиле.
+    loadLoveState();
 });
