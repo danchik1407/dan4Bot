@@ -964,6 +964,14 @@ async def get_global_top(limit: int = 10):
 
 @dp.message(F.text.func(lambda t: strip_prefix(t).lower().startswith("топ")))
 async def cmd_top(message: Message):
+    # `топ отношений` / `топ любви` — отдельная статистика пар. Проверяем здесь,
+    # потому что этот хендлер зарегистрирован раньше любовного блока и иначе
+    # съел бы команду.
+    clean = strip_prefix(message.text).lower()
+    # «топ отношений», «топ любви», «топ любовь» — всё это статистика пар.
+    # Проверяем по началу фразы: обычный `топ` по коинам не должен попасть сюда.
+    if "отношен" in clean or clean.startswith(("топ люб", "top love", "top lov")):
+        return await cmd_top_love(message)
     try:
         users = await get_global_top(10)
     except Exception:
@@ -1467,6 +1475,97 @@ async def cmd_love_break(message: Message):
     await message.answer(f"💔 Отношения завершены. Накоплено Love: {int(row.get('love') or 0)}.")
 
 
+def _love_int(value):
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _love_short(value, limit: int = 14) -> str:
+    text = str(value or "игрок")
+    return text if len(text) <= limit else text[:limit - 1] + "…"
+
+
+async def love_top_rows():
+    """Все активные пары + ники игроков одним проходом по базе."""
+    def _fetch():
+        rows = (supabase.table(RELATIONSHIPS_TABLE)
+                .select("id, user_a, user_b, love, bank, status")
+                .eq("status", "active")
+                .order("love", desc=True)
+                .execute().data) or []
+        ids = set()
+        for row in rows:
+            for key in ("user_a", "user_b"):
+                try:
+                    ids.add(int(row.get(key)))
+                except (TypeError, ValueError):
+                    continue
+        names = {}
+        if ids:
+            # Один запрос на всех: иначе топ из 100 пар — это 200 запросов.
+            users = supabase.table("users").select("user_id, username").execute().data or []
+            for user in users:
+                try:
+                    user_id = int(user.get("user_id"))
+                except (TypeError, ValueError):
+                    continue
+                if user_id in ids:
+                    names[user_id] = str(user.get("username") or f"id{user_id}")
+        return rows, names
+
+    return await asyncio.to_thread(_fetch)
+
+
+@dp.message(F.text.func(lambda t: strip_prefix(t).lower().startswith(("топ отношений", "топ любви"))))
+async def cmd_top_love(message: Message):
+    """Общая статистика пар: Love коины, этап и место в топе.
+
+    Отношения хранятся в Supabase (таблица relationships) и не привязаны к
+    чату: пара, созданная в одном чате, видна и в другом.
+    """
+    try:
+        rows, names = await love_top_rows()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Топ отношений недоступен (миграция не применена?): %s", exc)
+        return await message.answer(
+            "❌ Не удалось загрузить отношения. Проверьте, что применена миграция "
+            "<code>20261109000000_economy_social.sql</code>.", parse_mode="HTML")
+
+    if not rows:
+        return await message.answer(
+            "💗 <b>ТОП ОТНОШЕНИЙ</b>\n━━━━━━━━━━━━━━━━━━━━\n\n"
+            "Пока ни одной пары. Начни первым: <code>+любовь @username</code>",
+            parse_mode="HTML")
+
+    total_love = sum(int(row.get("love") or 0) for row in rows)
+    top_stage = max((stage_info(int(row.get("love") or 0)) for row in rows),
+                    key=lambda info: info["index"])
+    lines = [
+        "💗 <b>ТОП ОТНОШЕНИЙ</b>",
+        "━━━━━━━━━━━━━━━━━━━━",
+        f"👥 Пар: <b>{len(rows)}</b> · всего Love: <b>{coin_amount(total_love)}</b>",
+        f"🏆 Высший этап: <b>{safe_text(top_stage['title'])}</b>",
+        "",
+    ]
+    medals = ["🥇", "🥈", "🥉"]
+    for index, row in enumerate(rows[:10]):
+        score = int(row.get("love") or 0)
+        info = stage_info(score)
+        partner_a = names.get(_love_int(row.get("user_a")), "игрок")
+        partner_b = names.get(_love_int(row.get("user_b")), "игрок")
+        place = medals[index] if index < 3 else f"{index + 1}."
+        lines.append(
+            f"{place} <b>{safe_text(_love_short(partner_a))}</b> 💞 "
+            f"<b>{safe_text(_love_short(partner_b))}</b>\n"
+            f"    💗 {coin_amount(score)} Love · этап «{safe_text(info['title'])}»")
+    if len(rows) > 10:
+        lines.append(f"\n…и ещё {len(rows) - 10} пар(ы).")
+    lines.append("\n<i>Отношения общие для всех чатов. Второй пары быть не может.</i>")
+    await message.answer("\n".join(lines), parse_mode="HTML")
+
+
 @dp.message(F.text.func(lambda t: strip_prefix(t).lower().startswith("любовь")
                         or strip_prefix(t).lower().startswith(("пара", "отношения"))))
 async def cmd_love_status(message: Message):
@@ -1863,7 +1962,7 @@ async def cmd_bot_stats(message: Message):
     F.text.func(lambda t: strip_prefix(t).lower().startswith("помощь") or strip_prefix(t).lower().startswith("help")))
 async def cmd_help(message: Message):
     text = (
-        "📖 <b>СПИСОК КОМАНД БОТА</b>\n━━━━━━━━━━━━━━━━━━━━\n\n🎟️ <b>Промокоды:</b>\n• <code>промо код</code> — активировать промокод\n\n💰 <b>Экономика:</b>\n• <code>карман</code> — твой баланс\n• <code>карман @user</code> — баланс другого\n• <code>перевод @user сумма</code> — перевести\n• <code>перевод сумма</code> (ответом) — быстрый перевод\n• <code>топ</code> — топ-10 богачей\n• <code>магазин</code> — магазин\n\n🎲 <b>Игры:</b>\n• <code>кубы @user ставка</code> — дуэль в кости\n• <code>кубы ставка</code> (ответом) — быстрый вызов\n\n💗 <b>Отношения:</b>\n• <code>+любовь @user</code> — предложить отношения\n• <code>поцеловать</code>, <code>обнять</code>, <code>прижать</code>, <code>погладить</code>… — РП-команды (+10 Love паре)\n• <code>любовь</code> — этап и Love коины пары\n• <code>-любовь</code> — завершить отношения\n\n• <code>тег</code> — проверка бота\n• <code>помощь</code> — эта справка")
+        "📖 <b>СПИСОК КОМАНД БОТА</b>\n━━━━━━━━━━━━━━━━━━━━\n\n🎟️ <b>Промокоды:</b>\n• <code>промо код</code> — активировать промокод\n\n💰 <b>Экономика:</b>\n• <code>карман</code> — твой баланс\n• <code>карман @user</code> — баланс другого\n• <code>перевод @user сумма</code> — перевести\n• <code>перевод сумма</code> (ответом) — быстрый перевод\n• <code>топ</code> — топ-10 богачей\n• <code>магазин</code> — магазин\n\n🎲 <b>Игры:</b>\n• <code>кубы @user ставка</code> — дуэль в кости\n• <code>кубы ставка</code> (ответом) — быстрый вызов\n\n💗 <b>Отношения:</b>\n• <code>+любовь @user</code> — предложить отношения\n• <code>поцеловать</code>, <code>обнять</code>, <code>прижать</code>, <code>погладить</code>… — РП-команды (+10 Love паре)\n• <code>любовь</code> — этап и Love коины пары\n• <code>топ отношений</code> — все пары, Love и этапы\n• <code>-любовь</code> — завершить отношения\n\n• <code>тег</code> — проверка бота\n• <code>помощь</code> — эта справка")
     await message.answer(text, parse_mode="HTML")
 
 
