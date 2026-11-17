@@ -9,7 +9,7 @@
     <meta http-equiv="Pragma" content="no-cache">
     <meta http-equiv="Expires" content="0">
     <title>AURA GAME</title>
-    <link rel="stylesheet" href="style.css?v=aura-23">
+    <link rel="stylesheet" href="style.css?v=aura-25">
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
 </head>
 <body>
@@ -260,17 +260,18 @@
                  ставке каждого игрока, мяч летает по серверной траектории и
                  останавливается в выигрышном секторе. -->
             <div class="hockey-arena hockey-field" id="hockey-field">
-                <!-- camera: слой, который зумится и едет за мячом (как в старом
-                     поле). Внутри — корнер-подсветка, полосы и мяч. -->
+                <!-- camera: слой, который приближается на концовке броска
+                     (transform-origin ставится в точку мяча). Внутри — ровно
+                     как в арене «до командной»: сектора игроков с аватарками
+                     и мяч. Ничего лишнего. -->
                 <div class="hockey-camera" id="hockey-camera">
                     <div class="hockey-scene" id="hockey-scene">
                         <div class="corner" id="corner-tl"></div>
                         <div class="corner" id="corner-tr"></div>
                         <div class="corner" id="corner-bl"></div>
                         <div class="corner" id="corner-br"></div>
+                        <div class="hockey-ball" id="hockey-ball" hidden></div>
                     </div>
-                    <div class="hockey-sectors" id="hockey-sectors"></div>
-                    <div class="hockey-ball" id="hockey-ball" hidden></div>
                 </div>
             </div>
 
@@ -491,6 +492,6 @@
         <div class="nav-item" onclick="switchTab('profile', this)"><span class="nav-icon">👤</span> Профиль</div>
     </nav>
 
-    <script src="app.js?v=aura-23" defer></script>
+    <script src="app.js?v=aura-25" defer></script>
 </body>
 </html>

@@ -15,9 +15,9 @@ from db_schema import audit as db_schema_audit
 from shop_catalog import SHOP_ITEMS, ShopPurchaseError, is_admin_id, parse_inventory, purchase_shop_item, \
     serialize_shop_items, missing_stock_rows, shop_stock_snapshot, stock_diagnostics, \
     sold_out_items, STOCK_LIMITS_ENABLED
-from love import (LOVE_STAGES, LOVE_ACTION_BONUS, LOVE_ACTION_COOLDOWN, LOVE_ICE_COST,
-                  RP_ACTIONS, claim_stage_rewards, stage_info as love_stage_info,
-                  next_stage as love_next_stage)
+from love import (LOVE_ACTION_BONUS, LOVE_ACTION_COOLDOWN, LOVE_ICE_COST,
+                  RP_ACTIONS, claim_stage_rewards, public_stage as love_public_stage,
+                  public_stages as love_public_stages)
 
 load_dotenv()
 
@@ -83,7 +83,7 @@ async def _http_json(url, method: str = "GET", params=None, payload=None, timeou
 
 # Номер сборки: по нему из /api/health видно, что на сервисе НЕ старый код.
 # Если после деплоя здесь прежнее значение — Render ещё не перезапустился.
-API_BUILD = "2026-11-20-schema-audit-16"
+API_BUILD = "2026-11-21-arena-love-17"
 
 # Момент старта процесса. По нему видно, что сервис только что «проснулся»:
 # Render на бесплатном тарифе усыпляет Web Service через 15 минут без входящих
@@ -4216,6 +4216,21 @@ def _love_partner_id(row, user_id):
     return a
 
 
+def _love_days(row) -> int:
+    """Сколько дней пара вместе (день создания = 1-й день)."""
+    raw = (row or {}).get("created_at")
+    if not raw:
+        return 0
+    try:
+        stamp = str(raw).replace("Z", "+00:00")
+        parsed = datetime.datetime.fromisoformat(stamp)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=datetime.timezone.utc)
+        return max(0, int((datetime.datetime.now(datetime.timezone.utc) - parsed).total_seconds() // 86400))
+    except Exception:
+        return 0
+
+
 def _love_partner_name(partner_id):
     row = _db_user(partner_id) if partner_id else None
     if not row:
@@ -4224,15 +4239,21 @@ def _love_partner_name(partner_id):
 
 
 def love_state_for(user_id) -> dict:
-    """Состояние отношений: партнёр, Love коины, этап и прогресс до следующего."""
+    """Состояние отношений: партнёр, Love коины и текущий уровень.
+
+    Задача 29: этапы и награды за них — СЕКРЕТНАЯ механика. Клиенту уходят
+    только уровень, Love и прогресс: никаких сумм наград и «следующего этапа»,
+    иначе игроки считают таблицу выплат вместо того, чтобы играть.
+    """
     row = _love_relationship_for(user_id)
     if not row:
         return {"ok": True, "in_relationship": False, "available": True,
-                "stages": LOVE_STAGES, "action_bonus": LOVE_ACTION_BONUS,
+                "stages": love_public_stages(), "action_bonus": LOVE_ACTION_BONUS,
                 "cooldown_hours": round(LOVE_ACTION_COOLDOWN / 3600, 1),
                 "ice_cost": LOVE_ICE_COST, "rpc_actions": list(RP_ACTIONS)}
     score = _safe_int(row.get("love"), 0)
     partner_id = _love_partner_id(row, user_id)
+    level = love_public_stage(score)
     return {
         "ok": True,
         "available": True,
@@ -4241,8 +4262,12 @@ def love_state_for(user_id) -> dict:
         "partner_name": _love_partner_name(partner_id),
         "love": score,
         "bank": _safe_int(row.get("bank"), 0),
-        "stage": love_stage_info(score),
-        "next_stage": love_next_stage(score),
+        "days": _love_days(row),
+        # Совместимость: stage.title/level — но без reward и без next_stage.
+        "stage": level,
+        "level": level["level"],
+        "stage_title": level["title"],
+        "progress": level["progress"],
         "action_bonus": LOVE_ACTION_BONUS,
         "cooldown_hours": round(LOVE_ACTION_COOLDOWN / 3600, 1),
         "ice_cost": LOVE_ICE_COST,
@@ -4261,8 +4286,10 @@ async def love_state(data: UserAuth):
         row = _love_relationship_for(uid)
         if row:
             granted = claim_stage_rewards(supabase, row)
+            # Награда начислена, но её размер и название этапа клиенту не уходят:
+            # этапы — секретная механика (задача 29). Только флаг «стало теплее».
             if granted:
-                state["stage_rewards"] = granted
+                state["stage_up"] = True
     return state
 
 @app.get("/api/global_top")
