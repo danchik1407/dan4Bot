@@ -488,6 +488,9 @@ function applyProfile(data) {
         if (Number.isFinite(Number(upgradeConfig.chance_factor))) {
             upgradeEconomy.chance_factor = Number(upgradeConfig.chance_factor);
         }
+        if (Number(upgradeConfig.chance_numerator) > 0) {
+            upgradeEconomy.numerator = Number(upgradeConfig.chance_numerator);
+        }
         if (upgradeConfig.multiplier_chances && typeof upgradeConfig.multiplier_chances === 'object') {
             Object.keys(upgradeConfig.multiplier_chances).forEach(key => {
                 const value = Number(upgradeConfig.multiplier_chances[key]);
@@ -697,7 +700,15 @@ function openChannel(event) {
     } catch (e) { console.error('openTelegramLink недоступен', e); }
     // После возвращения из канала проверяем подписку и, если она есть,
     // начисляем одноразовый бонус (сервер сам решает, положен ли он).
-    setTimeout(() => checkSubscription({ alert: true }), 1200);
+    // Telegram возвращает в WebView не мгновенно, поэтому проверяем лесенкой:
+    // 1.2 с, 3 с и ещё раз, когда вкладка снова стала видимой.
+    [1200, 3000].forEach(delay => setTimeout(() => checkSubscription({ alert: true }), delay));
+    const onBack = () => {
+        if (document.visibilityState !== 'visible') return;
+        setTimeout(() => checkSubscription({ alert: true }), 900);
+    };
+    document.addEventListener('visibilitychange', onBack);
+    setTimeout(() => document.removeEventListener('visibilitychange', onBack), 5 * 60 * 1000);
     return true;
 }
 
@@ -711,6 +722,10 @@ async function checkSubscription(options) {
         const data = await apiPost('/api/channel_check', {}, { fallback: 'Не удалось проверить подписку' });
         subscriptionChecked = true;
         const reward = document.getElementById('sub-banner-reward');
+        const banner = document.getElementById('sub-banner');
+        // Акция одноразовая: забрал бонус — предложение исчезает навсегда.
+        // Никакой «награды за подписку» в шапке больше не висит.
+        if (data.bonus_claimed && banner) banner.hidden = true;
         // Уже забирал — Telegram больше не дёргаем (сервер тоже не дёргает),
         // поэтому никаких «Bad Request: member list is inaccessible».
         if (data.bonus_claimed) {
@@ -720,6 +735,7 @@ async function checkSubscription(options) {
         }
         if (data.granted) {
             playSound('win');
+            if (banner) banner.hidden = true;
             tg.showAlert(`🎉 Спасибо за подписку! Начислено ${data.granted} коинов.`);
             await loadUserData().catch(() => {});
         } else if (alert) {
@@ -1479,26 +1495,26 @@ function upgradeTargetValue(fromValue) {
 }
 
 // ================= ШАНС: ФИКСИРОВАННАЯ ТАБЛИЦА =================
-// Задача 26: шанс на множитель больше не считается как 1/множитель (из-за
-// этого x1.75 давал «страшные» 45.71% = 1/1.75 × дом-эдж 0.8). Теперь шанс
-// монотонно убывает вместе с множителем (78 / 65 / 55 / 50), чуть строже
-// честного 1/x — «сливает чуть чаще», но предсказуемо. Таблица обязана
-// совпадать с UPGRADE_MULTIPLIER_CHANCES в api.py; её подтверждает /api/user.
-const UPGRADE_MULT_CHANCES = { 1.12: 78, 1.35: 65, 1.55: 55, 1.75: 50, 20: 4, 50: 1.5 };
+// Шанс = 90 / X — ОДНА формула и для кнопок, и для «своего» множителя.
+// Честный шанс был бы 100 / X; 90 / X — те же 10% в пользу игры, но игрок
+// может проверить любое число на калькуляторе: x1.75 → 51.43%, x3.7 → 24.32%.
+// Знаменатель приходит с сервера (economy.upgrade.chance_numerator).
+const UPGRADE_MULT_CHANCES = { 1.12: 80.36, 1.35: 66.67, 1.55: 58.06, 1.75: 51.43, 20: 4.5, 50: 1.8 };
+const UPGRADE_MULT_MIN = 1.12;
+const UPGRADE_MULT_MAX = 50;
 // Дом-эдж и админский множитель приходят с сервера (/api/user → economy.upgrade).
-// Пусто — значит приложение открыли без профиля: считаем по таблице как есть.
-let upgradeEconomy = { house_edge: 1, chance_factor: 1 };
+let upgradeEconomy = { house_edge: 1, chance_factor: 1, numerator: 90 };
 
 function upgradeMultChance(mult) {
-    const key = Number(mult);
-    if (Number.isFinite(key) && Object.prototype.hasOwnProperty.call(UPGRADE_MULT_CHANCES, key)) {
-        return UPGRADE_MULT_CHANCES[key];
-    }
-    return 0;
+    const value = Number(mult);
+    if (!Number.isFinite(value) || value <= 0) return 0;
+    const numerator = Number(upgradeEconomy.numerator) > 0 ? Number(upgradeEconomy.numerator) : 90;
+    // 90 / X, с тем же зажимом, что на сервере (0.5…95%).
+    return Math.round(Math.max(0.5, Math.min(95, numerator / value)) * 100) / 100;
 }
 
-// Сырой шанс: для множителя — таблица, для «цели по проценту» и капсул —
-// отношение стоимостей (там нет фиксированной сетки).
+// Сырой шанс: для множителя — 90/X, для «цели по проценту» и капсул —
+// отношение стоимостей (там нет сетки множителей).
 function upgradeRawChance(fromValue, toValue) {
     if (upgradeTarget.kind === 'mult' && upgradeTarget.value !== undefined) {
         const fixed = upgradeMultChance(upgradeTarget.value);
@@ -1810,6 +1826,61 @@ function clearUpgradeResult() {
 // Вкладки «Инвентарь»: коины + каждая капсула, которая вообще бывает в игре.
 // Показываем счётчик, пустые капсулы приглушаем, но не прячем — так игрок
 // видит, что рубиновую/алмазную тоже можно поставить.
+// ================= СВОЙ МНОЖИТЕЛЬ (ползунок) =================
+// Шкала логарифмическая: иначе на линейном отрезке 1.12…50 весь «интересный»
+// диапазон (1.12–2) съедался бы первыми тремя процентами ползунка.
+function upgradeMultFromSlider(raw) {
+    const min = Math.log(UPGRADE_MULT_MIN);
+    const max = Math.log(UPGRADE_MULT_MAX);
+    const ratio = Math.max(0, Math.min(1000, Number(raw) || 0)) / 1000;
+    const value = Math.exp(min + (max - min) * ratio);
+    return Math.max(UPGRADE_MULT_MIN, Math.min(UPGRADE_MULT_MAX, Math.round(value * 100) / 100));
+}
+
+function upgradeSliderFromMult(mult) {
+    const min = Math.log(UPGRADE_MULT_MIN);
+    const max = Math.log(UPGRADE_MULT_MAX);
+    const value = Math.max(UPGRADE_MULT_MIN, Math.min(UPGRADE_MULT_MAX, Number(mult) || UPGRADE_MULT_MIN));
+    return Math.round((Math.log(value) - min) / (max - min) * 1000);
+}
+
+function syncUpgradeCustomMult() {
+    const slider = document.getElementById('up-custom-range');
+    const label = document.getElementById('up-custom-value');
+    const chanceEl = document.getElementById('up-custom-chance');
+    const isMult = upgradeTarget.kind === 'mult';
+    const mult = isMult ? Number(upgradeTarget.value) : UPGRADE_MULT_MIN;
+    if (slider) slider.value = String(upgradeSliderFromMult(mult));
+    if (label) label.textContent = isMult ? `x${mult.toFixed(2)}` : '—';
+    if (chanceEl) chanceEl.textContent = isMult
+        ? `${upgradeDisplayChance(upgradeMultChance(mult)).toFixed(2)}%`
+        : 'выбери X';
+}
+
+// Ползунок двигают — обновляем цифры сразу (без полной перерисовки, чтобы
+// палец не «дёргался»). Полная перерисовка — по окончании движения.
+function onCustomMultInput(raw) {
+    if (upgradeBusy) return;
+    const mult = upgradeMultFromSlider(raw);
+    upgradeToTab = 'coin';
+    upgradeTarget = { kind: 'mult', value: mult };
+    syncUpgradeCustomMult();
+    document.querySelectorAll('.up-chip').forEach(chip => chip.classList.remove('active'));
+    const chance = upgradeDisplayChance(upgradeMultChance(mult));
+    setUpgradeRingPercent(chance);
+    const chanceEl = document.getElementById('up-chance');
+    if (chanceEl && !upgradeBusy) chanceEl.textContent = chance.toFixed(2) + '%';
+    const outcome = document.getElementById('up-outcome');
+    if (outcome) outcome.innerHTML = `Выигрыш: <b>${upgradeRewardText()}</b>`;
+}
+
+function onCustomMultCommit() {
+    if (upgradeBusy) return;
+    clearUpgradeResult();
+    playSound('click');
+    renderUpgrade();
+}
+
 function renderUpgradeFromTabs() {
     const box = document.getElementById('up-from-tabs');
     if (!box) return;
@@ -1889,14 +1960,17 @@ function renderUpgrade() {
     }
 
     // --- правая панель ---
+    syncUpgradeCustomMult();
     const hint = document.getElementById('up-to-hint');
     if (hint) {
         if (upgradeToTab === 'coin') {
-            hint.textContent = 'Шанс фиксированный: ' + UPGRADE_MULTS.map(mult => {
-                const value = upgradeDisplayChance(upgradeMultChance(mult));
-                const shown = Number.isInteger(value) ? value.toFixed(0) : value.toFixed(2);
-                return `x${mult} → ${shown}%`;
-            }).join(' · ');
+            // Формула одна и та же для кнопок и для своего X — показываем её
+            // прямо в подписи, чтобы не было вопросов «почему 45.71%».
+            hint.textContent = `Шанс = ${Number(upgradeEconomy.numerator) || 90} / X · `
+                + UPGRADE_MULTS.map(mult => {
+                    const value = upgradeDisplayChance(upgradeMultChance(mult));
+                    return `x${mult} → ${value.toFixed(2)}%`;
+                }).join(' · ');
         } else {
             hint.textContent = 'Шанс = стоимость вашего предмета / стоимость цели';
         }
@@ -2972,7 +3046,13 @@ function updateArenaModeUI(mode, myTeam) {
     if (teamBtn) teamBtn.classList.toggle('active', isTeam);
     const teamRow = document.getElementById('arena-team-buttons');
     const singleBtn = document.getElementById('hockey-btn');
-    if (teamRow) teamRow.hidden = !isTeam;
+    // В обычной арене красных/синих нет вообще: строка скрыта и скрыта
+    // физически (display), чтобы её нельзя было «достать» стилями браузера.
+    if (teamRow) {
+        teamRow.hidden = !isTeam;
+        teamRow.style.display = isTeam ? 'flex' : 'none';
+        teamRow.setAttribute('aria-hidden', isTeam ? 'false' : 'true');
+    }
     if (singleBtn) singleBtn.style.display = isTeam ? 'none' : '';
     const redBtn = document.getElementById('team-red-btn');
     const blueBtn = document.getElementById('team-blue-btn');
@@ -3014,7 +3094,14 @@ function updateArenaView(mode) {
     const circle = document.getElementById('hockey-arena');
     if (field) field.hidden = isTeam;
     if (circle) circle.hidden = !isTeam;
-    if (isTeam) stopArenaBall();
+    if (isTeam) {
+        stopArenaBall();
+        resetArenaCamera();
+        const fieldEl = document.getElementById('hockey-field');
+        if (fieldEl) fieldEl.classList.remove('rolling', 'settled');
+    } else if (circle) {
+        circle.classList.remove('rolling', 'settled');
+    }
 }
 
 function renderNormalArena(state) {
@@ -3037,9 +3124,12 @@ function renderNormalArena(state) {
             ? `<img src="${escapeHtml(player.avatar)}" alt="">`
             : `<span class="arena-chip-letter">${escapeHtml(name.slice(0, 1).toUpperCase())}</span>`;
         // Чем больше ставка — тем крупнее аватарка в полосе.
-        const size = Math.max(20, Math.min(40, 14 + share * 0.6));
+        const size = Math.max(22, Math.min(44, 16 + share * 0.62));
+        // Было color + '26' (15% альфы) — из-за этого сектора выглядели
+        // «тусклыми». Теперь плотный градиент своего цвета + подсветка сверху.
+        const tint = escapeHtml(color);
         return `<div class="hockey-sector${isWinner ? ' win' : ''}"
-                     style="width:${share.toFixed(3)}%; background:${escapeHtml(color)}26;">
+                     style="width:${share.toFixed(3)}%; background:linear-gradient(180deg, ${tint}cc 0%, ${tint}88 45%, ${tint}55 100%);">
                     <div class="sector-label">
                         <span class="sector-avatar" style="--sector-avatar:${size.toFixed(0)}px">${avatar}</span>
                         <span class="sector-name">${escapeHtml(shortName(name, 10))}</span>
@@ -3058,6 +3148,9 @@ function hideArenaBall() {
     stopArenaBall();
     const ball = document.getElementById('hockey-ball');
     if (ball) ball.hidden = true;
+    const field = document.getElementById('hockey-field');
+    if (field) field.classList.remove('rolling', 'settled');
+    resetArenaCamera();
     arenaBall.roundId = null;
     arenaBall.path = null;
 }
@@ -3068,6 +3161,32 @@ function placeArenaBall(x, y) {
     ball.hidden = false;
     ball.style.left = `${Math.max(0, Math.min(100, Number(x) || 0)).toFixed(2)}%`;
     ball.style.top = `${Math.max(0, Math.min(100, Number(y) || 0)).toFixed(2)}%`;
+}
+
+// ================= КАМЕРА =================
+// Как в старом поле: во время броска картинка приближается и едет за мячом,
+// после раунда плавно возвращается. Математика простая: точку мяча (x,y в %)
+// ставим в центр поля — тогда мяч «в кадре», а полосы уходят за края.
+const ARENA_CAMERA_ZOOM = 1.32;      // рабочий зум во время броска
+const ARENA_CAMERA_FINISH = 1.55;    // короткий «дожим» на финише
+
+function setArenaCamera(x, y, scale) {
+    const camera = document.getElementById('hockey-camera');
+    const field = document.getElementById('hockey-field');
+    if (!camera || !field) return;
+    const width = field.clientWidth || 1;
+    const height = field.clientHeight || 1;
+    const zoom = Math.max(1, Math.min(2.2, Number(scale) || 1));
+    const px = Math.max(0, Math.min(100, Number(x) || 0)) / 100;
+    const py = Math.max(0, Math.min(100, Number(y) || 0)) / 100;
+    const tx = -(px - 0.5) * width * zoom;
+    const ty = -(py - 0.5) * height * zoom;
+    camera.style.transform = `translate3d(${tx.toFixed(2)}px, ${ty.toFixed(2)}px, 0) scale(${zoom.toFixed(3)})`;
+}
+
+function resetArenaCamera() {
+    const camera = document.getElementById('hockey-camera');
+    if (camera) camera.style.transform = 'translate3d(0, 0, 0) scale(1)';
 }
 
 async function loadArenaRollPath(roundId) {
@@ -3085,6 +3204,12 @@ async function loadArenaRollPath(roundId) {
 
 function startArenaBall(state) {
     stopArenaBall();
+    const field = document.getElementById('hockey-field');
+    if (field) {
+        field.classList.add('rolling');
+        field.classList.remove('settled');
+    }
+    resetArenaCamera();
     const roundId = state && state.round_id ? String(state.round_id) : null;
     arenaBall.roundId = roundId;
     arenaBall.path = null;
@@ -3114,7 +3239,12 @@ function animateArenaBall() {
             const t = raw - index;
             const a = path[index] || path[0];
             const b = path[index + 1] || a;
-            placeArenaBall(a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t);
+            const bx = a[0] + (b[0] - a[0]) * t;
+            const by = a[1] + (b[1] - a[1]) * t;
+            placeArenaBall(bx, by);
+            // Камера едет за мячом: в начале раунда зум мягко набирается,
+            // к финишу чуть приближается — как в прежней арене.
+            setArenaCamera(bx, by, ARENA_CAMERA_ZOOM + progress * 0.18);
         }
         if (progress < 1) arenaBall.rafId = requestAnimationFrame(step);
     };
@@ -3128,7 +3258,16 @@ function freezeArenaBall(state) {
     const x = Number(roll.final_x);
     const y = Number(roll.final_y);
     stopArenaBall();
-    if (Number.isFinite(x)) placeArenaBall(x, Number.isFinite(y) ? y : 50);
+    const field = document.getElementById('hockey-field');
+    if (field) { field.classList.remove('rolling'); field.classList.add('settled'); }
+    if (!Number.isFinite(x)) return;
+    const fy = Number.isFinite(y) ? y : 50;
+    placeArenaBall(x, fy);
+    // Короткий «дожим» камеры на победном секторе, затем плавный возврат.
+    setArenaCamera(x, fy, ARENA_CAMERA_FINISH);
+    setTimeout(() => {
+        if (field && field.classList.contains('settled')) setArenaCamera(x, fy, 1.12);
+    }, 700);
 }
 
 async function pollHockeyState() {
@@ -3243,7 +3382,13 @@ async function pollHockeyState() {
         } else {
             renderNormalArena(state);
         }
-        if (arena) arena.classList.toggle('team-mode', isTeamMode);
+        if (arena) {
+            arena.classList.toggle('team-mode', isTeamMode);
+            // Анимации командной арены: «бегущее» кольцо во время броска и
+            // золотая пульсация круга после него.
+            arena.classList.toggle('rolling', isTeamMode && state.status === 'rolling');
+            arena.classList.toggle('settled', isTeamMode && state.status === 'finished');
+        }
         const list = document.getElementById('hockey-participants');
         if (list) list.innerHTML = '';
         const players = arenaState.players;

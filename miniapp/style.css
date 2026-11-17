@@ -290,7 +290,44 @@ main { padding: 0 16px; }
 .player-shape-wrapper { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); display: flex; justify-content: center; align-items: center; pointer-events: none; z-index: 5; }
 .player-shape { display: flex; justify-content: center; align-items: center; overflow: hidden; box-shadow: 0 0 15px rgba(0,0,0,0.5); border: 2px solid rgba(255,255,255,0.4); border-radius: 50%; }
 .player-shape img { object-fit: cover; width: 100%; height: 100%; border-radius: inherit; }
-.hockey-ball { width: 20px; height: 20px; background: white; border-radius: 50%; position: absolute; box-shadow: 0 0 15px #fff; transform: translate(-50%, -50%); z-index: 10; will-change: left, top; }
+.hockey-ball {
+    width: 22px; height: 22px; border-radius: 50%; position: absolute;
+    background: radial-gradient(circle at 35% 30%, #ffffff 0 45%, #dbeafe 70%, #93c5fd 100%);
+    box-shadow: 0 0 10px #fff, 0 0 26px rgba(147, 197, 253, 0.95), 0 0 46px rgba(59, 130, 246, 0.55);
+    transform: translate(-50%, -50%); z-index: 10; will-change: left, top;
+}
+/* След мяча: второй, более мягкий ореол, «дышит» на ходу. */
+.hockey-ball::after {
+    content: ''; position: absolute; inset: -6px; border-radius: 50%;
+    background: radial-gradient(circle, rgba(147, 197, 253, 0.55), transparent 70%);
+    animation: arenaBallHalo 0.9s ease-in-out infinite alternate;
+}
+@keyframes arenaBallHalo {
+    from { transform: scale(0.85); opacity: 0.55; }
+    to { transform: scale(1.25); opacity: 0.95; }
+}
+.hockey-field.rolling .hockey-ball { animation: arenaBallPulse 0.5s ease-in-out infinite alternate; }
+@keyframes arenaBallPulse {
+    from { transform: translate(-50%, -50%) scale(1); }
+    to { transform: translate(-50%, -50%) scale(1.18); }
+}
+/* Финиш: мяч вспыхивает, победная полоса пульсирует золотом. */
+.hockey-field.settled .hockey-ball { animation: arenaBallWin 0.6s ease-out; }
+@keyframes arenaBallWin {
+    0% { box-shadow: 0 0 10px #fff, 0 0 26px rgba(255, 204, 0, 0.9); }
+    100% { box-shadow: 0 0 22px #fff, 0 0 60px rgba(255, 204, 0, 0.95), 0 0 90px rgba(255, 204, 0, 0.6); }
+}
+.hockey-sector.win { animation: arenaSectorWin 0.9s ease-in-out infinite alternate; }
+@keyframes arenaSectorWin {
+    from { box-shadow: inset 0 0 0 2px rgba(255, 204, 0, 0.75), inset 0 0 24px rgba(255, 204, 0, 0.3); }
+    to { box-shadow: inset 0 0 0 3px #ffd83d, inset 0 0 46px rgba(255, 204, 0, 0.55); }
+}
+/* Полосы появляются плавно при смене раунда — без «телепорта» цвета. */
+.hockey-sectors .hockey-sector { animation: arenaSectorIn 0.32s ease-out both; }
+@keyframes arenaSectorIn {
+    from { opacity: 0.35; transform: translateY(6px); }
+    to { opacity: 1; transform: none; }
+}
 .corner { position: absolute; width: 30px; height: 30px; border: 3px solid transparent; transition: all 0.3s; z-index: 15; border-radius: 50%; pointer-events: none; }
 #corner-tl { top: 0; left: 0; }
 #corner-tr { top: 0; right: 0; }
@@ -645,6 +682,11 @@ body.maintenance { overflow: hidden; }
 }
 
 /* ================= ПРОФИЛЬ: ОТНОШЕНИЯ / ПАССИВКА / РЕФЕРАЛЫ ================= */
+/* КРИТИЧНО: у .love-badge задан display, а это перебивает [hidden] из
+   браузерных стилей — из-за этого в профиле одновременно висели «В отношениях
+   с …» и «Свободен». Теперь hidden действительно скрывает. */
+.love-badge[hidden], .sub-banner[hidden], .hockey-arena[hidden], .arena-team-buttons[hidden] { display: none !important; }
+
 .love-badge {
     display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap;
     margin: 0 auto 12px; padding: 7px 14px; border-radius: 999px;
@@ -705,11 +747,70 @@ body.maintenance { overflow: hidden; }
 }
 .arena-mode-btn.active { background: var(--accent, #007aff); color: #fff; }
 
+/* Свой множитель апгрейда (ползунок x1.12 … x50). */
+.up-custom-mult {
+    width: 100%; margin: 8px 0 10px; padding: 10px 12px;
+    border-radius: 14px; border: 1px solid rgba(59, 130, 246, 0.22);
+    background: linear-gradient(180deg, rgba(59, 130, 246, 0.10), rgba(15, 23, 42, 0.5));
+}
+.up-custom-head {
+    display: flex; justify-content: space-between; align-items: baseline;
+    font-size: 11px; font-weight: 800; color: #8fb0d8; letter-spacing: 0.4px;
+    text-transform: uppercase;
+}
+.up-custom-head b { font-size: 16px; color: #eaf3ff; letter-spacing: 0; }
+.up-custom-range {
+    -webkit-appearance: none; appearance: none; width: 100%; height: 22px;
+    background: transparent; margin: 6px 0 2px; cursor: pointer;
+}
+.up-custom-range::-webkit-slider-runnable-track {
+    height: 6px; border-radius: 999px;
+    background: linear-gradient(90deg, #22c55e, #eab308 45%, #ef4444 100%);
+}
+.up-custom-range::-webkit-slider-thumb {
+    -webkit-appearance: none; appearance: none; width: 22px; height: 22px;
+    margin-top: -8px; border-radius: 50%;
+    background: radial-gradient(circle at 35% 30%, #ffffff, #93c5fd 70%);
+    border: 2px solid #0b1220; box-shadow: 0 0 12px rgba(147, 197, 253, 0.9);
+}
+.up-custom-range::-moz-range-track {
+    height: 6px; border-radius: 999px;
+    background: linear-gradient(90deg, #22c55e, #eab308 45%, #ef4444 100%);
+}
+.up-custom-range::-moz-range-thumb {
+    width: 20px; height: 20px; border-radius: 50%; border: 2px solid #0b1220;
+    background: radial-gradient(circle at 35% 30%, #ffffff, #93c5fd 70%);
+}
+.up-custom-meta {
+    display: flex; justify-content: space-between; align-items: center;
+    font-size: 10px; font-weight: 700; color: #6f8bb0;
+}
+.up-custom-meta .up-custom-chance { color: #7ee2a8; font-size: 12px; font-weight: 900; }
+
 /* ================= ОБЫЧНАЯ АРЕНА: ПОЛЕ С МЯЧИКОМ ================= */
 /* Сектора — вертикальные полосы по доле ставки, мяч летает по серверной
    траектории (x/y 0..100). Ширины считает JS, здесь только каркас. */
-.hockey-field { background: #0b1220; }
+.hockey-field {
+    /* Было почти чёрное #0b1220 из-за чего сектора выглядели «тусклыми».
+       Теперь светлее фон + подсветка по краям, цвета игроков читаются. */
+    background:
+        radial-gradient(120% 80% at 50% 0%, rgba(59, 130, 246, 0.18), transparent 60%),
+        radial-gradient(90% 70% at 50% 100%, rgba(168, 85, 247, 0.16), transparent 65%),
+        #141c2c;
+    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.06), inset 0 0 40px rgba(0, 0, 0, 0.55);
+}
+/* Слой «камеры»: едет за мячом и зумится. Трансформ ставит JS. */
+.hockey-camera {
+    position: absolute; inset: 0; transform-origin: 50% 50%;
+    will-change: transform; transition: transform 0.12s linear;
+}
 .hockey-sectors { position: absolute; inset: 0; z-index: 1; display: flex; align-items: stretch; }
+.hockey-sector { transition: box-shadow 0.25s ease, filter 0.25s ease; }
+.hockey-field.rolling .hockey-sectors { animation: arenaBreath 2.4s ease-in-out infinite; }
+@keyframes arenaBreath {
+    0%, 100% { filter: brightness(1); }
+    50% { filter: brightness(1.12); }
+}
 .hockey-sectors .hockey-sector { flex: 0 0 auto; }
 .hockey-sector .sector-label {
     position: absolute; inset: 0; display: flex; flex-direction: column;
@@ -745,6 +846,27 @@ body.maintenance { overflow: hidden; }
     transition: filter 0.3s ease;
 }
 .arena-pie.settled { filter: saturate(1.15) brightness(1.05); }
+/* Командная арена: пока идёт бросок — кольцо «бежит», круг дышит. */
+.arena-circle.rolling .arena-ring { animation: arenaRingSpin 1.6s linear infinite; }
+@keyframes arenaRingSpin {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
+}
+.arena-circle.rolling .arena-pie { filter: saturate(1.35) brightness(1.08); }
+.arena-circle.settled .arena-pie { animation: arenaPieWin 0.9s ease-in-out infinite alternate; }
+@keyframes arenaPieWin {
+    from { filter: saturate(1.15) brightness(1.02); }
+    to { filter: saturate(1.5) brightness(1.16); }
+}
+.arena-circle.rolling .arena-pointer-head {
+    filter: drop-shadow(0 0 12px rgba(255, 255, 255, 1));
+}
+/* Фишки игроков появляются с «поп»-эффектом и не мигают при каждом опросе. */
+.arena-chip { animation: arenaChipIn 0.35s cubic-bezier(0.22, 1.2, 0.4, 1) both; }
+@keyframes arenaChipIn {
+    from { opacity: 0; transform: translate(-50%, -50%) scale(0.6); }
+    to { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+}
 .arena-ring {
     position: absolute; inset: 0; border-radius: 50%;
     border: 3px solid rgba(255, 255, 255, 0.12);

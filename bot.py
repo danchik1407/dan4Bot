@@ -1762,11 +1762,11 @@ def _settings_sync():
 
 def _settings_text(values: dict) -> str:
     chance = values.get("upgrade_chance_factor", "1.0")
-    edge = values.get("upgrade_house_edge", "0.8")
+    edge = values.get("upgrade_house_edge", "1.0")
     return (f"🎛 <b>ШАНСЫ</b>\n"
             f"• множитель шанса апгрейда: <b>{chance}</b> (1.0 — как задумано, 0.5 — вдвое строже)\n"
-            f"• дом-эдж от 1000 коинов: <b>{edge}</b>\n\n"
-            f"Меняется без деплоя: API подхватывает за 30 секунд.")
+            f"• дом-эдж апгрейда: <b>{edge}</b> (1.0 — шанс ровно 90/X)\n"
+            f"• шанс = <b>90 / X</b>: x1.75 → 51.43%, x3.7 → 24.32%")
 
 
 def _admin_keyboard():
@@ -1827,9 +1827,9 @@ async def cb_admin_panel(callback: CallbackQuery):
             [InlineKeyboardButton(text="− шанс", callback_data="adm|set|upgrade_chance_factor|0.8"),
              InlineKeyboardButton(text="1.0", callback_data="adm|set|upgrade_chance_factor|1.0"),
              InlineKeyboardButton(text="+ шанс", callback_data="adm|set|upgrade_chance_factor|1.2")],
-            [InlineKeyboardButton(text="дом-эдж 0.6", callback_data="adm|set|upgrade_house_edge|0.6"),
-             InlineKeyboardButton(text="0.8", callback_data="adm|set|upgrade_house_edge|0.8"),
-             InlineKeyboardButton(text="1.0", callback_data="adm|set|upgrade_house_edge|1.0")],
+            [InlineKeyboardButton(text="дом-эдж 0.8", callback_data="adm|set|upgrade_house_edge|0.8"),
+             InlineKeyboardButton(text="1.0", callback_data="adm|set|upgrade_house_edge|1.0"),
+             InlineKeyboardButton(text="1.2", callback_data="adm|set|upgrade_house_edge|1.2")],
         ])
         await callback.message.answer(_settings_text(values), parse_mode="HTML", reply_markup=keyboard)
         return await callback.answer()
