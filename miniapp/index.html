@@ -9,7 +9,7 @@
     <meta http-equiv="Pragma" content="no-cache">
     <meta http-equiv="Expires" content="0">
     <title>AURA GAME</title>
-    <link rel="stylesheet" href="style.css?v=aura-21">
+    <link rel="stylesheet" href="style.css?v=aura-23">
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
 </head>
 <body>
@@ -169,7 +169,6 @@
                 <!-- Свободен/свободна: зелёная плашка вместо пустого места. -->
                 <div class="love-badge love-badge-free" id="profile-love-free" hidden>
                     💚 <b id="profile-love-free-text">Свободен</b>
-                    <span class="love-badge-stage" id="profile-love-free-hint">+любовь @ник в боте</span>
                 </div>
                 <div class="profile-avatar-large"><img id="profile-avatar-large" src="avatar_placeholder.svg" alt="Avatar"></div>
                 <h2 class="profile-name" id="profile-name">Загрузка...</h2>
@@ -261,14 +260,18 @@
                  ставке каждого игрока, мяч летает по серверной траектории и
                  останавливается в выигрышном секторе. -->
             <div class="hockey-arena hockey-field" id="hockey-field">
-                <div class="hockey-scene" id="hockey-scene">
-                    <div class="corner" id="corner-tl"></div>
-                    <div class="corner" id="corner-tr"></div>
-                    <div class="corner" id="corner-bl"></div>
-                    <div class="corner" id="corner-br"></div>
+                <!-- camera: слой, который зумится и едет за мячом (как в старом
+                     поле). Внутри — корнер-подсветка, полосы и мяч. -->
+                <div class="hockey-camera" id="hockey-camera">
+                    <div class="hockey-scene" id="hockey-scene">
+                        <div class="corner" id="corner-tl"></div>
+                        <div class="corner" id="corner-tr"></div>
+                        <div class="corner" id="corner-bl"></div>
+                        <div class="corner" id="corner-br"></div>
+                    </div>
+                    <div class="hockey-sectors" id="hockey-sectors"></div>
+                    <div class="hockey-ball" id="hockey-ball" hidden></div>
                 </div>
-                <div class="hockey-sectors" id="hockey-sectors"></div>
-                <div class="hockey-ball" id="hockey-ball" hidden></div>
             </div>
 
             <!-- КОМАНДНАЯ АРЕНА: круг, сектора — доли ставок команд (красные/синие). -->
@@ -380,6 +383,24 @@
                         <button class="up-to-tab active" id="up-to-tab-coin" onclick="selectUpgradeToTab('coin', this)">Коины</button>
                         <button class="up-to-tab" id="up-to-tab-capsule" onclick="selectUpgradeToTab('capsule', this)">Капсулы</button>
                     </div>
+                    <!-- Свой множитель: ползунок от x1.12 до x50 по логарифмической
+                         шкале. Шанс считается по той же формуле 90 / X, что и у
+                         плиток, поэтому «свой» X не даёт преимущества. -->
+                    <div class="up-custom-mult" id="up-custom-mult">
+                        <div class="up-custom-head">
+                            <span>Свой множитель</span>
+                            <b id="up-custom-value">x1.75</b>
+                        </div>
+                        <input type="range" id="up-custom-range" class="up-custom-range"
+                               min="0" max="1000" step="1" value="117"
+                               oninput="onCustomMultInput(this.value)"
+                               onchange="onCustomMultCommit(this.value)">
+                        <div class="up-custom-meta">
+                            <span>x1.12</span>
+                            <span class="up-custom-chance" id="up-custom-chance">51.43%</span>
+                            <span>x50</span>
+                        </div>
+                    </div>
                     <div class="up-to-grid" id="up-to-grid"></div>
                     <div class="up-to-hint" id="up-to-hint">Шанс = стоимость вашего предмета / стоимость цели</div>
                 </section>
@@ -470,6 +491,6 @@
         <div class="nav-item" onclick="switchTab('profile', this)"><span class="nav-icon">👤</span> Профиль</div>
     </nav>
 
-    <script src="app.js?v=aura-21" defer></script>
+    <script src="app.js?v=aura-23" defer></script>
 </body>
 </html>

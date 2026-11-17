@@ -82,7 +82,7 @@ async def _http_json(url, method: str = "GET", params=None, payload=None, timeou
 
 # Номер сборки: по нему из /api/health видно, что на сервисе НЕ старый код.
 # Если после деплоя здесь прежнее значение — Render ещё не перезапустился.
-API_BUILD = "2026-11-18-arena-love-14"
+API_BUILD = "2026-11-19-arena-slider-15"
 
 # Момент старта процесса. По нему видно, что сервис только что «проснулся»:
 # Render на бесплатном тарифе усыпляет Web Service через 15 минут без входящих
@@ -582,14 +582,13 @@ UPGRADE_MAX_REWARD = 2_000_000
 # Множители апгрейда (задача 25): x4 и x8 убраны, добавлены «почти монетка»
 # x1.12/x1.35/x1.55/x1.75 и редкие крупные x20/x50.
 UPGRADE_COIN_MULTIPLIERS = [1.12, 1.35, 1.55, 1.75, 20, 50]
-# Шанс на каждый множитель — ФИКСИРОВАННАЯ таблица, а не 1/множитель.
-# Раньше игрок видел «x1.75 → 45.71%» (это 1/1.75, ещё и умноженное на
-# дом-эдж 0.8) — число выглядело случайным. Теперь круглые значения,
-# монотонно убывающие вместе с ростом множителя: x1.12 → 78%, x1.35 → 65%,
-# x1.55 → 55%, x1.75 → 50%. От честного 1/множитель (89.3 / 74.1 / 64.5 / 57.1)
-# они отличаются на ~12–14% в пользу игры — слив «чуть чаще», но предсказуемо
-# и без скрытых множителей. Что нарисовано на круге = по чему считает сервер.
-UPGRADE_MULTIPLIER_CHANCES = {1.12: 78.0, 1.35: 65.0, 1.55: 55.0, 1.75: 50.0, 20: 4.0, 50: 1.5}
+# Шанс = 90 / X. Одна формула на всё: и на кнопки x1.12…x50, и на «свой»
+# множитель из ползунка. Честный шанс был бы 100 / X, то есть 90 / X — это те же
+# «сливает чуть чаще» 10%, но ЗАМЕТНО понятнее таблицы: игрок может проверить
+# любое число на калькуляторе. Пример: x1.75 → 90 / 1.75 = 51.43%.
+UPGRADE_CHANCE_NUMERATOR = 90.0
+UPGRADE_MIN_MULTIPLIER = 1.12
+UPGRADE_MAX_MULTIPLIER = 50.0
 UPGRADE_QUICK_CHANCES = [35, 55, 75]
 # Стоимость капсул для апгрейда. Совпадает с shop_catalog.SHOP_ITEMS
 # (+ LEGACY_ITEMS), поэтому в игру можно ставить ЛЮБУЮ капсулу из инвентаря.
@@ -775,8 +774,12 @@ def _upgrade_economy_config() -> dict:
         "max_bet": UPGRADE_MAX_BET,
         "max_capsules": UPGRADE_MAX_CAPSULES,
         "multipliers": UPGRADE_COIN_MULTIPLIERS,
-        "multiplier_chances": {str(key): value for key, value in
-                               UPGRADE_MULTIPLIER_CHANCES.items()},
+        # Шанс = numerator / X (одинаково для кнопок и для «своего» X).
+        "chance_numerator": UPGRADE_CHANCE_NUMERATOR,
+        "multiplier_chances": {str(key): upgrade_multiplier_chance(key)
+                               for key in UPGRADE_COIN_MULTIPLIERS},
+        "mult_min": UPGRADE_MIN_MULTIPLIER,
+        "mult_max": UPGRADE_MAX_MULTIPLIER,
         "item_prices": UPGRADE_ITEM_PRICES,
         "sources": list(UPGRADE_SOURCES),
         "house_edge": game_setting_float("upgrade_house_edge", UPGRADE_HOUSE_EDGE_FACTOR),
@@ -3010,6 +3013,22 @@ def _upgrade_source_value(source: str, amount: int) -> int:
     return UPGRADE_ITEM_PRICES[source] * amount
 
 
+def upgrade_multiplier_chance(multiplier) -> float:
+    """Шанс для множителя X: 90 / X, обрезанный в допустимые рамки.
+
+    Одна и та же формула у кнопок и у «своего» X: игрок выбирает x3.7 —
+    получает 24.32%, выбирает x1.75 — 51.43%. Никакой таблицы-лотереи.
+    """
+    try:
+        value = float(multiplier)
+    except (TypeError, ValueError):
+        return 0.0
+    if value <= 0:
+        return 0.0
+    chance = UPGRADE_CHANCE_NUMERATOR / value
+    return round(max(UPGRADE_MIN_CHANCE, min(UPGRADE_MAX_CHANCE, chance)), 2)
+
+
 def _upgrade_target_value(source: str, amount: int, target: str,
                           multiplier: Optional[float], chance: Optional[float]) -> tuple[int, float]:
     """Возвращает (стоимость цели, визуальный шанс успеха в процентах)."""
@@ -3027,21 +3046,17 @@ def _upgrade_target_value(source: str, amount: int, target: str,
                 multiplier = float(multiplier or 0)
             except (TypeError, ValueError):
                 raise HTTPException(status_code=400, detail="Некорректный коэффициент")
-            if multiplier <= 1:
-                raise HTTPException(status_code=400, detail="Коэффициент должен быть больше x1")
-            # Задача 25: набор множителей фиксирован (x4 и x8 убраны). Проверяем
-            # и на сервере, иначе старый закешированный клиент продолжал бы
-            # присылать x4 и играть по старым правилам.
-            allowed = any(abs(float(multiplier) - float(item)) < 1e-9
-                          for item in UPGRADE_COIN_MULTIPLIERS)
-            if not allowed:
+            # Диапазон вместо списка: с задачи 27 игрок сам выбирает X ползунком
+            # (1.12 … 50). Список оставлен только для быстрых кнопок.
+            if multiplier < UPGRADE_MIN_MULTIPLIER - 1e-9:
                 raise HTTPException(status_code=400,
-                                    detail="Такой множитель больше не доступен")
+                                    detail=f"Минимальный множитель x{UPGRADE_MIN_MULTIPLIER}")
+            if multiplier > UPGRADE_MAX_MULTIPLIER + 1e-9:
+                raise HTTPException(status_code=400,
+                                    detail=f"Максимальный множитель x{int(UPGRADE_MAX_MULTIPLIER)}")
             to_value = int(round(from_value * multiplier))
-            # Фиксированный шанс из таблицы: x1.75 → ровно 50%, а не 45.71%.
-            priced_chance = UPGRADE_MULTIPLIER_CHANCES.get(
-                next((key for key in UPGRADE_COIN_MULTIPLIERS
-                      if abs(float(key) - multiplier) < 1e-9), None))
+            # Шанс по одной формуле 90 / X — что нарисовано, то и играется.
+            priced_chance = upgrade_multiplier_chance(multiplier)
         win_amount = to_value
     elif target in UPGRADE_ITEM_PRICES:
         # Цель — капсула: за успех выдаём ровно одну штуку.
