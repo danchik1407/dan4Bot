@@ -85,7 +85,7 @@ async def _http_json(url, method: str = "GET", params=None, payload=None, timeou
 
 # Номер сборки: по нему из /api/health видно, что на сервисе НЕ старый код.
 # Если после деплоя здесь прежнее значение — Render ещё не перезапустился.
-API_BUILD = "2026-11-27-sub-bonus-fix-24"
+API_BUILD = "2026-11-28-referral-arrow-25"
 
 # Момент старта процесса. По нему видно, что сервис только что «проснулся»:
 # Render на бесплатном тарифе усыпляет Web Service через 15 минут без входящих
@@ -4282,15 +4282,33 @@ async def referral_check(data: UserAuth):
     referrer_id = _safe_int(row.get("referrer_id"), None)
     if referrer_id is None:
         return {"ok": True, "available": True, "referred": True, "paid": False}
+
+    # Задача 37: награда не должна ломать вход приглашённому. Раньше, если у
+    # пригласившего не было строки в users (или запись не прошла), игрок получал
+    # 503 — и приглашение навсегда оставалось pending. Теперь просто отвечаем
+    # «пока не начислено» и пробуем снова при следующем заходе.
     new_balance = award_coins(referrer_id, reward)
     if new_balance is None:
-        raise HTTPException(status_code=503, detail="Не удалось начислить награду за реферала")
+        logger.warning("Реферал %s → %s: награда %s не начислилась, попробуем позже",
+                       referrer_id, uid, reward)
+        return {"ok": True, "available": True, "referred": True, "paid": False,
+                "pending": True, "reward": reward,
+                "detail": "Награда пригласившему начислится чуть позже"}
     try:
         supabase.table(REFERRALS_TABLE).update({
             "reward": reward, "status": "paid", "paid_at": _now_iso(),
         }).eq("referred_id", uid).execute()
     except Exception as exc:  # noqa: BLE001
         logger.warning("Не удалось отметить реферальную награду: %s", exc)
+
+    # Пригласивший узнаёт о награде в личке бота, а не «где-то в приложении».
+    await _send_user_dm(
+        referrer_id,
+        f"🎉 <b>По твоей ссылке пришёл игрок!</b>\n\n"
+        f"Начислено: <b>+{reward} коинов</b>\n"
+        f"Баланс: <b>{new_balance}</b>\n\n"
+        f"Зови ещё — за каждого друга платим отдельно.",
+    )
     return {"ok": True, "available": True, "referred": True, "paid": True,
             "reward": reward, "referrer_balance": new_balance,
             "detail": f"Пригласивший получил {reward} коинов"}

@@ -3283,15 +3283,16 @@ function renderArenaCircle(state) {
 }
 
 // ================= КОМАНДНАЯ АРЕНА: СТРЕЛКА =================
-// Крутится и останавливается ровно как стрелка Апгрейда: пока идёт бросок —
-// ровное вращение (requestAnimationFrame, 900°/с), на финише — несколько полных
-// оборотов и плавное затухание одной CSS-кривой cubic-bezier(0.1, 0.7, 0.1, 1)
-// точно на выигрышном секторе. Никаких «рывков» на стыке фаз: переход один.
+// Крутится как стрелка Апгрейда (ровное вращение 900°/с), а на финише
+// ЗАМЕДЛЯЕТСЯ ПОСТЕПЕННО: скорость падает по экспоненте, поэтому в первую
+// секунду стрелка летит почти с прежней скоростью, дальше всё медленнее и к
+// концу почти замирает. Раньше финиш был одной CSS-кривой cubic-bezier — на
+// пяти секундах она сбрасывала почти всё замедление в первые полсекунды, и
+// выглядело так, будто стрелка резко тормозит, а потом ползёт.
+// Задача 37: затухание считаем на каждом кадре (requestAnimationFrame).
 const ARENA_POINTER_SPEED = 900;          // °/с — как UPGRADE_ARROW_SPEED
-// Задача 34: финиш стрелки — ровно как в апгрейде (UPGRADE_LAND_MS = 5000) и с
-// той же кривой. Было 3200 мс, из-за чего затухание выглядело резким: почти
-// все обороты проскакивали в первой трети перехода.
-const ARENA_POINTER_LAND_MS = 5000;
+const ARENA_POINTER_LAND_MS = 5000;       // длительность финишного доезда
+// Резерв, если в WebView нет requestAnimationFrame: тот же доезд через CSS.
 const ARENA_POINTER_LAND_EASING = 'cubic-bezier(0.1, 0.7, 0.1, 1)';
 // Победителя показываем только ПОСЛЕ того, как стрелка встала / мяч замер.
 const ARENA_WINNER_DELAY_MS = 1200;        // обычная арена: мяч уже замер
@@ -3356,9 +3357,29 @@ function arenaStartPointerSpin() {
         : setTimeout(step, 16);
 }
 
-// Финиш: минимум три полных оборота + доводка до сектора победителя.
-// Токен защищает от гонки: новый раунд сбрасывает стрелку, а старый
-// transitionend не должен ничего «дорисовать».
+// Сколько градусов набежит при скорости v(t) = v0·e^(−k·t) за seconds секунд.
+function arenaDecayCoverage(v0, k, seconds) {
+    if (!(k > 0)) return v0 * seconds;
+    return (v0 / k) * (1 - Math.exp(-k * seconds));
+}
+
+// Подбираем коэффициент затухания k так, чтобы за totalMs набежало ровно
+// distance градусов: стрелка стартует со скорости вращения и плавно гаснет.
+function arenaDecayFactor(distance, totalMs, v0) {
+    const seconds = Math.max(0.1, Number(totalMs) / 1000);
+    let lo = 0.01, hi = 40;
+    for (let i = 0; i < 60; i++) {
+        const mid = (lo + hi) / 2;
+        if (arenaDecayCoverage(v0, mid, seconds) > distance) lo = mid;
+        else hi = mid;
+    }
+    return (lo + hi) / 2;
+}
+
+// Финиш: минимум четыре полных оборота + доводка до сектора победителя,
+// с постепенным замедлением «с каждой секундой медленнее».
+// Токен защищает от гонки: новый раунд сбрасывает стрелку, а старый финиш
+// не должен ничего «дорисовать».
 function arenaLandPointer(finalX, durationMs) {
     const pointer = arenaPointerNode();
     arenaPointerStopSpin();
@@ -3370,35 +3391,52 @@ function arenaLandPointer(finalX, durationMs) {
     const current = ((arenaPointer.angle % 360) + 360) % 360;
     const delta = ((desired - current) % 360 + 360) % 360;
     const total = Math.max(2200, Number(durationMs) || ARENA_POINTER_LAND_MS);
-    // Оборотов столько же, сколько в апгрейде (не меньше четырёх): стрелка
-    // успевает «разогнаться» из вращения и плавно гаснет, а не прыгает.
     const turns = Math.max(4, Math.ceil(total / 1000));
-    const target = arenaPointer.angle + turns * 360 + delta;
+    const distance = turns * 360 + delta;
+    const startAngle = arenaPointer.angle;
 
     let finished = false;
-    let fallbackTimer = null;
     const finish = () => {
         if (finished) return;
         finished = true;
-        if (pointer.removeEventListener) pointer.removeEventListener('transitionend', onTransitionEnd);
-        if (fallbackTimer) clearTimeout(fallbackTimer);
         if (token !== arenaPointer.landToken) return;
-        arenaPointerSetAngle(target);          // фиксируем конечный угол
-    };
-    const onTransitionEnd = (event) => {
-        if (!event || event.target === pointer) finish();
+        arenaPointerSetAngle(startAngle + distance);        // фиксируем угол
     };
 
-    // 1) стартовый угол без анимации, 2) reflow (иначе браузер склеит
-    // transform и transition не запустится), 3) один плавный переход.
-    arenaPointerSetAngle(arenaPointer.angle);
-    void pointer.offsetWidth;
+    if (typeof requestAnimationFrame !== 'function') {
+        // Резервный путь: один CSS-переход (старые WebView без rAF).
+        arenaPointerSetAngle(startAngle);
+        void pointer.offsetWidth;
+        pointer.classList.add('landing');
+        pointer.style.transition = `transform ${total}ms ${ARENA_POINTER_LAND_EASING}`;
+        arenaPointer.angle = startAngle + distance;
+        pointer.style.transform = `rotate(${(startAngle + distance).toFixed(2)}deg)`;
+        setTimeout(finish, total + 300);
+        return;
+    }
+
     pointer.classList.add('landing');
-    pointer.style.transition = `transform ${total}ms ${ARENA_POINTER_LAND_EASING}`;
-    arenaPointer.angle = target;
-    pointer.style.transform = `rotate(${target.toFixed(2)}deg)`;
-    if (pointer.addEventListener) pointer.addEventListener('transitionend', onTransitionEnd);
-    fallbackTimer = setTimeout(finish, total + 300);
+    pointer.style.transition = 'none';          // угол двигаем вручную, кадр за кадром
+    const v0 = ARENA_POINTER_SPEED;             // старт — со скорости вращения
+    const k = arenaDecayFactor(distance, total, v0);
+    const norm = 1 - Math.exp(-k * (total / 1000));
+    const nowMs = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
+    const startedAt = nowMs();
+
+    const step = () => {
+        if (finished || token !== arenaPointer.landToken) return;
+        const elapsed = Math.max(0, nowMs() - startedAt);
+        const progress = Math.min(1, elapsed / total);
+        // Доля пройденного пути по экспоненте: быстро в начале, всё медленнее
+        // к концу (в последнюю секунду стрелка почти останавливается).
+        const factor = norm > 0 ? (1 - Math.exp(-k * (progress * total / 1000))) / norm : progress;
+        arenaPointerSetAngle(startAngle + distance * factor);
+        if (progress >= 1) return finish();
+        requestAnimationFrame(step);
+    };
+    requestAnimationFrame(step);
+    // Страховка: если кадры не приходят (окно свернули), фиксируем финал.
+    setTimeout(finish, total + 500);
 }
 
 function updateArenaModeUI(mode, myTeam) {
