@@ -25,7 +25,10 @@ REQUIRED = {
     "stars_payments": ["charge_id", "user_id", "coins", "stars", "created_at"],
     "idempotency_keys": ["key", "user_id", "endpoint", "response", "created_at"],
     "game_settings": ["key", "value"],
-    "relationships": ["id", "user_a", "user_b", "love", "status", "created_at"],
+    # bank нужен выплатам/RPC пары: без него бот писал «примените миграцию».
+    "relationships": ["id", "user_a", "user_b", "love", "bank", "status", "created_at"],
+    "love_stage_rewards": ["relationship_id", "stage"],
+    "love_cooldowns": ["user_id", "action_at"],
     "solo_love": ["user_id", "love"],
     "solo_love_stage_rewards": ["user_id", "stage"],
     "crash_history": ["id", "round_id", "crash_point", "players", "created_at"],
@@ -55,6 +58,13 @@ COLUMN_TYPES = {
     "bonus_claimed": "BOOLEAN NOT NULL DEFAULT TRUE",
     "reward": "INTEGER NOT NULL DEFAULT 0",
     "status": "TEXT NOT NULL DEFAULT 'pending'",
+    "bank": "INTEGER NOT NULL DEFAULT 0",
+    "love": "INTEGER NOT NULL DEFAULT 0",
+    "user_a": "BIGINT NOT NULL",
+    "user_b": "BIGINT NOT NULL",
+    "relationship_id": "BIGINT NOT NULL",
+    "stage": "INTEGER NOT NULL DEFAULT 0",
+    "action_at": "TIMESTAMPTZ NOT NULL DEFAULT now()",
     "stars": "INTEGER NOT NULL DEFAULT 0",
     "players": "JSONB NOT NULL DEFAULT '[]'::jsonb",
     "claimed": "BOOLEAN NOT NULL DEFAULT FALSE",
@@ -71,6 +81,12 @@ MIGRATION_BY_COLUMN = {
     "ice": "20261109000000_economy_social.sql",
     "premium": "20261109000000_economy_social.sql",
     "inventory": "20261027000000_shop_daily_limits.sql",
+    "bank": "20261124000000_love_fix.sql",
+    "love": "20261124000000_love_fix.sql",
+    "status": "20261124000000_love_fix.sql",
+    "action_at": "20261124000000_love_fix.sql",
+    "relationship_id": "20261124000000_love_fix.sql",
+    "stage": "20261122000000_solo_love.sql",
 }
 
 RELOAD_HINT = ("Если миграция уже применена — обновите кэш схемы PostgREST: "

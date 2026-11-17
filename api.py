@@ -84,7 +84,7 @@ async def _http_json(url, method: str = "GET", params=None, payload=None, timeou
 
 # Номер сборки: по нему из /api/health видно, что на сервисе НЕ старый код.
 # Если после деплоя здесь прежнее значение — Render ещё не перезапустился.
-API_BUILD = "2026-11-24-two-arenas-night-20"
+API_BUILD = "2026-11-25-love-fix-21"
 
 # Момент старта процесса. По нему видно, что сервис только что «проснулся»:
 # Render на бесплатном тарифе усыпляет Web Service через 15 минут без входящих
@@ -370,6 +370,13 @@ CHANNEL_USERNAME = (os.getenv("CHANNEL_USERNAME") or "Auragameplay_Channel").str
 CHANNEL_URL = f"https://t.me/{CHANNEL_USERNAME}"
 SUBSCRIPTION_BONUS = 200
 SUBSCRIPTIONS_TABLE = "subscriptions_history"
+# Задача 33: бонус за канал больше не зависит от того, может ли бот проверить
+# подписку (getChatMember). Раньше, если бота не было админом канала или канал
+# был закрыт, игрок вообще не мог получить 200 коинов — теперь бонус выдаётся
+# один раз всем, а в личку бота приходит подтверждение «получил». Задание в
+# Mini App после этого исчезает навсегда (subscriptions_history).
+# CHANNEL_BONUS_STRICT=1 возвращает старую проверку подписки.
+CHANNEL_BONUS_STRICT = _env_flag("CHANNEL_BONUS_STRICT", False)
 
 # ==================== ПАССИВНЫЙ ДОХОД С КАПСУЛ ====================
 # Сколько коинов в час приносит одна капсула каждого типа.
@@ -3853,6 +3860,32 @@ async def telegram_chat_member_status(user_id) -> dict:
             "detail": "" if subscribed else "Вы ещё не подписаны на канал"}
 
 
+async def _send_user_dm(user_id, text: str) -> bool:
+    """Личное сообщение от бота игроку. Лучший вариант: не роняем запрос.
+
+    Нужно для подтверждения бонуса: игрок должен увидеть в боте, что награда
+    начислена, даже если в Mini App он больше это задание не встретит.
+    """
+    if not BOT_TOKEN:
+        logger.warning("DM не отправлено: BOT_TOKEN не задан (user_id=%s)", user_id)
+        return False
+    try:
+        payload = await _http_json(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+                                   method="POST",
+                                   payload={"chat_id": int(user_id), "text": text,
+                                            "parse_mode": "HTML",
+                                            "disable_web_page_preview": True},
+                                   timeout=8)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("DM не отправлено (user_id=%s): %s", user_id, exc)
+        return False
+    if isinstance(payload, dict) and payload.get("ok"):
+        return True
+    logger.warning("DM отказ (user_id=%s): %s", user_id,
+                   (payload or {}).get("description") if isinstance(payload, dict) else payload)
+    return False
+
+
 def _subscription_claimed(user_id) -> Optional[bool]:
     """True/False — было ли начисление. None — таблица недоступна."""
     try:
@@ -3882,14 +3915,19 @@ async def channel_check(data: ChannelCheckRequest):
     if claimed is None:
         raise HTTPException(status_code=503, detail=(
             "Таблица subscriptions_history не создана. Примените миграцию "
-            "supabase/migrations/20261109000000_economy_social.sql"))
+            "supabase/migrations/20261124000000_love_fix.sql"))
     if claimed:
         return {"ok": True, "subscribed": True, "bonus": SUBSCRIPTION_BONUS,
                 "bonus_claimed": True, "granted": 0, "channel_url": CHANNEL_URL,
+                "dm_sent": False, "check_skipped": False,
                 "detail": "Бонус за подписку уже получен — повторно он не начисляется."}
 
     member = await telegram_chat_member_status(uid)
-    if not member["subscribed"]:
+    # Задача 33: бонус одноразовый и больше НЕ зависит от проверки канала.
+    # Если бот не админ канала / канал закрыт / Telegram не ответил, игрок всё
+    # равно получает 200 коинов — но только один раз за всё время.
+    check_failed = not member["ok"] or not member["subscribed"]
+    if check_failed and CHANNEL_BONUS_STRICT:
         return {
             "ok": bool(member["ok"]),
             "subscribed": False,
@@ -3923,9 +3961,19 @@ async def channel_check(data: ChannelCheckRequest):
             pass
         raise HTTPException(status_code=503, detail="Не удалось начислить бонус, попробуйте ещё раз")
 
+    # Подтверждение в личку бота: «получил» — чтобы награда не потерялась,
+    # даже когда задание из Mini App исчезло.
+    dm_text = (f"🎁 <b>Бонус за подписку получен!</b>\n\n"
+               f"Начислено: <b>+{SUBSCRIPTION_BONUS} коинов</b>\n"
+               f"Баланс: <b>{coins}</b>\n\n"
+               f"Задание выполнено — в приложении оно больше не появится.")
+    dm_sent = await _send_user_dm(uid, dm_text)
+
     return {"ok": True, "subscribed": True, "bonus": SUBSCRIPTION_BONUS,
             "bonus_claimed": True, "granted": SUBSCRIPTION_BONUS,
             "new_balance": coins, "channel_url": CHANNEL_URL,
+            "checked": not check_failed, "check_skipped": check_failed,
+            "dm_sent": dm_sent,
             "detail": f"Бонус +{SUBSCRIPTION_BONUS} коинов за подписку"}
 
 
