@@ -1017,6 +1017,49 @@ x1.75 должно быть ровно `51.43%`, у x50 — `1.80%`. Если ч
 Миграций не нужно. Статика поднята до `?v=aura-32`,
 `API_BUILD = "2026-11-27-channel-task-23"`.
 
+## 4.3.1.6.5. Задача 36: «Не удалось начислить бонус. Попробуйте ещё раз чуть позже»
+
+Такое сообщение приходило с кнопки «✅ Проверить подписку» в личке бота, когда
+запись отметки в базу падала, а обработчик прятал настоящую причину. Теперь
+выдача сделана «мягкой» и любую поломку базы переживает:
+
+| Что случилось в базе | Что делает бот |
+|---|---|
+| нет таблицы `subscriptions_history` | ставит отметку в `game_settings` (`sub_bonus_<id>`) и **всё равно начисляет** 200 |
+| нет колонки `created_at` / `reward` | пишет без неё и начисляет |
+| нет строки игрока в `users` | создаёт её и начисляет |
+| повторный тап | «Бонус уже получен», второй раз не начисляет |
+| RLS без политики (и `game_settings` тоже) | **не начисляет** (иначе был бы дубль) и показывает, что делать: добавить `SUPABASE_SERVICE_KEY` сервису `dan4Bot` |
+| база не ответила | «Попробуйте ещё раз чуть позже» |
+
+Отметка в `game_settings` читается и ботом, и `aura-api` — поэтому задание
+исчезает из Mini App даже если основная таблица недоступна.
+
+**Админам видно техническую причину.** Если выдача всё-таки упала, в алерте
+под текстом появляется строка «🔧 Технически: …» с настоящей ошибкой базы
+(например `marker/rls: new row violates row-level security policy`). В логах
+`dan4Bot` — та же ошибка с таблицей и колонкой.
+
+**Если бонус не выдаётся — что проверить в Supabase** (SQL Editor, разово):
+
+```sql
+CREATE TABLE IF NOT EXISTS public.subscriptions_history (
+    user_id       BIGINT      PRIMARY KEY,
+    bonus_claimed BOOLEAN     NOT NULL DEFAULT TRUE,
+    reward        INTEGER     NOT NULL DEFAULT 200,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+ALTER TABLE public.subscriptions_history ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS subscriptions_history_service_all ON public.subscriptions_history;
+CREATE POLICY subscriptions_history_service_all ON public.subscriptions_history
+    FOR ALL USING (true) WITH CHECK (true);
+NOTIFY pgrst, 'reload schema';
+```
+
+Или просто применить `supabase/migrations/20261124000000_love_fix.sql` — там
+эта таблица и политика уже есть. Переменная `SUPABASE_SERVICE_KEY` у сервиса
+`dan4Bot` снимает вопрос с RLS полностью.
+
 ## 4.3.1.7. Одиночки (Unlove) и `-отны` (старое `-отн`) — задача 30
 
 **Зачем.** Раньше без пары игрок ничего не получал: `поцеловать` отвечало
