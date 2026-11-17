@@ -140,7 +140,7 @@ main { padding: 0 16px; }
     display: inline-flex; align-items: center; gap: 5px; flex: 0 0 auto;
     font-size: 15px; font-weight: 800; color: #fff; font-variant-numeric: tabular-nums;
 }
-.lb-gem { font-size: 13px; }
+.lb-balance .coin-img { width: 1.05em; height: 1.05em; margin: 0 0 0 2px; }
 .lb-empty { text-align: center; color: #8e8e93; font-size: 14px; padding: 26px 0; }
 .lb-item.top-1 { border-color: #ffcc00; background: linear-gradient(90deg, rgba(255,204,0,0.1) 0%, #1c1c1c 100%); }
 .lb-item.top-2 { border-color: #c0c0c0; background: linear-gradient(90deg, rgba(192,192,192,0.1) 0%, #1c1c1c 100%); }
@@ -222,6 +222,9 @@ main { padding: 0 16px; }
    object-fit: contain, никаких чёрных плашек и обрезки по краям. */
 .shop-art { width: 100%; aspect-ratio: 1 / 1; border-radius: 14px; overflow: hidden; margin-bottom: 10px; background: transparent; display: flex; align-items: center; justify-content: center; }
 .shop-art img { width: 100%; height: 100%; object-fit: contain; object-position: center; background: transparent; display: block; }
+/* Задача 35: под ценой капсулы — маленькая подпись, сколько она приносит в час. */
+.shop-income { display: flex; align-items: center; justify-content: center; gap: 2px; font-size: 11px; font-weight: 700; color: #7fe3a0; margin: -2px 0 8px; }
+.shop-income .coin-img { width: 1.05em; height: 1.05em; margin: 0 1px; }
 .shop-stock { display: block; font-size: 11px; font-weight: 700; color: #9aa7b8; margin-bottom: 8px; font-variant-numeric: tabular-nums; }
 .shop-stock.low { color: #ff9500; }
 .shop-stock.muted { color: #7d8794; font-weight: 600; opacity: .9; }
@@ -603,6 +606,8 @@ main { padding: 0 16px; }
 }
 /* Контекстные множители: icon-места чуть крупнее текста. */
 .balance-badge .coin-img { width: 1.15em; height: 1.15em; margin: 0 0.1em 0 0; }
+#passive-rate .coin-img, .extra-value .coin-img { width: 1.05em; height: 1.05em; margin: 0 1px; }
+.up-slot-icon .coin-img { width: 1em; height: 1em; margin: 0; filter: drop-shadow(0 0 16px rgba(59, 130, 246, 0.55)); }
 .game-balance-badge .coin-img { width: 1.1em; height: 1.1em; margin: 0; }
 .stat-icon .coin-img { width: 1.35em; height: 1.35em; margin: 0; }
 .up-from-emoji .coin-img { width: 1.1em; height: 1.1em; margin: 0; }

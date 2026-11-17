@@ -710,6 +710,11 @@ const CHANNEL_URL = 'https://t.me/Auragameplay_Channel';
 
 // Кнопка подписки в шапке. Внутри Telegram — нативное открытие ссылки,
 // снаружи (браузер/тест) — обычный переход по href.
+//
+// Задача 35: бонус выдаётся НЕ по тапу на плашку, а кнопкой в личке бота.
+// Тап по плашке открывает канал и просит сервер прислать в ЛС сообщение с
+// кнопкой «Проверить подписку». Бот проверяет подписку и начисляет 200 коинов,
+// после чего плашка задания исчезает из аппки навсегда.
 function openChannel(event) {
     try {
         if (tg && typeof tg.openTelegramLink === 'function') {
@@ -717,70 +722,73 @@ function openChannel(event) {
             tg.openTelegramLink(CHANNEL_URL);
         }
     } catch (e) { console.error('openTelegramLink недоступен', e); }
-    // После возвращения из канала проверяем подписку и, если она есть,
-    // начисляем одноразовый бонус (сервер сам решает, положен ли он).
-    // Telegram возвращает в WebView не мгновенно, поэтому проверяем лесенкой:
-    // 1.2 с, 3 с и ещё раз, когда вкладка снова стала видимой.
-    [1200, 3000].forEach(delay => setTimeout(() => checkSubscription({ alert: true }), delay));
-    const onBack = () => {
-        if (document.visibilityState !== 'visible') return;
-        setTimeout(() => checkSubscription({ alert: true }), 900);
-    };
-    document.addEventListener('visibilitychange', onBack);
-    setTimeout(() => document.removeEventListener('visibilitychange', onBack), 5 * 60 * 1000);
+    requestChannelTask();
     return true;
 }
 
-// Проверка подписки через getChatMember (на сервере) + бонус 200 коинов.
-// Бонус строго одноразовый: факт начисления хранится в subscriptions_history,
-// поэтому повторная подписка после отписки денег не даёт.
-async function checkSubscription(options) {
-    const alert = Boolean(options && options.alert);
+// Плашка задания исчезает безвозвратно: бонус получен либо бот прислал задание.
+function hideChannelTask() {
+    const banner = document.getElementById('sub-banner');
+    if (banner) { banner.hidden = true; banner.style.display = 'none'; }
+    stopChannelTaskWatch();
+}
+
+// Задание уходит в личку бота вместе с кнопкой «Проверить подписку».
+async function requestChannelTask() {
     if (!tg.initData) {
-        // Вне Telegram проверить подписку невозможно — говорим это, а не молчим.
-        if (alert && tg && tg.showAlert) {
-            tg.showAlert('Откройте приложение через Telegram — без initData начислить бонус нельзя.');
-        }
-        return;
+        if (tg && tg.showAlert) tg.showAlert('Откройте приложение через Telegram — иначе бот не сможет написать вам в личку.');
+        return null;
     }
+    const reward = document.getElementById('sub-banner-reward');
     try {
-        const data = await apiPost('/api/channel_check', {}, { fallback: 'Не удалось проверить подписку' });
-        subscriptionChecked = true;
-        const reward = document.getElementById('sub-banner-reward');
-        const banner = document.getElementById('sub-banner');
-        // Акция одноразовая: забрал бонус — предложение исчезает навсегда.
-        // Никакой «награды за подписку» в шапке больше не висит.
-        if (data.bonus_claimed && banner) banner.hidden = true;
-        // Уже забирал — Telegram больше не дёргаем (сервер тоже не дёргает),
-        // поэтому никаких «Bad Request: member list is inaccessible».
-        if (data.bonus_claimed) {
-            if (reward) reward.textContent = '✅ Бонус за подписку уже получен';
-        } else if (data.ok === false) {
-            // Проверка не удалась (бот не админ канала и т.п.) — не обещаем
-            // «200 коинов» молча: пишем причину прямо в плашку.
-            if (reward) reward.textContent = `⚠️ ${data.detail || 'Подписку не удалось проверить'}`;
-        } else if (reward) {
-            reward.textContent = `🎁 Награда за подписку: ${data.bonus || 200} коинов`;
+        const data = await apiPost('/api/channel_task', {}, { fallback: 'Не удалось отправить задание в бота' });
+        if (data && data.claimed) { hideChannelTask(); return data; }
+        if (reward) {
+            reward.textContent = data && data.dm_sent
+                ? '✅ Задание в личке бота — нажми «Проверить»'
+                : `🎁 Награда за подписку: ${(data && data.bonus) || 200} коинов`;
         }
-        if (data.granted) {
-            playSound('win');
-            if (banner) banner.hidden = true;
-            tg.showAlert(`🎉 Спасибо за подписку! Начислено ${data.granted} коинов.`);
-            await loadUserData().catch(() => {});
-        } else if (alert) {
-            if (data.bonus_claimed) {
-                tg.showAlert('Бонус за подписку уже получен — второй раз он не начисляется.');
-            } else {
-                tg.showAlert(data.detail || 'Подпишитесь на канал, чтобы получить бонус.');
-            }
-        } else if (data.detail && data.ok === false) {
-            // Проверка не удалась (бот не админ канала и т.п.) — пишем причину
-            // в плашку, а не вываливаем сырой ответ Telegram в алерт.
-            if (reward) reward.textContent = `⚠️ ${data.detail}`;
+        if (data && data.dm_sent) {
+            tg.showAlert('📩 Задание отправлено в личку бота.\n\nПодпишись на канал и нажми там кнопку «Проверить подписку» — бонус придёт сразу, а задание исчезнет из приложения.');
+            startChannelTaskWatch();
+        } else if (tg && tg.showAlert) {
+            tg.showAlert((data && data.detail) || 'Бот не смог написать в личку. Открой бота и нажми «Старт».');
         }
+        return data;
     } catch (e) {
-        if (alert) tg.showAlert(e.message || 'Не удалось проверить подписку');
+        if (tg && tg.showAlert) tg.showAlert(e.message || 'Не удалось отправить задание в бота');
+        return null;
     }
+}
+
+// Пока аппка открыта — раз в 10 секунд спрашиваем статус: игрок мог уже нажать
+// «Проверить» в боте, и плашка задания должна пропасть сама.
+let channelTaskTimer = null;
+function stopChannelTaskWatch() {
+    if (channelTaskTimer) { clearInterval(channelTaskTimer); channelTaskTimer = null; }
+}
+function startChannelTaskWatch() {
+    stopChannelTaskWatch();
+    let ticks = 0;
+    channelTaskTimer = setInterval(() => {
+        ticks += 1;
+        if (ticks > 30) return stopChannelTaskWatch();   // 5 минут — хватит
+        refreshChannelTask();
+    }, 10000);
+}
+
+async function refreshChannelTask() {
+    if (!tg.initData) return null;
+    try {
+        const data = await apiPost('/api/channel_status', {}, { fallback: 'Статус задания недоступен' });
+        if (data && data.claimed) hideChannelTask();
+        return data;
+    } catch (e) { return null; }
+}
+
+// Тихая проверка при входе: если бонус уже получен — задание не показываем.
+async function checkSubscription() {
+    return refreshChannelTask();
 }
 
 async function loadGlobalTop() {
@@ -804,7 +812,7 @@ async function loadGlobalTop() {
                 <div class="${cls}">
                     <span class="lb-place">${place}</span>
                     ${nameHtml(u.username)}
-                    <span class="lb-balance">${formatCoins(_safeCoins(u.coins))} <span class="lb-gem">💎</span></span>
+                    <span class="lb-balance">${formatCoins(_safeCoins(u.coins))} ${COIN_IMG}</span>
                 </div>
             `;
         }).join('');
@@ -839,7 +847,8 @@ function renderPassiveCard() {
     const button = document.getElementById('passive-btn');
     if (!rateEl) return;
     const rate = passiveRateFor();
-    rateEl.textContent = `${rate.toFixed(1)} 🪙 / час`;
+    // Монета — наша картинка AG (coin.png), эмодзи больше не используем.
+    rateEl.innerHTML = `${rate.toFixed(1)} ${COIN_IMG} / час`;
     if (hintEl) {
         const nightFrom = String(passiveNight.from || 22).padStart(2, '0');
         const nightTo = String(passiveNight.to || 8).padStart(2, '0');
@@ -922,7 +931,7 @@ async function loadReferralStats() {
         const linkEl = document.getElementById('ref-link');
         const detailEl = document.getElementById('ref-detail');
         if (countEl) countEl.textContent = String(data.count || 0);
-        if (earnedEl) earnedEl.textContent = `${formatCoins(data.earned || 0)} 🪙`;
+        if (earnedEl) earnedEl.innerHTML = `${formatCoins(data.earned || 0)} ${COIN_IMG}`;
         // Имя бота берём у СЕРВЕРА. Раньше здесь был initDataUnsafe.bot_username,
         // то есть имя того бота, из которого открыли страницу: у проекта есть
         // старый бот, и игроки получали ссылку-приглашение на него.
@@ -1519,6 +1528,15 @@ async function loadShopItems() {
     updateUI();
 }
 
+// Сколько коинов в час приносит капсула — мелкая подпись под ценой.
+// Ставки живут на сервере (PASSIVE_INCOME_RATES в api.py) и приходят в профиле.
+function passiveIncomeLabel(itemId) {
+    const rate = Number(passiveRates[itemId] || 0);
+    if (!(rate > 0)) return '';
+    const value = rate < 1 ? rate.toFixed(1) : formatCoins(Math.round(rate));
+    return `<small class="shop-income">приносит ${value} ${COIN_IMG}/час</small>`;
+}
+
 function renderShop() {
     const grid = document.getElementById('shop-grid');
     if (!grid) return;
@@ -1548,6 +1566,7 @@ function renderShop() {
                 ${art}
                 <h3>${item.name}</h3>
                 <p>${coinAmount(item.price)}</p>
+                ${passiveIncomeLabel(itemId)}
                 ${stockText}
                 <button class="buy-btn" onclick="buyItem('${itemId}')">Купить</button>
             </article>
@@ -4491,8 +4510,9 @@ document.addEventListener('DOMContentLoaded', async () => {
     // ---- Задача 25: новая экономика ----
     // Реферальная привязка и награда пригласившему (проверяется при входе).
     bindReferralFromStartParam().then(checkReferralStatus).catch(() => {});
-    // Подписка на канал: тихая проверка, чтобы баннер сразу показал «бонус получен».
-    checkSubscription({ alert: false });
+    // Подписка на канал: тихая проверка. Бонус уже получен — задание скрыто;
+    // иначе плашка ждёт тапа (задание придёт в личку бота).
+    checkSubscription();
     // Пассивный доход: начисляем накопленное при входе и далее раз в 15 минут.
     claimPassiveIncome({ silent: true });
     startPassiveIncomeTimer();
