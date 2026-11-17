@@ -9,7 +9,7 @@
     <meta http-equiv="Pragma" content="no-cache">
     <meta http-equiv="Expires" content="0">
     <title>AURA GAME</title>
-    <link rel="stylesheet" href="style.css?v=aura-28">
+    <link rel="stylesheet" href="style.css?v=aura-29">
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
 </head>
 <body>
@@ -320,6 +320,24 @@
                     <button class="team-btn team-blue" id="team-blue-btn" onclick="placeHockeyBet('blue')">🔵 За синих</button>
                 </div>
             </div>
+            <!-- Задача 32: в командной арене участники — не одна лента, а две
+                 плитки по бокам: слева синие, справа красные. -->
+            <div class="arena-team-boards" id="arena-team-boards" hidden>
+                <div class="arena-team-board team-blue" id="team-board-blue" data-team="blue">
+                    <div class="arena-team-head">
+                        <span class="arena-team-title">🔵 Синие</span>
+                        <span class="arena-team-sum" id="team-board-blue-sum">0</span>
+                    </div>
+                    <div class="arena-team-list" id="team-board-blue-list"></div>
+                </div>
+                <div class="arena-team-board team-red" id="team-board-red" data-team="red">
+                    <div class="arena-team-head">
+                        <span class="arena-team-title">🔴 Красные</span>
+                        <span class="arena-team-sum" id="team-board-red-sum">0</span>
+                    </div>
+                    <div class="arena-team-list" id="team-board-red-list"></div>
+                </div>
+            </div>
             <div class="hockey-participants" id="hockey-participants"></div>
         </section>
 
@@ -511,6 +529,6 @@
         <div class="nav-item" onclick="switchTab('profile', this)"><span class="nav-icon">👤</span> Профиль</div>
     </nav>
 
-    <script src="app.js?v=aura-28" defer></script>
+    <script src="app.js?v=aura-29" defer></script>
 </body>
 </html>

@@ -200,6 +200,9 @@ let maintenanceMessage = '';         // текст с сервера (если �
 
 // ================= НОВАЯ ЭКОНОМИКА (задача 25) =================
 let passiveRates = { capsule: 0.1, uniq_capsule: 0.5, ruby: 5, diamond: 20, galactic: 50 };
+// Задача 32: доход копится всегда (даже когда аппка закрыта), а ночью по МСК
+// (22:00–08:00) капает вдвое меньше. Числа — с сервера (/api/user → passive_night).
+let passiveNight = { multiplier: 0.5, from: 22, to: 8 };
 let passiveTimer = null;
 let subscriptionChecked = false;
 let loveState = null;
@@ -488,6 +491,9 @@ function applyProfile(data) {
     inventory = Array.isArray(data.inventory) ? data.inventory : [];
     lastChestTime = Number(data.last_chest) || 0;
     daysInGame = Math.max(0, Number(data.days_in_game) || 0);
+    if (data.passive_night && typeof data.passive_night === 'object') {
+        passiveNight = Object.assign({}, passiveNight, data.passive_night);
+    }
     if (data.passive_rates && typeof data.passive_rates === 'object') {
         passiveRates = Object.assign({}, passiveRates, data.passive_rates);
     }
@@ -835,9 +841,12 @@ function renderPassiveCard() {
     const rate = passiveRateFor();
     rateEl.textContent = `${rate.toFixed(1)} 🪙 / час`;
     if (hintEl) {
+        const nightFrom = String(passiveNight.from || 22).padStart(2, '0');
+        const nightTo = String(passiveNight.to || 8).padStart(2, '0');
         hintEl.textContent = rate > 0
-            ? `Твой инвентарь приносит ${rate.toFixed(1)} коинов каждый час. Начисление идёт, пока аппка открыта.`
-            : 'Купи капсулы — они приносят коины каждый час.';
+            ? `Твой инвентарь приносит ${rate.toFixed(1)} коинов каждый час. Доход копится, даже когда аппка закрыта: `
+              + `ночью (${nightFrom}:00–${nightTo}:00 МСК) — вдвое меньше.`
+            : 'Купи капсулы — они приносят коины каждый час, даже когда аппка закрыта.';
     }
     if (button) button.disabled = rate <= 0;
 }
@@ -851,7 +860,10 @@ async function claimPassiveIncome(options) {
         const data = await apiPost('/api/passive_income', {}, { fallback: 'Пассивный доход недоступен' });
         if (data.accrued > 0) {
             playSound('coin');
-            if (!silent) tg.showAlert(`💤 Пассивный доход: +${data.accrued} коинов`);
+            if (!silent) {
+                const nightNote = data.night ? '\n🌙 Сейчас ночь — капает вдвое меньше (22:00–08:00 МСК).' : '';
+                tg.showAlert(`💤 Пассивный доход: +${data.accrued} коинов${nightNote}`);
+            }
             balance = Number(data.new_balance) || balance;
             balanceKnown = true;
             updateUI();
@@ -911,7 +923,13 @@ async function loadReferralStats() {
         const detailEl = document.getElementById('ref-detail');
         if (countEl) countEl.textContent = String(data.count || 0);
         if (earnedEl) earnedEl.textContent = `${formatCoins(data.earned || 0)} 🪙`;
-        const botName = (tg.initDataUnsafe && tg.initDataUnsafe.bot_username) || 'AuragameBot';
+        // Имя бота берём у СЕРВЕРА. Раньше здесь был initDataUnsafe.bot_username,
+        // то есть имя того бота, из которого открыли страницу: у проекта есть
+        // старый бот, и игроки получали ссылку-приглашение на него.
+        const linkBot = (data.link && /t\.me\/([^/?]+)/i.exec(data.link) || [])[1] || '';
+        const botName = data.bot_username
+            || (linkBot && linkBot !== '{bot}' ? linkBot : '')
+            || 'AuragameBot';
         const link = data.link
             ? data.link.replace('{bot}', botName)
             : `https://t.me/${botName}?startapp=${referralCodeFor(user && user.id)}`;
@@ -3421,7 +3439,72 @@ function syncArenaView() {
 // Список участников активной арены. Раньше он перерисовывался на каждом
 // опросе (аватарки дёргались), теперь — только при изменении состава/ставок.
 // Функция общая для опроса и локального переключения арены.
+// Командная арена: две плитки по бокам — слева синие, справа красные.
+// Раньше все участники шли одной лентой вниз, и понять, кто за кого, можно было
+// только по эмодзи в нике. Теперь состав команд разложен по плиткам, как
+// мини-таблица: своя команда подсвечена, победившая — золотом.
+function renderTeamBoards() {
+    const wrap = document.getElementById('arena-team-boards');
+    const flat = document.getElementById('hockey-participants');
+    if (!wrap) return;
+    const pool = arenaPool('team');
+    const players = Array.isArray(pool.players) ? pool.players : [];
+    const banks = { red: 0, blue: 0 };
+    players.forEach(p => {
+        if (p.team === 'red' || p.team === 'blue') banks[p.team] += Math.max(0, Number(p.bet) || 0);
+    });
+    const winnerTeam = pool.winner_team || (pool.winner && pool.winner.id) || null;
+    ['blue', 'red'].forEach(team => {
+        const listEl = document.getElementById(`team-board-${team}-list`);
+        const sumEl = document.getElementById(`team-board-${team}-sum`);
+        const board = document.getElementById(`team-board-${team}`);
+        if (!listEl) return;
+        const members = players
+            .filter(p => p.team === team)
+            .sort((a, b) => (Number(b.bet) || 0) - (Number(a.bet) || 0));
+        const total = banks[team] || 0;
+        const signature = `${team}:${winnerTeam || ''}:` + members.map(p => `${p.id}:${p.bet}`).join(',');
+        if (sumEl) sumEl.textContent = coinAmount(total);
+        if (board) board.classList.toggle('win', Boolean(winnerTeam) && winnerTeam === team);
+        if (listEl.dataset.signature === signature) return;
+        listEl.dataset.signature = signature;
+        listEl.innerHTML = '';
+        if (!members.length) {
+            const empty = document.createElement('div');
+            empty.className = 'arena-team-empty';
+            empty.textContent = 'Ждём ставок…';
+            listEl.appendChild(empty);
+            return;
+        }
+        members.forEach(p => {
+            const row = document.createElement('div');
+            row.className = 'arena-team-row' + (String(p.id) === String(user && user.id) ? ' mine' : '');
+            const name = escapeHtml(shortName(String(p.name || '?'), 10));
+            const percent = total ? ((Number(p.bet) || 0) / total * 100).toFixed(0) : '0';
+            row.innerHTML = `<span class="row-name"><span title="${escapeHtml(String(p.name || ''))}">${name}</span></span>`
+                + `<span class="row-bet">${coinAmount(p.bet)} · ${percent}%</span>`;
+            listEl.appendChild(row);
+        });
+    });
+    wrap.hidden = false;
+    wrap.style.display = 'flex';
+    if (flat) { flat.hidden = true; flat.style.display = 'none'; }
+}
+
+function renderFlatParticipants() {
+    const wrap = document.getElementById('arena-team-boards');
+    const flat = document.getElementById('hockey-participants');
+    if (wrap) { wrap.hidden = true; wrap.style.display = 'none'; }
+    if (flat) { flat.hidden = false; flat.style.display = 'flex'; }
+}
+
 function renderArenaParticipants() {
+    // В командной арене — две плитки по командам, в обычной — прежняя лента.
+    if (arenaState.view === 'team') {
+        renderTeamBoards();
+        return;
+    }
+    renderFlatParticipants();
     const list = document.getElementById('hockey-participants');
     if (!list) return;
     const players = arenaState.players || [];
