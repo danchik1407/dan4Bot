@@ -529,9 +529,10 @@ def _sub_claim_and_award_sync(user_id, bonus: int):
 
 
 def _sub_status_text(user_id) -> str:
-    return (f"🎁 <b>Бонус за подписку получен!</b>\n\n"
-            f"Начислено: <b>+{SUBSCRIPTION_BONUS} коинов</b>\n\n"
-            f"Задание выполнено — в приложении оно больше не появится.")
+    return (f"✅ <b>Бонус за подписку уже получен</b>\n\n"
+            f"Твои +{SUBSCRIPTION_BONUS} коинов на месте — второй раз это "
+            f"задание не выполняется.\n\n"
+            f"Больше искать его в приложении не нужно: оно убрано.")
 
 
 async def _chat_member_subscribed(user_id):
@@ -556,7 +557,8 @@ async def cb_sub_check(callback: CallbackQuery):
 
     if await asyncio.to_thread(_sub_claimed_sync, uid):
         try:
-            await callback.message.edit_text(_sub_status_text(uid), reply_markup=None)
+            await callback.message.edit_text(_sub_status_text(uid), reply_markup=None,
+                                             parse_mode="HTML")
         except Exception:
             pass
         return await callback.answer("Бонус уже получен — второй раз он не начисляется.", show_alert=True)
@@ -569,7 +571,8 @@ async def cb_sub_check(callback: CallbackQuery):
     new_balance, error = await asyncio.to_thread(_sub_claim_and_award_sync, uid, SUBSCRIPTION_BONUS)
     if error == "claimed":
         try:
-            await callback.message.edit_text(_sub_status_text(uid), reply_markup=None)
+            await callback.message.edit_text(_sub_status_text(uid), reply_markup=None,
+                                             parse_mode="HTML")
         except Exception:
             pass
         return await callback.answer("Бонус уже получен.", show_alert=True)
@@ -593,12 +596,12 @@ async def cb_sub_check(callback: CallbackQuery):
 
     text = _sub_status_text(uid)
     if new_balance is not None:
-        text = (f"🎁 <b>Бонус за подписку получен!</b>\n\n"
-                f"Начислено: <b>+{SUBSCRIPTION_BONUS} коинов</b>\n"
-                f"Баланс: <b>{new_balance}</b>\n\n"
-                f"Задание выполнено — в приложении оно больше не появится.")
+        text = (f"🎉 <b>Спасибо за подписку!</b>\n\n"
+                f"Накинули <b>+{SUBSCRIPTION_BONUS} коинов</b>, "
+                f"на балансе теперь <b>{new_balance}</b>.\n\n"
+                f"Задание одноразовое — в приложении оно больше не появится.")
     try:
-        await callback.message.edit_text(text, reply_markup=None)
+        await callback.message.edit_text(text, reply_markup=None, parse_mode="HTML")
     except Exception:
         try:
             await callback.message.answer(text, parse_mode="HTML")
@@ -802,7 +805,8 @@ async def cmd_admin_take_caps(message: Message):
         else:
             return await message.answer("❌ Формат: <code>забрать капсулы @user</code>", parse_mode="HTML")
     await update_user(target.id, inventory="[]")
-    await message.answer(f"✅ У пользователя <b>@{target.username}</b> забраны все капсулы.")
+    await message.answer(f"✅ У пользователя <b>@{safe_text(target.username)}</b> забраны все капсулы.",
+                         parse_mode="HTML")
 
 
 @dp.message(F.text.func(lambda t: strip_prefix(t).lower().startswith("забрать всё")))
@@ -2412,8 +2416,9 @@ async def solo_rp_action(message: Message, meta: dict, target_id, target_name):
             f"{safe_text(message.from_user.full_name)}</a> {meta['text']}")
     if target_id and target_id != actor_id:
         text += f" <a href=\"tg://user?id={target_id}\">{safe_text(target_name or 'игрока')}</a>"
-    text += (f"\n\n💔 Пока один(а) — копится <b>{SOLO_CURRENCY}</b>. "
-             f"Передать Love/Unlove другому нельзя, только заработать.")
+    # Задача 37: убрали длинное объяснение «Пока один(а) — копится Unlove…» —
+    # оно занимало пол-сообщения и повторялось на каждое действие. Счёт и так
+    # виден в ответе («+10 Unlove (всего N)»).
 
     left = await love_cooldown_left(actor_id)
     if left > 0:
