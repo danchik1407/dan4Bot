@@ -5,6 +5,7 @@ import time
 import asyncio
 import logging
 import json
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from dotenv import load_dotenv
 from aiogram import BaseMiddleware, Bot, Dispatcher, F, Router
@@ -334,54 +335,197 @@ except ValueError:
 SUBSCRIPTIONS_TABLE = "subscriptions_history"
 
 
-def _sub_claimed_sync(user_id) -> bool:
+SUB_FALLBACK_PREFIX = "sub_bonus_"
+
+
+def _db_error_text(exc) -> str:
+    return f"{type(exc).__name__}: {exc}".lower()
+
+
+def _db_error_column(exc):
+    """Имя отсутствующей колонки из ошибки PostgREST/Postgres (или None)."""
+    import re
+    text = str(exc).lower()
+    found = (re.search(r"'([a-z_][a-z0-9_]*)'\s+column", text)
+             or re.search(r'column\s+"([a-z_][a-z0-9_]*)"', text)
+             or re.search(r"column\s+'?\"?([a-z_][a-z0-9_]*)", text))
+    return found.group(1) if found else None
+
+
+def _db_error_kind(exc) -> str:
+    """Классификация ошибки базы: no_table / rls / duplicate / column / db."""
+    text = _db_error_text(exc)
+    if ("does not exist" in text or "pgrst205" in text or "pgrst202" in text
+            or ("schema cache" in text and "table" in text)
+            or "не найдена" in text):
+        return "no_table"
+    if "row-level security" in text or "42501" in text or "rls" in text:
+        return "rls"
+    if "23505" in text or "duplicate key" in text:
+        return "duplicate"
+    if _db_error_column(exc):
+        return "column"
+    return "db"
+
+
+def _insert_tolerant_sync(table, payload: dict, logger_prefix: str = ""):
+    """INSERT, который не падает из-за отсутствия «украшающих» колонок.
+
+    (ok, error). Если база ругается на конкретную колонку — выкидываем её и
+    повторяем: из-за отсутствия created_at/reward бонус ломаться не должен.
+    """
+    data = dict(payload)
+    last_error = None
+    for _ in range(5):
+        try:
+            supabase.table(table).insert(data).execute()
+            return True, None
+        except Exception as exc:  # noqa: BLE001
+            last_error = exc
+            column = _db_error_column(exc)
+            if column and column in data and _db_error_kind(exc) == "column":
+                logger.warning(f"{logger_prefix}{table}: колонки «{column}» нет — пишем без неё. {exc}")
+                data.pop(column, None)
+                continue
+            break
+    return False, last_error
+
+
+def _setting_get_sync(key):
+    try:
+        res = (supabase.table("game_settings").select("value")
+               .eq("key", key).limit(1).execute())
+    except Exception:  # noqa: BLE001
+        return None
+    return res.data[0].get("value") if res.data else None
+
+
+def _setting_set_sync(key, value) -> bool:
+    try:
+        supabase.table("game_settings").upsert(
+            {"key": key, "value": str(value)}, on_conflict="key").execute()
+        return True
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"game_settings: не удалось записать {key}: {exc}")
+        return False
+
+
+def _sub_claimed_sync(user_id):
+    """True/False — получен ли бонус. None — база не дала прочитать.
+
+    Читаем два источника: основную таблицу subscriptions_history и запасную
+    отметку в game_settings (она есть в любой схеме — по ней же живёт кулдаун
+    награды за РП). Вторая нужна, если миграция со subscriptions_history ещё
+    не применена: бонус всё равно выдаётся ровно один раз.
+    """
+    uid = int(user_id)
+    saw_table = False
     try:
         res = (supabase.table(SUBSCRIPTIONS_TABLE).select("user_id")
-               .eq("user_id", int(user_id)).limit(1).execute())
-    except Exception as e:  # noqa: BLE001
-        logger.warning(f"subscriptions_history недоступна: {e}")
-        return False
-    return bool(res.data)
+               .eq("user_id", uid).limit(1).execute())
+        saw_table = True
+        if res.data:
+            return True
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"subscriptions_history недоступна: {exc}")
+    if _setting_get_sync(f"{SUB_FALLBACK_PREFIX}{uid}"):
+        return True
+    return False if saw_table else None
 
 
-def _sub_claim_and_award_sync(user_id, bonus: int):
-    """Отметка «бонус получен» + начисление. (new_balance, error)."""
-    uid = int(user_id)
-    try:
-        from datetime import datetime, timezone
-        row = {"user_id": uid, "bonus_claimed": True, "reward": int(bonus),
-               "created_at": datetime.now(timezone.utc).isoformat()}
+def _sub_new_user_sync(uid):
+    """Создаём строку игрока так же, как get_user (иначе NOT NULL колонки мешают)."""
+    row = {
+        "user_id": uid, "coins": 0, "keys": 0, "username": f"id{uid}",
+        "last_chest": 0, "last_call": 0, "last_daily_case": 0, "call_sign": None,
+        "inventory": "[]", "daily_transfers": 0, "last_transfer_reset": 0,
+    }
+    data = dict(row)
+    for _ in range(6):
         try:
-            supabase.table(SUBSCRIPTIONS_TABLE).insert(row).execute()
-        except Exception as e:  # noqa: BLE001
-            logger.warning(f"Подписка: вставка с created_at не прошла ({e}), повторяю без неё")
-            row.pop("created_at", None)
-            supabase.table(SUBSCRIPTIONS_TABLE).insert(row).execute()
-    except Exception as e:  # noqa: BLE001
-        logger.error(f"Не удалось зафиксировать бонус за подписку: {e}")
-        # Если строка уже есть — бонус просто был получен раньше.
-        if _sub_claimed_sync(uid):
-            return None, "claimed"
-        return None, str(e)
+            supabase.table("users").insert(data).execute()
+            return True, None
+        except Exception as exc:  # noqa: BLE001
+            column = _db_error_column(exc)
+            if column and column in data:
+                data.pop(column, None)
+                continue
+            return False, exc
+    return False, RuntimeError("users: не удалось создать строку игрока")
 
+
+def _award_coins_sync(uid, amount):
+    """Начислить коины. (new_balance, error)."""
     try:
         res = supabase.table("users").select("coins").eq("user_id", uid).execute()
         if not res.data:
-            username = f"id{uid}"
-            supabase.table("users").insert({"user_id": uid, "coins": 0, "username": username}).execute()
+            ok, err = _sub_new_user_sync(uid)
+            if not ok:
+                return None, err
             coins = 0
         else:
             coins = int(res.data[0].get("coins") or 0)
-        new_coins = coins + int(bonus)
+        new_coins = coins + int(amount)
         supabase.table("users").update({"coins": new_coins}).eq("user_id", uid).execute()
-    except Exception as e:  # noqa: BLE001
-        logger.error(f"Не удалось начислить бонус за подписку: {e}")
-        try:
-            supabase.table(SUBSCRIPTIONS_TABLE).delete().eq("user_id", uid).execute()
-        except Exception:
-            pass
-        return None, str(e)
-    return new_coins, ""
+        return new_coins, None
+    except Exception as exc:  # noqa: BLE001
+        return None, exc
+
+
+# Последняя техническая ошибка выдачи бонуса — её видит админ в алерте,
+# чтобы «Не удалось начислить бонус» больше не было загадкой.
+SUB_LAST_ERROR = {"detail": ""}
+
+
+def _sub_claim_and_award_sync(user_id, bonus: int):
+    """Отметка «бонус получен» + начисление.
+
+    Возвращает (new_balance, error): error пустой — всё хорошо; "claimed" —
+    бонус уже был получен; "no_table"/"rls"/"db" — реальная причина сбоя,
+    чтобы игрок увидел не «попробуйте позже», а что именно чинить.
+    """
+    uid = int(user_id)
+    SUB_LAST_ERROR["detail"] = ""
+    claimed = _sub_claimed_sync(uid)
+    if claimed:
+        return None, "claimed"
+
+    marker_key = f"{SUB_FALLBACK_PREFIX}{uid}"
+    ok, error = _insert_tolerant_sync(
+        SUBSCRIPTIONS_TABLE,
+        {"user_id": uid, "bonus_claimed": True, "reward": int(bonus),
+         "created_at": datetime.now(timezone.utc).isoformat()},
+        logger_prefix="ПОДПИСКА: ")
+    used_fallback = False
+    if not ok:
+        kind = _db_error_kind(error)
+        if kind == "duplicate":
+            return None, "claimed"
+        logger.error(f"Подписка: не удалось записать отметку ({kind}): {error}")
+        SUB_LAST_ERROR["detail"] = f"marker/{kind}: {error}"[:300]
+        # Таблицы нет / нет прав — ставим отметку в game_settings, она есть
+        # в базе всегда (там же лежит кулдаун РП).
+        if not _setting_set_sync(marker_key, "1"):
+            return None, kind
+        used_fallback = True
+
+    new_balance, award_error = _award_coins_sync(uid, bonus)
+    if award_error is not None:
+        logger.error(f"Подписка: не удалось начислить коины: {award_error}")
+        SUB_LAST_ERROR["detail"] = f"award: {award_error}"[:300]
+        # Начисление не прошло — снимаем отметку, чтобы бонус не сгорел.
+        if used_fallback:
+            try:
+                supabase.table("game_settings").delete().eq("key", marker_key).execute()
+            except Exception:
+                pass
+        else:
+            try:
+                supabase.table(SUBSCRIPTIONS_TABLE).delete().eq("user_id", uid).execute()
+            except Exception:
+                pass
+        return None, _db_error_kind(award_error)
+    return new_balance, ""
 
 
 def _sub_status_text(user_id) -> str:
@@ -430,8 +574,22 @@ async def cb_sub_check(callback: CallbackQuery):
             pass
         return await callback.answer("Бонус уже получен.", show_alert=True)
     if error:
-        return await callback.answer("Не удалось начислить бонус. Попробуйте ещё раз чуть позже.",
-                                     show_alert=True)
+        reasons = {
+            "no_table": ("База не нашла таблицу subscriptions_history.\n\n"
+                         "Примените в Supabase → SQL Editor миграцию "
+                         "supabase/migrations/20261109000000_economy_social.sql "
+                         "и нажмите кнопку ещё раз."),
+            "rls": ("База отклонила запись (RLS без политики).\n\n"
+                    "Добавьте переменную SUPABASE_SERVICE_KEY сервису dan4Bot "
+                    "(Render → Environment) или примените миграцию с политиками."),
+            "column": ("В базе нет нужной колонки у subscriptions_history — "
+                       "примените миграцию supabase/migrations/20261109000000_economy_social.sql."),
+            "db": "База не ответила. Попробуйте ещё раз чуть позже.",
+        }
+        text = reasons.get(error, "Не удалось начислить бонус. Попробуйте позже.")
+        if is_admin(uid) and SUB_LAST_ERROR.get("detail"):
+            text += f"\n\n🔧 Технически: {SUB_LAST_ERROR['detail']}"
+        return await callback.answer(text[:900], show_alert=True)
 
     text = _sub_status_text(uid)
     if new_balance is not None:

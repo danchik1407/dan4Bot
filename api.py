@@ -85,7 +85,7 @@ async def _http_json(url, method: str = "GET", params=None, payload=None, timeou
 
 # Номер сборки: по нему из /api/health видно, что на сервисе НЕ старый код.
 # Если после деплоя здесь прежнее значение — Render ещё не перезапустился.
-API_BUILD = "2026-11-27-channel-task-23"
+API_BUILD = "2026-11-27-sub-bonus-fix-24"
 
 # Момент старта процесса. По нему видно, что сервис только что «проснулся»:
 # Render на бесплатном тарифе усыпляет Web Service через 15 минут без входящих
@@ -3895,14 +3895,27 @@ async def _send_user_dm(user_id, text: str, reply_markup=None) -> bool:
 
 
 def _subscription_claimed(user_id) -> Optional[bool]:
-    """True/False — было ли начисление. None — таблица недоступна."""
+    """True/False — было ли начисление. None — база не дала прочитать.
+
+    Читаем оба источника: основную таблицу и запасную отметку в game_settings.
+    Запасную ставит бот (bot.py), если миграция со subscriptions_history ещё не
+    применена, — иначе приложение продолжало бы показывать выполненное задание.
+    """
+    uid = int(user_id)
     try:
         res = (supabase.table(SUBSCRIPTIONS_TABLE).select("user_id, bonus_claimed")
-               .eq("user_id", int(user_id)).limit(1).execute())
+               .eq("user_id", uid).limit(1).execute())
+        if res.data:
+            return True
     except Exception as exc:  # noqa: BLE001
         logger.warning("subscriptions_history недоступна: %s", exc)
+    try:
+        res = (supabase.table("game_settings").select("value")
+               .eq("key", f"sub_bonus_{uid}").limit(1).execute())
+        return bool(res.data and str(res.data[0].get("value") or "").strip())
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("game_settings недоступна для отметки бонуса: %s", exc)
         return None
-    return bool(res.data)
 
 
 def _channel_status_payload(uid) -> dict:
