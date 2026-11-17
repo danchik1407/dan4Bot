@@ -13,6 +13,7 @@ from aiogram.enums import ChatMemberStatus
 from aiogram.filters import StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
+from aiogram.exceptions import TelegramUnauthorizedError
 import aiohttp                     # клиент для проверки сервиса aura-api (/api/health)
 from aiohttp import web            # только для start_fake_website (порт Render)
 from supabase import create_client, Client
@@ -2311,11 +2312,41 @@ async def start_fake_website():
     await site.start()
 
 
+async def get_me_with_retry(attempts: int = 8, delay: float = 3.0,
+                            bot_instance=None):
+    """get_me() с повторами: сетевой сбой Telegram не должен убивать процесс.
+
+    Render любой выход процесса на старте показывает как «Application exited
+    early» и перезапускает сервис. Один ConnectionResetError/таймаут при
+    первом запросе к Telegram раньше ронял бота в цикл перезапусков, хотя
+    достаточно было подождать пару секунд. Неверный токен не ретраим — это
+    ошибка настройки, и ждать её исправления бессмысленно.
+    """
+    client = bot_instance or bot
+    attempts = max(1, int(attempts))
+    last_error = None
+    for attempt in range(1, attempts + 1):
+        try:
+            return await client.get_me()
+        except TelegramUnauthorizedError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - сеть, DNS, таймауты, 5xx
+            last_error = exc
+            logger.warning("get_me: попытка %s/%s не удалась (%s: %s)",
+                           attempt, attempts, type(exc).__name__, exc)
+            if attempt < attempts:
+                await asyncio.sleep(min(30.0, max(1.0, delay * attempt)))
+    logger.error("Не удалось связаться с Telegram за %s попыток", attempts)
+    raise last_error
+
+
 async def main():
     global BOT_USERNAME
+    # Порт открываем ПЕРВЫМ: Render убивает Web Service без слушающего порта,
+    # а Telegram может отвечать с задержкой.
     await start_fake_website()
     await resolve_api_url()          # выправляем адрес aura-api до первого запроса
-    me = await bot.get_me()
+    me = await get_me_with_retry()
     if me.username:
         # Настоящее имя бота: из него строится прямая ссылка на Mini App,
         # поэтому ссылка не зависит от устаревшей константы в коде.
