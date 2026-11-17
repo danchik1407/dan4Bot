@@ -84,7 +84,7 @@ async def _http_json(url, method: str = "GET", params=None, payload=None, timeou
 
 # Номер сборки: по нему из /api/health видно, что на сервисе НЕ старый код.
 # Если после деплоя здесь прежнее значение — Render ещё не перезапустился.
-API_BUILD = "2026-11-23-two-arenas-19"
+API_BUILD = "2026-11-24-two-arenas-night-20"
 
 # Момент старта процесса. По нему видно, что сервис только что «проснулся»:
 # Render на бесплатном тарифе усыпляет Web Service через 15 минут без входящих
@@ -316,6 +316,9 @@ async def health():
             "channel": f"@{CHANNEL_USERNAME}",
             "passive_rates": PASSIVE_INCOME_RATES,
             "passive_max_hours": PASSIVE_INCOME_MAX_HOURS,
+            # Пассивка идёт всегда (апка закрыта — копится), ночью по МСК вдвое меньше.
+            "passive_night": {"multiplier": PASSIVE_NIGHT_MULTIPLIER,
+                              "from": PASSIVE_NIGHT_START_HOUR, "to": PASSIVE_NIGHT_END_HOUR},
             "referral_rewards": {
                 "base": REFERRAL_REWARD_BASE,
                 "nft2": REFERRAL_REWARD_NFT2,
@@ -383,6 +386,17 @@ PASSIVE_INCOME_MAX_HOURS = 24.0
 PASSIVE_INCOME_MIN_HOURS = 1.0 / 60.0     # меньше минуты не считаем (шум)
 PASSIVE_INCOME_TABLE = "passive_income"
 
+# Пассивка капает ВСЕГДА, даже когда Mini App закрыт: сервер считает доход по
+# прошедшему времени от отметки last_at, а игрок забирает накопленное при
+# следующем заходе (в том числе за несколько дней — в пределах MAX_HOURS).
+# Ночь (22:00–08:00 по Москве) идёт вдвое дешевле: за эти часы капает 50 %.
+PASSIVE_NIGHT_START_HOUR = 22
+PASSIVE_NIGHT_END_HOUR = 8
+PASSIVE_NIGHT_MULTIPLIER = 0.5
+PASSIVE_DAY_MULTIPLIER = 1.0
+MSK_OFFSET_SECONDS = 3 * 3600            # Москва — UTC+3, круглый год
+DAY_SECONDS = 86400.0
+
 # ==================== РЕФЕРАЛЬНАЯ СИСТЕМА ====================
 REFERRALS_TABLE = "referrals"
 REFERRAL_REWARD_BASE = 500          # обычный реферал
@@ -392,6 +406,16 @@ REFERRAL_REWARD_PREMIUM = 2000      # premium с рейтингом и 1+ NFT
 # а всё, что начинается с nft, тоже считается. Premium — колонка users.premium
 # (если её нет, реферал считается обычным).
 REFERRAL_NFT_ITEMS = {"galactic", "diamond"}
+
+# Имя бота для реферальных ссылок. Раньше Mini App подставлял в ссылку
+# <code>initDataUnsafe.bot_username</code> — то есть имя ТОГО бота, из которого
+# страницу открыли. У проекта есть старый бот, поэтому игроки получали ссылку
+# на чужого бота. Теперь имя берём на сервере и один раз: env BOT_USERNAME →
+# Telegram getMe по токену настоящего бота → константа.
+BOT_USERNAME_OVERRIDE = (os.getenv("BOT_USERNAME")
+                         or os.getenv("AURA_BOT_USERNAME") or "").strip().lstrip("@")
+DEFAULT_BOT_USERNAME = "AuragameBot"
+_BOT_USERNAME_CACHE = {"value": "", "at": 0.0}
 
 # ==================== TELEGRAM STARS (донат) ====================
 # Пакеты коинов за Telegram Stars. Покупка ВКЛЮЧЕНА по умолчанию: кнопка «+»
@@ -948,6 +972,10 @@ def _user_payload(row, is_admin, user_id=None):
         "days_in_game": _days_in_game(created_at),
         # Пассивный доход: клиент считает «в час» по своему инвентарю этими ставками.
         "passive_rates": PASSIVE_INCOME_RATES,
+        "passive_max_hours": PASSIVE_INCOME_MAX_HOURS,
+        # Пассивка идёт всегда (апка закрыта — копится), ночью по МСК вдвое меньше.
+        "passive_night": {"multiplier": PASSIVE_NIGHT_MULTIPLIER,
+                          "from": PASSIVE_NIGHT_START_HOUR, "to": PASSIVE_NIGHT_END_HOUR},
         "channel_url": CHANNEL_URL,
         "subscription_bonus": SUBSCRIPTION_BONUS,
         # Доступ и экономика: клиенту нужны те же числа, что играет сервер
@@ -3959,6 +3987,54 @@ def _iso_from_timestamp(stamp: float) -> str:
     return datetime.datetime.fromtimestamp(float(stamp), datetime.timezone.utc).isoformat()
 
 
+def _passive_multiplier_at(stamp: float) -> float:
+    """Множитель ставки в конкретную секунду: ночью по МСК — 0.5, днём — 1.0."""
+    msk_hour = ((float(stamp) + MSK_OFFSET_SECONDS) % DAY_SECONDS) / 3600.0
+    is_night = (msk_hour >= PASSIVE_NIGHT_START_HOUR) or (msk_hour < PASSIVE_NIGHT_END_HOUR)
+    return PASSIVE_NIGHT_MULTIPLIER if is_night else PASSIVE_DAY_MULTIPLIER
+
+
+def _passive_split_hours(start: float, end: float) -> tuple:
+    """Разбивает интервал на «день/ночь» и считает (реальные, оплачиваемые) часы.
+
+    Возвращает (real_hours, effective_hours), где effective_hours — реальные
+    часы, умноженные на ночную ставку. Так ночь с 22 до 8 даёт ровно вдвое
+    меньше, а интервал, попадающий на границу, считается честно по кускам.
+    """
+    start, end = float(start), float(end)
+    real_hours = max(0.0, (end - start) / 3600.0)
+    if real_hours <= 0:
+        return 0.0, 0.0
+
+    effective = 0.0
+    cursor = start
+    while cursor < end - 1e-6:
+        # Ближайшая граница «ночь → день» или «день → ночь» по МСК.
+        msk_now = (cursor + MSK_OFFSET_SECONDS) % DAY_SECONDS
+        hour = msk_now / 3600.0
+        night = (hour >= PASSIVE_NIGHT_START_HOUR) or (hour < PASSIVE_NIGHT_END_HOUR)
+        if night:
+            # До 08:00, если мы уже после 22:00 — значит до конца суток.
+            next_boundary = (PASSIVE_NIGHT_END_HOUR * 3600.0) if hour < PASSIVE_NIGHT_END_HOUR \
+                else DAY_SECONDS
+        else:
+            next_boundary = PASSIVE_NIGHT_START_HOUR * 3600.0
+        available = DAY_SECONDS - msk_now
+        step = min(end - cursor, max(1e-6, next_boundary - msk_now), available)
+        multiplier = PASSIVE_NIGHT_MULTIPLIER if night else PASSIVE_DAY_MULTIPLIER
+        effective += step / 3600.0 * multiplier
+        cursor += step
+    return real_hours, round(effective, 6)
+
+
+def _passive_preview(start: float, now: float) -> dict:
+    """Сколько уже накапало (для карточки пассивки), без начисления."""
+    window_end = min(float(now), float(start) + PASSIVE_INCOME_MAX_HOURS * 3600.0)
+    real_hours, effective_hours = _passive_split_hours(start, window_end)
+    return {"real_hours": round(real_hours, 3), "hours": round(effective_hours, 3),
+            "capped": (now - start) / 3600.0 >= PASSIVE_INCOME_MAX_HOURS}
+
+
 @app.post("/api/passive_income")
 async def passive_income(data: PassiveIncomeRequest):
     """Пассивный доход с капсул: начисляется сервером по фактическому инвентарю.
@@ -3982,29 +4058,46 @@ async def passive_income(data: PassiveIncomeRequest):
         last = _PASSIVE_MEMORY.get(int(uid))
     if last is None:
         _passive_touch(uid, now)
-        return {"ok": True, "accrued": 0, "rate": rate, "hours": 0.0,
+        return {"ok": True, "accrued": 0, "rate": rate, "hours": 0.0, "real_hours": 0.0,
                 "breakdown": breakdown, "new_balance": _safe_int(row.get("coins"), 0),
                 "degraded": degraded,
-                "detail": "Пассивный доход запущен — заходите позже"}
+                "night": _passive_multiplier_at(now) == PASSIVE_NIGHT_MULTIPLIER,
+                "night_multiplier": PASSIVE_NIGHT_MULTIPLIER,
+                "night_window": f"{PASSIVE_NIGHT_START_HOUR:02d}:00–"
+                                f"{PASSIVE_NIGHT_END_HOUR:02d}:00 МСК",
+                "detail": "Пассивный доход запущен — накопление идёт и при закрытой аппке"}
 
-    hours = max(0.0, min(PASSIVE_INCOME_MAX_HOURS, (now - float(last)) / 3600.0))
+    # За один заход считаем не больше PASSIVE_INCOME_MAX_HOURS, но накопленное
+    # НЕ сгорает: отметка сдвигается только на оплаченные часы, поэтому
+    # следующий заход доберёт остаток. Пока Mini App закрыт — доход копится.
+    window_end = min(now, float(last) + PASSIVE_INCOME_MAX_HOURS * 3600.0)
+    real_hours, hours = _passive_split_hours(float(last), window_end)
+    night_now = _passive_multiplier_at(now) == PASSIVE_NIGHT_MULTIPLIER
     entitled = rate * hours
     accrued = int(entitled)          # дробные коины копим, а не теряем
     coins_now = _safe_int(row.get("coins"), 0)
+    night_info = {"night": night_now, "night_multiplier": PASSIVE_NIGHT_MULTIPLIER,
+                  "night_window": f"{PASSIVE_NIGHT_START_HOUR:02d}:00–"
+                                  f"{PASSIVE_NIGHT_END_HOUR:02d}:00 МСК"}
     if accrued < 1 or rate <= 0:
         return {"ok": True, "accrued": 0, "rate": rate, "hours": round(hours, 3),
+                "real_hours": round(real_hours, 3),
                 "entitled": round(entitled, 3), "breakdown": breakdown,
-                "new_balance": coins_now, "degraded": degraded,
+                "new_balance": coins_now, "degraded": degraded, **night_info,
                 "detail": "Накопление идёт" if rate > 0 else "Нет капсул для пассивного дохода"}
 
     new_coins = award_coins(uid, accrued)
     if new_coins is None:
         raise HTTPException(status_code=503, detail="Не удалось начислить пассивный доход")
-    # Сдвигаем отметку ровно на оплаченные часы: остаток «с копейками» остаётся.
+    # Сдвигаем отметку ровно на оплаченные часы: остаток «с копейками» и ночная
+    # скидка остаются учтёнными, а не теряются и не удваиваются.
     consumed_hours = accrued / rate
-    _passive_touch(uid, min(now, float(last) + consumed_hours * 3600.0))
+    fraction = min(1.0, (consumed_hours / hours) if hours > 0 else 1.0)
+    _passive_touch(uid, min(window_end, float(last) + real_hours * 3600.0 * fraction))
     return {"ok": True, "accrued": accrued, "rate": rate, "hours": round(hours, 3),
+            "real_hours": round(real_hours, 3),
             "breakdown": breakdown, "new_balance": new_coins, "degraded": degraded,
+            **night_info,
             "detail": f"+{accrued} коинов пассивного дохода"}
 
 
@@ -4068,6 +4161,8 @@ def _referral_stats(user_id) -> dict:
         "invited": [{"user_id": row.get("referred_id"),
                      "reward": _safe_int(row.get("reward"), 0),
                      "status": row.get("status") or "pending"} for row in rows[:20]],
+        # Шаблон оставлен для старого клиента: /api/referrals подменяет его
+        # готовой ссылкой на настоящего бота.
         "link": f"https://t.me/{{bot}}?startapp=ref_{int(user_id)}",
     }
 
@@ -4142,11 +4237,45 @@ async def referral_check(data: UserAuth):
             "detail": f"Пригласивший получил {reward} коинов"}
 
 
+async def _resolve_bot_username() -> str:
+    """@username бота, который реально ведёт игру (для ссылок на Mini App).
+
+    Порядок: явный env → Telegram getMe по BOT_TOKEN → константа. Результат
+    кешируем на час: getMe не нужен на каждый запрос, а после переименования
+    бота ссылка сама станет правильной.
+    """
+    if BOT_USERNAME_OVERRIDE:
+        return BOT_USERNAME_OVERRIDE
+    cached = _BOT_USERNAME_CACHE.get("value") or ""
+    if cached and time.time() - float(_BOT_USERNAME_CACHE.get("at") or 0) < 3600:
+        return cached
+    if BOT_TOKEN:
+        try:
+            payload = await _http_json(f"https://api.telegram.org/bot{BOT_TOKEN}/getMe",
+                                       timeout=6)
+            username = str(((payload or {}).get("result") or {}).get("username") or "")
+            if username:
+                _BOT_USERNAME_CACHE.update({"value": username, "at": time.time()})
+                return username
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("getMe недоступен для реферальной ссылки: %s", exc)
+    return cached or DEFAULT_BOT_USERNAME
+
+
+def _referral_link(bot_username: str, user_id) -> str:
+    """Ссылка-приглашение на конкретного бота: t.me/<бот>?startapp=ref_<id>."""
+    username = (bot_username or DEFAULT_BOT_USERNAME).lstrip("@")
+    return f"https://t.me/{username}?startapp=ref_{int(user_id)}"
+
+
 @app.post("/api/referrals")
 async def referrals_info(data: UserAuth):
     uid = _auth_user_id(data.initData)
     stats = _referral_stats(uid)
-    stats.update({"ok": True, "code": f"ref_{uid}"})
+    bot_username = await _resolve_bot_username()
+    stats.update({"ok": True, "code": f"ref_{uid}", "bot_username": bot_username,
+                  # Ссылку отдаём готовой: клиент больше ничего не подставляет.
+                  "link": _referral_link(bot_username, uid)})
     return stats
 
 

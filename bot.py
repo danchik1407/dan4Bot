@@ -1459,7 +1459,7 @@ async def cmd_love_propose(message: Message):
     existing = await get_relationship(proposer_id)
     if existing:
         notice = await _relationship_notice(existing, proposer_id, "Ты", about_self=True)
-        return await message.answer(f"{notice}\nСначала <code>-отн</code>.", parse_mode="HTML")
+        return await message.answer(f"{notice}\nСначала <code>-отны</code>.", parse_mode="HTML")
     target_relationship = await get_relationship(target_id)
     if target_relationship:
         # Работает в ЛЮБОМ чате: отношения общие, и второй пары быть не может.
@@ -1505,7 +1505,7 @@ async def cb_love_answer(callback: CallbackQuery):
         owner = target_id if own else proposer_id
         partner_name = await _player_display(_partner_of(row, owner))
         return await callback.answer(
-            f"💔 Уже есть пара: {partner_name}. Сначала -отн.", show_alert=True)
+            f"💔 Уже есть пара: {partner_name}. Сначала -отны.", show_alert=True)
 
     def _create():
         return supabase.table(RELATIONSHIPS_TABLE).insert({
@@ -1532,11 +1532,14 @@ async def cb_love_answer(callback: CallbackQuery):
     await callback.answer("💗")
 
 
-# Разрыв: `-отн`, `-отношения`, `-пара`, `-любовь` (и старое `разлюбить`).
+# Разрыв: `-отны` (основная команда), плюс `-отн`, `-отношения`, `-пара`,
+# `-любовь` и старое `разлюбить` — все варианты продолжают работать, чтобы
+# игроки, привыкшие к короткой форме, ничего не заметили.
 # Удаляем СТРОКУ пары, а не помечаем её broken: у обоих исчезает статус и весь
 # накопленный Love, а заново начать историю можно с чистого листа. Уже
 # выплаченные награды за этапы не отзываются (деньги не отбираем).
-_BREAK_PREFIXES = ("-отн", "-пара", "-любовь", "разлюбить")
+_BREAK_PREFIXES = ("-отны", "-отн", "-отношения", "-отнош", "-пара", "-любовь",
+                   "разлюбить")
 
 
 @dp.message(F.text.func(lambda t: strip_prefix(t).lower().replace("ё", "е").startswith(
@@ -2236,7 +2239,7 @@ async def cmd_db_schema(message: Message):
     F.text.func(lambda t: strip_prefix(t).lower().startswith("помощь") or strip_prefix(t).lower().startswith("help")))
 async def cmd_help(message: Message):
     text = (
-        "📖 <b>СПИСОК КОМАНД БОТА</b>\n━━━━━━━━━━━━━━━━━━━━\n\n🎟️ <b>Промокоды:</b>\n• <code>промо код</code> — активировать промокод\n\n💰 <b>Экономика:</b>\n• <code>карман</code> — твой баланс\n• <code>карман @user</code> — баланс другого\n• <code>перевод @user сумма</code> — перевести\n• <code>перевод сумма</code> (ответом) — быстрый перевод\n• <code>топ</code> — топ-10 богачей\n• <code>магазин</code> — магазин\n\n🎲 <b>Игры:</b>\n• <code>кубы @user ставка</code> — дуэль в кости\n• <code>кубы ставка</code> (ответом) — быстрый вызов\n\n💗 <b>Отношения:</b>\n• <code>+любовь @user</code> — предложить отношения\n• <code>все рп</code> — список всех РП-команд\n• <code>поцеловать</code>, <code>обнять</code>, <code>погладить</code>… — РП-команды (+10 Love паре)\n• <code>отн инфа</code> — с кем, сколько дней, уровень и Love (только своё)\n• <code>топ отношений</code> — все пары и их Love (одиночки не показываются)\n• <code>-отн</code> — разорвать отношения (у обоих сгорает статус и Love)\n• одному РП-команда даёт +10 Unlove — награды только тебе\n\n• <code>тег</code> — проверка бота\n• <code>помощь</code> — эта справка")
+        "📖 <b>СПИСОК КОМАНД БОТА</b>\n━━━━━━━━━━━━━━━━━━━━\n\n🎟️ <b>Промокоды:</b>\n• <code>промо код</code> — активировать промокод\n\n💰 <b>Экономика:</b>\n• <code>карман</code> — твой баланс\n• <code>карман @user</code> — баланс другого\n• <code>перевод @user сумма</code> — перевести\n• <code>перевод сумма</code> (ответом) — быстрый перевод\n• <code>топ</code> — топ-10 богачей\n• <code>магазин</code> — магазин\n\n🎲 <b>Игры:</b>\n• <code>кубы @user ставка</code> — дуэль в кости\n• <code>кубы ставка</code> (ответом) — быстрый вызов\n\n💗 <b>Отношения:</b>\n• <code>+любовь @user</code> — предложить отношения\n• <code>все рп</code> — список всех РП-команд\n• <code>поцеловать</code>, <code>обнять</code>, <code>погладить</code>… — РП-команды (+10 Love паре)\n• <code>отн инфа</code> — с кем, сколько дней, уровень и Love (только своё)\n• <code>топ отношений</code> — все пары и их Love (одиночки не показываются)\n• <code>-отны</code> — разорвать отношения (у обоих сгорает статус и Love)\n• одному РП-команда даёт +10 Unlove — награды только тебе\n\n• <code>тег</code> — проверка бота\n• <code>помощь</code> — эта справка")
     await message.answer(text, parse_mode="HTML")
 
 
