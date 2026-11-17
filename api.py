@@ -82,7 +82,7 @@ async def _http_json(url, method: str = "GET", params=None, payload=None, timeou
 
 # Номер сборки: по нему из /api/health видно, что на сервисе НЕ старый код.
 # Если после деплоя здесь прежнее значение — Render ещё не перезапустился.
-API_BUILD = "2026-11-09-economy-13"
+API_BUILD = "2026-11-18-arena-love-14"
 
 # Момент старта процесса. По нему видно, что сервис только что «проснулся»:
 # Render на бесплатном тарифе усыпляет Web Service через 15 минут без входящих
@@ -317,12 +317,7 @@ async def health():
                 "premium": REFERRAL_REWARD_PREMIUM,
             },
             "stars_enabled": STARS_ENABLED,
-            "upgrade": {
-                "max_bet": UPGRADE_MAX_BET,
-                "max_capsules": UPGRADE_MAX_CAPSULES,
-                "multipliers": UPGRADE_COIN_MULTIPLIERS,
-                "admin_only": UPGRADE_ADMIN_ONLY,
-            },
+            "upgrade": _upgrade_economy_config(),
             "arena_mode": game_state.get("mode", "normal"),
         },
     }
@@ -587,10 +582,22 @@ UPGRADE_MAX_REWARD = 2_000_000
 # Множители апгрейда (задача 25): x4 и x8 убраны, добавлены «почти монетка»
 # x1.12/x1.35/x1.55/x1.75 и редкие крупные x20/x50.
 UPGRADE_COIN_MULTIPLIERS = [1.12, 1.35, 1.55, 1.75, 20, 50]
+# Шанс на каждый множитель — ФИКСИРОВАННАЯ таблица, а не 1/множитель.
+# Раньше игрок видел «x1.75 → 45.71%» (это 1/1.75, ещё и умноженное на
+# дом-эдж 0.8) — число выглядело случайным. Теперь круглые значения,
+# монотонно убывающие вместе с ростом множителя: x1.12 → 78%, x1.35 → 65%,
+# x1.55 → 55%, x1.75 → 50%. От честного 1/множитель (89.3 / 74.1 / 64.5 / 57.1)
+# они отличаются на ~12–14% в пользу игры — слив «чуть чаще», но предсказуемо
+# и без скрытых множителей. Что нарисовано на круге = по чему считает сервер.
+UPGRADE_MULTIPLIER_CHANCES = {1.12: 78.0, 1.35: 65.0, 1.55: 55.0, 1.75: 50.0, 20: 4.0, 50: 1.5}
 UPGRADE_QUICK_CHANCES = [35, 55, 75]
-UPGRADE_ITEM_PRICES = {"capsule": 100, "uniq_capsule": 500}
-UPGRADE_SOURCES = ("coin", "capsule", "uniq_capsule")
-UPGRADE_TARGETS = ("coin", "capsule", "uniq_capsule")
+# Стоимость капсул для апгрейда. Совпадает с shop_catalog.SHOP_ITEMS
+# (+ LEGACY_ITEMS), поэтому в игру можно ставить ЛЮБУЮ капсулу из инвентаря.
+UPGRADE_ITEM_PRICES = {"capsule": 100, "uniq_capsule": 500, "ruby": 1000,
+                       "diamond": 5000, "galactic": 10000,
+                       "malachite": 3000, "emerald": 5000}
+UPGRADE_SOURCES = ("coin",) + tuple(UPGRADE_ITEM_PRICES)
+UPGRADE_TARGETS = ("coin",) + tuple(UPGRADE_ITEM_PRICES)
 # В апгрейде пока играют только админы — шанс честный. Когда откроем для всех,
 # реальный шанс = визуальный / этот делитель (то есть x2 = 25%).
 UPGRADE_NON_ADMIN_DIVIDER = 2
@@ -604,8 +611,11 @@ UPGRADE_ADMIN_ONLY_MESSAGE = "Апгрейд доступен только ад�
 # в минус — реальный шанс = расчётный * этот множитель (50% → 40%).
 # Клиент считает тот же множитель по своему балансу (UPGRADE_HOUSE_EDGE_* в
 # miniapp/app.js), поэтому зелёная зона круга и вердикт сервера совпадают.
+# Задача 26: дом-эдж больше не зависит от баланса — он «вшит» в таблицу выше
+# (там шанс уже ниже честного 1/множитель). Оставляем 1.0 по умолчанию, чтобы
+# круг не врал; админ может подкрутить значение в /admin (game_settings).
 UPGRADE_HOUSE_EDGE_MIN_BALANCE = 1000
-UPGRADE_HOUSE_EDGE_FACTOR = 0.8
+UPGRADE_HOUSE_EDGE_FACTOR = 1.0
 
 BOT_NAMES = ["Shark_V", "LuckyFox", "NeonWolf", "GhostByte", "PixelKing", "CyberCat", "IronFist", "VoidWalker",
              "ShadowAce", "RogueOne", "Toxic", "Viper", "Sniper", "ProGamer", "NoobMaster", "Killer", "Dragon"]
@@ -753,6 +763,28 @@ def _db_update_user(user_id, **fields):
     return False
 
 
+def _upgrade_economy_config() -> dict:
+    """Настройки апгрейда для клиента: одна правда о шансах.
+
+    Клиент рисует ровно эти числа (таблица «множитель → шанс», дом-эдж и
+    админский множитель), поэтому подпись на круге и вердикт сервера не могут
+    разойтись. Вынесено в отдельную функцию, чтобы /api/health и /api/user
+    отдавали один и тот же объект.
+    """
+    return {
+        "max_bet": UPGRADE_MAX_BET,
+        "max_capsules": UPGRADE_MAX_CAPSULES,
+        "multipliers": UPGRADE_COIN_MULTIPLIERS,
+        "multiplier_chances": {str(key): value for key, value in
+                               UPGRADE_MULTIPLIER_CHANCES.items()},
+        "item_prices": UPGRADE_ITEM_PRICES,
+        "sources": list(UPGRADE_SOURCES),
+        "house_edge": game_setting_float("upgrade_house_edge", UPGRADE_HOUSE_EDGE_FACTOR),
+        "chance_factor": game_setting_float("upgrade_chance_factor", 1.0),
+        "admin_only": UPGRADE_ADMIN_ONLY,
+    }
+
+
 def _user_payload(row, is_admin, user_id=None):
     """Единый ответ профиля: любые NULL/строки из базы приводим к нормальным типам."""
     created_at = row.get("created_at")
@@ -785,6 +817,14 @@ def _user_payload(row, is_admin, user_id=None):
         "passive_rates": PASSIVE_INCOME_RATES,
         "channel_url": CHANNEL_URL,
         "subscription_bonus": SUBSCRIPTION_BONUS,
+        # Доступ и экономика: клиенту нужны те же числа, что играет сервер
+        # (шансы апгрейда, лимиты, режим «только админы»).
+        "access": {
+            "admin_only_app": ADMIN_ONLY_APP,
+            "admins": len(ADMIN_IDS),
+            "message": ADMIN_ONLY_MESSAGE if ADMIN_ONLY_APP else "",
+        },
+        "economy": {"upgrade": _upgrade_economy_config()},
     }
 
 
@@ -2975,11 +3015,13 @@ def _upgrade_target_value(source: str, amount: int, target: str,
     """Возвращает (стоимость цели, визуальный шанс успеха в процентах)."""
     from_value = _upgrade_source_value(source, amount)
 
+    priced_chance = None
     if target == "coin":
         if chance is not None:
             if chance <= 0 or chance > UPGRADE_MAX_CHANCE:
                 raise HTTPException(status_code=400, detail=f"Шанс должен быть от 0 до {int(UPGRADE_MAX_CHANCE)}%")
             to_value = int(round(from_value / (chance / 100.0)))
+            priced_chance = float(chance)
         else:
             try:
                 multiplier = float(multiplier or 0)
@@ -2996,8 +3038,12 @@ def _upgrade_target_value(source: str, amount: int, target: str,
                 raise HTTPException(status_code=400,
                                     detail="Такой множитель больше не доступен")
             to_value = int(round(from_value * multiplier))
+            # Фиксированный шанс из таблицы: x1.75 → ровно 50%, а не 45.71%.
+            priced_chance = UPGRADE_MULTIPLIER_CHANCES.get(
+                next((key for key in UPGRADE_COIN_MULTIPLIERS
+                      if abs(float(key) - multiplier) < 1e-9), None))
         win_amount = to_value
-    else:
+    elif target in UPGRADE_ITEM_PRICES:
         # Цель — капсула: за успех выдаём ровно одну штуку.
         to_value = UPGRADE_ITEM_PRICES[target]
         win_amount = 1
@@ -3009,7 +3055,8 @@ def _upgrade_target_value(source: str, amount: int, target: str,
         # комбинации (до 10 000 коинов × x50) проходят с запасом.
         raise HTTPException(status_code=400, detail="Слишком крупная цель — выбери что-то поменьше")
 
-    visual_chance = from_value / to_value * 100.0
+    visual_chance = (priced_chance if priced_chance is not None
+                     else from_value / to_value * 100.0)
     if visual_chance > UPGRADE_MAX_CHANCE:
         raise HTTPException(status_code=400,
                             detail=f"Шанс {visual_chance:.2f}% слишком высокий — выбери цель подороже")
@@ -3215,11 +3262,10 @@ async def upgrade_action(data: UpgradeAction):
                 inventory.remove(source)
             new_coins = raw_coins
 
-        # ДОМ-ЭДЖ: на балансе от 1000 коинов шанс ниже расчётного. Считаем здесь,
-        # а не до цикла, потому что баланс мог измениться между попытками.
-        edge = 1.0
-        if raw_coins >= UPGRADE_HOUSE_EDGE_MIN_BALANCE:
-            edge = game_setting_float("upgrade_house_edge", UPGRADE_HOUSE_EDGE_FACTOR)
+        # ДОМ-ЭДЖ больше не зависит от баланса (он уже в таблице множителей).
+        # Значение из game_settings применяется ко ВСЕМ и уходит клиенту в
+        # /api/user, поэтому круг рисует ровно тот шанс, по которому играем.
+        edge = game_setting_float("upgrade_house_edge", UPGRADE_HOUSE_EDGE_FACTOR)
         real_chance = visual_chance * edge
         # Админ может подкрутить шансы без деплоя (таблица game_settings).
         real_chance *= game_setting_float("upgrade_chance_factor", 1.0)
@@ -3472,6 +3518,33 @@ def award_coins(user_id, amount) -> Optional[int]:
     return coins if _db_update_user(uid, coins=coins) else None
 
 
+def friendly_telegram_error(description: str) -> str:
+    """Сырой ответ Telegram → текст, который не стыдно показать игроку.
+
+    Самый частый случай — «Bad Request: member list is inaccessible»: бот не
+    администратор канала, и Telegram отказывает в getChatMember. Раньше это
+    улетало в Mini App как есть (страшный алерт после перехода в канал).
+    """
+    text = str(description or "").strip()
+    low = text.lower()
+    if not text:
+        return "Не удалось проверить подписку. Попробуйте позже."
+    if "member list is inaccessible" in low or "not enough rights" in low:
+        return (f"Не удалось проверить подписку: бот должен быть администратором "
+                f"канала @{CHANNEL_USERNAME}.")
+    if "chat not found" in low or "chat_id is empty" in low:
+        return f"Канал @{CHANNEL_USERNAME} не найден. Проверьте CHANNEL_USERNAME на сервере."
+    if "user not found" in low or "participant_id_invalid" in low or "user_id_invalid" in low:
+        return "Тебя нет в канале — подпишись и нажми «Проверить» ещё раз."
+    if "bot was blocked by the user" in low or "bot is not a member" in low:
+        return f"Бот не может проверить канал @{CHANNEL_USERNAME}: добавьте его администратором."
+    if "too many requests" in low or "retry after" in low:
+        return "Слишком много проверок подряд. Подождите минуту и попробуйте снова."
+    # Всё остальное — без «Bad Request:» и кода ошибки.
+    cleaned = text.split(":", 1)[1].strip() if low.startswith("bad request") else text
+    return f"Не удалось проверить подписку: {cleaned[:160]}"
+
+
 async def telegram_chat_member_status(user_id) -> dict:
     """Статус подписки на канал через getChatMember.
 
@@ -3492,8 +3565,9 @@ async def telegram_chat_member_status(user_id) -> dict:
                 "detail": "Не удалось проверить подписку, попробуйте позже"}
     if not isinstance(payload, dict) or not payload.get("ok"):
         description = (payload or {}).get("description") if isinstance(payload, dict) else ""
+        logger.warning("getChatMember отказ: %s", description)
         return {"ok": False, "status": "", "subscribed": False,
-                "detail": description or "Telegram не подтвердил проверку подписки"}
+                "detail": friendly_telegram_error(description)}
     status = str((payload.get("result") or {}).get("status") or "")
     subscribed = status in ("creator", "administrator", "member")
     return {"ok": True, "status": status, "subscribed": subscribed,
@@ -3521,17 +3595,10 @@ async def channel_check(data: ChannelCheckRequest):
     отписался и подписался снова.
     """
     uid = _auth_user_id(data.initData)
-    member = await telegram_chat_member_status(uid)
-    if not member["subscribed"]:
-        return {
-            "ok": bool(member["ok"]),
-            "subscribed": False,
-            "bonus": SUBSCRIPTION_BONUS,
-            "bonus_claimed": _subscription_claimed(uid) is True,
-            "channel_url": CHANNEL_URL,
-            "detail": member["detail"],
-        }
 
+    # Сначала смотрим, забирал ли игрок бонус. Если да — Telegram вообще не
+    # дёргаем: иначе у всех, кто уже получил 200 коинов, вылезал сырой
+    # «Bad Request: member list is inaccessible» вместо человеческого ответа.
     claimed = _subscription_claimed(uid)
     if claimed is None:
         raise HTTPException(status_code=503, detail=(
@@ -3540,7 +3607,18 @@ async def channel_check(data: ChannelCheckRequest):
     if claimed:
         return {"ok": True, "subscribed": True, "bonus": SUBSCRIPTION_BONUS,
                 "bonus_claimed": True, "granted": 0, "channel_url": CHANNEL_URL,
-                "detail": "Бонус за подписку уже получен"}
+                "detail": "Бонус за подписку уже получен — повторно он не начисляется."}
+
+    member = await telegram_chat_member_status(uid)
+    if not member["subscribed"]:
+        return {
+            "ok": bool(member["ok"]),
+            "subscribed": False,
+            "bonus": SUBSCRIPTION_BONUS,
+            "bonus_claimed": False,
+            "channel_url": CHANNEL_URL,
+            "detail": member["detail"],
+        }
 
     # Ставим отметку ДО начисления: user_id — первичный ключ, поэтому две
     # параллельные проверки не смогут выдать бонус дважды.

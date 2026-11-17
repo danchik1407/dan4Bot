@@ -288,7 +288,21 @@ const UPGRADE_MULTS = [1.12, 1.35, 1.55, 1.75, 20, 50];
 // Куда именно крутится стрелка: одна CSS-кривая на весь финиш, без рывков.
 const UPGRADE_LAND_MS = 5000;
 const UPGRADE_LAND_EASING = 'cubic-bezier(0.1, 0.7, 0.1, 1)';
-const UPGRADE_FALLBACK_PRICES = { capsule: 100, uniq_capsule: 500 };
+const UPGRADE_FALLBACK_PRICES = {
+    capsule: 100, uniq_capsule: 500, ruby: 1000, diamond: 5000,
+    galactic: 10000, malachite: 3000, emerald: 5000,
+};
+// Полный каталог капсул: в апгрейд можно ставить ЛЮБУЮ капсулу из инвентаря,
+// а не только обычную и уникальную. Порядок = порядок вкладок «Инвентарь».
+const UPGRADE_ITEM_CATALOG = [
+    { id: 'capsule', short: 'Обычная', emoji: '💊' },
+    { id: 'uniq_capsule', short: 'Уник.', emoji: '⚱️' },
+    { id: 'ruby', short: 'Рубиновая', emoji: '♦️' },
+    { id: 'diamond', short: 'Алмазная', emoji: '💎' },
+    { id: 'galactic', short: 'Галактич.', emoji: '🌌' },
+    { id: 'malachite', short: 'Малахит', emoji: '🟢' },
+    { id: 'emerald', short: 'Изумруд', emoji: '💚' },
+];
 const upgradeStats = { total: 0, wins: 0, best: 0 };
 // Шанс, с которым реально играет текущий раунд. Пока он зафиксирован, круг и
 // подпись рисуют ИМЕННО его: раньше любой updateUI() пересчитывал дугу под текущую
@@ -464,6 +478,23 @@ function applyProfile(data) {
     if (data.passive_rates && typeof data.passive_rates === 'object') {
         passiveRates = Object.assign({}, passiveRates, data.passive_rates);
     }
+    // Шансы апгрейда: дом-эдж и админский множитель — с сервера, чтобы круг
+    // не расходился с вердиктом.
+    const upgradeConfig = data.economy && data.economy.upgrade;
+    if (upgradeConfig) {
+        if (Number.isFinite(Number(upgradeConfig.house_edge))) {
+            upgradeEconomy.house_edge = Number(upgradeConfig.house_edge);
+        }
+        if (Number.isFinite(Number(upgradeConfig.chance_factor))) {
+            upgradeEconomy.chance_factor = Number(upgradeConfig.chance_factor);
+        }
+        if (upgradeConfig.multiplier_chances && typeof upgradeConfig.multiplier_chances === 'object') {
+            Object.keys(upgradeConfig.multiplier_chances).forEach(key => {
+                const value = Number(upgradeConfig.multiplier_chances[key]);
+                if (Number.isFinite(value) && value > 0) UPGRADE_MULT_CHANCES[Number(key)] = value;
+            });
+        }
+    }
     // Список ADMIN_IDS — главный источник; флаг сервера его подтверждает.
     isAdmin = isAdminId(user && user.id) || Boolean(data.is_admin);
     userDataLoaded = true;
@@ -627,7 +658,12 @@ function openGame(game) {
     const screen = document.getElementById('screen-' + game);
     if (!screen) { console.warn('Нет экрана для игры:', game); return; }
     screen.classList.add('active');
-    if (game === 'hockey') { startHockeyPolling(); }
+    if (game === 'hockey') {
+        // Сразу показываем нужное поле: до первого ответа сервера режим берём
+        // из последнего известного состояния, а не мигаем кругом.
+        updateArenaView(arenaState.mode);
+        startHockeyPolling();
+    }
     if (game === 'crash') { lastCrashStatus = null; startCrashPolling(); }
 }
 
@@ -675,8 +711,10 @@ async function checkSubscription(options) {
         const data = await apiPost('/api/channel_check', {}, { fallback: 'Не удалось проверить подписку' });
         subscriptionChecked = true;
         const reward = document.getElementById('sub-banner-reward');
+        // Уже забирал — Telegram больше не дёргаем (сервер тоже не дёргает),
+        // поэтому никаких «Bad Request: member list is inaccessible».
         if (data.bonus_claimed) {
-            if (reward) reward.textContent = '✅ Подписка получена, бонус начислен';
+            if (reward) reward.textContent = '✅ Бонус за подписку уже получен';
         } else if (reward) {
             reward.textContent = `🎁 Награда за подписку: ${data.bonus || 200} коинов`;
         }
@@ -685,7 +723,15 @@ async function checkSubscription(options) {
             tg.showAlert(`🎉 Спасибо за подписку! Начислено ${data.granted} коинов.`);
             await loadUserData().catch(() => {});
         } else if (alert) {
-            tg.showAlert(data.detail || 'Подпишитесь на канал, чтобы получить бонус.');
+            if (data.bonus_claimed) {
+                tg.showAlert('Бонус за подписку уже получен — второй раз он не начисляется.');
+            } else {
+                tg.showAlert(data.detail || 'Подпишитесь на канал, чтобы получить бонус.');
+            }
+        } else if (data.detail && data.ok === false) {
+            // Проверка не удалась (бот не админ канала и т.п.) — пишем причину
+            // в плашку, а не вываливаем сырой ответ Telegram в алерт.
+            if (reward) reward.textContent = `⚠️ ${data.detail}`;
         }
     } catch (e) {
         if (alert) tg.showAlert(e.message || 'Не удалось проверить подписку');
@@ -869,15 +915,34 @@ function todayStageRewards(state) {
     return true;
 }
 
+// «Свободен» / «Свободна»: Telegram не отдаёт пол, поэтому смотрим на имя.
+// Не угадали — показываем нейтральное «Свободен(на)», это лучше пустого места.
+function freeLoveLabel() {
+    const name = String((user && (user.first_name || user.username)) || '').trim();
+    if (!name) return 'Свободен(на)';
+    return /[ая]$/i.test(name) ? 'Свободна' : 'Свободен';
+}
+
 function renderLoveBadge() {
     const badge = document.getElementById('profile-love-badge');
+    const freeBadge = document.getElementById('profile-love-free');
     const partner = document.getElementById('profile-love-partner');
     const stage = document.getElementById('profile-love-stage');
-    if (!badge) return;
-    if (!loveState || !loveState.in_relationship) { badge.hidden = true; return; }
-    badge.hidden = false;
+    const freeText = document.getElementById('profile-love-free-text');
+    if (!badge && !freeBadge) return;
+    const inRelationship = Boolean(loveState && loveState.in_relationship);
+    if (badge) badge.hidden = !inRelationship;
+    if (freeBadge) freeBadge.hidden = inRelationship;
+    if (!inRelationship) {
+        if (freeText) freeText.textContent = freeLoveLabel();
+        return;
+    }
     if (partner) partner.textContent = loveState.partner_name || 'партнёр';
-    if (stage) stage.textContent = loveState.stage ? ` · ${loveState.stage.title}` : '';
+    if (stage) {
+        const score = Number(loveState.love) || 0;
+        const title = loveState.stage ? ` · ${loveState.stage.title}` : '';
+        stage.textContent = `${title} · ${score} Love`;
+    }
 }
 
 // ================= TELEGRAM STARS =================
@@ -1370,20 +1435,25 @@ function upgradePrice(itemId) {
     return Number.isFinite(price) && price > 0 ? price : (UPGRADE_FALLBACK_PRICES[itemId] || 500);
 }
 
+const UPGRADE_ITEM_NAMES = {
+    capsule: 'Обычная капсула', uniq_capsule: 'Уникальная капсула', ruby: 'Рубиновая капсула',
+    diamond: 'Алмазная капсула', galactic: 'Галактическая капсула',
+    malachite: 'Малахитовая капсула', emerald: 'Изумрудная капсула',
+};
+
 function upgradeItemName(itemId) {
     const item = SHOP_ITEMS[itemId];
     if (item && item.name) return item.name;
-    if (itemId === 'uniq_capsule') return 'Уникальная капсула';
-    if (itemId === 'capsule') return 'Обычная капсула';
+    if (UPGRADE_ITEM_NAMES[itemId]) return UPGRADE_ITEM_NAMES[itemId];
     return 'Коины';
 }
 
 function upgradeItemEmoji(itemId) {
     const item = SHOP_ITEMS[itemId];
     if (item && item.emoji) return item.emoji;
-    if (itemId === 'uniq_capsule') return '⚱️';
-    if (itemId === 'capsule') return '💊';
-    return '💰';
+    const found = UPGRADE_ITEM_CATALOG.find(entry => entry.id === itemId);
+    if (found) return found.emoji;
+    return itemId === 'coin' ? '💰' : '💊';
 }
 
 function formatCoins(value) {
@@ -1408,9 +1478,32 @@ function upgradeTargetValue(fromValue) {
     return base * Number(upgradeTarget.value);
 }
 
-// Сырой шанс = стоимость слева / стоимость цели. Не обрезаем: если он больше 95%,
-// цель недостижима, и это должно быть видно и в круге, и в плитке.
+// ================= ШАНС: ФИКСИРОВАННАЯ ТАБЛИЦА =================
+// Задача 26: шанс на множитель больше не считается как 1/множитель (из-за
+// этого x1.75 давал «страшные» 45.71% = 1/1.75 × дом-эдж 0.8). Теперь шанс
+// монотонно убывает вместе с множителем (78 / 65 / 55 / 50), чуть строже
+// честного 1/x — «сливает чуть чаще», но предсказуемо. Таблица обязана
+// совпадать с UPGRADE_MULTIPLIER_CHANCES в api.py; её подтверждает /api/user.
+const UPGRADE_MULT_CHANCES = { 1.12: 78, 1.35: 65, 1.55: 55, 1.75: 50, 20: 4, 50: 1.5 };
+// Дом-эдж и админский множитель приходят с сервера (/api/user → economy.upgrade).
+// Пусто — значит приложение открыли без профиля: считаем по таблице как есть.
+let upgradeEconomy = { house_edge: 1, chance_factor: 1 };
+
+function upgradeMultChance(mult) {
+    const key = Number(mult);
+    if (Number.isFinite(key) && Object.prototype.hasOwnProperty.call(UPGRADE_MULT_CHANCES, key)) {
+        return UPGRADE_MULT_CHANCES[key];
+    }
+    return 0;
+}
+
+// Сырой шанс: для множителя — таблица, для «цели по проценту» и капсул —
+// отношение стоимостей (там нет фиксированной сетки).
 function upgradeRawChance(fromValue, toValue) {
+    if (upgradeTarget.kind === 'mult' && upgradeTarget.value !== undefined) {
+        const fixed = upgradeMultChance(upgradeTarget.value);
+        if (fixed > 0) return fixed;
+    }
     if (!(fromValue > 0) || !(toValue > 0)) return 0;
     return (fromValue / toValue) * 100;
 }
@@ -1421,24 +1514,26 @@ function upgradeChanceFor(fromValue, toValue) {
 
 function upgradeChance() { return upgradeRawChance(upgradeSourceValue(), upgradeTargetValue()); }
 
-// ================= ДОМ-ЭДЖ ПО БАЛАНСУ =================
-// Ровно те же числа, что в api.py: с баланса 1000 коинов реальный шанс ниже
-// расчётного. Клиент обязан рисовать ИМЕННО боевой шанс — иначе зелёная зона
-// обещала бы одно, а сервер решал по другому (это и был баг «на красном зашло»).
-const UPGRADE_HOUSE_EDGE_MIN_BALANCE = 1000;
-const UPGRADE_HOUSE_EDGE_FACTOR = 0.8;
+// ================= ДОМ-ЭДЖ =================
+// Числа приходят с сервера и применяются ко ВСЕМ (больше нет «с баланса 1000
+// играем хуже»): круг обязан показывать ровно тот шанс, по которому решает
+// сервер, иначе игрок видит не то, что произошло.
+function upgradeHouseEdgeFactor() {
+    const edge = Number(upgradeEconomy.house_edge);
+    return Number.isFinite(edge) && edge > 0 ? edge : 1;
+}
 
-function upgradeHouseEdgeFactor(balanceValue) {
-    const value = Number(balanceValue === undefined ? balance : balanceValue);
-    if (!Number.isFinite(value)) return 1;
-    return value >= UPGRADE_HOUSE_EDGE_MIN_BALANCE ? UPGRADE_HOUSE_EDGE_FACTOR : 1;
+function upgradeChanceFactor() {
+    const factor = Number(upgradeEconomy.chance_factor);
+    return Number.isFinite(factor) && factor > 0 ? factor : 1;
 }
 
 // Шанс, по которому реально играем (и который рисуем на круге).
 function upgradeDisplayChance(raw) {
     const base = raw === undefined ? upgradeChance() : Number(raw);
     if (!Number.isFinite(base)) return 0;
-    return Math.max(0, Math.min(100, base * upgradeHouseEdgeFactor()));
+    const value = base * upgradeHouseEdgeFactor() * upgradeChanceFactor();
+    return Math.max(0, Math.min(100, Math.round(value * 100) / 100));
 }
 
 function upgradeChanceIsValid(chance) {
@@ -1712,6 +1807,36 @@ function clearUpgradeResult() {
     clearUpgradeNet();
 }
 
+// Вкладки «Инвентарь»: коины + каждая капсула, которая вообще бывает в игре.
+// Показываем счётчик, пустые капсулы приглушаем, но не прячем — так игрок
+// видит, что рубиновую/алмазную тоже можно поставить.
+function renderUpgradeFromTabs() {
+    const box = document.getElementById('up-from-tabs');
+    if (!box) return;
+    const tabs = [{
+        id: 'coin',
+        label: 'Коины',
+        emoji: `<img class="coin-img" src="coin.png" alt="монета">`,
+        count: null,
+    }].concat(UPGRADE_ITEM_CATALOG.map(item => ({
+        id: item.id,
+        label: item.short,
+        emoji: item.emoji,
+        count: countItem(item.id),
+    })));
+
+    box.innerHTML = tabs.map(tab => {
+        const active = upgradeFrom === tab.id ? ' active' : '';
+        const empty = tab.count === 0 ? ' empty' : '';
+        const count = tab.count === null ? '' : ` <b>${tab.count}</b>`;
+        return `<button type="button" class="up-from-tab${active}${empty}" data-from="${tab.id}"
+                        onclick="selectUpgradeFrom('${tab.id}', this)">
+                    <span class="up-from-emoji">${tab.emoji}</span>
+                    <span class="up-from-label">${tab.label}${count}</span>
+                </button>`;
+    }).join('');
+}
+
 function renderUpgrade() {
     // innerHTML: в текстах встречается картинка монеты.
     const setText = (id, value) => { const el = document.getElementById(id); if (el) el.innerHTML = value; };
@@ -1729,12 +1854,7 @@ function renderUpgrade() {
         ? coinAmount(upgradeFromAmount)
         : `${upgradeFromAmount} шт. · ${coinAmount(fromValue)}`);
 
-    setText('up-owned-capsule', countItem('capsule'));
-    setText('up-owned-uniq', countItem('uniq_capsule'));
-    const capsuleTab = document.querySelector('.up-from-tab[data-from="capsule"]');
-    const uniqTab = document.querySelector('.up-from-tab[data-from="uniq_capsule"]');
-    if (capsuleTab) capsuleTab.classList.toggle('empty', countItem('capsule') === 0);
-    if (uniqTab) uniqTab.classList.toggle('empty', countItem('uniq_capsule') === 0);
+    renderUpgradeFromTabs();
 
     // --- поле ввода и ползунок ---
     const limits = upgradeAmountLimits();
@@ -1769,6 +1889,18 @@ function renderUpgrade() {
     }
 
     // --- правая панель ---
+    const hint = document.getElementById('up-to-hint');
+    if (hint) {
+        if (upgradeToTab === 'coin') {
+            hint.textContent = 'Шанс фиксированный: ' + UPGRADE_MULTS.map(mult => {
+                const value = upgradeDisplayChance(upgradeMultChance(mult));
+                const shown = Number.isInteger(value) ? value.toFixed(0) : value.toFixed(2);
+                return `x${mult} → ${shown}%`;
+            }).join(' · ');
+        } else {
+            hint.textContent = 'Шанс = стоимость вашего предмета / стоимость цели';
+        }
+    }
     renderUpgradeTargets();
 
     // --- быстрые кнопки ---
@@ -1812,8 +1944,10 @@ function renderUpgradeTargets() {
     if (upgradeToTab === 'coin') {
         UPGRADE_MULTS.forEach(mult => {
             const toValue = fromValue * mult;
-            const chance = upgradeRawChance(fromValue, toValue);
-            const shownChance = upgradeDisplayChance(chance);
+            // Шанс берём из таблицы «множитель → шанс», а не 1/множитель:
+            // x1.75 теперь ровно 50%, а не 45.71%.
+            const shownChance = upgradeDisplayChance(upgradeMultChance(mult));
+            const chance = shownChance;
             const active = upgradeTarget.kind === 'mult' && Number(upgradeTarget.value) === mult;
             tiles.push({
                 key: `mult:${mult}`,
@@ -1827,8 +1961,9 @@ function renderUpgradeTargets() {
         });
         if (upgradeTarget.kind === 'chance') {
             const toValue = upgradeTargetValue(fromValue);
-            const chance = upgradeRawChance(fromValue, toValue);
-            const shownChance = upgradeDisplayChance(chance);
+            const ratio = fromValue > 0 && toValue > 0 ? (fromValue / toValue) * 100 : 0;
+            const shownChance = upgradeDisplayChance(ratio);
+            const chance = shownChance;
             tiles.push({
                 key: `chance:${upgradeTarget.value}`,
                 active: true,
@@ -1839,10 +1974,12 @@ function renderUpgradeTargets() {
             });
         }
     } else {
-        ['capsule', 'uniq_capsule'].forEach(itemId => {
+        UPGRADE_ITEM_CATALOG.forEach(item => {
+            const itemId = item.id;
             const toValue = upgradePrice(itemId);
-            const chance = upgradeRawChance(fromValue, toValue);
-            const shownChance = upgradeDisplayChance(chance);
+            const shownChance = upgradeDisplayChance(fromValue > 0 && toValue > 0
+                ? (fromValue / toValue) * 100 : 0);
+            const chance = shownChance;
             const active = upgradeTarget.kind === 'item' && upgradeTarget.value === itemId;
             const disabled = !upgradeChanceIsValid(chance);
             tiles.push({
@@ -1850,7 +1987,7 @@ function renderUpgradeTargets() {
                 active,
                 disabled,
                 html: `<div class="up-to-tile-icon">${upgradeItemEmoji(itemId)}</div>
-                       <div class="up-to-tile-name">${itemId === 'uniq_capsule' ? 'Уник.' : 'Обычная'}</div>
+                       <div class="up-to-tile-name">${item.short}</div>
                        <div class="up-to-tile-value">${coinAmount(toValue)}</div>
                        <div class="up-to-tile-chance">${disabled ? '—' : shownChance.toFixed(2) + '%'}</div>`
             });
@@ -1875,9 +2012,10 @@ function renderUpgradeTargets() {
 
 function selectUpgradeFrom(type, element) {
     if (upgradeBusy) return;
-    if (!['coin', 'capsule', 'uniq_capsule'].includes(type)) return;
+    const known = type === 'coin' || UPGRADE_ITEM_CATALOG.some(item => item.id === type);
+    if (!known) return;
     if (type !== 'coin' && countItem(type) === 0) {
-        tg.showAlert(type === 'uniq_capsule' ? 'У тебя нет уникальных капсул' : 'У тебя нет обычных капсул');
+        tg.showAlert(`У тебя нет капсул «${upgradeItemName(type)}»`);
         return;
     }
     upgradeFrom = type;
@@ -2851,10 +2989,146 @@ async function setArenaMode(mode) {
         const data = await apiPost('/api/arena_mode', { mode }, { fallback: 'Не удалось переключить арену' });
         arenaState.mode = data.mode || mode;
         updateArenaModeUI(arenaState.mode, null);
+        // Поле с мячиком / круг переключаем сразу, не дожидаясь опроса.
+        updateArenaView(arenaState.mode);
         pollHockeyState();
     } catch (e) {
         tg.showAlert(e.message || 'Не удалось переключить арену');
     }
+}
+
+// ================= ОБЫЧНАЯ АРЕНА: ПОЛЕ С МЯЧИКОМ =================
+// Сектора — вертикальные полосы по доле ставки (как было до круглого поля),
+// мяч летит по траектории, которую посчитал СЕРВЕР (/api/hockey_roll/{id}).
+// Клиент только рисует точки: результат не зависит от телефона игрока.
+const arenaBall = { roundId: null, path: null, loading: false, rafId: null, startedAt: 0 };
+
+function normalArenaPlayers(state) {
+    const players = Array.isArray(state && state.players) ? state.players : [];
+    return players.filter(player => Number(player.bet) > 0);
+}
+
+function updateArenaView(mode) {
+    const isTeam = mode === 'team';
+    const field = document.getElementById('hockey-field');
+    const circle = document.getElementById('hockey-arena');
+    if (field) field.hidden = isTeam;
+    if (circle) circle.hidden = !isTeam;
+    if (isTeam) stopArenaBall();
+}
+
+function renderNormalArena(state) {
+    const box = document.getElementById('hockey-sectors');
+    if (!box) return;
+    const players = normalArenaPlayers(state);
+    if (!players.length) {
+        box.innerHTML = '<div class="arena-empty">Ждём ставок…</div>';
+        return;
+    }
+    const total = players.reduce((sum, player) => sum + Math.max(0, Number(player.bet) || 0), 0) || 1;
+    const finished = state && state.status === 'finished';
+    const winnerId = state && state.winner ? String(state.winner.id) : null;
+    box.innerHTML = players.map(player => {
+        const share = Math.max(0, Number(player.bet) || 0) / total * 100;
+        const color = player.color || '#5856d6';
+        const isWinner = finished && winnerId && String(player.id) === winnerId;
+        const name = String(player.name || '?');
+        const avatar = player.avatar && String(player.avatar).startsWith('http')
+            ? `<img src="${escapeHtml(player.avatar)}" alt="">`
+            : `<span class="arena-chip-letter">${escapeHtml(name.slice(0, 1).toUpperCase())}</span>`;
+        // Чем больше ставка — тем крупнее аватарка в полосе.
+        const size = Math.max(20, Math.min(40, 14 + share * 0.6));
+        return `<div class="hockey-sector${isWinner ? ' win' : ''}"
+                     style="width:${share.toFixed(3)}%; background:${escapeHtml(color)}26;">
+                    <div class="sector-label">
+                        <span class="sector-avatar" style="--sector-avatar:${size.toFixed(0)}px">${avatar}</span>
+                        <span class="sector-name">${escapeHtml(shortName(name, 10))}</span>
+                        <span class="sector-bet">${share.toFixed(0)}%</span>
+                    </div>
+                </div>`;
+    }).join('');
+}
+
+function stopArenaBall() {
+    if (arenaBall.rafId) cancelAnimationFrame(arenaBall.rafId);
+    arenaBall.rafId = null;
+}
+
+function hideArenaBall() {
+    stopArenaBall();
+    const ball = document.getElementById('hockey-ball');
+    if (ball) ball.hidden = true;
+    arenaBall.roundId = null;
+    arenaBall.path = null;
+}
+
+function placeArenaBall(x, y) {
+    const ball = document.getElementById('hockey-ball');
+    if (!ball) return;
+    ball.hidden = false;
+    ball.style.left = `${Math.max(0, Math.min(100, Number(x) || 0)).toFixed(2)}%`;
+    ball.style.top = `${Math.max(0, Math.min(100, Number(y) || 0)).toFixed(2)}%`;
+}
+
+async function loadArenaRollPath(roundId) {
+    try {
+        const res = await fetch(`${API_URL}/api/hockey_roll/${encodeURIComponent(roundId)}`);
+        const data = await res.json().catch(() => null);
+        if (res.ok && data && Array.isArray(data.path) && data.path.length > 1) {
+            return data.path;
+        }
+    } catch (e) {
+        // Траектория не критична: без неё мяч просто покажет финальную точку.
+    }
+    return null;
+}
+
+function startArenaBall(state) {
+    stopArenaBall();
+    const roundId = state && state.round_id ? String(state.round_id) : null;
+    arenaBall.roundId = roundId;
+    arenaBall.path = null;
+    // Время старта серверное: если игрок открыл экран на середине раунда,
+    // мяч окажется ровно там, где он сейчас, а не начнёт путь заново.
+    arenaBall.startedAt = Number(state && state.rolling_started_at) || (Date.now() / 1000);
+    placeArenaBall(50, 50);
+    if (!roundId) return;
+    loadArenaRollPath(roundId).then(path => {
+        if (arenaBall.roundId !== roundId) return;   // раунд уже сменился
+        arenaBall.path = path;
+        animateArenaBall();
+    });
+}
+
+function animateArenaBall() {
+    stopArenaBall();
+    const roundId = arenaBall.roundId;
+    const step = () => {
+        if (arenaBall.roundId !== roundId) return;
+        const elapsed = Math.max(0, (Date.now() / 1000) - arenaBall.startedAt);
+        const progress = Math.min(1, elapsed / HOCKEY_ROLL_DURATION);
+        const path = arenaBall.path;
+        if (path && path.length > 1) {
+            const raw = progress * (path.length - 1);
+            const index = Math.min(path.length - 2, Math.floor(raw));
+            const t = raw - index;
+            const a = path[index] || path[0];
+            const b = path[index + 1] || a;
+            placeArenaBall(a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t);
+        }
+        if (progress < 1) arenaBall.rafId = requestAnimationFrame(step);
+    };
+    arenaBall.rafId = requestAnimationFrame(step);
+}
+
+// Финальная точка мяча (по серверу): после раунда он замирает на выигрышном секторе.
+function freezeArenaBall(state) {
+    const roll = state && state.roll_data;
+    if (!roll) return;
+    const x = Number(roll.final_x);
+    const y = Number(roll.final_y);
+    stopArenaBall();
+    if (Number.isFinite(x)) placeArenaBall(x, Number.isFinite(y) ? y : 50);
 }
 
 async function pollHockeyState() {
@@ -2885,11 +3159,14 @@ async function pollHockeyState() {
         const mine = arenaState.players.find(p => String(p.id) === String(user && user.id));
         arenaState.myTeam = mine ? (mine.team || null) : null;
         updateArenaModeUI(arenaState.mode, arenaState.myTeam);
+        updateArenaView(arenaState.mode);
+        const isTeamMode = arenaState.mode === 'team';
 
         if (state.status === 'waiting') {
             statusEl.innerText = `Ставки: ${state.timer} сек`; statusEl.style.color = '#ffcc00';
             document.getElementById('hockey-controls').style.display = 'flex';
             hasShownWinner = false;
+            hideArenaBall();
             if (arenaPointer.roundId !== state.round_id) {
                 arenaPointer.roundId = state.round_id;
                 arenaResetPointer();
@@ -2899,25 +3176,32 @@ async function pollHockeyState() {
         } else if (state.status === 'rolling') {
             statusEl.innerText = 'Идёт бросок...'; statusEl.style.color = '#007aff';
             document.getElementById('hockey-controls').style.display = 'none';
-            // Указатель стартует один раз на раунд и едет к серверной точке.
-            if (arenaPointer.roundId !== state.round_id) {
-                arenaPointer.roundId = state.round_id;
-                arenaResetPointer();
-                const startedAt = Number(state.rolling_started_at) || (Date.now() / 1000);
-                const elapsed = Math.max(0, (Date.now() / 1000) - startedAt);
-                const left = Math.max(0.8, HOCKEY_ROLL_DURATION - elapsed);
-                const finalX = state.roll_data && state.roll_data.final_x !== undefined ? state.roll_data.final_x : null;
-                // Если final_x ещё не пришёл (старый сервер) — указатель просто
-                // доедет до случайной точки и встанет после завершения раунда.
-                arenaRotateTo(finalX === null ? 50 : finalX, left * 1000);
+            if (isTeamMode) {
+                // Командная арена: указатель едет к серверной точке круга.
+                if (arenaPointer.roundId !== state.round_id) {
+                    arenaPointer.roundId = state.round_id;
+                    arenaResetPointer();
+                    const startedAt = Number(state.rolling_started_at) || (Date.now() / 1000);
+                    const elapsed = Math.max(0, (Date.now() / 1000) - startedAt);
+                    const left = Math.max(0.8, HOCKEY_ROLL_DURATION - elapsed);
+                    const finalX = state.roll_data && state.roll_data.final_x !== undefined ? state.roll_data.final_x : null;
+                    arenaRotateTo(finalX === null ? 50 : finalX, left * 1000);
+                }
+            } else if (arenaBall.roundId !== String(state.round_id)) {
+                // Обычная арена: один раз на раунд берём траекторию и запускаем мяч.
+                startArenaBall(state);
             }
         } else if (state.status === 'finished') {
             statusEl.innerText = 'Раунд окончен!'; statusEl.style.color = '#ff3b30';
-            if (arenaPointer.roundId !== state.round_id) {
-                arenaPointer.roundId = state.round_id;
-                arenaResetPointer();
-                const finalX = state.roll_data ? state.roll_data.final_x : 0;
-                arenaRotateTo(Number(finalX) || 0, 900);
+            if (isTeamMode) {
+                if (arenaPointer.roundId !== state.round_id) {
+                    arenaPointer.roundId = state.round_id;
+                    arenaResetPointer();
+                    const finalX = state.roll_data ? state.roll_data.final_x : 0;
+                    arenaRotateTo(Number(finalX) || 0, 900);
+                }
+            } else {
+                freezeArenaBall(state);
             }
             const modal = document.getElementById('winner-modal');
             if (state.winner && !hasShownWinner) {
@@ -2950,12 +3234,16 @@ async function pollHockeyState() {
             }
         }
         bankEl.innerHTML = `Банк: ${coinAmount(state.bank)}`;
-        // Круг рисуем из серверных секторов: в обычном режиме — по игроку, в
-        // командном — два сектора. Пустой ответ не стирает уже нарисованный круг.
-        if (arenaShapes(state).length || state.status === 'waiting') {
-            renderArenaCircle(state);
+        // Рисуем то поле, которое выбрано переключателем: полосы с мячиком
+        // (обычная) или круг с секторами и аватарками (командная).
+        if (isTeamMode) {
+            if (arenaShapes(state).length || state.status === 'waiting') {
+                renderArenaCircle(state);
+            }
+        } else {
+            renderNormalArena(state);
         }
-        if (arena) arena.classList.toggle('team-mode', arenaState.mode === 'team');
+        if (arena) arena.classList.toggle('team-mode', isTeamMode);
         const list = document.getElementById('hockey-participants');
         if (list) list.innerHTML = '';
         const players = arenaState.players;
@@ -2977,9 +3265,10 @@ function startHockeyPolling() { if (hockeyInterval) clearInterval(hockeyInterval
 function stopHockeyPolling() {
     if (hockeyInterval) clearInterval(hockeyInterval);
     hockeyInterval = null;
-    // Указатель останавливаем вместе с опросом: иначе он продолжал бы крутиться
-    // на уже скрытом экране.
+    // Указатель и мяч останавливаем вместе с опросом: иначе они продолжали бы
+    // двигаться на уже скрытом экране и жгли батарею.
     arenaPointer.spinning = false;
+    stopArenaBall();
 }
 function closeWinnerModal() { document.getElementById('winner-modal').classList.remove('active'); }
 

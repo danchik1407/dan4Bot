@@ -9,7 +9,7 @@
     <meta http-equiv="Pragma" content="no-cache">
     <meta http-equiv="Expires" content="0">
     <title>AURA GAME</title>
-    <link rel="stylesheet" href="style.css?v=aura-20">
+    <link rel="stylesheet" href="style.css?v=aura-21">
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
 </head>
 <body>
@@ -166,6 +166,11 @@
                     💗 В отношениях с <b id="profile-love-partner">…</b>
                     <span class="love-badge-stage" id="profile-love-stage"></span>
                 </div>
+                <!-- Свободен/свободна: зелёная плашка вместо пустого места. -->
+                <div class="love-badge love-badge-free" id="profile-love-free" hidden>
+                    💚 <b id="profile-love-free-text">Свободен</b>
+                    <span class="love-badge-stage" id="profile-love-free-hint">+любовь @ник в боте</span>
+                </div>
                 <div class="profile-avatar-large"><img id="profile-avatar-large" src="avatar_placeholder.svg" alt="Avatar"></div>
                 <h2 class="profile-name" id="profile-name">Загрузка...</h2>
                 <div class="stats-row">
@@ -252,8 +257,22 @@
                 <button class="arena-mode-btn" id="arena-mode-team" onclick="setArenaMode('team')">Командная арена</button>
             </div>
 
-            <!-- КРУГЛОЕ поле: сектора заполняются аватарками по размеру ставки. -->
-            <div class="hockey-arena arena-circle" id="hockey-arena">
+            <!-- ОБЫЧНАЯ АРЕНА: поле с мячиком (как было раньше). Сектора — по
+                 ставке каждого игрока, мяч летает по серверной траектории и
+                 останавливается в выигрышном секторе. -->
+            <div class="hockey-arena hockey-field" id="hockey-field">
+                <div class="hockey-scene" id="hockey-scene">
+                    <div class="corner" id="corner-tl"></div>
+                    <div class="corner" id="corner-tr"></div>
+                    <div class="corner" id="corner-bl"></div>
+                    <div class="corner" id="corner-br"></div>
+                </div>
+                <div class="hockey-sectors" id="hockey-sectors"></div>
+                <div class="hockey-ball" id="hockey-ball" hidden></div>
+            </div>
+
+            <!-- КОМАНДНАЯ АРЕНА: круг, сектора — доли ставок команд (красные/синие). -->
+            <div class="hockey-arena arena-circle" id="hockey-arena" hidden>
                 <div class="arena-pie" id="arena-pie"></div>
                 <div class="arena-ring" aria-hidden="true"></div>
                 <!-- Указатель-стрелка: крутится и плавно останавливается на выигрышном секторе. -->
@@ -261,12 +280,6 @@
                     <span class="arena-pointer-head"></span>
                 </div>
                 <div class="arena-players" id="arena-players"></div>
-                <div class="hockey-scene" id="hockey-scene" hidden>
-                    <div class="corner" id="corner-tl"></div>
-                    <div class="corner" id="corner-tr"></div>
-                    <div class="corner" id="corner-bl"></div>
-                    <div class="corner" id="corner-br"></div>
-                </div>
             </div>
             <div class="hockey-controls" id="hockey-controls">
                 <div class="bet-input-container">
@@ -309,17 +322,10 @@
                     </div>
 
                     <div class="up-inventory-title">🎒 Инвентарь</div>
-                    <div class="up-from-tabs">
-                        <button class="up-from-tab active" data-from="coin" onclick="selectUpgradeFrom('coin', this)">
-                            <span class="up-from-emoji"><img class="coin-img" src="coin.png" alt="монета"></span><span class="up-from-label">Коины</span>
-                        </button>
-                        <button class="up-from-tab" data-from="capsule" onclick="selectUpgradeFrom('capsule', this)">
-                            <span class="up-from-emoji">💊</span><span class="up-from-label">Обычная <b id="up-owned-capsule">0</b></span>
-                        </button>
-                        <button class="up-from-tab" data-from="uniq_capsule" onclick="selectUpgradeFrom('uniq_capsule', this)">
-                            <span class="up-from-emoji">⚱️</span><span class="up-from-label">Уник. <b id="up-owned-uniq">0</b></span>
-                        </button>
-                    </div>
+                    <!-- Вкладки строятся в JS: в игру можно ставить ЛЮБУЮ
+                         капсулу из инвентаря (обычная, уникальная, рубиновая,
+                         алмазная, галактическая и старые легаси). -->
+                    <div class="up-from-tabs" id="up-from-tabs"></div>
 
                     <div class="up-amount">
                         <label class="up-label" id="up-amount-label">Сколько ставим?</label>
@@ -375,7 +381,7 @@
                         <button class="up-to-tab" id="up-to-tab-capsule" onclick="selectUpgradeToTab('capsule', this)">Капсулы</button>
                     </div>
                     <div class="up-to-grid" id="up-to-grid"></div>
-                    <div class="up-to-hint">Шанс = стоимость вашего предмета / стоимость цели</div>
+                    <div class="up-to-hint" id="up-to-hint">Шанс = стоимость вашего предмета / стоимость цели</div>
                 </section>
             </div>
 
@@ -464,6 +470,6 @@
         <div class="nav-item" onclick="switchTab('profile', this)"><span class="nav-icon">👤</span> Профиль</div>
     </nav>
 
-    <script src="app.js?v=aura-20" defer></script>
+    <script src="app.js?v=aura-21" defer></script>
 </body>
 </html>

@@ -392,7 +392,9 @@ main { padding: 0 16px; }
 .up-slot-name { margin-top: 8px; font-size: 13px; font-weight: 800; color: #dbe7f7; }
 .up-slot-value { margin-top: 3px; font-size: 12px; font-weight: 900; color: #58a6ff; font-variant-numeric: tabular-nums; }
 
-.up-from-tabs { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+/* Вкладок «Инвентарь» стало больше (все капсулы): 3 фиксированные колонки
+   сжимали подписи до нечитаемого — теперь переносим по ширине. */
+.up-from-tabs { display: grid; grid-template-columns: repeat(auto-fit, minmax(64px, 1fr)); gap: 6px; }
 .up-from-tab { display: flex; flex-direction: column; align-items: center; gap: 2px; padding: 8px 4px; border-radius: 12px; border: 1px solid rgba(59, 130, 246, 0.16); background: #0b111a; color: #7e96b5; font-size: 10px; font-weight: 800; cursor: pointer; transition: 0.15s; }
 .up-from-emoji { font-size: 18px; }
 .up-from-label b { color: #58a6ff; }
@@ -413,7 +415,8 @@ main { padding: 0 16px; }
 .up-quick-amounts button:active { background: rgba(59, 130, 246, 0.2); color: #eaf3ff; }
 
 /* --- центр: круг --- */
-.up-circle { position: relative; width: min(58vw, 200px); aspect-ratio: 1; display: grid; place-items: center; margin-top: 2px; }
+/* margin-top — место под стрелку снаружи круга, иначе её срезает край панели. */
+.up-circle { position: relative; width: min(58vw, 200px); aspect-ratio: 1; display: grid; place-items: center; margin-top: 26px; }
 .up-circle-ring { position: absolute; inset: 0; border-radius: 50%; -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 13px), #000 calc(100% - 12px)); mask: radial-gradient(farthest-side, transparent calc(100% - 13px), #000 calc(100% - 12px)); }
 /* Круг всегда двухцветный и начинается с ВЕРХНЕЙ ТОЧКИ (12 часов) по часовой:
    ЗЕЛЁНАЯ зона 0 → шанс, КРАСНАЯ зона шанс → 100%.
@@ -427,10 +430,23 @@ main { padding: 0 16px; }
 /* Метка границы: белая риска ровно на угле --p (тот же ноль — 12 часов, что у
    заливки и у стрелки), крутится вместе с зоной. Игроку видно, пересекла
    стрелка границу зелёной зоны или осталась внутри. */
-/* Белая стрелка: вращается через JS, в конце плавно замедляется и замирает на результате. */
+/* Стрелка СНАРУЖИ круга (задача 26): короткий указатель над кольцом, который
+   смотрит ВНИЗ на сектор. Крутится через JS вокруг центра круга, в конце
+   плавно замедляется и замирает на результате. Ноль — 12 часов, как у заливки. */
 .up-arrow-wrap { position: absolute; inset: 0; z-index: 2; transform: rotate(0deg); will-change: transform; pointer-events: none; }
-.up-arrow { position: absolute; left: 50%; bottom: 50%; width: 3px; height: 43%; transform: translateX(-50%); border-radius: 3px; background: linear-gradient(to top, rgba(255, 255, 255, 0.1), #ffffff 40%, #ffffff); box-shadow: 0 0 10px rgba(255, 255, 255, 0.75); }
-.up-arrow::before { content: ''; position: absolute; top: -11px; left: 50%; transform: translateX(-50%); border-left: 6px solid transparent; border-right: 6px solid transparent; border-bottom: 13px solid #ffffff; filter: drop-shadow(0 0 6px rgba(255, 255, 255, 0.9)); }
+.up-arrow {
+    position: absolute; left: 50%; top: -18px; transform: translateX(-50%);
+    width: 4px; height: 20px; border-radius: 3px;
+    background: linear-gradient(to bottom, rgba(255, 255, 255, 0.15), #ffffff 55%, #ffffff);
+    box-shadow: 0 0 10px rgba(255, 255, 255, 0.75);
+}
+/* Наконечник — ниже «ножки», смотрит внутрь круга. */
+.up-arrow::before {
+    content: ''; position: absolute; top: 100%; left: 50%; transform: translateX(-50%);
+    border-left: 8px solid transparent; border-right: 8px solid transparent;
+    border-top: 14px solid #ffffff;
+    filter: drop-shadow(0 0 6px rgba(255, 255, 255, 0.9));
+}
 .up-circle.spinning .up-arrow { box-shadow: 0 0 16px rgba(255, 255, 255, 0.95); }
 .up-circle.win .up-arrow::before { border-bottom-color: #6ee7a0; }
 .up-circle.lose .up-arrow::before { border-bottom-color: #fca5a5; }
@@ -689,6 +705,33 @@ body.maintenance { overflow: hidden; }
 }
 .arena-mode-btn.active { background: var(--accent, #007aff); color: #fff; }
 
+/* ================= ОБЫЧНАЯ АРЕНА: ПОЛЕ С МЯЧИКОМ ================= */
+/* Сектора — вертикальные полосы по доле ставки, мяч летает по серверной
+   траектории (x/y 0..100). Ширины считает JS, здесь только каркас. */
+.hockey-field { background: #0b1220; }
+.hockey-sectors { position: absolute; inset: 0; z-index: 1; display: flex; align-items: stretch; }
+.hockey-sectors .hockey-sector { flex: 0 0 auto; }
+.hockey-sector .sector-label {
+    position: absolute; inset: 0; display: flex; flex-direction: column;
+    justify-content: center; align-items: center; gap: 2px; padding: 4px 2px;
+    text-align: center; pointer-events: none;
+}
+.hockey-sector .sector-avatar {
+    width: var(--sector-avatar, 26px); height: var(--sector-avatar, 26px);
+    border-radius: 50%; overflow: hidden; display: flex; align-items: center;
+    justify-content: center; border: 2px solid rgba(255, 255, 255, 0.55);
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.45); background: rgba(0, 0, 0, 0.25);
+}
+.hockey-sector .sector-avatar img { width: 100%; height: 100%; object-fit: cover; }
+.hockey-sector .sector-name {
+    max-width: 90%; font-size: 9px; font-weight: 800; color: #fff;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    text-shadow: 0 1px 3px rgba(0, 0, 0, 0.8);
+}
+.hockey-sector .sector-bet { font-size: 9px; font-weight: 700; color: rgba(255, 255, 255, 0.85); }
+.hockey-sector.win { box-shadow: inset 0 0 0 2px #ffcc00, inset 0 0 24px rgba(255, 204, 0, 0.35); }
+.hockey-sector.win .sector-name { color: #ffe79a; }
+
 /* Круг: сектора рисуются conic-gradient из JS, аватарки — поверх. */
 .arena-circle {
     width: min(100%, 350px); height: auto; aspect-ratio: 1 / 1;
@@ -761,6 +804,15 @@ body.maintenance { overflow: hidden; }
     position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
     color: #8e8e93; font-size: 13px; white-space: nowrap;
 }
+
+/* Свободен/свободна: зелёная плашка вместо пустого места в профиле. */
+.love-badge-free {
+    background: linear-gradient(135deg, rgba(52, 199, 89, 0.22), rgba(16, 122, 62, 0.35));
+    border-color: rgba(52, 199, 89, 0.55);
+    color: #b7f7c8;
+    box-shadow: 0 0 18px rgba(52, 199, 89, 0.25);
+}
+.love-badge-free .love-badge-stage { color: #86e0a3; }
 
 /* Командная арена: две большие кнопки. «Своя» команда подсвечена, «чужая» закрыта. */
 .arena-team-buttons { display: flex; gap: 8px; width: 100%; }
