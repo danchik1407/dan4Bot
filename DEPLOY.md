@@ -691,6 +691,55 @@ Build Command сервиса: при сборке без `requirements.txt` ло
 именно старт процесса, и Render показывает только «Application failed to
 respond» / бесконечный деплой.
 
+## 4.7. «Application exited early»: команды Build и Start перепутаны
+
+**Симптом.** Деплой доходит до конца, потом в логе:
+
+```
+==> Deploying...
+==> Running 'pip install -r requirements.txt'
+Successfully installed ...
+==> Application exited early
+==> Instance srv-... restarted
+```
+
+**Причина.** `pip install -r requirements.txt` стоит в поле **Start Command**.
+Render запускает эту команду как процесс сервиса: пакеты ставятся, `pip`
+завершается с кодом 0 — Render видит «приложение вышло само» и перезапускает.
+
+**Как должно быть (два разных поля):**
+
+| Сервис | Build Command | Start Command |
+|---|---|---|
+| `aura-api` | `pip install -r requirements.txt` | `uvicorn api:app --host 0.0.0.0 --port $PORT` |
+| `dan4Bot` | `pip install -r requirements.txt` | `python bot.py` |
+
+Render Dashboard → сервис → **Settings → Build & Deploy**:
+
+- **Build Command** — установка зависимостей, выполняется один раз при сборке;
+- **Start Command** — долгоживущий процесс; он НЕ должен завершаться сам.
+
+После исправления: **Manual Deploy → Clear build cache & deploy**. В логе
+должно быть `==> Running 'python bot.py'`, затем строки бота:
+
+```
+🤖 Бот: @... | Mini App: https://aura-api-mptt.onrender.com/miniapp/
+🔗 Прямая ссылка Mini App: ...
+```
+
+Признак правильного старта `dan4Bot`: сервис не перезапускается, `/health`
+этого сервиса отвечает `OK` (бот поднимает минимальный HTTP-сервер
+`start_fake_website`, потому что Render убивает Web Service без открытого порта).
+
+**Если Start Command верный, а процесс всё равно падает:**
+
+- `raise SystemExit("❌ ОШИБКА: Не найден BOT_TOKEN!")` — не задана переменная
+  `BOT_TOKEN` (Environment → Add Environment Variable).
+- `TelegramUnauthorizedError` — токен отозван/перепутан (BotFather → API Token).
+- `get_me` больше не роняет старт с первого сетевого сбоя: в `bot.py` есть
+  `get_me_with_retry()` (8 попыток с нарастающей паузой); неверный токен при
+  этом по-прежнему падает сразу, без ожидания.
+
 ## 4.5. Задача 25: экономика, соцсеть и админ-панель
 
 ### 4.5.1. Что применить в Supabase (один файл, можно повторно)
