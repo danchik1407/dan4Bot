@@ -21,8 +21,48 @@ LOVE_STAGES = [
 
 # Экономика Love.
 LOVE_ACTION_BONUS = 10              # +10 Love коинов в общий банк пары за действие
-LOVE_ACTION_COOLDOWN = 5 * 3600     # награда не чаще, чем раз в 5 часов
+# Задача 34: кулдаун ВРЕМЕННО выключен (0), чтобы можно было за один вечер
+# прогнать уровень и проверить награды. Значение можно менять на лету
+# секретной админ-командой `кд` (см. bot.py) — она пишет его в game_settings.
+LOVE_ACTION_COOLDOWN = 0
+LOVE_ACTION_COOLDOWN_DEFAULT = 5 * 3600   # «как задумано» — вернуть сюда
 LOVE_ICE_COST = 3                   # «ускорить» за 3 i¢ (донат-валюта)
+
+# Текущий кулдаун в секундах. Живёт в памяти процесса и переопределяется
+# админ-командой; и бот (награды), и API (цифра в Mini App) читают его отсюда.
+_COOLDOWN_STATE = {"seconds": LOVE_ACTION_COOLDOWN}
+
+
+def love_cooldown_seconds() -> int:
+    """Действующий кулдаун награды за РП, в секундах (0 — без ограничения)."""
+    try:
+        value = int(_COOLDOWN_STATE.get("seconds") or 0)
+    except (TypeError, ValueError):
+        value = 0
+    return max(0, value)
+
+
+def set_love_cooldown_seconds(seconds) -> int:
+    """Поставить кулдаун награды. Возвращает применённое значение."""
+    try:
+        value = int(seconds)
+    except (TypeError, ValueError):
+        value = 0
+    value = max(0, value)
+    _COOLDOWN_STATE["seconds"] = value
+    return value
+
+
+def format_love_cooldown(seconds=None) -> str:
+    """«без ограничения» / «5 ч» / «30 мин» / «45 сек» — для сообщений."""
+    value = love_cooldown_seconds() if seconds is None else max(0, int(seconds))
+    if value <= 0:
+        return "без ограничения"
+    if value % 3600 == 0:
+        return f"{value // 3600} ч"
+    if value % 60 == 0:
+        return f"{value // 60} мин"
+    return f"{value} сек"
 
 # РП-команды: `поцеловать @user`, `обнять @user` и т.д. Ключи — то, что пишет
 # игрок; значение — эмодзи и текст для сообщения.

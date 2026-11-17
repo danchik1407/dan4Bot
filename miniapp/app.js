@@ -3269,8 +3269,14 @@ function renderArenaCircle(state) {
 // оборотов и плавное затухание одной CSS-кривой cubic-bezier(0.1, 0.7, 0.1, 1)
 // точно на выигрышном секторе. Никаких «рывков» на стыке фаз: переход один.
 const ARENA_POINTER_SPEED = 900;          // °/с — как UPGRADE_ARROW_SPEED
-const ARENA_POINTER_LAND_MS = 3200;       // столько длится финишная прокрутка
+// Задача 34: финиш стрелки — ровно как в апгрейде (UPGRADE_LAND_MS = 5000) и с
+// той же кривой. Было 3200 мс, из-за чего затухание выглядело резким: почти
+// все обороты проскакивали в первой трети перехода.
+const ARENA_POINTER_LAND_MS = 5000;
 const ARENA_POINTER_LAND_EASING = 'cubic-bezier(0.1, 0.7, 0.1, 1)';
+// Победителя показываем только ПОСЛЕ того, как стрелка встала / мяч замер.
+const ARENA_WINNER_DELAY_MS = 1200;        // обычная арена: мяч уже замер
+const ARENA_WINNER_AFTER_LAND_MS = 350;    // командная: сразу после посадки
 
 function arenaPointerNode() { return document.getElementById('arena-pointer'); }
 
@@ -3344,8 +3350,10 @@ function arenaLandPointer(finalX, durationMs) {
     const desired = ((arenaAngleForShare(Math.max(0, Math.min(100, Number(finalX) || 0))) % 360) + 360) % 360;
     const current = ((arenaPointer.angle % 360) + 360) % 360;
     const delta = ((desired - current) % 360 + 360) % 360;
-    const total = Math.max(1200, Number(durationMs) || ARENA_POINTER_LAND_MS);
-    const turns = Math.max(3, Math.ceil(total / 900));
+    const total = Math.max(2200, Number(durationMs) || ARENA_POINTER_LAND_MS);
+    // Оборотов столько же, сколько в апгрейде (не меньше четырёх): стрелка
+    // успевает «разогнаться» из вращения и плавно гаснет, а не прыгает.
+    const turns = Math.max(4, Math.ceil(total / 1000));
     const target = arenaPointer.angle + turns * 360 + delta;
 
     let finished = false;
@@ -3493,7 +3501,9 @@ function renderTeamBoards() {
             .sort((a, b) => (Number(b.bet) || 0) - (Number(a.bet) || 0));
         const total = banks[team] || 0;
         const signature = `${team}:${winnerTeam || ''}:` + members.map(p => `${p.id}:${p.bet}`).join(',');
-        if (sumEl) sumEl.textContent = coinAmount(total);
+        // coinAmount() отдаёт готовый HTML (внутри картинка монеты), поэтому
+        // только innerHTML — иначе на плитке видно "<img class=coin-img ...>".
+        if (sumEl) sumEl.innerHTML = coinAmount(total);
         if (board) board.classList.toggle('win', Boolean(winnerTeam) && winnerTeam === team);
         if (listEl.dataset.signature === signature) return;
         listEl.dataset.signature = signature;
@@ -4018,12 +4028,19 @@ async function pollHockeyState() {
             }
         } else if (state.status === 'finished') {
             statusEl.innerText = 'Раунд окончен!'; statusEl.style.color = '#ff3b30';
+            // Задача 34: победителя показываем не сразу, а когда анимация
+            // доехала до конца. Раньше модалка всплывала через 1 с — стрелка
+            // ещё крутилась, и финиш выглядел резким обрывом.
+            let winnerDelayMs = ARENA_WINNER_DELAY_MS;
             if (isTeamMode) {
-                // Победитель уже известен серверу — стрелка доезжает до него.
+                // Победитель уже известен серверу — стрелка плавно доезжает до него.
                 if (arenaPointer.landedRound !== state.round_id) {
                     arenaPointer.landedRound = state.round_id;
                     const finalX = state.roll_data ? state.roll_data.final_x : 0;
                     arenaLandPointer(Number(finalX) || 0, ARENA_POINTER_LAND_MS);
+                    winnerDelayMs = ARENA_POINTER_LAND_MS + ARENA_WINNER_AFTER_LAND_MS;
+                } else {
+                    winnerDelayMs = ARENA_WINNER_DELAY_MS;
                 }
             } else {
                 freezeArenaBall(state);
@@ -4065,7 +4082,7 @@ async function pollHockeyState() {
                     // The database is the only balance source; never optimistically add the pot here.
                     loadUserData();
                     if (info.amount > 0) { playSound('win'); } else { playSound('arena_lose'); }
-                }, 1000);
+                }, winnerDelayMs);
             }
         }
         // Банк и поле переключились выше, в syncArenaView() — рисуем ровно ту

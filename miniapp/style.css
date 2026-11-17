@@ -347,7 +347,8 @@ main { padding: 0 16px; }
     display: flex; align-items: center; justify-content: space-between; gap: 6px;
     font-size: 12px; font-weight: 800; color: #e6e6e6; padding: 0 2px;
 }
-.arena-team-head .arena-team-sum { color: #8a8f98; font-weight: 700; font-size: 11px; white-space: nowrap; }
+.arena-team-head .arena-team-sum { color: #cfd3d8; font-weight: 800; font-size: 11px; white-space: nowrap; display: inline-flex; align-items: center; gap: 3px; }
+.arena-team-head .arena-team-sum .coin-img { width: 12px; height: 12px; vertical-align: middle; }
 .arena-team-list { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
 .arena-team-row {
     display: flex; align-items: center; justify-content: space-between; gap: 6px;
