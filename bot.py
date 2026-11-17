@@ -27,6 +27,7 @@ from love import (
     rp_action_for,
     stage_info,
 )
+from db_schema import audit as db_schema_audit, format_report as db_schema_report
 from shop_catalog import (
     DAILY_LIMITS_ENABLED,
     ShopPurchaseError,
@@ -300,7 +301,8 @@ async def cmd_admin_help(message: Message):
         "• <code>админы</code> — пингануть админов чата\n"
         "• <code>стоп</code> — остановить созыв\n\n"
         "📊 <b>Статистика:</b>\n"
-        "• <code>стата бота</code> — общая статистика (работает только в ЛС)\n\n"
+        "• <code>стата бота</code> — общая статистика (работает только в ЛС)\n"
+        "• <code>бд</code> — проверка схемы базы: каких миграций не хватает\n\n"
         "👑 <b>Панель:</b>\n"
         "• <code>/admin</code> — статистика, шансы апгрейда, подсказки по выдаче и бану\n\n"
         "💡 <i>Совет: писать команды лучше в ЛС с ботом, чтобы не спалить промокоды.</i>"
@@ -1955,6 +1957,28 @@ async def cmd_bot_stats(message: Message):
     except Exception as e:
         logger.error(f"Ошибка при получении статистики: {e}")
         await message.answer(f"❌ Ошибка при получении статистики: {e}")
+
+
+# ================= СХЕМА БАЗЫ =================
+@dp.message(F.text.func(lambda t: strip_prefix(t).lower() in (
+        "бд", "база", "миграции", "проверь базу", "схема базы")))
+async def cmd_db_schema(message: Message):
+    """Админ видит, какие миграции реально применены и что доделать.
+
+    Появилось после жалобы «миграцию применил, а Mini App пишет, что нет
+    колонки created_at»: старая ошибка всегда называла users, даже когда
+    колонки не хватало в другой таблице. Теперь есть одна команда-диагностика.
+    """
+    if not is_admin(message.from_user.id):
+        return await message.answer("❌ Эта команда доступна только администраторам бота.")
+    if message.chat.type != "private":
+        return await message.answer("❌ Эта команда работает только в личных сообщениях с ботом.")
+    try:
+        report = await asyncio.to_thread(db_schema_audit, supabase)
+    except Exception as e:  # noqa: BLE001 — админ должен увидеть причину
+        logger.error(f"Аудит схемы базы не удался: {e}")
+        return await message.answer(f"❌ Не удалось проверить базу: {e}")
+    await message.answer(db_schema_report(report), parse_mode="HTML")
 
 
 # ================= ПОМОЩЬ =================

@@ -11,6 +11,7 @@ from urllib.parse import parse_qsl
 from dotenv import load_dotenv
 from supabase import create_client, Client
 from typing import Optional, Union
+from db_schema import audit as db_schema_audit
 from shop_catalog import SHOP_ITEMS, ShopPurchaseError, is_admin_id, parse_inventory, purchase_shop_item, \
     serialize_shop_items, missing_stock_rows, shop_stock_snapshot, stock_diagnostics, \
     sold_out_items, STOCK_LIMITS_ENABLED
@@ -82,7 +83,7 @@ async def _http_json(url, method: str = "GET", params=None, payload=None, timeou
 
 # Номер сборки: по нему из /api/health видно, что на сервисе НЕ старый код.
 # Если после деплоя здесь прежнее значение — Render ещё не перезапустился.
-API_BUILD = "2026-11-19-arena-slider-15"
+API_BUILD = "2026-11-20-schema-audit-16"
 
 # Момент старта процесса. По нему видно, что сервис только что «проснулся»:
 # Render на бесплатном тарифе усыпляет Web Service через 15 минут без входящих
@@ -266,6 +267,9 @@ async def health():
             "ready": os.path.isfile(os.path.join(MINIAPP_DIR, "index.html")),
             "url": "/miniapp/",
         },
+        # Диагностика схемы: админ открывает /api/db_audit (или пишет боту «бд»)
+        # и видит, каких миграций/колонок не хватает, с готовым SQL.
+        "db_audit": {"endpoint": "/api/db_audit", "bot_command": "бд"},
         "shop_stock": {
             # Задача 19: лимиты включены — у каждой капсулы общий тираж.
             # false бывает только если в shop_catalog.py флаг выключили вручную.
@@ -648,38 +652,84 @@ def _row_matches_id(row, user_id):
 
 # ==================== ПОНЯТНЫЕ ОШИБКИ БАЗЫ ====================
 # Частые поломки Supabase: в таблице users нет колонки (inventory, last_chest,
-# daily_buys, …) или нет самой таблицы. PostgREST отвечает PGRST204/PGRST205/
+# created_at, …) или нет самой таблицы. PostgREST отвечает PGRST204/PGRST205/
 # 42703 — раньше игрок видел «Внутренняя ошибка», а админ не понимал, что чинить.
-_USERS_MIGRATION_HINT = ("если колонки нет в базе — сверьте таблицу users с "
-                         "supabase/migrations и добавьте недостающую колонку")
+#
+# ВАЖНО (задача 27): раньше текст ошибки ВСЕГДА писал «в таблице users», даже
+# если колонки не хватало в subscriptions_history или referrals. Из-за этого
+# админ применял миграцию users, а ошибка возвращалась — и выглядело так, будто
+# миграция «не применилась». Теперь имя таблицы берётся из ответа PostgREST.
+_MIGRATION_HINT_BY_COLUMN = {
+    "created_at": "supabase/migrations/20261028000000_created_at_and_crash_history.sql",
+    "ice": "supabase/migrations/20261109000000_economy_social.sql",
+    "premium": "supabase/migrations/20261109000000_economy_social.sql",
+    "inventory": "supabase/migrations/20261109000000_economy_social.sql",
+    "daily_buys": "supabase/migrations/20261027000000_shop_daily_limits.sql",
+}
+_POSTGREST_RELOAD_HINT = ("Если миграция уже применена — обновите кэш схемы: "
+                          "SQL Editor → NOTIFY pgrst, 'reload schema'; "
+                          "(Dashboard → Settings → API → Reload schema)")
+
+
+def _sql_error_column_table(message: str) -> tuple:
+    """Достаём (колонка, таблица) из текста ошибки PostgREST/Postgres.
+
+    PostgREST: "Could not find the 'created_at' column of 'users' in the schema cache"
+    Postgres:  column "created_at" of relation "users" does not exist
+    """
+    import re as _re
+    text = (message or "").lower()
+    column = None
+    found = (_re.search(r"'([a-z_][a-z0-9_]*)'\s+column", text)
+             or _re.search(r'column\s+"([a-z_][a-z0-9_]*)"', text)
+             or _re.search(r"column\s+'?\"?([a-z_][a-z0-9_]*)", text))
+    if found:
+        column = found.group(1)
+    table = None
+    found_table = (_re.search(r"of\s+'([a-z_][a-z0-9_]*)'\s+in the schema cache", text)
+                   or _re.search(r'of relation "([a-z_][a-z0-9_]*)"', text)
+                   # "Could not find the table 'public.referrals' in the schema cache"
+                   or _re.search(r"table\s+'([a-z_]+\.[a-z0-9_]+)'", text)
+                   or _re.search(r"table\s+'([a-z_][a-z0-9_]*)'", text)
+                   or _re.search(r'table "([a-z_]+\.[a-z0-9_]+)"', text)
+                   or _re.search(r'table "([a-z_][a-z0-9_]*)"', text))
+    if found_table:
+        table = found_table.group(1).split(".")[-1]
+    return column, table
 
 
 def _db_error_detail(exc: Exception, fallback: str = "База временно недоступна") -> str:
     """Человеческий текст ошибки БД для фронтенда (его показывает tg.showAlert).
 
     Возвращает готовый `detail` для HTTPException: без SQL-простыней, но с
-    конкретикой — какой колонки/таблицы не хватает и что применить.
+    конкретикой — какой колонки/таблицы не хватает, в КАКОЙ таблице и что применить.
     """
     message = f"{type(exc).__name__}: {exc}"
     lower = message.lower()
 
     # 1) Нет таблицы / устарел кэш схемы PostgREST.
     if "pgrst205" in lower or "42p01" in lower or "could not find the table" in lower:
-        return ("Таблица users не найдена в базе (или устарел кэш PostgREST). "
-                "Проверьте SUPABASE_URL и выполните NOTIFY pgrst, 'reload schema'")
+        _, table = _sql_error_column_table(message)
+        name = table or "нужная"
+        return (f"Таблицы «{name}» нет в базе (или устарел кэш PostgREST). "
+                "Примените миграции из supabase/migrations, затем выполните "
+                "NOTIFY pgrst, 'reload schema'")
 
     # 2) Нет колонки: PostgREST: "Could not find the 'inventory' column of 'users'".
-    column = None
     if "pgrst204" in lower or "42703" in lower or "column" in lower:
-        import re as _re
-        found = _re.search(r"'([a-z_][a-z0-9_]*)'\s+column", lower) or \
-                _re.search(r"column\s+'?\"?([a-z_][a-z0-9_]*)", lower)
-        if found:
-            column = found.group(1)
-        where = f"колонки «{column}» " if column else ""
-        return (f"В базе не хватает {where}в таблице users. "
-                "Примените миграции из supabase/migrations (или добавьте колонку), "
-                "затем повторите — данные игрока не потеряны")
+        column, table = _sql_error_column_table(message)
+        where = ["В базе не хватает"]
+        if column:
+            where.append(f"колонки «{column}»")
+        where.append(f"в таблице «{table}»" if table else "колонки в одной из таблиц")
+        detail = " ".join(where) + ". "
+        migration = _MIGRATION_HINT_BY_COLUMN.get(column or "")
+        if migration:
+            detail += f"Примените {migration}. "
+        else:
+            detail += "Сверьте таблицу с supabase/migrations и добавьте колонку. "
+        detail += _POSTGREST_RELOAD_HINT + ". Данные игрока не потеряны."
+        return detail
 
     # 3) Права: RLS без политики.
     if "row-level security" in lower or "42501" in lower:
@@ -696,6 +746,48 @@ def _db_error_detail(exc: Exception, fallback: str = "База временно 
                 "Выполните NOTIFY pgrst, 'reload schema' и повторите")
 
     return fallback
+
+
+def _optional_columns_error(exc: Exception, optional) -> bool:
+    """True, если ошибка именно про одну из НЕобязательных колонок.
+
+    Нужно для «мягкой» записи: created_at у служебных таблиц — украшение
+    (по нему ничего не считается в игре), и из-за его отсутствия не должен
+    ломаться бонус за подписку или реферал.
+    """
+    lower = f"{type(exc).__name__}: {exc}".lower()
+    if not any(code in lower for code in ("pgrst204", "42703", "column")):
+        return False
+    column, _ = _sql_error_column_table(str(exc))
+    return bool(column) and column in set(optional)
+
+
+def _insert_tolerant(table: str, payload: dict, optional=("created_at",),
+                     upsert: bool = False, on_conflict: str = None,
+                     logger_prefix: str = ""):
+    """INSERT/upsert, который не падает из-за отсутствия «украшающих» колонок.
+
+    Сначала пишем полный payload. Если база ругается ровно на created_at
+    (или другую необязательную колонку) — повторяем без неё. Так одноразовый
+    бонус за подписку начисляется, даже если миграция применена не до конца,
+    а в лог пишется предупреждение с именем таблицы.
+    """
+    def _run(data: dict):
+        query = supabase.table(table)
+        if upsert:
+            return query.upsert(data, on_conflict=on_conflict).execute()
+        return query.insert(data).execute()
+
+    try:
+        return _run(payload)
+    except Exception as exc:  # noqa: BLE001
+        if not _optional_columns_error(exc, optional):
+            raise
+        column, _ = _sql_error_column_table(str(exc))
+        stripped = {key: value for key, value in payload.items() if key != column}
+        logger.warning("%s%s: колонки «%s» нет — пишем без неё. %s",
+                       logger_prefix, table, column, _POSTGREST_RELOAD_HINT)
+        return _run(stripped)
 
 
 # Последняя ошибка чтения users: _find_user_rows её не пробрасывает (иначе любой
@@ -741,24 +833,55 @@ def _db_user(user_id):
     return rows[0] if rows else None
 
 
+_LAST_USER_WRITE_ERROR = None
+# users.created_at: однажды выяснили, что колонки нет — не дёргаем базу каждым
+# запросом профиля (иначе лог забивается PGRST204, а игрок каждый раз ждёт).
+_USERS_CREATED_AT_READY = None
+
+
 def _db_update_user(user_id, **fields):
     """Обновляем только переданные колонки (никаких PGRST204 из-за лишних полей)."""
+    global _LAST_USER_WRITE_ERROR
     payload = {key: value for key, value in fields.items() if value is not None}
     if not payload:
         return False
     uid = _safe_int(user_id, None)
     if uid is None:
         return False
+    _LAST_USER_WRITE_ERROR = None
     # Строка могла быть сохранена как int, а могла — как текст (старые записи).
     for key in (uid, str(uid)):
         try:
             updated = supabase.table("users").update(payload).eq("user_id", key).select("user_id").execute()
         except Exception as exc:  # noqa: BLE001
+            _LAST_USER_WRITE_ERROR = exc
             logger.error("Не удалось обновить users по user_id=%s (%s): %s",
                          key, ", ".join(sorted(payload)), exc)
             continue
         if updated.data:
             return True
+    return False
+
+
+def _backfill_user_created_at(user_id, value) -> bool:
+    """Ставим users.created_at старому профилю. Отсутствие колонки — не приговор.
+
+    Если миграция ещё не применена, профиль должен открываться: счётчик
+    «дней в игре» просто останется пустым, а в лог один раз уйдёт подсказка,
+    какую миграцию выполнить. Раньше обновление пыталось выполняться на каждом
+    запросе и забивало лог.
+    """
+    global _USERS_CREATED_AT_READY
+    if _USERS_CREATED_AT_READY is False:
+        return False
+    if _db_update_user(user_id, created_at=value):
+        _USERS_CREATED_AT_READY = True
+        return True
+    cause = _LAST_USER_WRITE_ERROR
+    if cause is not None and _optional_columns_error(cause, ("created_at",)):
+        _USERS_CREATED_AT_READY = False
+        logger.warning("users.created_at отсутствует — примените %s. %s",
+                       _MIGRATION_HINT_BY_COLUMN["created_at"], _POSTGREST_RELOAD_HINT)
     return False
 
 
@@ -1013,11 +1136,11 @@ def idempotency_store(key: Optional[str], user_id, endpoint: str, payload: dict)
     if not key or not isinstance(payload, dict):
         return
     try:
-        supabase.table(IDEMPOTENCY_TABLE).upsert({
+        _insert_tolerant(IDEMPOTENCY_TABLE, {
             "key": key, "user_id": int(user_id), "endpoint": endpoint,
             "response": json.dumps(payload, ensure_ascii=False),
             "created_at": _now_iso(),
-        }, on_conflict="key").execute()
+        }, upsert=True, on_conflict="key", logger_prefix="IDEMPOTENCY: ")
     except Exception as exc:  # noqa: BLE001 — не роняем уже совершённую операцию
         logger.warning("Не удалось сохранить idempotency-ключ %s: %s", key, exc)
 
@@ -2179,7 +2302,7 @@ async def get_user(auth: UserAuth):
     # в базе навсегда оставлял игрока с нулём.
     if not row.get("created_at"):
         backfill = _now_iso()
-        if _db_update_user(user_id, created_at=backfill):
+        if _backfill_user_created_at(user_id, backfill):
             row["created_at"] = backfill
     if len(rows) > 1:
         logger.warning("Дубли профиля user_id=%s: %s", user_id,
@@ -2246,6 +2369,20 @@ async def self_check(auth: UserAuth):
             result["upgrade_log_ready"] = False
             result["upgrade_log_error"] = f"{type(exc).__name__}: {exc}"[:200]
     return result
+
+
+# ==================== АУДИТ СХЕМЫ БАЗЫ ====================
+# Один список колонок на API и бота — db_schema.py. По нему /api/db_audit
+# проверяет базу и печатает готовый SQL: когда игрок видит «не хватает колонки»,
+# админ за один запрос понимает, применилась ли миграция и что доделать.
+@app.post("/api/db_audit")
+async def db_audit(data: UserAuth):
+    """Диагностика схемы: чего именно не хватает в базе и какой SQL выполнить."""
+    _require_admin_api(data.initData)
+    report = db_schema_audit(supabase)
+    report["build"] = API_BUILD
+    report["supabase_host"] = _supabase_host()
+    return report
 
 
 def _supabase_host():
@@ -3638,10 +3775,10 @@ async def channel_check(data: ChannelCheckRequest):
     # Ставим отметку ДО начисления: user_id — первичный ключ, поэтому две
     # параллельные проверки не смогут выдать бонус дважды.
     try:
-        supabase.table(SUBSCRIPTIONS_TABLE).insert({
+        _insert_tolerant(SUBSCRIPTIONS_TABLE, {
             "user_id": uid, "bonus_claimed": True, "reward": SUBSCRIPTION_BONUS,
             "created_at": _now_iso(),
-        }).execute()
+        }, logger_prefix="ПОДПИСКА: ")
     except Exception as exc:  # noqa: BLE001
         if _subscription_claimed(uid):
             return {"ok": True, "subscribed": True, "bonus": SUBSCRIPTION_BONUS,
@@ -3840,10 +3977,10 @@ async def referral_bind(data: ReferralBindRequest):
             "Таблица referrals не создана. Примените миграцию "
             "supabase/migrations/20261109000000_economy_social.sql")) from exc
     try:
-        supabase.table(REFERRALS_TABLE).insert({
+        _insert_tolerant(REFERRALS_TABLE, {
             "referred_id": uid, "referrer_id": referrer_id, "reward": 0,
             "status": "pending", "created_at": _now_iso(),
-        }).execute()
+        }, optional=("created_at", "paid_at"), logger_prefix="РЕФЕРАЛ: ")
     except Exception as exc:  # noqa: BLE001
         logger.warning("Не удалось записать реферала %s → %s: %s", referrer_id, uid, exc)
         return {"ok": False, "detail": "Не удалось сохранить приглашение"}
@@ -3956,10 +4093,10 @@ def stars_credit(user_id, coins, charge_id, stars: int = 0) -> Optional[int]:
         if existing.data:
             row = _db_user(uid)
             return _safe_int((row or {}).get("coins"), 0)
-        supabase.table(STARS_PAYMENTS_TABLE).insert({
+        _insert_tolerant(STARS_PAYMENTS_TABLE, {
             "charge_id": str(charge_id), "user_id": uid, "coins": int(coins),
             "stars": int(stars), "created_at": _now_iso(),
-        }).execute()
+        }, logger_prefix="STARS: ")
     except Exception as exc:  # noqa: BLE001
         logger.warning("stars_payments недоступна: %s", exc)
         return None

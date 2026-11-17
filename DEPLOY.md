@@ -883,7 +883,7 @@ Render Dashboard → сервис → **Settings → Build & Deploy**:
 
 ### 4.5.3. Что проверить после деплоя
 
-1. `GET /api/health` — отдаёт `alive`, `build 2026-11-19-arena-slider-15`, лимиты
+1. `GET /api/health` — отдаёт `alive`, `build 2026-11-20-schema-audit-16`, лимиты
    апгрейда (`max_bet 10000`, `max_capsules 50`), диапазон `mult_min 1.12 /
    mult_max 50` и `chance_numerator 90`.
 2. Админом открыть Mini App: видна игра, кнопка «Подписаться на канал» с
@@ -899,6 +899,9 @@ Render Dashboard → сервис → **Settings → Build & Deploy**:
    пропорционален ставке, после ставки за красных кнопка «Синие» заблокирована.
    Профиль показывает ровно одну плашку: «Свободен» **или** «В отношениях с».
 6. Бот: `+любовь @ник` → кнопки «Да/Нет»; `/admin` работает только у админов.
+7. Схема базы: `бд` в ЛС боту (или `POST /api/db_audit`) — «✅ Схема базы в
+   порядке». Если что-то не применено, бот перечислит `таблица.колонка` и
+   выдаст готовый `ALTER TABLE` — см. §4.9.
 
 ### 4.5.4. Все финансовые операции — только на сервере
 
@@ -969,6 +972,92 @@ NOTIFY pgrst, 'reload schema';
 Без этой миграции: игра и апгрейд работают (шансы читаются из кода), но защита от
 второй пары останется только на уровне бота, а в `game_settings` будет висеть
 старое `0.8` → круг покажет 40 % вместо 50 %.
+
+## 4.9. «В базе не хватает колонки «created_at»» — что это значит и как чинить
+
+**Задача 28.** Игрок видел алерт «В базе не хватает колонки «created_at» в
+таблице users», хотя все миграции были применены. Причин две, и обе устранены.
+
+### 4.9.1. Ошибка называла не ту таблицу
+
+`api._db_error_detail()` всегда писала «в таблице **users**», потому что имя
+таблицы было зашито в текст. PostgREST же говорит другое:
+
+```
+Could not find the 'created_at' column of 'subscriptions_history' in the schema cache
+```
+
+Теперь таблица и колонка **вытаскиваются из ответа базы** (`_sql_error_column_table`),
+и текст выглядит так:
+
+> В базе не хватает колонки «created_at» в таблице «subscriptions_history».
+> Примените supabase/migrations/20261028000000_created_at_and_crash_history.sql.
+> Если миграция уже применена — обновите кэш схемы: SQL Editor →
+> `NOTIFY pgrst, 'reload schema';` (Dashboard → Settings → API → Reload schema).
+> Данные игрока не потеряны.
+
+То есть «применил же» больше не превращается в тупик: видно, **что именно**
+не применено и что кэш PostgREST тоже надо обновить.
+
+### 4.9.2. Отсутствие created_at больше не ломает игру
+
+- запись в `subscriptions_history`, `referrals`, `stars_payments`,
+  `idempotency_keys` идёт через `_insert_tolerant`: если база ругается ровно на
+  `created_at`, строка пишется **без неё**, а в лог уходит предупреждение.
+  Бонус за подписку, реферал и платёж Stars проходят;
+- профиль (`/api/user`) при отсутствии `users.created_at` открывается, просто
+  без «дней в игре». Повторные попытки backfill-а кэшируются
+  (`_USERS_CREATED_AT_READY`), чтобы не забивать лог PGRST204 на каждый запрос;
+- `created_at` считается **необязательной** колонкой в аудите: она помечается
+  `•`, а не `❗` — играть можно.
+
+### 4.9.3. Одна команда-диагностика
+
+| Где | Как | Что показывает |
+|---|---|---|
+| Бот | `бд` (или `!бд`, `база`, `миграции`) — только админ, только в ЛС | нет таблиц / нет колонок (`users.created_at`), готовый SQL |
+| API | `POST /api/db_audit` с `initData` админа | JSON: `missing_tables`, `missing_columns` (с флагом `optional`), `blocking`, `users_created_at`, `sql` |
+| Health | `GET /api/health` → `db_audit` | ссылка на эндпоинт и подсказка про `бд` |
+
+Список «что должно быть в базе» живёт в одном месте — `db_schema.py`
+(`REQUIRED`, `COLUMN_TYPES`, `OPTIONAL_COLUMNS`). Его используют и API, и бот,
+поэтому они не могут разойтись.
+
+Пример ответа, когда колонки нет:
+
+```json
+{
+  "ok": false,
+  "users_created_at": false,
+  "missing_columns": [{"table": "users", "column": "created_at", "optional": true}],
+  "blocking": [],
+  "sql": "ALTER TABLE public.users ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT now();\n\nNOTIFY pgrst, 'reload schema';"
+}
+```
+
+### 4.9.4. Миграция «добить всё разом»
+
+`supabase/migrations/20261120000000_schema_audit_missing_columns.sql` —
+идемпотентная: `ADD COLUMN IF NOT EXISTS` для `created_at` во всех таблицах,
+где он нужен (`users`, `subscriptions_history`, `referrals`, `stars_payments`,
+`idempotency_keys`, `shop_purchases`, `crash_history`, `upgrade_log`,
+`relationships`), плюс `paid_at`, `updated_at`, `ice`, `premium`, `inventory`,
+`last_chest`, `keys`, политики RLS «всё разрешено серверу» и
+`NOTIFY pgrst, 'reload schema'` в конце.
+
+Порядок действий, если алерт всё-таки появился:
+
+1. написать боту `бд` (или дёрнуть `/api/db_audit` админом) — увидеть точный
+   список `таблица.колонка`;
+2. выполнить предложенный SQL (или миграцию `20261120000000_…`) целиком в
+   SQL Editor;
+3. последняя строка миграции делает `NOTIFY pgrst, 'reload schema'` — без неё
+   PostgREST продолжит отдавать PGRST204 на новые колонки;
+4. открыть Mini App заново и нажать «Подписаться на канал» — бонус 200 коинов
+   начислится (он одноразовый, повторно не придёт).
+
+Если в отчёте есть `❗`-строки — это блокирующие колонки (например
+`users.inventory`), их надо применить обязательно; `•` — косметика.
 
 ## 5. Клиент Mini App
 
