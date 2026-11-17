@@ -16,6 +16,16 @@ from aiogram.fsm.state import State, StatesGroup
 import aiohttp                     # клиент для проверки сервиса aura-api (/api/health)
 from aiohttp import web            # только для start_fake_website (порт Render)
 from supabase import create_client, Client
+from love import (
+    LOVE_ACTION_BONUS,
+    LOVE_ACTION_COOLDOWN,
+    LOVE_ICE_COST,
+    LOVE_STAGES,
+    claim_stage_rewards,
+    next_stage,
+    rp_action_for,
+    stage_info,
+)
 from shop_catalog import (
     DAILY_LIMITS_ENABLED,
     ShopPurchaseError,
@@ -290,6 +300,8 @@ async def cmd_admin_help(message: Message):
         "• <code>стоп</code> — остановить созыв\n\n"
         "📊 <b>Статистика:</b>\n"
         "• <code>стата бота</code> — общая статистика (работает только в ЛС)\n\n"
+        "👑 <b>Панель:</b>\n"
+        "• <code>/admin</code> — статистика, шансы апгрейда, подсказки по выдаче и бану\n\n"
         "💡 <i>Совет: писать команды лучше в ЛС с ботом, чтобы не спалить промокоды.</i>"
     )
     await message.answer(text, parse_mode="HTML")
@@ -1293,6 +1305,525 @@ async def cb_buy_capsule_legacy(callback: CallbackQuery):
 async def cb_buy_uniq_capsule_legacy(callback: CallbackQuery):
     await _complete_shop_purchase(callback, "uniq_capsule")
 
+
+# ================= ОТНОШЕНИЯ (ЛЮБОВЬ) =================
+# Таблицы: relationships (пара), love_stage_rewards (какие этапы оплачены),
+# love_cooldowns (когда игрок последний раз получал +10 Love коинов).
+# Этапы и награды живут в love.py — там же, откуда их читает Mini App,
+# поэтому бот и профиль не могут показать разные цифры.
+RELATIONSHIPS_TABLE = "relationships"
+LOVE_COOLDOWNS_TABLE = "love_cooldowns"
+
+# Предложения отношений ждут ответа не дольше 15 минут. Храним в памяти:
+# если бот перезапустится — предложение просто истечёт (деньги не теряются).
+love_proposals = {}
+LOVE_PROPOSAL_TTL = 15 * 60
+
+
+def _relationship_sync(user_id):
+    """Активная пара игрока (в базе user_id бывает и числом, и строкой)."""
+    res = supabase.table(RELATIONSHIPS_TABLE).select("*").eq("status", "active").execute()
+    for row in res.data or []:
+        if str(row.get("user_a")) == str(user_id) or str(row.get("user_b")) == str(user_id):
+            return row
+    return None
+
+
+async def get_relationship(user_id):
+    try:
+        return await asyncio.to_thread(_relationship_sync, user_id)
+    except Exception as e:
+        logger.warning(f"Отношения недоступны (миграция не применена?): {e}")
+        return None
+
+
+def _partner_of(row, user_id):
+    try:
+        a, b = int(row.get("user_a")), int(row.get("user_b"))
+    except (TypeError, ValueError):
+        return None
+    return b if a == int(user_id) else a
+
+
+def _stage_text(score: int) -> str:
+    info = stage_info(score)
+    nxt = next_stage(score)
+    ceiling = "∞" if info["max"] is None else f"{info['max']}"
+    text = (f"💗 <b>{info['title']}</b>\n"
+            f"Love: <b>{score}</b> / {ceiling} ({info['progress']:.0f}%)\n"
+            f"Награда этапа: <b>{info['reward']:,}</b> коинов каждому")
+    if nxt:
+        text += (f"\n➡️ Следующий: {nxt['title']} с {nxt['min']} Love "
+                 f"(награда {nxt['reward']:,})")
+    return text
+
+
+async def resolve_partner_target(message: Message):
+    """@username или ответ на сообщение → id партнёра."""
+    if message.reply_to_message and message.reply_to_message.from_user:
+        target = message.reply_to_message.from_user
+        return target.id, target.username or target.full_name
+    for part in strip_prefix(message.text).split()[1:]:
+        if part.startswith("@"):
+            found = await get_user_global(part)
+            if found:
+                return int(found.id), found.username
+            # Игрок мог ещё не писать боту — ищем по users.username без @.
+            return None, part
+    return None, None
+
+
+@dp.message(F.text.func(lambda t: strip_prefix(t).lower().startswith("+любовь")))
+async def cmd_love_propose(message: Message):
+    if not message.from_user or message.from_user.is_bot:
+        return
+    proposer_id = message.from_user.id
+    target_id, target_name = await resolve_partner_target(message)
+    if target_id is None:
+        return await message.answer(
+            "💗 Формат: <code>+любовь @username</code> (или ответом на сообщение).\n"
+            "Узнать этапы: <code>любовь</code>", parse_mode="HTML")
+    if target_id == proposer_id:
+        return await message.answer("🙃 Себя любить можно, но пару так не создать.")
+    existing = await get_relationship(proposer_id)
+    if existing:
+        partner = _partner_of(existing, proposer_id)
+        return await message.answer(f"💗 Ты уже в отношениях (id{partner}). Сначала <code>-любовь</code>.",
+                                    parse_mode="HTML")
+    if await get_relationship(target_id):
+        return await message.answer("💔 Этот игрок уже в отношениях.")
+
+    love_proposals[target_id] = {"from": proposer_id, "at": time.time()}
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="💗 Да", callback_data=f"love_yes|{proposer_id}"),
+        InlineKeyboardButton(text="💔 Нет", callback_data=f"love_no|{proposer_id}"),
+    ]])
+    await message.answer(
+        f"💌 <b>Предложение отношений</b>\n\n"
+        f"<a href=\"tg://user?id={target_id}\">{safe_text(target_name or 'Игрок')}</a>, "
+        f"<a href=\"tg://user?id={proposer_id}\">{safe_text(message.from_user.full_name)}</a> "
+        f"зовёт тебя в пару!\n\n"
+        f"За РП-команды пара получает +{LOVE_ACTION_BONUS} Love коинов, "
+        f"а на каждом этапе — награду коинами (до {LOVE_STAGES[-1]['reward']:,}).",
+        parse_mode="HTML", reply_markup=keyboard)
+
+
+@dp.callback_query(F.data.startswith("love_yes|") | F.data.startswith("love_no|"))
+async def cb_love_answer(callback: CallbackQuery):
+    action, _, raw_from = (callback.data or "").partition("|")
+    proposer_id = int(raw_from or 0)
+    target_id = callback.from_user.id
+    proposal = love_proposals.get(target_id)
+    if not proposal or proposal.get("from") != proposer_id or time.time() - proposal["at"] > LOVE_PROPOSAL_TTL:
+        love_proposals.pop(target_id, None)
+        return await callback.answer("Предложение уже неактуально", show_alert=True)
+
+    if action == "love_no":
+        love_proposals.pop(target_id, None)
+        await callback.message.edit_text("💔 Предложение отклонено. Ничего страшного — впереди ещё много игроков.")
+        return await callback.answer()
+
+    if await get_relationship(target_id) or await get_relationship(proposer_id):
+        love_proposals.pop(target_id, None)
+        return await callback.answer("Кто-то из вас уже в отношениях", show_alert=True)
+
+    def _create():
+        return supabase.table(RELATIONSHIPS_TABLE).insert({
+            "user_a": int(proposer_id), "user_b": int(target_id),
+            "love": 0, "bank": 0, "status": "active",
+        }).execute()
+
+    try:
+        await asyncio.to_thread(_create)
+    except Exception as e:
+        logger.error(f"Не удалось создать пару: {e}")
+        return await callback.answer("Не удалось создать пару — примените миграцию", show_alert=True)
+
+    love_proposals.pop(target_id, None)
+    await callback.message.edit_text(
+        f"💗 <b>Теперь вы пара!</b>\n\n{_stage_text(0)}\n\n"
+        f"Пишите друг другу РП-команды: <code>поцеловать</code>, <code>обнять</code>, "
+        f"<code>прижать</code>… — так копится Love.",
+        parse_mode="HTML")
+    await callback.answer("💗")
+
+
+@dp.message(F.text.func(lambda t: strip_prefix(t).lower().startswith(("-любовь", "разлюбить"))))
+async def cmd_love_break(message: Message):
+    if not message.from_user:
+        return
+    row = await get_relationship(message.from_user.id)
+    if not row:
+        return await message.answer("💔 Ты пока ни с кем не в отношениях.")
+    try:
+        await asyncio.to_thread(lambda: supabase.table(RELATIONSHIPS_TABLE)
+                                .update({"status": "broken"}).eq("id", row["id"]).execute())
+    except Exception as e:
+        logger.error(f"Не удалось разорвать отношения: {e}")
+        return await message.answer("❌ Не удалось разорвать отношения, попробуй позже.")
+    partner = _partner_of(row, message.from_user.id)
+    love_proposals.pop(partner, None)
+    await message.answer(f"💔 Отношения завершены. Накоплено Love: {int(row.get('love') or 0)}.")
+
+
+@dp.message(F.text.func(lambda t: strip_prefix(t).lower().startswith("любовь")
+                        or strip_prefix(t).lower().startswith(("пара", "отношения"))))
+async def cmd_love_status(message: Message):
+    if not message.from_user:
+        return
+    row = await get_relationship(message.from_user.id)
+    if not row:
+        return await message.answer(
+            "💗 Ты пока один(а).\n\nПредложить отношения: <code>+любовь @username</code>",
+            parse_mode="HTML")
+    partner = _partner_of(row, message.from_user.id)
+    score = int(row.get("love") or 0)
+    await message.answer(f"💗 <b>В отношениях</b> с id{partner}\n\n{_stage_text(score)}",
+                         parse_mode="HTML")
+
+
+async def love_cooldown_left(user_id) -> int:
+    """Сколько секунд осталось до следующего +10 Love (0 — можно получать)."""
+    def _read():
+        res = supabase.table(LOVE_COOLDOWNS_TABLE).select("action_at").eq("user_id", user_id).execute()
+        return res.data[0].get("action_at") if res.data else None
+
+    try:
+        raw = await asyncio.to_thread(_read)
+    except Exception:
+        return 0
+    if not raw:
+        return 0
+    try:
+        from datetime import datetime, timezone
+        stamp = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        if stamp.tzinfo is None:
+            stamp = stamp.replace(tzinfo=timezone.utc)
+        left = LOVE_ACTION_COOLDOWN - (time.time() - stamp.timestamp())
+        return max(0, int(left))
+    except Exception:
+        return 0
+
+
+async def love_cooldown_touch(user_id):
+    def _write():
+        supabase.table(LOVE_COOLDOWNS_TABLE).upsert(
+            {"user_id": int(user_id), "action_at": datetime_now_iso()}, on_conflict="user_id").execute()
+    try:
+        await asyncio.to_thread(_write)
+    except Exception as e:
+        logger.warning(f"Не удалось сохранить кулдаун любви: {e}")
+
+
+def datetime_now_iso() -> str:
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).isoformat()
+
+
+async def add_love_points(row, amount: int):
+    """+Love коины паре и награды за перешагнутые этапы. Возвращает (new_love, granted)."""
+    old_score = int(row.get("love") or 0)
+    new_score = old_score + int(amount)
+    await asyncio.to_thread(lambda: supabase.table(RELATIONSHIPS_TABLE).update({
+        "love": new_score, "bank": new_score,
+    }).eq("id", row["id"]).execute())
+    row = dict(row)
+    row["love"] = new_score
+    granted = await asyncio.to_thread(claim_stage_rewards, supabase, row)
+    return new_score, granted
+
+
+@dp.message(F.text.func(lambda t: rp_action_for(strip_prefix(t))[0] is not None))
+async def cmd_rp_action(message: Message):
+    if not message.from_user or message.from_user.is_bot:
+        return
+    action, meta = rp_action_for(strip_prefix(message.text))
+    if not action:
+        return
+    row = await get_relationship(message.from_user.id)
+    if not row:
+        return await message.answer(
+            "💗 Сначала предложи отношения: <code>+любовь @username</code>", parse_mode="HTML")
+    partner_id = _partner_of(row, message.from_user.id)
+    target_id, _ = await resolve_partner_target(message)
+    if target_id and target_id != partner_id:
+        return await message.answer("💔 Это не твой партнёр — РП-команды работают только для пары.")
+
+    text = (f"{meta['emoji']} <a href=\"tg://user?id={message.from_user.id}\">"
+            f"{safe_text(message.from_user.full_name)}</a> {meta['text']} "
+            f"<a href=\"tg://user?id={partner_id}\">партнёра</a>")
+
+    left = await love_cooldown_left(message.from_user.id)
+    if left > 0:
+        # Кулдаун: +10 Love уже получены недавно. Можно «докупить» действие за i¢.
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text=f"⚡ За {LOVE_ICE_COST} i¢", callback_data=f"love_ice|{message.from_user.id}")
+        ]])
+        hours = left // 3600
+        minutes = (left % 3600) // 60
+        return await message.answer(
+            f"{text}\n\n⏳ Love-бонус через {hours}ч {minutes}м. "
+            f"Можно не ждать — выполнить действие за {LOVE_ICE_COST} i¢ (донат-валюта).",
+            parse_mode="HTML", reply_markup=keyboard)
+
+    new_score, granted = await add_love_points(row, LOVE_ACTION_BONUS)
+    await love_cooldown_touch(message.from_user.id)
+    reply = f"{text}\n\n💗 +{LOVE_ACTION_BONUS} Love (всего {new_score})"
+    if granted:
+        for stage in granted:
+            reply += (f"\n🏆 Новый этап: <b>{stage['title']}</b> — "
+                      f"по {stage['reward']:,} коинов каждому!")
+    await message.answer(reply, parse_mode="HTML")
+
+
+@dp.callback_query(F.data.startswith("love_ice|"))
+async def cb_love_ice(callback: CallbackQuery):
+    owner_id = int((callback.data or "").split("|", 1)[1] or 0)
+    if callback.from_user.id != owner_id:
+        return await callback.answer("Это не твоя кнопка", show_alert=True)
+    row = await get_relationship(owner_id)
+    if not row:
+        return await callback.answer("Отношения не найдены", show_alert=True)
+
+    def _spend():
+        res = supabase.table("users").select("ice").eq("user_id", int(owner_id)).execute()
+        ice = int((res.data[0].get("ice") or 0)) if res.data else 0
+        if ice < LOVE_ICE_COST:
+            return None, ice
+        supabase.table("users").update({"ice": ice - LOVE_ICE_COST}).eq("user_id", int(owner_id)).execute()
+        return True, ice - LOVE_ICE_COST
+
+    try:
+        ok, balance_left = await asyncio.to_thread(_spend)
+    except Exception as e:
+        logger.warning(f"i¢ недоступны: {e}")
+        return await callback.answer("i¢ пока недоступны", show_alert=True)
+    if not ok:
+        return await callback.answer(f"Недостаточно i¢ (нужно {LOVE_ICE_COST}, есть {balance_left})", show_alert=True)
+
+    new_score, granted = await add_love_points(row, LOVE_ACTION_BONUS)
+    await love_cooldown_touch(owner_id)
+    text = f"⚡ Действие выполнено за {LOVE_ICE_COST} i¢. 💗 +{LOVE_ACTION_BONUS} Love (всего {new_score})"
+    if granted:
+        text += "\n🏆 " + ", ".join(f"{s['title']} +{s['reward']:,}" for s in granted)
+    await callback.answer(text[:190], show_alert=True)
+
+
+
+# ================= АДМИН-ПАНЕЛЬ (/admin) =================
+# Скрытая команда: работает только для ADMIN_IDS. В общую справку `помощь`
+# она не попадает — админы узнают о ней из `адм помощь`.
+GAME_SETTINGS_TABLE = "game_settings"
+UPGRADE_ITEM_PRICES_BOT = {"capsule": 100, "uniq_capsule": 500}
+
+
+def _admin_stats_sync():
+    """Статистика для панели. Любая недоступная таблица — просто ноль."""
+    data = {"users": 0, "coins": 0, "spins": 0, "bets": 0, "paid": 0,
+            "crash_rounds": 0, "pairs": 0, "referrals": 0}
+    try:
+        users = supabase.table("users").select("user_id, coins").execute().data or []
+        data["users"] = len(users)
+        data["coins"] = sum(int(row.get("coins") or 0) for row in users)
+    except Exception:
+        pass
+    try:
+        log = supabase.table("upgrade_log").select("amount_from, win_amount, item_from").execute().data or []
+        data["spins"] = len(log)
+        data["bets"] = sum(
+            int(row.get("amount_from") or 0) * (1 if row.get("item_from") == "coin"
+                                                else UPGRADE_ITEM_PRICES_BOT.get(row.get("item_from"), 1))
+            for row in log)
+        data["paid"] = sum(int(row.get("win_amount") or 0) for row in log)
+    except Exception:
+        pass
+    try:
+        data["crash_rounds"] = len(supabase.table("crash_history").select("round_id").execute().data or [])
+    except Exception:
+        pass
+    try:
+        data["pairs"] = len(supabase.table("relationships").select("id").eq("status", "active").execute().data or [])
+    except Exception:
+        pass
+    try:
+        data["referrals"] = len(supabase.table("referrals").select("referred_id").execute().data or [])
+    except Exception:
+        pass
+    return data
+
+
+def _settings_sync():
+    try:
+        rows = supabase.table(GAME_SETTINGS_TABLE).select("key, value").execute().data or []
+    except Exception:
+        return {}
+    return {str(row.get("key")): row.get("value") for row in rows}
+
+
+def _settings_text(values: dict) -> str:
+    chance = values.get("upgrade_chance_factor", "1.0")
+    edge = values.get("upgrade_house_edge", "0.8")
+    return (f"🎛 <b>ШАНСЫ</b>\n"
+            f"• множитель шанса апгрейда: <b>{chance}</b> (1.0 — как задумано, 0.5 — вдвое строже)\n"
+            f"• дом-эдж от 1000 коинов: <b>{edge}</b>\n\n"
+            f"Меняется без деплоя: API подхватывает за 30 секунд.")
+
+
+def _admin_keyboard():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📊 Статистика", callback_data="adm|stats")],
+        [InlineKeyboardButton(text="🎛 Шансы апгрейда", callback_data="adm|settings")],
+        [InlineKeyboardButton(text="💰 Выдать коины", callback_data="adm|give"),
+         InlineKeyboardButton(text="🚫 Бан", callback_data="adm|ban")],
+    ])
+
+
+@dp.message(F.text.func(lambda t: strip_prefix(t).lower() == "admin"
+                        or strip_prefix(t).lower().startswith("admin ")))
+async def cmd_admin_panel(message: Message):
+    if not message.from_user or not is_admin(message.from_user.id):
+        # Не админ — молчим: команда скрытая, палить её незачем.
+        return
+    stats = await asyncio.to_thread(_admin_stats_sync)
+    values = await asyncio.to_thread(_settings_sync)
+    text = (
+        "👑 <b>АДМИН-ПАНЕЛЬ</b>\n━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"👥 Игроков: <b>{stats['users']}</b>\n"
+        f"💰 Коинов в системе: <b>{stats['coins']:,}</b>\n"
+        f"🛠️ Апгрейдов: <b>{stats['spins']}</b> (поставлено {stats['bets']:,}, выплачено {stats['paid']:,})\n"
+        f"🚀 Раундов Ракеты: <b>{stats['crash_rounds']}</b>\n"
+        f"💗 Пар: <b>{stats['pairs']}</b> · 👥 Рефералов: <b>{stats['referrals']}</b>\n\n"
+        + _settings_text(values) + "\n\n"
+        "Команды: <code>+пополнить карман @user 500</code>, <code>бан @user причина</code>, "
+        "<code>разбан @user</code>"
+    )
+    await message.answer(text, parse_mode="HTML", reply_markup=_admin_keyboard())
+
+
+@dp.callback_query(F.data.startswith("adm|"))
+async def cb_admin_panel(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        return await callback.answer("Только для администраторов", show_alert=True)
+    parts = (callback.data or "").split("|")
+    action = parts[1] if len(parts) > 1 else ""
+
+    if action == "stats":
+        stats = await asyncio.to_thread(_admin_stats_sync)
+        await callback.message.answer(
+            "📊 <b>СТАТИСТИКА</b>\n"
+            f"Игроков: <b>{stats['users']}</b>\n"
+            f"Коинов в системе: <b>{stats['coins']:,}</b>\n"
+            f"Апгрейдов: <b>{stats['spins']}</b>\n"
+            f"Поставлено (в коинах): <b>{stats['bets']:,}</b>\n"
+            f"Выплачено (в коинах): <b>{stats['paid']:,}</b>\n"
+            f"Раундов Ракеты: <b>{stats['crash_rounds']}</b>\n"
+            f"Пар: <b>{stats['pairs']}</b> · Рефералов: <b>{stats['referrals']}</b>",
+            parse_mode="HTML")
+        return await callback.answer()
+
+    if action == "settings":
+        values = await asyncio.to_thread(_settings_sync)
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="− шанс", callback_data="adm|set|upgrade_chance_factor|0.8"),
+             InlineKeyboardButton(text="1.0", callback_data="adm|set|upgrade_chance_factor|1.0"),
+             InlineKeyboardButton(text="+ шанс", callback_data="adm|set|upgrade_chance_factor|1.2")],
+            [InlineKeyboardButton(text="дом-эдж 0.6", callback_data="adm|set|upgrade_house_edge|0.6"),
+             InlineKeyboardButton(text="0.8", callback_data="adm|set|upgrade_house_edge|0.8"),
+             InlineKeyboardButton(text="1.0", callback_data="adm|set|upgrade_house_edge|1.0")],
+        ])
+        await callback.message.answer(_settings_text(values), parse_mode="HTML", reply_markup=keyboard)
+        return await callback.answer()
+
+    if action == "set" and len(parts) >= 4:
+        key, value = parts[2], parts[3]
+        if key not in ("upgrade_chance_factor", "upgrade_house_edge", "crash_house_edge"):
+            return await callback.answer("Неизвестная настройка", show_alert=True)
+        try:
+            await asyncio.to_thread(lambda: supabase.table(GAME_SETTINGS_TABLE).upsert(
+                {"key": key, "value": str(value)}, on_conflict="key").execute())
+        except Exception as e:
+            logger.error(f"Настройки недоступны: {e}")
+            return await callback.answer("Примените миграцию game_settings", show_alert=True)
+        await callback.message.answer(f"✅ <b>{key}</b> = <b>{value}</b>", parse_mode="HTML")
+        return await callback.answer("Сохранено")
+
+    if action == "give":
+        await callback.message.answer(
+            "💰 <b>Выдать коины</b>\n\n"
+            "Команда: <code>+пополнить карман @username 500</code>\n"
+            "Списать: <code>забрать @username 100</code>\n"
+            "Ключи: <code>выдать ключ @username 5</code>", parse_mode="HTML")
+        return await callback.answer()
+
+    if action == "ban":
+        await callback.message.answer(
+            "🚫 <b>Баны</b>\n\n"
+            "Забанить: <code>бан @username причина</code>\n"
+            "Разбанить: <code>разбан @username</code>\n"
+            "Список: <code>список банов</code>", parse_mode="HTML")
+        return await callback.answer()
+
+    await callback.answer()
+
+
+# ================= TELEGRAM STARS =================
+# Оплата приходит в бот: pre_checkout_query подтверждает заказ, а successful_payment
+# начисляет коины. Ключ идемпотентности — telegram_payment_charge_id, поэтому
+# повторный апдейт от Telegram не начислит деньги дважды.
+STARS_PACKAGES = {"coins_1000": 1000, "coins_5000": 5000, "coins_15000": 15000}
+STARS_PAYMENTS_TABLE = "stars_payments"
+
+
+def _credit_stars_payment_sync(charge_id: str, user_id: int, coins: int, stars: int) -> bool:
+    try:
+        existing = (supabase.table(STARS_PAYMENTS_TABLE).select("charge_id")
+                    .eq("charge_id", charge_id).execute())
+        if existing.data:
+            return False
+        supabase.table(STARS_PAYMENTS_TABLE).insert({
+            "charge_id": charge_id, "user_id": int(user_id),
+            "coins": int(coins), "stars": int(stars),
+        }).execute()
+    except Exception as e:
+        logger.error(f"stars_payments недоступна: {e}")
+        return False
+    try:
+        res = supabase.table("users").select("coins").eq("user_id", int(user_id)).execute()
+        if not res.data:
+            return False
+        new_coins = int(res.data[0].get("coins") or 0) + int(coins)
+        supabase.table("users").update({"coins": new_coins}).eq("user_id", int(user_id)).execute()
+        return True
+    except Exception as e:
+        logger.error(f"Не удалось начислить коины за Stars: {e}")
+        return False
+
+
+@dp.pre_checkout_query()
+async def on_pre_checkout(query):
+    await query.answer(ok=True)
+
+
+@dp.message(F.successful_payment)
+async def on_successful_payment(message: Message):
+    payment = message.successful_payment
+    if not payment:
+        return
+    payload = (payment.invoice_payload or "").split(":")
+    coins = STARS_PACKAGES.get(payload[1], 0) if len(payload) >= 2 else 0
+    user_id = int(payload[2]) if len(payload) >= 3 and payload[2].isdigit() else message.from_user.id
+    if coins <= 0:
+        return
+    ok = await asyncio.to_thread(_credit_stars_payment_sync, payment.telegram_payment_charge_id,
+                                 user_id, coins, int(payment.total_amount or 0))
+    if ok:
+        await message.answer(f"⭐ Оплата получена! Начислено <b>{coins:,}</b> коинов. Спасибо!",
+                             parse_mode="HTML")
+    else:
+        await message.answer("⭐ Оплата получена, но начисление задерживается. "
+                             "Напиши администратору — платёж сохранён.")
+
+
 # ================= СТАТИСТИКА =================
 @dp.message(F.text.func(lambda t: strip_prefix(t).lower().startswith("стата бота")))
 async def cmd_bot_stats(message: Message):
@@ -1331,7 +1862,7 @@ async def cmd_bot_stats(message: Message):
     F.text.func(lambda t: strip_prefix(t).lower().startswith("помощь") or strip_prefix(t).lower().startswith("help")))
 async def cmd_help(message: Message):
     text = (
-        "📖 <b>СПИСОК КОМАНД БОТА</b>\n━━━━━━━━━━━━━━━━━━━━\n\n🎟️ <b>Промокоды:</b>\n• <code>промо код</code> — активировать промокод\n\n💰 <b>Экономика:</b>\n• <code>карман</code> — твой баланс\n• <code>карман @user</code> — баланс другого\n• <code>перевод @user сумма</code> — перевести\n• <code>перевод сумма</code> (ответом) — быстрый перевод\n• <code>топ</code> — топ-10 богачей\n• <code>магазин</code> — магазин\n\n🎲 <b>Игры:</b>\n• <code>кубы @user ставка</code> — дуэль в кости\n• <code>кубы ставка</code> (ответом) — быстрый вызов\n\n• <code>тег</code> — проверка бота\n• <code>помощь</code> — эта справка")
+        "📖 <b>СПИСОК КОМАНД БОТА</b>\n━━━━━━━━━━━━━━━━━━━━\n\n🎟️ <b>Промокоды:</b>\n• <code>промо код</code> — активировать промокод\n\n💰 <b>Экономика:</b>\n• <code>карман</code> — твой баланс\n• <code>карман @user</code> — баланс другого\n• <code>перевод @user сумма</code> — перевести\n• <code>перевод сумма</code> (ответом) — быстрый перевод\n• <code>топ</code> — топ-10 богачей\n• <code>магазин</code> — магазин\n\n🎲 <b>Игры:</b>\n• <code>кубы @user ставка</code> — дуэль в кости\n• <code>кубы ставка</code> (ответом) — быстрый вызов\n\n💗 <b>Отношения:</b>\n• <code>+любовь @user</code> — предложить отношения\n• <code>поцеловать</code>, <code>обнять</code>, <code>прижать</code>, <code>погладить</code>… — РП-команды (+10 Love паре)\n• <code>любовь</code> — этап и Love коины пары\n• <code>-любовь</code> — завершить отношения\n\n• <code>тег</code> — проверка бота\n• <code>помощь</code> — эта справка")
     await message.answer(text, parse_mode="HTML")
 
 

@@ -6,7 +6,7 @@ from pydantic import BaseModel
 import asyncio
 import uuid
 import logging
-import os, hashlib, hmac, json, time, random, uvicorn, datetime, math
+import os, hashlib, hmac, json, time, random, secrets, uvicorn, datetime, math, aiohttp
 from urllib.parse import parse_qsl
 from dotenv import load_dotenv
 from supabase import create_client, Client
@@ -14,12 +14,15 @@ from typing import Optional, Union
 from shop_catalog import SHOP_ITEMS, ShopPurchaseError, is_admin_id, parse_inventory, purchase_shop_item, \
     serialize_shop_items, missing_stock_rows, shop_stock_snapshot, stock_diagnostics, \
     sold_out_items, STOCK_LIMITS_ENABLED
+from love import (LOVE_STAGES, LOVE_ACTION_BONUS, LOVE_ACTION_COOLDOWN, LOVE_ICE_COST,
+                  RP_ACTIONS, claim_stage_rewards, stage_info as love_stage_info,
+                  next_stage as love_next_stage)
 
 load_dotenv()
 
 # Номер сборки: по нему из /api/health видно, что на сервисе НЕ старый код.
 # Если после деплоя здесь прежнее значение — Render ещё не перезапустился.
-API_BUILD = "2026-11-02-ux-clean-12"
+API_BUILD = "2026-11-09-economy-13"
 
 # Момент старта процесса. По нему видно, что сервис только что «проснулся»:
 # Render на бесплатном тарифе усыпляет Web Service через 15 минут без входящих
@@ -233,6 +236,32 @@ async def health():
         },
         # MAINTENANCE_MODE объявлен ниже по файлу, но к моменту запроса уже существует.
         "maintenance": MAINTENANCE_MODE,
+        # Доступ: пока ADMIN_ONLY_APP включён, Mini App открывают только админы.
+        "access": {
+            "admin_only_app": ADMIN_ONLY_APP,
+            "admins": len(ADMIN_IDS),
+            "message": ADMIN_ONLY_MESSAGE if ADMIN_ONLY_APP else "",
+        },
+        # Экономика задачи 25: по этим числам видно нужную сборку на сервисе.
+        "economy": {
+            "subscription_bonus": SUBSCRIPTION_BONUS,
+            "channel": f"@{CHANNEL_USERNAME}",
+            "passive_rates": PASSIVE_INCOME_RATES,
+            "passive_max_hours": PASSIVE_INCOME_MAX_HOURS,
+            "referral_rewards": {
+                "base": REFERRAL_REWARD_BASE,
+                "nft2": REFERRAL_REWARD_NFT2,
+                "premium": REFERRAL_REWARD_PREMIUM,
+            },
+            "stars_enabled": STARS_ENABLED,
+            "upgrade": {
+                "max_bet": UPGRADE_MAX_BET,
+                "max_capsules": UPGRADE_MAX_CAPSULES,
+                "multipliers": UPGRADE_COIN_MULTIPLIERS,
+                "admin_only": UPGRADE_ADMIN_ONLY,
+            },
+            "arena_mode": game_state.get("mode", "normal"),
+        },
     }
 
 
@@ -244,6 +273,79 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 
 ADMIN_IDS = [6338018270, 5184813347, 8890834384]
 MAX_BET = 10000
+
+# ==================== ДОСТУП В MINI APP ====================
+# Задача 24+: пока идут работы, в Mini App заходят ТОЛЬКО администраторы
+# (ADMIN_IDS). Это отдельный, «жёсткий» рубильник, который НЕ выключается
+# флагом техработ: выключается переменной окружения ADMIN_ONLY_APP=0 в Render.
+#   ADMIN_ONLY_APP=1 (по умолчанию) — заходят только админы, остальные видят
+#   экран «Технические работы», а API отвечает им 403;
+#   ADMIN_ONLY_APP=0 — заходят все (старое поведение).
+def _env_flag(name: str, default: bool = False) -> bool:
+    raw = (os.getenv(name) or "").strip().lower()
+    if raw in ("1", "true", "yes", "on"):
+        return True
+    if raw in ("0", "false", "no", "off"):
+        return False
+    return default
+
+
+ADMIN_ONLY_APP = _env_flag("ADMIN_ONLY_APP", True)
+ADMIN_ONLY_MESSAGE = ("🛠️ Идут технические работы. Пока доступ к игре есть "
+                      "только у администраторов — скоро откроем всем.")
+
+# ==================== ПОДПИСКА НА КАНАЛ ====================
+# Бонус начисляется РОВНО ОДИН РАЗ за всё время: факт начисления хранится в
+# таблице subscriptions_history (user_id — первичный ключ). Отписался и
+# подписался снова — бонуса не будет.
+CHANNEL_USERNAME = (os.getenv("CHANNEL_USERNAME") or "Auragameplay_Channel").strip().lstrip("@")
+CHANNEL_URL = f"https://t.me/{CHANNEL_USERNAME}"
+SUBSCRIPTION_BONUS = 200
+SUBSCRIPTIONS_TABLE = "subscriptions_history"
+
+# ==================== ПАССИВНЫЙ ДОХОД С КАПСУЛ ====================
+# Сколько коинов в час приносит одна капсула каждого типа.
+PASSIVE_INCOME_RATES = {
+    "capsule": 0.1,
+    "uniq_capsule": 0.5,
+    "ruby": 5.0,
+    "diamond": 20.0,
+    "galactic": 50.0,
+}
+# Максимум накопления: если игрок не заходил неделю, «проценты» за 168 часов
+# не капают — иначе один заход давал бы миллионы.
+PASSIVE_INCOME_MAX_HOURS = 24.0
+PASSIVE_INCOME_MIN_HOURS = 1.0 / 60.0     # меньше минуты не считаем (шум)
+PASSIVE_INCOME_TABLE = "passive_income"
+
+# ==================== РЕФЕРАЛЬНАЯ СИСТЕМА ====================
+REFERRALS_TABLE = "referrals"
+REFERRAL_REWARD_BASE = 500          # обычный реферал
+REFERRAL_REWARD_NFT2 = 800          # реферал с 2+ NFT
+REFERRAL_REWARD_PREMIUM = 2000      # premium с рейтингом и 1+ NFT
+# «NFT» в этом проекте — лимитированные капсулы (их тираж конечен, как у NFT),
+# а всё, что начинается с nft, тоже считается. Premium — колонка users.premium
+# (если её нет, реферал считается обычным).
+REFERRAL_NFT_ITEMS = {"galactic", "diamond"}
+
+# ==================== TELEGRAM STARS (донат) ====================
+# Заглушка прайса: цены согласуем позже. Пока пакеты описаны здесь, а покупка
+# включается переменной окружения STARS_ENABLED=1.
+STARS_ENABLED = _env_flag("STARS_ENABLED", False)
+STARS_PACKAGES = [
+    {"id": "coins_1000", "coins": 1000, "stars": 5},
+    {"id": "coins_5000", "coins": 5000, "stars": 20},
+    {"id": "coins_15000", "coins": 15000, "stars": 50},
+]
+STARS_PAYMENTS_TABLE = "stars_payments"
+
+# ==================== IDEMPOTENCY ====================
+# Ключ запроса от клиента (request_id) + таблица idempotency_keys: повторная
+# отправка той же операции (двойной тап, ретрай после таймаута) не спишет
+# деньги дважды, а вернёт сохранённый ответ.
+IDEMPOTENCY_TABLE = "idempotency_keys"
+# Сколько живёт сохранённый ответ. Через сутки ключ можно переиспользовать.
+IDEMPOTENCY_TTL = 86400
 
 # ==================== ТЕХРАБОТЫ ====================
 # Техработы ЗАКОНЧИЛИСЬ: играть может любой игрок (раньше — только ADMIN_IDS).
@@ -264,10 +366,20 @@ MAINTENANCE_MESSAGE = "🛠️ Технические работы: скоро �
 
 
 def can_play(user_id) -> bool:
-    """Может ли этот пользователь играть прямо сейчас."""
+    """Может ли этот пользователь играть прямо сейчас.
+
+    Два независимых рубильника:
+      1) ADMIN_ONLY_APP — «в аппку заходят только админы» (по умолчанию включён);
+      2) MAINTENANCE_MODE — аварийные техработы (тоже только для админов).
+    Проверка серверная: даже если клиент нарисует себе кнопки, игровые
+    эндпоинты ответят 403.
+    """
+    admin = is_admin_id(user_id, ADMIN_IDS)
+    if ADMIN_ONLY_APP and not admin:
+        return False
     if not MAINTENANCE_MODE:
         return True
-    return is_admin_id(user_id, ADMIN_IDS)
+    return admin
 
 
 def require_play_access(user) -> int:
@@ -276,8 +388,15 @@ def require_play_access(user) -> int:
     if user_id is None:
         raise HTTPException(status_code=400, detail="Некорректный id пользователя")
     if not can_play(user_id):
-        raise HTTPException(status_code=403, detail=MAINTENANCE_MESSAGE)
+        raise HTTPException(status_code=403, detail=_access_denied_message(user_id))
     return user_id
+
+
+def _access_denied_message(user_id) -> str:
+    """Почему не пускаем: админ-онли понятнее, чем «техработы»."""
+    if ADMIN_ONLY_APP and not is_admin_id(user_id, ADMIN_IDS):
+        return ADMIN_ONLY_MESSAGE
+    return MAINTENANCE_MESSAGE
 
 
 # ==================== СУНДУКИ ====================
@@ -392,12 +511,19 @@ MINES_MULTIPLIERS = {
 # ==================== АПГРЕЙД (TONGRADER) ====================
 # Шанс = (стоимость предмета слева / стоимость цели справа) * 100.
 UPGRADE_MIN_BET = 50            # минимум коинов на левой панели
-UPGRADE_MAX_BET = 5000          # максимум коинов на левой панели
-UPGRADE_MAX_CAPSULES = 50       # максимум капсул за один апгрейд
+# Задача 25: ставка до 10 000 коинов и до 50 капсул за один апгрейд.
+# Раньше «Слишком большой апгрейд за один раз» вылетало уже на x20 при ставке
+# 5 000 — теперь множители и лимиты согласованы между собой.
+UPGRADE_MAX_BET = 10000         # максимум коинов на левой панели
+UPGRADE_MAX_CAPSULES = 50       # максимум капсул за один апгрейд (лимит инвентаря)
 UPGRADE_MIN_CHANCE = 0.5        # ниже 0.5% цель считается недостижимой
 UPGRADE_MAX_CHANCE = 95.0       # 100% и выше не выдаём
-UPGRADE_MAX_REWARD = 100000     # предохранитель по выплате
-UPGRADE_COIN_MULTIPLIERS = [2, 4, 5, 8, 10]
+# Потолок выплаты — страховка от абсурдных значений в запросе, а не ограничение
+# игры: 10 000 * x50 = 500 000 проходит свободно.
+UPGRADE_MAX_REWARD = 2_000_000
+# Множители апгрейда (задача 25): x4 и x8 убраны, добавлены «почти монетка»
+# x1.12/x1.35/x1.55/x1.75 и редкие крупные x20/x50.
+UPGRADE_COIN_MULTIPLIERS = [1.12, 1.35, 1.55, 1.75, 20, 50]
 UPGRADE_QUICK_CHANCES = [35, 55, 75]
 UPGRADE_ITEM_PRICES = {"capsule": 100, "uniq_capsule": 500}
 UPGRADE_SOURCES = ("coin", "capsule", "uniq_capsule")
@@ -564,7 +690,7 @@ def _db_update_user(user_id, **fields):
     return False
 
 
-def _user_payload(row, is_admin):
+def _user_payload(row, is_admin, user_id=None):
     """Единый ответ профиля: любые NULL/строки из базы приводим к нормальным типам."""
     created_at = row.get("created_at")
     if isinstance(created_at, str):
@@ -576,6 +702,8 @@ def _user_payload(row, is_admin):
             created_text = str(created_at)
     else:
         created_text = None
+    uid = user_id if user_id is not None else row.get("user_id")
+    allowed = can_play(uid) if uid is not None else bool(is_admin)
     return {
         "ok": True,
         "coins": _safe_int(row.get("coins"), 0),
@@ -584,11 +712,16 @@ def _user_payload(row, is_admin):
         "last_chest": _safe_int(row.get("last_chest"), 0),
         "is_admin": is_admin,
         # Техработы: приложение показывает экран-заглушку всем, у кого нет доступа.
-        "maintenance": MAINTENANCE_MODE,
-        "maintenance_message": MAINTENANCE_MESSAGE if MAINTENANCE_MODE else "",
-        "can_play": (not MAINTENANCE_MODE) or bool(is_admin),
+        "maintenance": MAINTENANCE_MODE or ADMIN_ONLY_APP,
+        "maintenance_message": ("" if allowed else _access_denied_message(uid or 0)),
+        "admin_only": ADMIN_ONLY_APP,
+        "can_play": bool(allowed),
         "created_at": created_text,
         "days_in_game": _days_in_game(created_at),
+        # Пассивный доход: клиент считает «в час» по своему инвентарю этими ставками.
+        "passive_rates": PASSIVE_INCOME_RATES,
+        "channel_url": CHANNEL_URL,
+        "subscription_bonus": SUBSCRIPTION_BONUS,
     }
 
 
@@ -618,6 +751,171 @@ def _is_admin_user(user_id):
         return False
 
 
+# ==================== КРИПТОСТОЙКИЙ ГЕНЕРАТОР ====================
+# Игровой рандом не должен зависеть от Mersenne Twister: его состояние можно
+# восстановить по нескольким выдачам. Для ставок, апгрейдов и сундуков берём
+# secrets (os.urandom), а random оставляем только для «декора» — имена ботов,
+# цвета, паузы между ботами.
+def secure_float(lo: float = 0.0, hi: float = 1.0) -> float:
+    """Равномерное число [lo, hi) из криптографического источника."""
+    span = float(hi) - float(lo)
+    if span <= 0:
+        return float(lo)
+    # 53 бита — ровно столько, сколько помещается в мантиссу double, поэтому
+    # распределение остаётся равномерным без «дырок» на краях.
+    return float(lo) + span * (secrets.randbits(53) / float(1 << 53))
+
+
+def secure_int(lo: int, hi: int) -> int:
+    """Целое [lo, hi] включительно, без смещения в сторону меньших чисел."""
+    lo, hi = int(lo), int(hi)
+    if hi <= lo:
+        return lo
+    return lo + secrets.randbelow(hi - lo + 1)
+
+
+def secure_choice(seq):
+    if not seq:
+        return None
+    return seq[secrets.randbelow(len(seq))]
+
+
+def roll_percent() -> float:
+    """Бросок 0..100 с двумя знаками — ровно то, что сравнивается с шансом."""
+    return min(100.0, max(0.0, round(secure_float(0.0, 100.0), 2)))
+
+
+def roll_unit() -> float:
+    """Бросок [0, 1): для шансов вида «10% капсулы из сундука»."""
+    return secure_float(0.0, 1.0)
+
+
+# ==================== НАСТРОЙКИ ИГРЫ (админ меняет шансы) ====================
+# Таблица game_settings (key/value) — единственный способ менять коэффициенты
+# без деплоя: бот пишет, API читает с коротким кэшем.
+GAME_SETTINGS_TABLE = "game_settings"
+GAME_SETTINGS_TTL = 30.0
+_game_settings_cache = {"at": 0.0, "values": {}}
+
+
+def _load_game_settings(force: bool = False) -> dict:
+    now = time.time()
+    if not force and (now - _game_settings_cache["at"]) < GAME_SETTINGS_TTL:
+        return _game_settings_cache["values"]
+    try:
+        res = supabase.table(GAME_SETTINGS_TABLE).select("key, value").execute()
+        values = {}
+        for row in (res.data or []):
+            key = str(row.get("key") or "").strip()
+            if key:
+                values[key] = row.get("value")
+    except Exception:  # таблицы может не быть — играем на дефолтах
+        values = _game_settings_cache["values"]
+    _game_settings_cache.update({"at": now, "values": values})
+    return values
+
+
+def game_setting_float(key: str, default: float) -> float:
+    raw = _load_game_settings().get(key)
+    if raw is None or raw == "":
+        return float(default)
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return float(default)
+
+
+def game_setting_set(key: str, value) -> bool:
+    """Запись настройки. None/'' — удалить строку (вернуться к дефолту)."""
+    key = str(key or "").strip()
+    if not key:
+        return False
+    try:
+        if value is None or value == "":
+            supabase.table(GAME_SETTINGS_TABLE).delete().eq("key", key).execute()
+        else:
+            supabase.table(GAME_SETTINGS_TABLE).upsert(
+                {"key": key, "value": str(value)}, on_conflict="key").execute()
+        _game_settings_cache["at"] = 0.0        # следующий вызов перечитает
+        return True
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Не удалось записать настройку %s: %s", key, exc)
+        return False
+
+
+# ==================== IDEMPOTENCY ====================
+# Клиент присылает request_id (uuid). Один и тот же ключ = один и тот же
+# результат: повтор после таймаута не спишет деньги второй раз.
+def _parse_timestamp(value) -> Optional[float]:
+    """Строка/дата из базы → unix-время. Мусор → None (а не исключение)."""
+    if value is None or value == "":
+        return None
+    if isinstance(value, (int, float)):
+        # Supabase иногда отдаёт секунды, иногда миллисекунды.
+        number = float(value)
+        return number / 1000.0 if number > 1e11 else number
+    if isinstance(value, datetime.datetime):
+        stamp = value
+    else:
+        text = str(value).strip().replace("Z", "+00:00")
+        try:
+            stamp = datetime.datetime.fromisoformat(text)
+        except ValueError:
+            return None
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=datetime.timezone.utc)
+    return stamp.timestamp()
+
+
+def _idempotency_key(user_id, request_id, endpoint: str) -> Optional[str]:
+    raw = str(request_id or "").strip()
+    if not raw:
+        return None
+    if len(raw) > 80:
+        raw = raw[:80]
+    return f"{endpoint}:{user_id}:{raw}"
+
+
+def idempotency_lookup(key: Optional[str]):
+    """Сохранённый ответ или None. Ошибка базы не должна ломать оплату."""
+    if not key:
+        return None
+    try:
+        res = (supabase.table(IDEMPOTENCY_TABLE).select("response, created_at")
+               .eq("key", key).limit(1).execute())
+    except Exception:
+        return None
+    if not res.data:
+        return None
+    row = res.data[0]
+    created = row.get("created_at")
+    # Устаревший ключ считаем недействительным: иначе «через сутки» игрок
+    # получил бы старый ответ вместо новой покупки.
+    stamp = _parse_timestamp(created)
+    if stamp is not None and time.time() - stamp > IDEMPOTENCY_TTL:
+        return None
+    payload = row.get("response")
+    if isinstance(payload, str):
+        try:
+            payload = json.loads(payload)
+        except (TypeError, ValueError):
+            return None
+    return payload if isinstance(payload, dict) else None
+
+
+def idempotency_store(key: Optional[str], user_id, endpoint: str, payload: dict) -> None:
+    if not key or not isinstance(payload, dict):
+        return
+    try:
+        supabase.table(IDEMPOTENCY_TABLE).upsert({
+            "key": key, "user_id": int(user_id), "endpoint": endpoint,
+            "response": json.dumps(payload, ensure_ascii=False),
+            "created_at": _now_iso(),
+        }, on_conflict="key").execute()
+    except Exception as exc:  # noqa: BLE001 — не роняем уже совершённую операцию
+        logger.warning("Не удалось сохранить idempotency-ключ %s: %s", key, exc)
+
+
 def _enforce_bet_limit(user_id, total_bet):
     """Строгая серверная проверка общей ставки: > MAX_BET запрещено всем, кроме админов."""
     if _is_admin_user(user_id):
@@ -627,13 +925,28 @@ def _enforce_bet_limit(user_id, total_bet):
 
 
 # === АРЕНА ===
-game_state = {
-    "status": "waiting", "timer": 15, "bank": 0, "players": [], "winner": None,
-    "last_update": time.time(), "last_bot_added": time.time(), "target_bots": _random_arena_bot_count(), "is_paid": False,
-    "payout_attempt_at": 0, "round_id": str(int(time.time())), "whales_added": 0,
-    "roll_data": None, "rolling_started_at": None, "whale_decided": False,
-    "whale_join": False, "whale_trigger_at": None
+# Две команды командной арены. Цвета — те же, что у красной/синей кнопки в UI.
+ARENA_TEAMS = {
+    "red": {"name": "Красные", "color": "#ff3b30"},
+    "blue": {"name": "Синие", "color": "#007aff"},
 }
+
+
+def _new_arena_state(mode: str = "normal") -> dict:
+    return {
+        "status": "waiting", "timer": 15, "bank": 0, "players": [], "winner": None,
+        "last_update": time.time(), "last_bot_added": time.time(),
+        "target_bots": _random_arena_bot_count(), "is_paid": False,
+        "payout_attempt_at": 0, "round_id": str(int(time.time())), "whales_added": 0,
+        "roll_data": None, "rolling_started_at": None, "whale_decided": False,
+        "whale_join": False, "whale_trigger_at": None,
+        # mode: 'normal' — сектор на каждого игрока, 'team' — красные против синих
+        "mode": mode if mode in ("normal", "team") else "normal",
+        "winner_team": None, "payouts": [], "paid_users": [],
+    }
+
+
+game_state = _new_arena_state()
 history = []
 
 
@@ -730,9 +1043,11 @@ def _add_hockey_bot(is_whale=False):
         bet = random.randint(10, 100)
         color = _unique_hockey_color(BOT_COLORS)
 
+    team = secure_choice(["red", "blue"]) if game_state.get("mode") == "team" else None
     game_state["players"].append({
         "id": f"bot_{random.randint(10000, 99999)}", "name": name, "avatar": "",
-        "bet": bet, "color": color, "is_bot": True,
+        "bet": bet, "color": ARENA_TEAMS[team]["color"] if team else color,
+        "is_bot": True, "team": team,
     })
     _update_hockey_percentages()
     return True
@@ -754,28 +1069,105 @@ def _maybe_add_hockey_bots(now, time_left):
             game_state["whales_added"] = 1
 
 
+def _arena_mode() -> str:
+    """'team' — красные против синих, 'normal' — сектор на каждого игрока."""
+    return "team" if game_state.get("mode") == "team" else "normal"
+
+
+def _hockey_teams() -> list:
+    """Сводка по командам: сумма ставок и доля круга в процентах."""
+    totals = {"red": 0, "blue": 0}
+    for player in game_state["players"]:
+        team = player.get("team")
+        if team in totals:
+            totals[team] += max(0, int(player.get("bet", 0)))
+    total = sum(totals.values())
+    if total <= 0:
+        return []
+    return [
+        {"id": team, "name": ARENA_TEAMS[team]["name"], "color": ARENA_TEAMS[team]["color"],
+         "bet": totals[team], "percent": round(totals[team] / total * 100.0, 4), "is_team": True}
+        for team in ("red", "blue") if totals[team] > 0
+    ]
+
+
+def _hockey_sectors() -> list:
+    """Сектора круга ровно в том порядке, в котором по ним ходит бросок.
+
+    В обычном режиме — по игроку на сектор (как раньше), в командном — два
+    сектора, чьи размеры пропорциональны ставкам команд.
+    """
+    if _arena_mode() == "team" and any(player.get("team") for player in game_state["players"]):
+        teams = _hockey_teams()
+        if teams:
+            return teams
+    return [dict(player) for player in game_state["players"]]
+
+
 def _hockey_winner_at_x(x):
     """Resolve a final ball x-coordinate to the bet-weighted arena sector."""
-    players = game_state["players"]
-    total_bets = sum(max(0, int(player.get("bet", 0))) for player in players)
+    sectors = _hockey_sectors()
+    total_bets = sum(max(0, int(sector.get("bet", 0))) for sector in sectors)
     if total_bets <= 0:
         return None
 
     current_x = 0.0
-    for player in players:
-        sector_width = max(0, int(player.get("bet", 0))) / total_bets * 100.0
+    for sector in sectors:
+        sector_width = max(0, int(sector.get("bet", 0))) / total_bets * 100.0
         if current_x <= x <= current_x + sector_width + 0.0001:
-            return player
+            return sector
         current_x += sector_width
-    return players[-1] if players else None
+    return sectors[-1] if sectors else None
+
+
+def _hockey_payout_plan() -> list:
+    """Кому и сколько платим. Считается один раз на раунд.
+
+    Обычный режим: весь банк одному победителю (как было).
+    Командный режим: банк делится между реальными игроками победившей команды
+    пропорционально их ставкам. Доля ботов из банка не выплачивается — это и
+    есть дом-эдж арены.
+    """
+    plan = game_state.get("payouts") or []
+    if plan:
+        return plan
+    bank = int(game_state.get("bank") or 0)
+    winner_team = game_state.get("winner_team")
+    if winner_team:
+        team_players = [p for p in game_state["players"] if p.get("team") == winner_team]
+        team_total = sum(max(0, int(p.get("bet", 0))) for p in team_players)
+        if team_total <= 0:
+            return []
+        for player in team_players:
+            if player.get("is_bot"):
+                continue
+            try:
+                numeric_id = int(player["id"])
+            except (TypeError, ValueError):
+                continue
+            amount = int(bank * max(0, int(player.get("bet", 0))) / team_total)
+            if amount > 0:
+                plan.append({"user_id": numeric_id, "amount": amount, "name": player.get("name")})
+    else:
+        winner = game_state.get("winner")
+        if winner and not winner.get("is_bot"):
+            try:
+                numeric_id = int(winner["id"])
+            except (TypeError, ValueError):
+                numeric_id = None
+            if numeric_id is not None:
+                plan.append({"user_id": numeric_id, "amount": bank, "name": winner.get("name")})
+    game_state["payouts"] = plan
+    return plan
 
 
 def _payout_hockey_winner():
-    """Credit the full displayed pot to a real winner, retrying failed DB writes."""
-    winner = game_state["winner"]
-    if game_state["is_paid"] or not winner:
+    """Выплатить банк победителю (или победившей команде), повторяя при сбоях базы."""
+    if game_state["is_paid"]:
         return
-    if winner.get("is_bot"):
+    plan = _hockey_payout_plan()
+    if not plan:
+        # Победили боты или банка нет — платить некому, раунд считаем закрытым.
         game_state["is_paid"] = True
         return
 
@@ -783,22 +1175,21 @@ def _payout_hockey_winner():
     if now - game_state.get("payout_attempt_at", 0) < 2:
         return
     game_state["payout_attempt_at"] = now
-    try:
-        numeric_winner_id = int(winner["id"])
-    except (TypeError, ValueError):
-        # Non-numeric IDs belong to synthetic participants, never to user accounts.
-        game_state["is_paid"] = True
-        return
 
     try:
-        res = supabase.table("users").select("coins").eq("user_id", numeric_winner_id).execute()
-        if not res.data:
-            raise RuntimeError("Победитель Арены не найден в таблице users")
-        new_coins = int(res.data[0].get("coins", 0)) + int(game_state["bank"])
-        updated = supabase.table("users").update({"coins": new_coins}).eq(
-            "user_id", numeric_winner_id).select("user_id").execute()
-        if not updated.data:
-            raise RuntimeError("Supabase не подтвердил выплату победителю Арены")
+        for entry in plan:
+            uid = entry["user_id"]
+            if uid in (game_state.get("paid_users") or []):
+                continue
+            res = supabase.table("users").select("coins").eq("user_id", uid).execute()
+            if not res.data:
+                raise RuntimeError(f"Победитель Арены user_id={uid} не найден в users")
+            new_coins = int(res.data[0].get("coins", 0)) + int(entry["amount"])
+            updated = supabase.table("users").update({"coins": new_coins}).eq(
+                "user_id", uid).select("user_id").execute()
+            if not updated.data:
+                raise RuntimeError(f"Supabase не подтвердил выплату user_id={uid}")
+            game_state.setdefault("paid_users", []).append(uid)
         game_state["is_paid"] = True
     except Exception as e:
         # Keep the round unsettled so the background worker can retry instead of losing the payout.
@@ -812,17 +1203,34 @@ def _finish_hockey_round():
     # The winner receives the entire displayed pot, including bot wagers.
     game_state["bank"] = sum(int(player["bet"]) for player in game_state["players"])
     roll_data = game_state.get("roll_data") or {}
+    game_state["winner_team"] = None
     if not game_state["players"] or game_state["bank"] <= 0 or "final_x" not in roll_data:
         game_state["winner"] = None
     else:
-        game_state["winner"] = _hockey_winner_at_x(float(roll_data["final_x"]))
+        sector = _hockey_winner_at_x(float(roll_data["final_x"]))
+        if sector is not None and sector.get("is_team"):
+            # Командный режим: банк забирает команда, а «победитель» для модалки —
+            # самый крупный реальный игрок этой команды.
+            game_state["winner_team"] = sector["id"]
+            team_players = [p for p in game_state["players"] if p.get("team") == sector["id"]]
+            human_players = [p for p in team_players if not p.get("is_bot")] or team_players
+            game_state["winner"] = (max(human_players, key=lambda p: int(p.get("bet", 0)))
+                                    if human_players else None)
+        else:
+            game_state["winner"] = sector
+    game_state["payouts"] = []
+    game_state["paid_users"] = []
+    _hockey_payout_plan()
 
     game_state["status"] = "finished"
     game_state["last_update"] = time.time()
     if game_state["winner"]:
         history.insert(0, {
             "round_id": game_state["round_id"],
-            "winner_name": game_state["winner"]["name"],
+            "winner_name": (f"{ARENA_TEAMS[game_state['winner_team']]['name']} · "
+                            f"{game_state['winner']['name']}" if game_state.get("winner_team")
+                            else game_state["winner"]["name"]),
+            "winner_team": game_state.get("winner_team"),
             "amount": game_state["bank"],
             "players": [
                 {"name": p["name"], "bet": p["bet"], "is_winner": p["id"] == game_state["winner"]["id"]}
@@ -981,16 +1389,31 @@ class UpdateBalance(BaseModel): initData: str; amount: int
 class UpdateKeys(BaseModel): initData: str; amount: int
 
 
-class BuyItem(BaseModel): initData: str; item_id: str; price: Optional[int] = None
+class BuyItem(BaseModel):
+    initData: str
+    item_id: str
+    price: Optional[int] = None
+    # Ключ идемпотентности: повторный запрос с тем же id вернёт сохранённый ответ.
+    request_id: Optional[str] = None
 
 
 class ShopCatalogRequest(BaseModel): initData: str
 
 
-class PlaceBet(BaseModel): initData: str; amount: int
+class PlaceBet(BaseModel):
+    initData: str
+    amount: int
+    # 'red'/'blue' — командная арена (задача 25). В обычном режиме игнорируется.
+    team: Optional[str] = None
+    request_id: Optional[str] = None
 
 
 class FinishHockey(BaseModel): initData: str; x: float; y: float
+
+
+class ArenaModeRequest(BaseModel):
+    initData: str
+    mode: str = "normal"
 
 
 class CrashBet(BaseModel): initData: str; amount: int
@@ -1011,6 +1434,7 @@ class MinesCashout(BaseModel): initData: str
 class OpenChestRequest(BaseModel):
     initData: str
     chest_type: str = "normal"
+    request_id: Optional[str] = None
 
 
 class ClaimChestRequest(BaseModel):
@@ -1030,6 +1454,7 @@ class UpgradeAck(BaseModel):
 
 class UpgradeAction(BaseModel):
     initData: str
+    request_id: Optional[str] = None
     # Новый контракт: что ставим (item_from) и что хотим получить (item_to).
     item_from: Optional[str] = None
     amount_from: Optional[int] = None
@@ -1047,6 +1472,11 @@ def _hockey_state_response():
     response = game_state.copy()
     # Derive the public pot from the same participants shown in the arena, including bots.
     response["bank"] = sum(max(0, int(player.get("bet", 0))) for player in response["players"])
+    # Круглая арена: клиент рисует сектора ровно в этом порядке (доли круга).
+    response["sectors"] = _hockey_sectors()
+    response["teams"] = _hockey_teams()
+    response["mode"] = _arena_mode()
+    response["payouts"] = game_state.get("payouts") or []
     if response.get("roll_data"):
         response["roll_data"] = {key: value for key, value in response["roll_data"].items() if key != "path"}
     response["server_time"] = time.time()
@@ -1078,11 +1508,10 @@ async def get_hockey_state():
         if game_state.get("winner") and not game_state["is_paid"]:
             _payout_hockey_winner()
         if now - game_state["last_update"] > 5 and (not game_state.get("winner") or game_state["is_paid"]):
-            game_state = {"status": "waiting", "timer": 15, "bank": 0, "players": [], "winner": None,
-                          "last_update": now, "last_bot_added": now, "target_bots": _random_arena_bot_count(),
-                          "is_paid": False, "payout_attempt_at": 0, "round_id": str(int(time.time())), "whales_added": 0,
-                          "roll_data": None, "rolling_started_at": None, "whale_decided": False,
-                          "whale_join": False, "whale_trigger_at": None}
+            previous_mode = game_state.get("mode", "normal")
+            game_state = _new_arena_state(previous_mode)
+            game_state["last_update"] = now
+            game_state["last_bot_added"] = now
             return _hockey_state_response()
 
     time_left = 15 - (now - game_state["last_update"]) if game_state["status"] == "waiting" else 0
@@ -1113,10 +1542,23 @@ async def place_bet(data: PlaceBet):
     if (game_state["status"] != "waiting"
             or time.time() - game_state["last_update"] >= 15):
         raise HTTPException(status_code=400, detail="Ставки закрыты")
+    # Команда (только в командном режиме): 'red' / 'blue'. В обычном игнорируется.
+    team = (data.team or "").strip().lower() or None
+    if team not in (None, "red", "blue"):
+        raise HTTPException(status_code=400, detail="Неизвестная команда")
+    if _arena_mode() != "team":
+        team = None
+
     existing_player = next(
         (p for p in game_state["players"] if p["id"] == user_id and not p.get("is_bot")),
         None,
     )
+    # Нельзя ставить за обе команды в одном раунде: иначе игрок «страхуется»
+    # и выигрывает всегда. Отказ понятный, чтобы UI мог подсветить кнопку.
+    if (existing_player is not None and team
+            and existing_player.get("team") and existing_player.get("team") != team):
+        blocked = ARENA_TEAMS.get(existing_player["team"], {}).get("name", "другую команду")
+        raise HTTPException(status_code=400, detail=f"Вы уже ставите за {blocked} — дождитесь конца раунда")
     # Лимит считается по ОБЩЕЙ ставке игрока в раунде, а не по одному запросу —
     # иначе он обходится десятью ставками по 1 000.
     total_after_bet = int(existing_player["bet"] if existing_player else 0) + int(data.amount)
@@ -1144,7 +1586,8 @@ async def place_bet(data: PlaceBet):
             player_color = f"hsl({random.randint(0, 360)}, 80%, 50%)"
         existing_player = {
             "id": user_id, "name": name, "avatar": avatar, "bet": data.amount,
-            "color": player_color, "is_bot": False,
+            "color": ARENA_TEAMS[team]["color"] if team else player_color,
+            "is_bot": False, "team": team,
         }
         game_state["players"].append(existing_player)
 
@@ -1177,18 +1620,49 @@ async def finish_hockey(data: FinishHockey):
 async def get_hockey_history(): return history
 
 
+@app.post("/api/arena_mode")
+async def arena_mode(data: ArenaModeRequest):
+    """Переключение «Обычная арена» / «Командная арена».
+
+    Меняем режим только в фазе ожидания и только пока в раунде нет живых
+    ставок: иначе у игрока уже стоит сектор по старой модели. Боты получают
+    команду автоматически при следующем входе в круг.
+    """
+    user = verify_telegram_data(data.initData)
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid auth data")
+    require_play_access(user)
+    mode = (data.mode or "").strip().lower()
+    if mode not in ("normal", "team"):
+        raise HTTPException(status_code=400, detail="Неизвестный режим арены")
+    if game_state["status"] != "waiting":
+        raise HTTPException(status_code=400, detail="Режим переключим после этого раунда")
+    if any(not p.get("is_bot") for p in game_state["players"]):
+        raise HTTPException(status_code=400, detail="Режим переключим после этого раунда")
+    game_state["mode"] = mode
+    # Уже набежавших ботов раскладываем по командам, чтобы круг не был пустым.
+    for player in game_state["players"]:
+        if mode == "team":
+            player["team"] = player.get("team") or secure_choice(["red", "blue"])
+            player["color"] = ARENA_TEAMS[player["team"]]["color"]
+        else:
+            player["team"] = None
+    _update_hockey_percentages()
+    return {"ok": True, "mode": mode, "teams": _hockey_teams()}
+
+
 # ==================== РАКЕТА (CRASH) ====================
 def get_crash_point_by_chance():
     """Мгновенные краши x1.00-x1.06 выпадают редко (12%), а не в трети раундов."""
-    rv = random.random()
+    rv = roll_unit()
     if rv < 0.12:
-        return random.uniform(1.00, 1.06)
+        return secure_float(1.00, 1.06)
     elif rv < 0.46:
-        return random.uniform(1.06, 2.0)
+        return secure_float(1.06, 2.0)
     elif rv < 0.85:
-        return random.uniform(2.0, 4.0)
+        return secure_float(2.0, 4.0)
     elif rv < 0.99:
-        return random.uniform(4.0, 50.0)
+        return secure_float(4.0, 50.0)
     else:
         return 100.0
 
@@ -1488,11 +1962,16 @@ async def mines_open(data: MinesOpen):
     if game["positions"] is None:
         # Позиции мин рождаются на первом клике: так работает надбавка к риску.
         positions = set()
-        if random.random() < game["first_click_chance"]:
+        if roll_unit() < game["first_click_chance"]:
             positions.add(cell)
         need = game["mines"] - len(positions)
         pool = [index for index in range(MINES_CELLS) if index not in positions]
-        positions.update(random.sample(pool, need))
+        # Своя выборка без повторов на secrets: random.sample() предсказуем.
+        for _ in range(need):
+            if not pool:
+                break
+            picked = pool.pop(secrets.randbelow(len(pool)))
+            positions.add(picked)
         game["positions"] = sorted(positions)
 
     if cell in game["positions"]:
@@ -1589,10 +2068,17 @@ async def get_user(auth: UserAuth):
     # Если в базе оказалось несколько строк (старые дубли), берём ту, где больше коинов —
     # иначе игрок видит 0, хотя в «кармане» бота лежат его деньги.
     row = max(rows, key=lambda item: _safe_int(item.get("coins"), 0))
+    # «0 дней в игре» лечится здесь же: если у старого профиля нет created_at,
+    # ставим текущий момент, и с этого дня счётчик начнёт расти. Раньше NULL
+    # в базе навсегда оставлял игрока с нулём.
+    if not row.get("created_at"):
+        backfill = _now_iso()
+        if _db_update_user(user_id, created_at=backfill):
+            row["created_at"] = backfill
     if len(rows) > 1:
         logger.warning("Дубли профиля user_id=%s: %s", user_id,
                        [(_safe_int(item.get("id"), None), _safe_int(item.get("coins"), 0)) for item in rows])
-    return _user_payload(row, is_admin)
+    return _user_payload(row, is_admin, user_id)
 
 
 @app.post("/api/self_check")
@@ -1772,7 +2258,7 @@ def roll_chest_capsule(chest_type: str) -> tuple[str, int]:
     chance = chest_capsule_chance(chest_type)
     if chance <= 0:
         return "", 0
-    if random.random() < chance:
+    if roll_unit() < chance:
         return CHEST_CAPSULE_ITEM, CHEST_CAPSULE_AMOUNT
     return "", 0
 
@@ -2072,6 +2558,14 @@ async def open_chest(auth: OpenChestRequest):
     check_ban(user_id)
 
     chest_type = (auth.chest_type or "normal").strip().lower()
+
+    # Идемпотентность: повторный запрос с тем же ключом вернёт уже открытый
+    # сундук, а не потратит второй ключ/кулдаун.
+    idem_key = _idempotency_key(user_id, auth.request_id, f"open_chest:{chest_type}")
+    cached = idempotency_lookup(idem_key)
+    if cached is not None:
+        cached["idempotent_replay"] = True
+        return cached
     if chest_type not in ("normal", "gold"):
         raise HTTPException(status_code=400, detail="Неизвестный тип сундука")
 
@@ -2140,16 +2634,17 @@ async def open_chest(auth: OpenChestRequest):
         if keys <= 0:
             raise HTTPException(status_code=400, detail="У вас нет ключей!")
         keys -= 1
-        reward_coins = 0 if random.random() < GOLD_KEY_BACK_CHANCE else random.randint(GOLD_MIN_COINS, GOLD_MAX_COINS)
+        reward_coins = (0 if roll_unit() < GOLD_KEY_BACK_CHANCE
+                        else secure_int(GOLD_MIN_COINS, GOLD_MAX_COINS))
         reward_keys = 1 if reward_coins == 0 else 0
     else:
         if (now - last_chest) < CHEST_COOLDOWN:
             raise HTTPException(status_code=400, detail="Сундук перезаряжается")
         last_chest = now
-        if random.random() < CHEST_KEY_CHANCE:
+        if roll_unit() < CHEST_KEY_CHANCE:
             reward_coins, reward_keys = 0, 1
         else:
-            reward_coins, reward_keys = random.randint(CHEST_MIN_COINS, CHEST_MAX_COINS), 0
+            reward_coins, reward_keys = secure_int(CHEST_MIN_COINS, CHEST_MAX_COINS), 0
 
     # Обычная капсула: отдельный бросок в ДОБАВОК к коинам/ключу.
     # Золотой сундук — 10%, обычный — 0.1%.
@@ -2177,7 +2672,7 @@ async def open_chest(auth: OpenChestRequest):
     if not _db_update_user(user_id, coins=coins, keys=keys, last_chest=last_chest):
         raise HTTPException(status_code=500, detail="Не удалось открыть сундук")
 
-    return {
+    payload = {
         "success": True, "chest_type": chest_type,
         "reward_coins": reward_coins, "reward_keys": reward_keys,
         # Капсула (если выпала) — отдельным полем: клиент рисует её в рулетке и
@@ -2188,6 +2683,8 @@ async def open_chest(auth: OpenChestRequest):
         "credited": False, "deferred": True,
         "new_balance": coins, "new_keys": keys, "last_chest": last_chest,
     }
+    idempotency_store(idem_key, user_id, f"open_chest:{chest_type}", payload)
+    return payload
 
 
 @app.post("/api/claim_chest")
@@ -2344,6 +2841,13 @@ async def buy_item(data: BuyItem):
     if data.item_id not in SHOP_ITEMS:
         raise HTTPException(status_code=400, detail="Неизвестный предмет магазина")
 
+    # Идемпотентность: двойной тап по «Купить» не должен списать коины дважды.
+    idem_key = _idempotency_key(user_id, data.request_id, "buy_item")
+    cached = idempotency_lookup(idem_key)
+    if cached is not None:
+        cached["idempotent_replay"] = True
+        return cached
+
     try:
         result = await asyncio.to_thread(purchase_shop_item, supabase, user_id, data.item_id,
                                          ADMIN_IDS, "mini")
@@ -2365,6 +2869,8 @@ async def buy_item(data: BuyItem):
     print(f"МАГАЗИН: куплено user_id={user_id} item={data.item_id} "
           f"баланс→{result.get('new_balance')} остаток→{result.get('stock')} "
           f"stock_ready={result.get('stock_ready')}", flush=True)
+    if isinstance(result, dict):
+        idempotency_store(idem_key, user_id, "buy_item", result)
     return result
 
 # ==================== АПГРЕЙД (TONGRADER) ====================
@@ -2418,6 +2924,14 @@ def _upgrade_target_value(source: str, amount: int, target: str,
                 raise HTTPException(status_code=400, detail="Некорректный коэффициент")
             if multiplier <= 1:
                 raise HTTPException(status_code=400, detail="Коэффициент должен быть больше x1")
+            # Задача 25: набор множителей фиксирован (x4 и x8 убраны). Проверяем
+            # и на сервере, иначе старый закешированный клиент продолжал бы
+            # присылать x4 и играть по старым правилам.
+            allowed = any(abs(float(multiplier) - float(item)) < 1e-9
+                          for item in UPGRADE_COIN_MULTIPLIERS)
+            if not allowed:
+                raise HTTPException(status_code=400,
+                                    detail="Такой множитель больше не доступен")
             to_value = int(round(from_value * multiplier))
         win_amount = to_value
     else:
@@ -2428,7 +2942,9 @@ def _upgrade_target_value(source: str, amount: int, target: str,
     if to_value <= 0:
         raise HTTPException(status_code=400, detail="Некорректная цель апгрейда")
     if to_value > UPGRADE_MAX_REWARD:
-        raise HTTPException(status_code=400, detail="Слишком большой апгрейд за один раз")
+        # Сработает только на заведомо мусорных числах из запроса: штатные
+        # комбинации (до 10 000 коинов × x50) проходят с запасом.
+        raise HTTPException(status_code=400, detail="Слишком крупная цель — выбери что-то поменьше")
 
     visual_chance = from_value / to_value * 100.0
     if visual_chance > UPGRADE_MAX_CHANCE:
@@ -2595,6 +3111,13 @@ async def upgrade_action(data: UpgradeAction):
 
     check_ban(str(user_id))
 
+    # Идемпотентность: повторная отправка того же апгрейда не спишет ставку снова.
+    idem_key = _idempotency_key(user_id, data.request_id, "upgrade")
+    cached = idempotency_lookup(idem_key)
+    if cached is not None:
+        cached["idempotent_replay"] = True
+        return cached
+
     source, amount, target, _ = _upgrade_normalize_request(data)
 
     if source == "coin":
@@ -2633,8 +3156,10 @@ async def upgrade_action(data: UpgradeAction):
         # а не до цикла, потому что баланс мог измениться между попытками.
         edge = 1.0
         if raw_coins >= UPGRADE_HOUSE_EDGE_MIN_BALANCE:
-            edge = UPGRADE_HOUSE_EDGE_FACTOR
+            edge = game_setting_float("upgrade_house_edge", UPGRADE_HOUSE_EDGE_FACTOR)
         real_chance = visual_chance * edge
+        # Админ может подкрутить шансы без деплоя (таблица game_settings).
+        real_chance *= game_setting_float("upgrade_chance_factor", 1.0)
         if not admin:
             real_chance /= UPGRADE_NON_ADMIN_DIVIDER
 
@@ -2643,9 +3168,11 @@ async def upgrade_action(data: UpgradeAction):
         # и ставит стрелку на roll * 3.6°, поэтому любое расхождение в округлении
         # сразу даёт «стрелка в красной зоне, а засчитали победу».
         chance_verdict = round(min(100.0, max(0.0, float(real_chance))), 2)
-        # Бросок: random.uniform(0, 100), до сотых — клиент ставит угол roll * 3.6°.
-        roll = round(random.uniform(0.0, 100.0), 2)
-        roll = min(100.0, max(0.0, roll))
+        # Бросок: криптостойкий ГСЧ (secrets), до сотых — клиент ставит угол
+        # roll * 3.6°. Mersenne Twister здесь недопустим: по нескольким выдачам
+        # его состояние восстанавливается, и «честный» рандом становится
+        # предсказуемым.
+        roll = roll_percent()
         # Правило игрока: roll <= chance — победа, roll > chance — проигрыш.
         # Граница (roll == chance) принадлежит ЗЕЛЁНОЙ зоне, ровно как заливка
         # на клиенте: зелёная 0..chance, красная chance..100.
@@ -2680,7 +3207,7 @@ async def upgrade_action(data: UpgradeAction):
                 win_amount=payout,
                 coins_before=raw_coins, coins_after=new_coins, inventory_after=new_inventory,
             )
-            return {
+            payload = {
                 "success": won,
                 "won": won,
                 "item_from": source,
@@ -2704,6 +3231,8 @@ async def upgrade_action(data: UpgradeAction):
                 "inventory": new_inventory,
                 "new_inventory": new_inventory,
             }
+            idempotency_store(idem_key, user_id, "upgrade", payload)
+            return payload
 
     raise HTTPException(status_code=409, detail="Апгрейд уже обрабатывается. Попробуйте ещё раз.")
 
@@ -2801,6 +3330,653 @@ async def update_keys(data: UpdateKeys):
         raise HTTPException(status_code=500, detail="Не удалось обновить ключи")
     return {"success": True, "new_keys": new_keys}
 
+
+
+# ==================== ПОДПИСКА / ПАССИВКА / РЕФЕРАЛЫ / STARS ====================
+class ChannelCheckRequest(BaseModel):
+    initData: str
+    request_id: Optional[str] = None
+
+
+class PassiveIncomeRequest(BaseModel):
+    initData: str
+
+
+class ReferralBindRequest(BaseModel):
+    initData: str
+    ref_code: Optional[str] = None
+
+
+class StarsInvoiceRequest(BaseModel):
+    initData: str
+    package_id: Optional[str] = None
+
+
+class AdminSettingRequest(BaseModel):
+    initData: str
+    key: str
+    value: Optional[str] = None
+
+
+class AdminGiveRequest(BaseModel):
+    initData: str
+    user_id: int
+    amount: int
+    request_id: Optional[str] = None
+
+
+class AdminBanRequest(BaseModel):
+    initData: str
+    user_id: int
+    banned: bool = True
+
+
+def _auth_user_id(init_data: str) -> int:
+    """Единая расшифровка initData → user_id (401/400 вместо трейсбека)."""
+    user = verify_telegram_data(init_data)
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid auth data")
+    uid = _safe_int(user.get("id"), None)
+    if uid is None:
+        raise HTTPException(status_code=400, detail="Некорректный id пользователя")
+    check_ban(str(uid))
+    return uid
+
+
+def _require_admin_api(init_data: str) -> int:
+    uid = _auth_user_id(init_data)
+    if not is_admin_id(uid, ADMIN_IDS):
+        raise HTTPException(status_code=403, detail="Только для администраторов")
+    return uid
+
+
+def award_coins(user_id, amount) -> Optional[int]:
+    """Начисление коинов на сервере: читаем актуальный баланс, пишем новый.
+
+    Возвращает новый баланс или None, если запись не прошла. Все начисления
+    (подписка, пассивка, рефералы, Stars) идут только через эту функцию —
+    клиент не может прибавить себе коины запросом.
+    """
+    uid = _safe_int(user_id, None)
+    if uid is None:
+        return None
+    row = _db_user(uid)
+    if row is None:
+        return None
+    coins = _safe_int(row.get("coins"), 0) + int(amount)
+    if coins < 0:
+        coins = 0
+    return coins if _db_update_user(uid, coins=coins) else None
+
+
+async def telegram_chat_member_status(user_id) -> dict:
+    """Статус подписки на канал через getChatMember.
+
+    Возвращает {"ok": bool, "status": str, "subscribed": bool, "detail": str}.
+    Сетевые/токеновые ошибки не роняют эндпоинт: игрок увидит «не удалось
+    проверить», а не 500.
+    """
+    if not BOT_TOKEN:
+        return {"ok": False, "status": "", "subscribed": False,
+                "detail": "BOT_TOKEN не задан на сервисе aura-api"}
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/getChatMember"
+    params = {"chat_id": f"@{CHANNEL_USERNAME}", "user_id": int(user_id)}
+    try:
+        timeout = aiohttp.ClientTimeout(total=8)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(url, params=params) as response:
+                payload = await response.json(content_type=None)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("getChatMember недоступен: %s", exc)
+        return {"ok": False, "status": "", "subscribed": False,
+                "detail": "Не удалось проверить подписку, попробуйте позже"}
+    if not isinstance(payload, dict) or not payload.get("ok"):
+        description = (payload or {}).get("description") if isinstance(payload, dict) else ""
+        return {"ok": False, "status": "", "subscribed": False,
+                "detail": description or "Telegram не подтвердил проверку подписки"}
+    status = str((payload.get("result") or {}).get("status") or "")
+    subscribed = status in ("creator", "administrator", "member")
+    return {"ok": True, "status": status, "subscribed": subscribed,
+            "detail": "" if subscribed else "Вы ещё не подписаны на канал"}
+
+
+def _subscription_claimed(user_id) -> Optional[bool]:
+    """True/False — было ли начисление. None — таблица недоступна."""
+    try:
+        res = (supabase.table(SUBSCRIPTIONS_TABLE).select("user_id, bonus_claimed")
+               .eq("user_id", int(user_id)).limit(1).execute())
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("subscriptions_history недоступна: %s", exc)
+        return None
+    return bool(res.data)
+
+
+@app.post("/api/channel_check")
+async def channel_check(data: ChannelCheckRequest):
+    """Проверка подписки + одноразовый бонус 200 коинов.
+
+    Порядок важен для честности: сначала getChatMember, потом «одноразовая»
+    отметка в базе, и только если её удалось поставить — начисление. Если
+    отметка уже стоит, второй раз коины не придут, даже если игрок
+    отписался и подписался снова.
+    """
+    uid = _auth_user_id(data.initData)
+    member = await telegram_chat_member_status(uid)
+    if not member["subscribed"]:
+        return {
+            "ok": bool(member["ok"]),
+            "subscribed": False,
+            "bonus": SUBSCRIPTION_BONUS,
+            "bonus_claimed": _subscription_claimed(uid) is True,
+            "channel_url": CHANNEL_URL,
+            "detail": member["detail"],
+        }
+
+    claimed = _subscription_claimed(uid)
+    if claimed is None:
+        raise HTTPException(status_code=503, detail=(
+            "Таблица subscriptions_history не создана. Примените миграцию "
+            "supabase/migrations/20261109000000_economy_social.sql"))
+    if claimed:
+        return {"ok": True, "subscribed": True, "bonus": SUBSCRIPTION_BONUS,
+                "bonus_claimed": True, "granted": 0, "channel_url": CHANNEL_URL,
+                "detail": "Бонус за подписку уже получен"}
+
+    # Ставим отметку ДО начисления: user_id — первичный ключ, поэтому две
+    # параллельные проверки не смогут выдать бонус дважды.
+    try:
+        supabase.table(SUBSCRIPTIONS_TABLE).insert({
+            "user_id": uid, "bonus_claimed": True, "reward": SUBSCRIPTION_BONUS,
+            "created_at": _now_iso(),
+        }).execute()
+    except Exception as exc:  # noqa: BLE001
+        if _subscription_claimed(uid):
+            return {"ok": True, "subscribed": True, "bonus": SUBSCRIPTION_BONUS,
+                    "bonus_claimed": True, "granted": 0, "channel_url": CHANNEL_URL,
+                    "detail": "Бонус за подписку уже получен"}
+        raise HTTPException(status_code=503, detail=_db_error_detail(
+            exc, "Не удалось зафиксировать бонус, попробуйте позже")) from exc
+
+    coins = award_coins(uid, SUBSCRIPTION_BONUS)
+    if coins is None:
+        # Начисление не прошло — снимаем отметку, чтобы бонус не «сгорел».
+        try:
+            supabase.table(SUBSCRIPTIONS_TABLE).delete().eq("user_id", uid).execute()
+        except Exception:
+            pass
+        raise HTTPException(status_code=503, detail="Не удалось начислить бонус, попробуйте ещё раз")
+
+    return {"ok": True, "subscribed": True, "bonus": SUBSCRIPTION_BONUS,
+            "bonus_claimed": True, "granted": SUBSCRIPTION_BONUS,
+            "new_balance": coins, "channel_url": CHANNEL_URL,
+            "detail": f"Бонус +{SUBSCRIPTION_BONUS} коинов за подписку"}
+
+
+def _passive_rate_for(inventory) -> tuple[float, dict]:
+    """Сколько коинов в час приносит инвентарь + разбивка по предметам."""
+    counts: dict = {}
+    for item in inventory or []:
+        item_id = str(item)
+        counts[item_id] = counts.get(item_id, 0) + 1
+    rate = sum(PASSIVE_INCOME_RATES.get(item_id, 0.0) * count
+               for item_id, count in counts.items())
+    breakdown = {item_id: {"count": count, "rate": PASSIVE_INCOME_RATES.get(item_id, 0.0),
+                           "per_hour": PASSIVE_INCOME_RATES.get(item_id, 0.0) * count}
+                 for item_id, count in counts.items() if PASSIVE_INCOME_RATES.get(item_id)}
+    return round(rate, 4), breakdown
+
+
+def _passive_last_at(user_id):
+    """Момент последнего начисления. None — ещё не начисляли, 'error' — нет таблицы."""
+    try:
+        res = (supabase.table(PASSIVE_INCOME_TABLE).select("last_at")
+               .eq("user_id", int(user_id)).limit(1).execute())
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("passive_income недоступна: %s", exc)
+        return "error"
+    if not res.data:
+        return None
+    return _parse_timestamp(res.data[0].get("last_at"))
+
+
+def _passive_touch(user_id, stamp: float) -> bool:
+    try:
+        supabase.table(PASSIVE_INCOME_TABLE).upsert(
+            {"user_id": int(user_id), "last_at": _iso_from_timestamp(stamp)},
+            on_conflict="user_id").execute()
+        return True
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Не удалось сохранить passive_income %s: %s", user_id, exc)
+        return False
+
+
+def _iso_from_timestamp(stamp: float) -> str:
+    return datetime.datetime.fromtimestamp(float(stamp), datetime.timezone.utc).isoformat()
+
+
+@app.post("/api/passive_income")
+async def passive_income(data: PassiveIncomeRequest):
+    """Пассивный доход с капсул: начисляется сервером по фактическому инвентарю.
+
+    Формула: сумма(кол-во капсул * ставка в час) * прошедшие часы, но не больше
+    24 часов за один заход. Начисление идемпотентно по времени: как только
+    коины выданы, отметка last_at сдвигается ровно на «оплаченные» часы.
+    """
+    uid = _auth_user_id(data.initData)
+    row = _db_user(uid)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Профиль не найден")
+    inventory = parse_inventory(row.get("inventory"))
+    rate, breakdown = _passive_rate_for(inventory)
+    now = time.time()
+
+    last = _passive_last_at(uid)
+    if last == "error":
+        raise HTTPException(status_code=503, detail=(
+            "Таблица passive_income не создана. Примените миграцию "
+            "supabase/migrations/20261109000000_economy_social.sql"))
+    if last is None:
+        _passive_touch(uid, now)
+        return {"ok": True, "accrued": 0, "rate": rate, "hours": 0.0,
+                "breakdown": breakdown, "new_balance": _safe_int(row.get("coins"), 0),
+                "detail": "Пассивный доход запущен — заходите позже"}
+
+    hours = max(0.0, min(PASSIVE_INCOME_MAX_HOURS, (now - float(last)) / 3600.0))
+    entitled = rate * hours
+    accrued = int(entitled)          # дробные коины копим, а не теряем
+    coins_now = _safe_int(row.get("coins"), 0)
+    if accrued < 1 or rate <= 0:
+        return {"ok": True, "accrued": 0, "rate": rate, "hours": round(hours, 3),
+                "entitled": round(entitled, 3), "breakdown": breakdown,
+                "new_balance": coins_now,
+                "detail": "Накопление идёт" if rate > 0 else "Нет капсул для пассивного дохода"}
+
+    new_coins = award_coins(uid, accrued)
+    if new_coins is None:
+        raise HTTPException(status_code=503, detail="Не удалось начислить пассивный доход")
+    # Сдвигаем отметку ровно на оплаченные часы: остаток «с копейками» остаётся.
+    consumed_hours = accrued / rate
+    _passive_touch(uid, min(now, float(last) + consumed_hours * 3600.0))
+    return {"ok": True, "accrued": accrued, "rate": rate, "hours": round(hours, 3),
+            "breakdown": breakdown, "new_balance": new_coins,
+            "detail": f"+{accrued} коинов пассивного дохода"}
+
+
+# ---------- Рефералы ----------
+def _nft_count(inventory) -> int:
+    """«NFT» этого проекта: лимитированные капсулы + всё, что начинается с nft."""
+    total = 0
+    for item in inventory or []:
+        item_id = str(item).lower()
+        if item_id in REFERRAL_NFT_ITEMS or item_id.startswith("nft"):
+            total += 1
+    return total
+
+
+def _referral_reward_for(row) -> int:
+    inventory = parse_inventory(row.get("inventory"))
+    nft = _nft_count(inventory)
+    premium = bool(row.get("premium"))
+    if premium and nft >= 1:
+        return REFERRAL_REWARD_PREMIUM
+    if nft >= 2:
+        return REFERRAL_REWARD_NFT2
+    return REFERRAL_REWARD_BASE
+
+
+def _referral_parse_code(raw) -> Optional[int]:
+    """ref_123 / 123 / https://t.me/bot?startapp=ref_123 → 123."""
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    if "startapp=" in text:
+        text = text.split("startapp=", 1)[1]
+    elif "start=" in text:
+        text = text.split("start=", 1)[1]
+    text = text.split("&", 1)[0]
+    if text.lower().startswith("ref_"):
+        text = text[4:]
+    return _safe_int(text, None)
+
+
+def _referral_rows_for_referrer(user_id, limit: int = 100):
+    try:
+        res = (supabase.table(REFERRALS_TABLE).select("*")
+               .eq("referrer_id", int(user_id)).limit(limit).execute())
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("referrals недоступна: %s", exc)
+        return "error"
+    return res.data or []
+
+
+def _referral_stats(user_id) -> dict:
+    rows = _referral_rows_for_referrer(user_id)
+    if rows == "error":
+        return {"available": False, "count": 0, "earned": 0, "invited": [],
+                "detail": "Примените миграцию 20261109000000_economy_social.sql"}
+    earned = sum(_safe_int(row.get("reward"), 0) for row in rows)
+    return {
+        "available": True,
+        "count": len(rows),
+        "earned": earned,
+        "invited": [{"user_id": row.get("referred_id"),
+                     "reward": _safe_int(row.get("reward"), 0),
+                     "status": row.get("status") or "pending"} for row in rows[:20]],
+        "link": f"https://t.me/{{bot}}?startapp=ref_{int(user_id)}",
+    }
+
+
+@app.post("/api/referral_bind")
+async def referral_bind(data: ReferralBindRequest):
+    """Привязать пригласившего. Работает один раз: у referred_id уникальный ключ."""
+    uid = _auth_user_id(data.initData)
+    referrer_id = _referral_parse_code(data.ref_code)
+    if referrer_id is None:
+        return {"ok": False, "detail": "Некорректный код приглашения"}
+    if referrer_id == uid:
+        return {"ok": False, "detail": "Нельзя пригласить самого себя"}
+    if _db_user(referrer_id) is None:
+        return {"ok": False, "detail": "Пригласивший не найден"}
+    try:
+        res = (supabase.table(REFERRALS_TABLE).select("referred_id")
+               .eq("referred_id", uid).limit(1).execute())
+        if res.data:
+            return {"ok": True, "already": True, "detail": "Приглашение уже учтено"}
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=503, detail=(
+            "Таблица referrals не создана. Примените миграцию "
+            "supabase/migrations/20261109000000_economy_social.sql")) from exc
+    try:
+        supabase.table(REFERRALS_TABLE).insert({
+            "referred_id": uid, "referrer_id": referrer_id, "reward": 0,
+            "status": "pending", "created_at": _now_iso(),
+        }).execute()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Не удалось записать реферала %s → %s: %s", referrer_id, uid, exc)
+        return {"ok": False, "detail": "Не удалось сохранить приглашение"}
+    return {"ok": True, "referrer_id": referrer_id, "status": "pending"}
+
+
+@app.post("/api/referral_check")
+async def referral_check(data: UserAuth):
+    """Проверка статуса реферала при его входе в Mini App.
+
+    Награда достаётся пригласившему и начисляется один раз: статус в таблице
+    переводится из pending в paid, повторный вызов ничего не платит.
+    """
+    uid = _auth_user_id(data.initData)
+    try:
+        res = (supabase.table(REFERRALS_TABLE).select("*")
+               .eq("referred_id", uid).limit(1).execute())
+    except Exception:  # noqa: BLE001 — таблицы нет: это не ошибка входа
+        return {"ok": True, "available": False, "paid": False}
+    if not res.data:
+        return {"ok": True, "available": True, "referred": False, "paid": False}
+    row = res.data[0]
+    if (row.get("status") or "") == "paid":
+        return {"ok": True, "available": True, "referred": True, "paid": True,
+                "reward": _safe_int(row.get("reward"), 0), "detail": "Награда уже начислена"}
+
+    referred_row = _db_user(uid) or {}
+    reward = _referral_reward_for(referred_row)
+    referrer_id = _safe_int(row.get("referrer_id"), None)
+    if referrer_id is None:
+        return {"ok": True, "available": True, "referred": True, "paid": False}
+    new_balance = award_coins(referrer_id, reward)
+    if new_balance is None:
+        raise HTTPException(status_code=503, detail="Не удалось начислить награду за реферала")
+    try:
+        supabase.table(REFERRALS_TABLE).update({
+            "reward": reward, "status": "paid", "paid_at": _now_iso(),
+        }).eq("referred_id", uid).execute()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Не удалось отметить реферальную награду: %s", exc)
+    return {"ok": True, "available": True, "referred": True, "paid": True,
+            "reward": reward, "referrer_balance": new_balance,
+            "detail": f"Пригласивший получил {reward} коинов"}
+
+
+@app.post("/api/referrals")
+async def referrals_info(data: UserAuth):
+    uid = _auth_user_id(data.initData)
+    stats = _referral_stats(uid)
+    stats.update({"ok": True, "code": f"ref_{uid}"})
+    return stats
+
+
+# ---------- Telegram Stars ----------
+@app.post("/api/stars_invoice")
+async def stars_invoice(data: StarsInvoiceRequest):
+    """Счёт на покупку коинов за Telegram Stars.
+
+    Прайс — заглушка (STARS_PACKAGES). Пока STARS_ENABLED выключен, эндпоинт
+    отдаёт список пакетов и честный «пока недоступно», чтобы фронт мог
+    показать витрину без ошибок.
+    """
+    uid = _auth_user_id(data.initData)
+    package = next((p for p in STARS_PACKAGES if p["id"] == data.package_id), None)
+    if not STARS_ENABLED:
+        return {"ok": False, "enabled": False, "packages": STARS_PACKAGES,
+                "detail": "Покупка коинов за Stars скоро появится"}
+    if package is None:
+        raise HTTPException(status_code=400, detail="Неизвестный пакет коинов")
+    if not BOT_TOKEN:
+        raise HTTPException(status_code=503, detail="BOT_TOKEN не задан")
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/createInvoiceLink"
+    payload = {
+        "title": f"{package['coins']} коинов",
+        "description": f"Пакет {package['coins']} коинов в AURA GAME",
+        "payload": f"coins:{package['id']}:{uid}",
+        "currency": "XTR",
+        # Для Stars цена передаётся в самом «звёздном» номинале, без *100.
+        "prices": [{"label": f"{package['coins']} коинов", "amount": int(package["stars"])}],
+    }
+    try:
+        timeout = aiohttp.ClientTimeout(total=10)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.post(url, json=payload) as response:
+                result = await response.json(content_type=None)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=503, detail="Telegram недоступен, попробуйте позже") from exc
+    if not isinstance(result, dict) or not result.get("ok"):
+        detail = (result or {}).get("description") if isinstance(result, dict) else ""
+        raise HTTPException(status_code=503, detail=detail or "Не удалось создать счёт")
+    return {"ok": True, "enabled": True, "url": result.get("result"),
+            "coins": package["coins"], "stars": package["stars"]}
+
+
+@app.get("/api/stars_packages")
+async def stars_packages():
+    return {"enabled": STARS_ENABLED, "packages": STARS_PACKAGES, "currency": "XTR"}
+
+
+def stars_credit(user_id, coins, charge_id, stars: int = 0) -> Optional[int]:
+    """Начислить коины за оплаченный Stars-инвойс ровно один раз.
+
+    Вызывается из бота по successful_payment. Ключ идемпотентности —
+    telegram_payment_charge_id: Telegram может повторить апдейт, а деньги
+    игрок должен получить один раз.
+    """
+    uid = _safe_int(user_id, None)
+    if uid is None or not charge_id:
+        return None
+    try:
+        existing = (supabase.table(STARS_PAYMENTS_TABLE).select("charge_id")
+                    .eq("charge_id", str(charge_id)).limit(1).execute())
+        if existing.data:
+            row = _db_user(uid)
+            return _safe_int((row or {}).get("coins"), 0)
+        supabase.table(STARS_PAYMENTS_TABLE).insert({
+            "charge_id": str(charge_id), "user_id": uid, "coins": int(coins),
+            "stars": int(stars), "created_at": _now_iso(),
+        }).execute()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("stars_payments недоступна: %s", exc)
+        return None
+    return award_coins(uid, int(coins))
+
+
+# ---------- Админ-API (то же, что показывает бот) ----------
+@app.post("/api/admin/settings")
+async def admin_settings(data: UserAuth):
+    _require_admin_api(data.initData)
+    values = _load_game_settings(force=True)
+    return {
+        "ok": True,
+        "settings": values,
+        "effective": {
+            "upgrade_chance_factor": game_setting_float("upgrade_chance_factor", 1.0),
+            "upgrade_house_edge": game_setting_float("upgrade_house_edge", UPGRADE_HOUSE_EDGE_FACTOR),
+            "crash_house_edge": game_setting_float("crash_house_edge", 1.0),
+        },
+        "admin_only_app": ADMIN_ONLY_APP,
+    }
+
+
+@app.post("/api/admin/set_setting")
+async def admin_set_setting(data: AdminSettingRequest):
+    _require_admin_api(data.initData)
+    ok = game_setting_set(data.key, data.value)
+    if not ok:
+        raise HTTPException(status_code=503, detail="Не удалось сохранить настройку")
+    return {"ok": True, "key": data.key, "value": data.value}
+
+
+@app.post("/api/admin/give_coins")
+async def admin_give_coins(data: AdminGiveRequest):
+    admin_id = _require_admin_api(data.initData)
+    if data.amount == 0:
+        raise HTTPException(status_code=400, detail="Сумма должна быть не нулевой")
+    key = _idempotency_key(admin_id, data.request_id, "admin_give")
+    cached = idempotency_lookup(key)
+    if cached is not None:
+        return cached
+    coins = award_coins(data.user_id, data.amount)
+    if coins is None:
+        raise HTTPException(status_code=404, detail="Игрок не найден")
+    payload = {"ok": True, "user_id": data.user_id, "amount": data.amount, "new_balance": coins}
+    idempotency_store(key, admin_id, "admin_give", payload)
+    return payload
+
+
+@app.post("/api/admin/ban")
+async def admin_ban(data: AdminBanRequest):
+    _require_admin_api(data.initData)
+    try:
+        if data.banned:
+            supabase.table("bans").upsert({"user_id": data.user_id}).execute()
+        else:
+            supabase.table("bans").delete().eq("user_id", data.user_id).execute()
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=503, detail=_db_error_detail(exc, "Не удалось изменить бан")) from exc
+    return {"ok": True, "user_id": data.user_id, "banned": bool(data.banned)}
+
+
+@app.post("/api/admin/stats")
+async def admin_stats(data: UserAuth):
+    """Сколько поставлено и сколько выплачено — по логам, которые уже есть."""
+    _require_admin_api(data.initData)
+    stats = {"users": 0, "coins_in_system": 0, "upgrade_bets": 0, "upgrade_paid": 0,
+             "upgrade_spins": 0, "crash_rounds": 0, "settings": _load_game_settings(force=True)}
+    try:
+        users = supabase.table("users").select("user_id, coins").execute().data or []
+        stats["users"] = len(users)
+        stats["coins_in_system"] = sum(_safe_int(row.get("coins"), 0) for row in users)
+    except Exception:
+        pass
+    try:
+        log = supabase.table("upgrade_log").select("amount_from, win_amount, item_from").execute().data or []
+        stats["upgrade_spins"] = len(log)
+        stats["upgrade_bets"] = sum(
+            _safe_int(row.get("amount_from"), 0) * (UPGRADE_ITEM_PRICES.get(row.get("item_from"), 1))
+            for row in log)
+        stats["upgrade_paid"] = sum(_safe_int(row.get("win_amount"), 0) for row in log)
+    except Exception:
+        pass
+    try:
+        stats["crash_rounds"] = len(supabase.table("crash_history").select("round_id").execute().data or [])
+    except Exception:
+        pass
+    return {"ok": True, **stats}
+
+
+
+# ==================== ОТНОШЕНИЯ (ЛЮБОВЬ) ====================
+# Таблицы: relationships (одна строка на пару) и love_stage_rewards (какие
+# этапы уже оплачены). РП-действия и начисление Love коинов делает бот —
+# в Mini App показывается плашка «В отношениях» и прогресс этапа.
+RELATIONSHIPS_TABLE = "relationships"
+
+
+def _love_relationship_for(user_id):
+    """Активные отношения игрока или None. Ошибка базы = None (не ломаем профиль)."""
+    try:
+        res = (supabase.table(RELATIONSHIPS_TABLE).select("*")
+               .eq("status", "active").execute())
+    except Exception:
+        return None
+    for row in (res.data or []):
+        if str(row.get("user_a")) == str(user_id) or str(row.get("user_b")) == str(user_id):
+            return row
+    return None
+
+
+def _love_partner_id(row, user_id):
+    a = _safe_int(row.get("user_a"), None)
+    b = _safe_int(row.get("user_b"), None)
+    if a is not None and str(a) == str(user_id):
+        return b
+    return a
+
+
+def _love_partner_name(partner_id):
+    row = _db_user(partner_id) if partner_id else None
+    if not row:
+        return f"id{partner_id}"
+    return str(row.get("username") or f"id{partner_id}")
+
+
+def love_state_for(user_id) -> dict:
+    """Состояние отношений: партнёр, Love коины, этап и прогресс до следующего."""
+    row = _love_relationship_for(user_id)
+    if not row:
+        return {"ok": True, "in_relationship": False, "available": True,
+                "stages": LOVE_STAGES, "action_bonus": LOVE_ACTION_BONUS,
+                "cooldown_hours": round(LOVE_ACTION_COOLDOWN / 3600, 1),
+                "ice_cost": LOVE_ICE_COST, "rpc_actions": list(RP_ACTIONS)}
+    score = _safe_int(row.get("love"), 0)
+    partner_id = _love_partner_id(row, user_id)
+    return {
+        "ok": True,
+        "available": True,
+        "in_relationship": True,
+        "partner_id": partner_id,
+        "partner_name": _love_partner_name(partner_id),
+        "love": score,
+        "bank": _safe_int(row.get("bank"), 0),
+        "stage": love_stage_info(score),
+        "next_stage": love_next_stage(score),
+        "action_bonus": LOVE_ACTION_BONUS,
+        "cooldown_hours": round(LOVE_ACTION_COOLDOWN / 3600, 1),
+        "ice_cost": LOVE_ICE_COST,
+        "rpc_actions": list(RP_ACTIONS),
+    }
+
+
+@app.post("/api/love_state")
+async def love_state(data: UserAuth):
+    """Плашка «В отношениях» и прогресс этапа для профиля Mini App."""
+    uid = _auth_user_id(data.initData)
+    state = love_state_for(uid)
+    if state.get("in_relationship"):
+        # Страховка: если пара перешагнула этап, а бот не успел начислить
+        # награду (например, действие пришло без интернета), наградим здесь.
+        row = _love_relationship_for(uid)
+        if row:
+            granted = claim_stage_rewards(supabase, row)
+            if granted:
+                state["stage_rewards"] = granted
+    return state
 
 @app.get("/api/global_top")
 async def get_global_top():

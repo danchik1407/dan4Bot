@@ -9,7 +9,7 @@
     <meta http-equiv="Pragma" content="no-cache">
     <meta http-equiv="Expires" content="0">
     <title>AURA GAME</title>
-    <link rel="stylesheet" href="style.css?v=aura-19">
+    <link rel="stylesheet" href="style.css?v=aura-20">
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
 </head>
 <body>
@@ -42,6 +42,7 @@
         <span class="sub-banner-text">
             <span class="sub-banner-title">Подписаться на канал</span>
             <span class="sub-banner-sub">Все анонсы и обновления здесь</span>
+            <span class="sub-banner-reward" id="sub-banner-reward">🎁 Награда за подписку: 200 коинов</span>
         </span>
         <span class="sub-banner-arrow" aria-hidden="true">›</span>
     </a>
@@ -159,6 +160,12 @@
         <section id="tab-profile" class="tab">
             <div class="page-header"><h2>👤 Профиль</h2></div>
             <div class="profile-card-pro">
+                <!-- Плашка отношений (задача 25): появляется над аватаркой, если у
+                     игрока есть пара. Данные приходят из /api/love_state. -->
+                <div class="love-badge" id="profile-love-badge" hidden>
+                    💗 В отношениях с <b id="profile-love-partner">…</b>
+                    <span class="love-badge-stage" id="profile-love-stage"></span>
+                </div>
                 <div class="profile-avatar-large"><img id="profile-avatar-large" src="avatar_placeholder.svg" alt="Avatar"></div>
                 <h2 class="profile-name" id="profile-name">Загрузка...</h2>
                 <div class="stats-row">
@@ -168,6 +175,41 @@
                 </div>
                 <h3 style="margin-top: 25px; margin-bottom: 10px; text-align: left;">🎒 Инвентарь</h3>
                 <div class="inventory-grid" id="inventory"></div>
+
+                <!-- Пассивный доход с капсул: ставки считает сервер, клиент только
+                     показывает накопленное и кнопку «Забрать». -->
+                <div class="profile-extra" id="passive-card">
+                    <div class="extra-head">
+                        <span class="extra-title">💤 Пассивный доход</span>
+                        <span class="extra-value" id="passive-rate">0 / час</span>
+                    </div>
+                    <div class="extra-hint" id="passive-hint">Купи капсулы — они приносят коины каждый час.</div>
+                    <button class="extra-btn" id="passive-btn" onclick="claimPassiveIncome()">Забрать</button>
+                </div>
+
+                <!-- Рефералы: счётчик приглашённых и «Заработано с рефералов». -->
+                <div class="profile-extra" id="referral-card">
+                    <div class="extra-head">
+                        <span class="extra-title">👥 Рефералы</span>
+                        <span class="extra-value" id="ref-earned">0 🪙</span>
+                    </div>
+                    <div class="extra-hint">Приглашено: <b id="ref-count">0</b> · за друга дают от 500 до 2 000 коинов</div>
+                    <div class="ref-link-row">
+                        <input class="ref-link" id="ref-link" readonly value="">
+                        <button class="extra-btn small" onclick="copyReferralLink()">Копировать</button>
+                    </div>
+                    <div class="extra-hint" id="ref-detail"></div>
+                </div>
+
+                <!-- Донат: Telegram Stars (прайс — заглушка, включается на сервере). -->
+                <div class="profile-extra" id="stars-card">
+                    <div class="extra-head">
+                        <span class="extra-title">⭐ Купить коины</span>
+                        <span class="extra-value">Telegram Stars</span>
+                    </div>
+                    <div class="extra-hint" id="stars-hint">Пакеты появятся позже</div>
+                    <button class="extra-btn" onclick="openStarsShop()">Открыть магазин Stars</button>
+                </div>
 
             </div>
         </section>
@@ -204,8 +246,22 @@
                 <div id="hockey-status" style="color: #34c759; font-weight: bold;">Ожидание...</div>
                 <div id="hockey-bank" style="font-size: 20px; font-weight: 900;">Банк: 0 <img class="coin-img" src="coin.png" alt="монета"></div>
             </div>
-            <div class="hockey-arena" id="hockey-arena">
-                <div class="hockey-scene" id="hockey-scene">
+            <!-- Переключение режимов арены (задача 25). -->
+            <div class="arena-mode-switch" id="arena-mode-switch">
+                <button class="arena-mode-btn active" id="arena-mode-normal" onclick="setArenaMode('normal')">Обычная арена</button>
+                <button class="arena-mode-btn" id="arena-mode-team" onclick="setArenaMode('team')">Командная арена</button>
+            </div>
+
+            <!-- КРУГЛОЕ поле: сектора заполняются аватарками по размеру ставки. -->
+            <div class="hockey-arena arena-circle" id="hockey-arena">
+                <div class="arena-pie" id="arena-pie"></div>
+                <div class="arena-ring" aria-hidden="true"></div>
+                <!-- Указатель-стрелка: крутится и плавно останавливается на выигрышном секторе. -->
+                <div class="arena-pointer" id="arena-pointer" aria-hidden="true">
+                    <span class="arena-pointer-head"></span>
+                </div>
+                <div class="arena-players" id="arena-players"></div>
+                <div class="hockey-scene" id="hockey-scene" hidden>
                     <div class="corner" id="corner-tl"></div>
                     <div class="corner" id="corner-tr"></div>
                     <div class="corner" id="corner-bl"></div>
@@ -214,13 +270,19 @@
             </div>
             <div class="hockey-controls" id="hockey-controls">
                 <div class="bet-input-container">
-                    <input type="number" id="hockey-bet" class="bet-input" value="10" min="10" max="1000">
+                    <input type="number" id="hockey-bet" class="bet-input" value="10" min="10" max="10000">
                     <div class="bet-buttons">
                         <button onclick="addBet('hockey', 10)">+10</button>
                         <button onclick="addBet('hockey', 100)">+100</button>
                     </div>
                 </div>
                 <button class="action-btn" id="hockey-btn" onclick="placeHockeyBet()">Поставить ставку</button>
+                <!-- Командный режим: отдельные кнопки. Вторую блокируем, если
+                     ставка уже сделана за противоположную команду. -->
+                <div class="arena-team-buttons" id="arena-team-buttons" hidden>
+                    <button class="team-btn team-red" id="team-red-btn" onclick="placeHockeyBet('red')">🔴 За красных</button>
+                    <button class="team-btn team-blue" id="team-blue-btn" onclick="placeHockeyBet('blue')">🔵 За синих</button>
+                </div>
             </div>
             <div class="hockey-participants" id="hockey-participants"></div>
         </section>
@@ -238,12 +300,15 @@
                 <!-- ЛЕВАЯ ПАНЕЛЬ: ваш предмет -->
                 <section class="up-panel up-panel-from">
                     <header class="up-panel-head">Ваш предмет</header>
+                    <!-- Чёткий заголовок под предметом: игрок должен сразу видеть,
+                         откуда берётся ставка (задача 25). -->
                     <div class="up-slot">
                         <div class="up-slot-icon" id="up-from-icon">💰</div>
                         <div class="up-slot-name" id="up-from-name">Коины</div>
                         <div class="up-slot-value" id="up-from-value">100 <img class="coin-img" src="coin.png" alt="монета"></div>
                     </div>
 
+                    <div class="up-inventory-title">🎒 Инвентарь</div>
                     <div class="up-from-tabs">
                         <button class="up-from-tab active" data-from="coin" onclick="selectUpgradeFrom('coin', this)">
                             <span class="up-from-emoji"><img class="coin-img" src="coin.png" alt="монета"></span><span class="up-from-label">Коины</span>
@@ -258,14 +323,15 @@
 
                     <div class="up-amount">
                         <label class="up-label" id="up-amount-label">Сколько ставим?</label>
-                        <input type="number" id="upgrade-amount" class="up-amount-input" value="100" min="50" max="5000" inputmode="numeric">
-                        <input type="range" id="upgrade-slider" class="up-slider" min="50" max="5000" step="50" value="100">
-                        <div class="up-amount-meta"><span id="up-amount-min">50</span><span id="up-amount-max">5 000</span></div>
+                        <input type="number" id="upgrade-amount" class="up-amount-input" value="100" min="50" max="10000" inputmode="numeric">
+                        <input type="range" id="upgrade-slider" class="up-slider" min="50" max="10000" step="50" value="100">
+                        <div class="up-amount-meta"><span id="up-amount-min">50</span><span id="up-amount-max">10 000</span></div>
                         <div class="up-quick-amounts">
                             <button onclick="setUpgradeAmount(50)">50</button>
-                            <button onclick="setUpgradeAmount(100)">100</button>
                             <button onclick="setUpgradeAmount(500)">500</button>
                             <button onclick="setUpgradeAmount(1000)">1 000</button>
+                            <button onclick="setUpgradeAmount(5000)">5 000</button>
+                            <button onclick="setUpgradeAmount(10000)">10 000</button>
                             <button onclick="setUpgradeAmount('max')">MAX</button>
                         </div>
                     </div>
@@ -275,9 +341,8 @@
                 <section class="up-panel up-panel-center">
                     <div class="up-circle" id="up-circle">
                         <div class="up-circle-ring" id="up-circle-ring"></div>
-                        <!-- Белая риска ровно на границе зелёной зоны (угол --p).
-                             Без неё при стрелке «впритык» не видно, пересечена граница или нет. -->
-                        <div class="up-boundary" id="up-boundary" aria-hidden="true"></div>
+                        <!-- Белой полосы между красным и зелёным больше нет: граница
+                             зон видна по самому контрасту цветов (задача 25). -->
                         <div class="up-arrow-wrap" id="up-arrow"><div class="up-arrow"></div></div>
                         <div class="up-circle-inner">
                             <div class="up-chance" id="up-chance">00.00%</div>
@@ -290,12 +355,12 @@
                     <div class="up-outcome" id="up-outcome">Выигрыш: 1 000 <img class="coin-img" src="coin.png" alt="монета"></div>
 
                     <div class="up-quick-chances">
-                        <button class="up-chip" data-target="mult:2" onclick="selectUpgradeQuick('mult', 2, this)">x2</button>
-                        <button class="up-chip" data-target="mult:4" onclick="selectUpgradeQuick('mult', 4, this)">x4</button>
-                        <button class="up-chip" data-target="mult:8" onclick="selectUpgradeQuick('mult', 8, this)">x8</button>
-                        <button class="up-chip" data-target="chance:35" onclick="selectUpgradeQuick('chance', 35, this)">35%</button>
-                        <button class="up-chip" data-target="chance:55" onclick="selectUpgradeQuick('chance', 55, this)">55%</button>
-                        <button class="up-chip" data-target="chance:75" onclick="selectUpgradeQuick('chance', 75, this)">75%</button>
+                        <button class="up-chip" data-target="mult:1.12" onclick="selectUpgradeQuick('mult', 1.12, this)">x1.12</button>
+                        <button class="up-chip" data-target="mult:1.35" onclick="selectUpgradeQuick('mult', 1.35, this)">x1.35</button>
+                        <button class="up-chip" data-target="mult:1.55" onclick="selectUpgradeQuick('mult', 1.55, this)">x1.55</button>
+                        <button class="up-chip" data-target="mult:1.75" onclick="selectUpgradeQuick('mult', 1.75, this)">x1.75</button>
+                        <button class="up-chip" data-target="mult:20" onclick="selectUpgradeQuick('mult', 20, this)">x20</button>
+                        <button class="up-chip" data-target="mult:50" onclick="selectUpgradeQuick('mult', 50, this)">x50</button>
                     </div>
 
                     <button class="up-upgrade-btn" id="upgrade-btn" onclick="onUpgradeButtonClick()">АПГРЕЙД</button>
@@ -399,6 +464,6 @@
         <div class="nav-item" onclick="switchTab('profile', this)"><span class="nav-icon">👤</span> Профиль</div>
     </nav>
 
-    <script src="app.js?v=aura-19" defer></script>
+    <script src="app.js?v=aura-20" defer></script>
 </body>
 </html>
