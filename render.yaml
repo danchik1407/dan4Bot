@@ -1,0 +1,69 @@
+# ============================================================================
+#  Render Blueprint: два сервиса, каждый в СВОЁМ workspace.
+# ----------------------------------------------------------------------------
+#  Важно (задача 38 — «Not Found» и 405 на HEAD /):
+#    * оба сервиса собираются из КОРНЯ репозитория (rootDir: .), где лежат
+#      api.py, bot.py и папка miniapp/ — если rootDir указать на подпапку,
+#      aura-api стартует без miniapp/ и раздавать фронтенд ему нечем;
+#    * healthCheckPath: /api/ping — дешёвый ответ без базы, на GET и HEAD
+#      (Render проверяет именно HEAD; раньше он получал 405 Method Not Allowed
+#      и сервис считался «нездоровым»).
+#
+#  Как применять: Render → New → Blueprint → репозиторий dan4Bot.
+#  Секреты (SUPABASE_KEY, BOT_TOKEN и т.д.) Render спросит при создании —
+#  они помечены sync: false и в git не попадают.
+# ============================================================================
+
+services:
+  # ---------------------------------------------------------------- aura-api
+  - type: web
+    name: aura-api
+    runtime: python
+    plan: free
+    region: frankfurt
+    rootDir: .
+    buildCommand: pip install -r requirements.txt
+    # --proxy-headers и --forwarded-allow-ips: Render терминирует HTTPS и
+    # ходит на сервис по внутреннему http, а нам нужен настоящий host/origin
+    # в ссылках Mini App.
+    startCommand: uvicorn api:app --host 0.0.0.0 --port $PORT --proxy-headers --forwarded-allow-ips="*"
+    healthCheckPath: /api/ping
+    autoDeploy: true
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.11.9"
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_KEY
+        sync: false
+
+  # ------------------------------------------------------------------ dan4Bot
+  - type: web
+    name: dan4Bot
+    runtime: python
+    plan: free
+    region: frankfurt
+    rootDir: .
+    # aiogram 3.20+ падает на Python 3.11 (unhashable type: 'FailFast'),
+    # поэтому версия зажата в requirements.txt (>=3.4.1,<3.20).
+    buildCommand: pip install -r requirements.txt
+    startCommand: python bot.py
+    # Бот — long-polling: Render убивает сервис без открытого порта, поэтому
+    # bot.py поднимает крошечный aiohttp-ответчик и отвечает на HEAD /.
+    healthCheckPath: /
+    autoDeploy: true
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.11.9"
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_KEY
+        sync: false
+      - key: BOT_TOKEN
+        sync: false
+      - key: AURA_API_URL
+        sync: false
+      - key: BOT_USERNAME
+        sync: false
+      - key: CHANNEL_USERNAME
+        sync: false

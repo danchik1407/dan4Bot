@@ -1060,6 +1060,69 @@ NOTIFY pgrst, 'reload schema';
 эта таблица и политика уже есть. Переменная `SUPABASE_SERVICE_KEY` у сервиса
 `dan4Bot` снимает вопрос с RLS полностью.
 
+## 4.3.1.6.7. Задача 38: «Not Found» на корне и `405` на `HEAD /`
+
+**Что было.** После переноса `aura-api` и `dan4Bot` в два разных workspace
+Render health-check сервиса стал отвечать `HEAD / → 405 Method Not Allowed`
+(в FastAPI был только `@app.get("/")`, а HEAD к `GET`-маршруту не относится),
+а корень `https://aura-api-….onrender.com/` открывался как «Not Found» —
+Mini App жил только по `/miniapp/`, и любой другой адрес давал ошибку.
+
+**Что сделано в `api.py`:**
+
+- `HEAD /` теперь отвечает `200` и `{"ok": true, "status": "alive"}` — Render
+  проходит health-check, сервис не считается «нездоровым»;
+- `GET /` из браузера или WebView Telegram отдаёт **index.html** (не редирект);
+- `GET /` от curl/монитора (`Accept: */*`) отдаёт тот же `alive`-JSON —
+  UptimeRobot с keyword `alive` продолжает работать;
+- `HEAD` добавлен и на `/api/ping`, `/health`, `/api/health`;
+- `/miniapp` (без слэша) отдаёт страницу сразу, без 307;
+- `/index.html`, `/app.js`, `/style.css`, `/coin.png` и любой существующий файл
+  из `miniapp/` редиректят в `/miniapp/…`;
+- в `index.html` появился тег `<base href="/miniapp/">`, поэтому CSS, JS и
+  картинки грузятся правильно и с корня, и из `/miniapp/`;
+- если папки `miniapp/` нет (деплой из подпапки, неполный коммит), сервис **не
+  падает**: `/miniapp/{path}` отдаёт файлы вручную, а при полном отсутствии
+  `index.html` возвращает 503 с человеческим текстом «Mini App не собран…»;
+- в лог при старте пишется строка `Mini App: <путь> (index.html найден, N КБ)`
+  или `Mini App НЕ будет раздаваться: … Рабочий каталог …` — по ней сразу
+  видно, откуда взят путь.
+
+**`bot.py`:** микро-HTTP бота (`start_fake_website`) теперь отвечает и на `HEAD /`
+(а также `HEAD /health`, `HEAD /api/ping`), иначе Render health-check того
+сервиса тоже получал 405.
+
+**`requirements.txt`:** `aiogram` зажат `>=3.4.1,<3.20`. Начиная с 3.20 aiogram
+падает при импорте на Python 3.11 с `TypeError: unhashable type: 'FailFast'`, и
+сервис `dan4Bot` уходил в цикл «Application exited early» — это выглядело как
+«бот не поднялся после переноса в новый workspace».
+
+**`render.yaml`** (новый файл): оба сервиса собираются из **корня**
+репозитория (`rootDir: .`), `healthCheckPath` — `/api/ping` у `aura-api` и `/`
+у `dan4Bot`. Секреты помечены `sync: false` и Render спрашивает их при создании.
+
+**Как проверить после деплоя (PowerShell):**
+
+```powershell
+curl.exe -I https://aura-api-XXXX.onrender.com/          # HTTP/1.1 200 OK
+curl.exe -I https://aura-api-XXXX.onrender.com/api/ping   # HTTP/1.1 200 OK
+curl.exe    https://aura-api-XXXX.onrender.com/           # HTML (в браузере — игра)
+curl.exe    https://aura-api-XXXX.onrender.com/api/health # {"ok": true, ...}
+```
+
+`/api/health` теперь содержит блок `static` с полями `ready`, `index_path`,
+`root_url` и `health_check` — по ним видно, что страница на месте.
+
+**Если «Not Found» остался** — почти всегда одно из трёх:
+
+1. в Render у сервиса указан **Root Directory** (подпапка) вместо корня —
+   поставьте пусто/`.` и передеплойте с Clear build cache;
+2. деплой ещё не закончился (Render держит старый контейнер) — смотрите
+   `build` в `/api/ping`: там должен быть `2026-11-29-static-root-26`;
+3. в BotFather → Configure Mini App указан адрес **другого** сервиса
+   (`dan4Bot`), а не `aura-api` — бот оттуда редиректит, но лучше указать
+   прямо `https://<aura-api>.onrender.com/miniapp/`.
+
 ## 4.3.1.6.6. Задача 37: сырые `<b>` в сообщениях, длинная подпись у одиночек, рефка, замедление стрелки
 
 **`🎁 <b>Бонус за подписку получен!</b>` сырыми тегами.** Бот менял сообщение

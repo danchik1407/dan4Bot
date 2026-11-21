@@ -3165,9 +3165,16 @@ async def start_fake_website():
         # перекидывает в Mini App на aura-api.
         raise web.HTTPFound(WEBAPP_URL)
 
-    app.router.add_get('/', index)
-    app.router.add_get('/health', health)
-    app.router.add_get('/{tail:.*}', anything_else)
+    # Задача 38: Render проверяет сервис запросом HEAD / — маршруты регистрируем
+    # на оба метода (GET и HEAD), иначе health-check получал 405.
+    app.router.add_route('GET', '/', index)
+    app.router.add_route('HEAD', '/', index)
+    app.router.add_route('GET', '/health', health)
+    app.router.add_route('HEAD', '/health', health)
+    app.router.add_route('GET', '/api/ping', health)
+    app.router.add_route('HEAD', '/api/ping', health)
+    app.router.add_route('GET', '/{tail:.*}', anything_else)
+    app.router.add_route('HEAD', '/{tail:.*}', anything_else)
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, '0.0.0.0', port)

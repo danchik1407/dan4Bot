@@ -34,10 +34,17 @@ function normalizeApiUrl(url) {
         .replace(/\/miniapp$/, "");
 }
 
-// Путь вида /miniapp/ или /miniapp/index.html значит «страницу отдал aura-api».
+// Путь вида /miniapp/, /miniapp/index.html, «/» или /index.html значит
+// «страницу отдал aura-api».
+// Задача 38: Mini App теперь открывается и с КОРНЯ сервиса (Render health check
+// перестал отвечать 405, а корень отдаёт index.html), поэтому корень тоже
+// считаем «своим» — иначе app.js уходил бы на старый домен из fallback-списка
+// и игрок получал «Not Found» уже на /api/....
 function servedFromMiniApp(loc) {
     try {
-        return /^\/miniapp(\/|$)/.test(String(loc.pathname || "/"));
+        const path = String(loc.pathname || "/");
+        if (path === "" || path === "/" || path === "/index.html") return true;
+        return /^\/miniapp(\/|$)/.test(path);
     } catch (e) {
         return false;
     }
@@ -51,6 +58,20 @@ function resolveApiUrl(loc) {
     } catch (e) {
         return API_URL_FALLBACK;
     }
+}
+
+// Задача 38: Mini App мог открыться с корня сервиса, а картинки/скрипты лежат
+// в /miniapp/. Берём это из тега <base>, который проставляет api.py.
+const MINIAPP_BASE_DIR = (() => {
+    try {
+        const tag = document.querySelector('base');
+        const href = tag ? String(tag.getAttribute('href') || '') : '';
+        return href ? href.replace(/\/?$/, '/') : '/miniapp/';
+    } catch (e) { return '/miniapp/'; }
+})();
+// Абсолютный адрес файла из папки Mini App (работает и с корня, и из /miniapp/).
+function miniappAsset(file) {
+    return `${MINIAPP_BASE_DIR}${String(file || '').replace(/^\/+/, '')}`;
 }
 
 // Адреса для проверки: сначала собственный origin (если он вообще http),
@@ -141,14 +162,14 @@ const INV_IMAGE_FALLBACK = {
 function shopImageFor(itemId, item) {
     const fromServer = item && item.shopImage ? String(item.shopImage) : '';
     // .jpg-карточки со старым чёрным фоном больше не используем.
-    if (fromServer && /\.png$/i.test(fromServer)) return fromServer;
-    return SHOP_IMAGE_FALLBACK[itemId] || '';
+    if (fromServer && /\.png$/i.test(fromServer)) return miniappAsset(fromServer);
+    return SHOP_IMAGE_FALLBACK[itemId] ? miniappAsset(SHOP_IMAGE_FALLBACK[itemId]) : '';
 }
 
 function inventoryImageFor(itemId, item) {
     const fromServer = item && item.inventoryImage ? String(item.inventoryImage) : '';
-    if (fromServer && /\.png$/i.test(fromServer)) return fromServer;
-    return INV_IMAGE_FALLBACK[itemId] || '';
+    if (fromServer && /\.png$/i.test(fromServer)) return miniappAsset(fromServer);
+    return INV_IMAGE_FALLBACK[itemId] ? miniappAsset(INV_IMAGE_FALLBACK[itemId]) : '';
 }
 let balance = 0, keys = 0, currentBet = 10, inventory = [], lastChestTime = 0, isProcessing = false, userDataLoaded = false;
 let daysInGame = 0;
@@ -157,7 +178,7 @@ let balanceKnown = false;
 let profileLoadPromise = null, profileRetryTimer = null, profileRetryCount = 0, profileFailure = '';
 let isAdmin = false;
 // Валюта в интерфейсе — картинка монеты coin.png (эмодзи больше не используем).
-const COIN_IMG_SRC = 'coin.png';
+const COIN_IMG_SRC = miniappAsset('coin.png');
 const COIN_IMG = `<img class="coin-img" src="${COIN_IMG_SRC}" alt="монета">`;
 const ADMIN_UI_IDS = [6338018270, 5184813347, 8890834384];
 function isAdminId(id) { return Boolean(id) && ADMIN_UI_IDS.includes(Number(id)); }
