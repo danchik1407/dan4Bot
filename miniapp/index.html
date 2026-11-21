@@ -2,6 +2,9 @@
 <html lang="ru">
 <head>
     <meta charset="UTF-8">
+    <!-- Все пути к style.css/app.js/картинкам относительные. Тег base делает их
+         рабочими и с корня сервиса (/), и из /miniapp/ — страницу отдаёт api.py. -->
+    <base href="/miniapp/">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
     <!-- Telegram WebView кэширует страницу агрессивно: без этих заголовков
          можно неделями видеть старый app.js/style.css (и старый поворот круга). -->
@@ -9,7 +12,7 @@
     <meta http-equiv="Pragma" content="no-cache">
     <meta http-equiv="Expires" content="0">
     <title>AURA GAME</title>
-    <link rel="stylesheet" href="style.css?v=aura-33">
+    <link rel="stylesheet" href="style.css?v=aura-34">
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
 </head>
 <body>
@@ -530,6 +533,6 @@
         <div class="nav-item" onclick="switchTab('profile', this)"><span class="nav-icon">👤</span> Профиль</div>
     </nav>
 
-    <script src="app.js?v=aura-33" defer></script>
+    <script src="app.js?v=aura-34" defer></script>
 </body>
 </html>

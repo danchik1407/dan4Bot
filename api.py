@@ -1,6 +1,6 @@
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, RedirectResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 import asyncio
@@ -85,7 +85,7 @@ async def _http_json(url, method: str = "GET", params=None, payload=None, timeou
 
 # Номер сборки: по нему из /api/health видно, что на сервисе НЕ старый код.
 # Если после деплоя здесь прежнее значение — Render ещё не перезапустился.
-API_BUILD = "2026-11-28-referral-arrow-25"
+API_BUILD = "2026-11-29-static-root-26"
 
 # Момент старта процесса. По нему видно, что сервис только что «проснулся»:
 # Render на бесплатном тарифе усыпляет Web Service через 15 минут без входящих
@@ -124,6 +124,19 @@ app.add_middleware(
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MINIAPP_DIR = os.path.join(BASE_DIR, "miniapp")
 
+MINIAPP_INDEX = os.path.join(MINIAPP_DIR, "index.html")
+MINIAPP_READY = os.path.isfile(MINIAPP_INDEX)
+
+
+def miniapp_ready() -> bool:
+    """Есть ли index.html ПРЯМО СЕЙЧАС.
+
+    Не константа на старте: если папку miniapp доложили позже (повторный
+    деплой, монтирование диска), страница должна начать открываться без
+    перезапуска сервиса. Проверка — один os.path.isfile на запрос.
+    """
+    return os.path.isfile(MINIAPP_INDEX)
+
 if os.path.isdir(MINIAPP_DIR):
     # То же самое, что app.mount("/miniapp", StaticFiles(directory="miniapp", html=True)),
     # только путь абсолютный: на Render рабочий каталог процесса может отличаться от корня репозитория.
@@ -131,22 +144,180 @@ if os.path.isdir(MINIAPP_DIR):
 else:  # pragma: no cover — защита от кривого деплоя
     logger.error("Папка miniapp не найдена (%s): Mini App не будет раздаваться", MINIAPP_DIR)
 
+# В лог при старте — одной строкой всё, что нужно для диагноза «Not Found»:
+# откуда взят путь, есть ли index.html, что лежит рядом и какой рабочий каталог.
+if MINIAPP_READY:
+    logger.info("Mini App: %s (index.html найден, %.1f КБ)",
+                MINIAPP_DIR, os.path.getsize(MINIAPP_INDEX) / 1024)
+else:  # pragma: no cover
+    logger.error("Mini App НЕ будет раздаваться: нет %s. Рабочий каталог %s, рядом: %s",
+                 MINIAPP_INDEX, os.getcwd(),
+                 ", ".join(sorted(os.listdir(BASE_DIR))[:20]) or "пусто")
 
-@app.get("/", include_in_schema=False)
-async def root_redirect(request: Request):
-    """Корень сервиса: человеку — Mini App, мониторингу — «alive».
 
-    Именно 307-редирект, а не отдача index.html с «/»: в index.html пути к
-    style.css/app.js относительные, и с корня они превратились бы в /style.css (404).
+@app.api_route("/miniapp", methods=["GET", "HEAD"], include_in_schema=False)
+async def miniapp_no_slash():
+    """`/miniapp` без слэша → сразу отдаём страницу (а не 307).
 
-    Но UptimeRobot и подобные мониторы по умолчанию бьют в корень и просят
-    `Accept: */*`. Им отдаём тот же дешёвый JSON, что /api/ping, иначе после
-    редиректа на HTML монитор с keyword `alive` показывал бы «Down».
+    BotFather и игроки пишут адрес как придётся. 307 формально правильный, но
+    в WebView Telegram лишний редирект — это лишний шанс получить «Not Found»
+    и потерять initData, поэтому отдаём index.html сразу.
     """
+    return _miniapp_page()
+
+
+MINIAPP_BASE_TAG = b'<base href="/miniapp/">'
+_MINAPP_HTML_CACHE = {"mtime": None, "html": None}
+
+
+def _miniapp_html() -> bytes:
+    """index.html с `<base href="/miniapp/">`.
+
+    Зачем base: в index.html ВСЕ пути относительные (`style.css?v=…`,
+    `app.js?v=…`, `cap_shop_ruby.png`). Если страницу открыли с корня сервиса
+    (`https://aura-api…/`), относительные пути ушли бы в /style.css и
+    /cap_shop_ruby.png — то есть мимо папки miniapp. С тегом base они всегда
+    разрешаются в /miniapp/…, и одинаково работают оба адреса: и `/`, и
+    `/miniapp/`. Файл читаем один раз и обновляем, если он изменился.
+    """
+    try:
+        mtime = os.path.getmtime(MINIAPP_INDEX)
+    except OSError:  # pragma: no cover
+        return b""
+    if _MINAPP_HTML_CACHE["html"] is not None and _MINAPP_HTML_CACHE["mtime"] == mtime:
+        return _MINAPP_HTML_CACHE["html"]
+    with open(MINIAPP_INDEX, "rb") as handle:
+        html = handle.read()
+    if b"<base " not in html:
+        lowered = html.lower()
+        position = lowered.find(b"<head>")
+        if position >= 0:
+            cut = position + len(b"<head>")
+            html = html[:cut] + MINIAPP_BASE_TAG + html[cut:]
+        else:  # pragma: no cover
+            html = MINIAPP_BASE_TAG + html
+    _MINAPP_HTML_CACHE.update({"mtime": mtime, "html": html})
+    return html
+
+
+def _miniapp_page() -> Response:
+    """index.html Mini App с надёжными заголовками и работающими путями.
+
+    Отдаём СТРАНИЦУ (а не 307-редирект): в WebView Telegram лишний редирект —
+    это лишний шанс получить «Not Found», а с тегом `<base href="/miniapp/">`
+    страница корректно грузит CSS, JS и картинки и с корня, и из /miniapp/.
+    """
+    if not miniapp_ready():  # pragma: no cover — битый деплой
+        raise HTTPException(status_code=503, detail=(
+            "Mini App не собран: в сервисе нет папки miniapp/index.html. "
+            "Проверьте, что деплой идёт из корня репозитория (там лежат api.py и miniapp/)."))
+    return Response(
+        content=_miniapp_html(),
+        media_type="text/html; charset=utf-8",
+        headers={
+            # Страница обязана перепроверяться: иначе WebView неделями держит
+            # старый index.html и старые ?v= у app.js/style.css.
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "Pragma": "no-cache",
+            "Expires": "0",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
+
+
+# ==== Аварийный режим статики ====
+# Если StaticFiles почему-то не смонтировался (папки miniapp нет на момент
+# старта, кривой деплой), Mini App всё равно должен открыться: отдаём файлы
+# вручную из BASE_DIR/miniapp. Проверяем существование папки на КАЖДЫЙ запрос,
+# поэтому файл, появившийся после старта, тоже подхватится.
+STATIC_TYPES = {
+    ".html": "text/html; charset=utf-8",
+    ".js": "application/javascript; charset=utf-8",
+    ".css": "text/css; charset=utf-8",
+    ".json": "application/json; charset=utf-8",
+    ".svg": "image/svg+xml",
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".webp": "image/webp",
+    ".ico": "image/x-icon",
+}
+
+
+def _miniapp_file_response(rel_path: str) -> Optional[Response]:
+    """Отдать файл из miniapp/ напрямую (безопасно: только внутри папки)."""
+    relative = (rel_path or "").strip("/")
+    if not relative or relative == "index.html":
+        return _miniapp_page()
+    if ".." in relative.split("/") or relative.startswith("/"):
+        return None
+    absolute = os.path.normpath(os.path.join(MINIAPP_DIR, relative))
+    if os.path.commonpath([absolute, MINIAPP_DIR]) != MINIAPP_DIR:
+        return None
+    if not os.path.isfile(absolute):
+        return None
+    extension = os.path.splitext(absolute)[1].lower()
+    cache = ("no-cache, no-store, must-revalidate" if extension == ".html"
+             else "public, max-age=86400")
+    return FileResponse(absolute, media_type=STATIC_TYPES.get(extension,
+                                                              "application/octet-stream"),
+                        headers={"Cache-Control": cache})
+
+
+@app.api_route("/miniapp/{path:path}", methods=["GET", "HEAD"], include_in_schema=False)
+async def miniapp_files(path: str):
+    """Дублирующий обработчик файлов Mini App — на случай, если mount не встал.
+
+    Когда StaticFiles смонтирован, до этой функции дело не доходит (mount
+    перехватывает /miniapp/* раньше). Если же папки на старте не было, mount
+    пропущен — и этот обработчик всё равно отдаст index.html, app.js, style.css
+    и картинки, вместо «Not Found».
+    """
+    response = _miniapp_file_response(path)
+    if response is not None:
+        return response
+    raise HTTPException(status_code=404, detail=f"Файл {path} не найден в miniapp/")
+
+
+def _wants_health_json(request: Request) -> bool:
+    """Это запрос монитора/health-check, а не игрока?
+
+    Render проверяет сервис запросом **HEAD /** со своим User-Agent, UptimeRobot
+    и прочие мониторы бьют в корень и просят `Accept: */*`. Таким клиентам нужен
+    дешёвый JSON {"ok": true, "status": "alive"}, а не HTML: по HTML монитор с
+    keyword `alive` покажет «Down».
+
+    Игрок приходит из Telegram WebView (Accept содержит text/html, свой
+    User-Agent) или просто открывает адрес в браузере — ему отдаём Mini App.
+    """
+    if request.method.upper() == "HEAD":
+        return True                       # HEAD / — это Render health check
     accept = (request.headers.get("accept") or "").lower()
-    if "text/html" not in accept:
+    if "text/html" in accept:
+        return False                      # браузер и WebView Telegram
+    if not accept or accept.strip() == "*/*":
+        user_agent = (request.headers.get("user-agent") or "").lower()
+        browsers = ("mozilla", "chrome", "safari", "firefox", "edg", "telegram")
+        return not any(name in user_agent for name in browsers)
+    return True
+
+
+@app.api_route("/", methods=["GET", "HEAD"], include_in_schema=False)
+async def root_redirect(request: Request):
+    """Корень сервиса: игроку — Mini App, мониторингу — «alive».
+
+    Задача 38: раньше здесь был только `@app.get("/")`, поэтому **HEAD /** от
+    Render health-check отвечал `405 Method Not Allowed` — сервис не проходил
+    проверку и ссылка на корень открывалась как «Not Found».
+
+    Теперь:
+    * HEAD / (Render) → 200 и `{"ok": true, "status": "alive"}`;
+    * браузер / WebView Telegram (Accept: text/html) → index.html Mini App;
+    * curl/монитор с `Accept: */*` → тот же alive-JSON, что /api/ping.
+    """
+    if _wants_health_json(request):
         return await ping()
-    return RedirectResponse(url="/miniapp/", status_code=307)
+    return _miniapp_page()
 
 
 # Файлы, которые исторически пытаются открыть по корню сервиса.
@@ -179,7 +350,7 @@ async def favicon():
     return Response(status_code=204)
 
 
-@app.get("/api/ping")
+@app.api_route("/api/ping", methods=["GET", "HEAD"])
 async def ping():
     """Самый дешёвый ответ: ни базы, ни тиража, ни кэшей.
 
@@ -200,7 +371,7 @@ async def ping():
     }
 
 
-@app.get("/health", include_in_schema=False)
+@app.api_route("/health", methods=["GET", "HEAD"], include_in_schema=False)
 async def health_alias():
     """Тот же дешёвый ответ, что /api/ping.
 
@@ -227,7 +398,7 @@ def _stock_health_hint(stock: dict | None, stock_error: str | None) -> str | Non
     return None
 
 
-@app.get("/api/health")
+@app.api_route("/api/health", methods=["GET", "HEAD"])
 async def health():
     """Проверка сервиса: Render health check + админская диагностика в боте."""
     # Состояние тиража: если магазин продаёт, а «Осталось» не меняется — видно здесь.
@@ -266,8 +437,15 @@ async def health():
         },
         "static": {
             "dir": "miniapp",
-            "ready": os.path.isfile(os.path.join(MINIAPP_DIR, "index.html")),
+            # ready=false — на сервисе нет miniapp/index.html: Mini App не собран,
+            # и корень сайта отвечает 503 с человеческим текстом. Лечится
+            # редеплоем из корня репозитория (api.py и miniapp/ лежат рядом).
+            "ready": miniapp_ready(),
             "url": "/miniapp/",
+            "root_url": "/",
+            "index_path": MINIAPP_INDEX,
+            "mount": "StaticFiles /miniapp + аварийный обработчик /miniapp/{path}",
+            "health_check": {"method": "HEAD /", "expect": 200},
         },
         # Диагностика схемы: админ открывает /api/db_audit (или пишет боту «бд»)
         # и видит, каких миграций/колонок не хватает, с готовым SQL.
@@ -4695,7 +4873,7 @@ async def get_season_end():
     return {"end_timestamp": int(end_date.timestamp()), "timezone": "Europe/Moscow"}
 
 
-@app.get("/{filename}", include_in_schema=False)
+@app.api_route("/{filename}", methods=["GET", "HEAD"], include_in_schema=False)
 async def root_static_redirect(filename: str):
     """Корневые ссылки на файлы Mini App → в /miniapp/.
 
@@ -4708,8 +4886,8 @@ async def root_static_redirect(filename: str):
     # /miniapp без слэша: catch-all перехватывает его раньше Mount, поэтому
     # редирект на канонический /miniapp/ делаем здесь же.
     if name == "miniapp":
-        return RedirectResponse(url="/miniapp/", status_code=307)
-    if name in ROOT_STATIC_FILES:
+        return _miniapp_page()
+    if name in ROOT_STATIC_FILES or os.path.isfile(os.path.join(MINIAPP_DIR, name)):
         return RedirectResponse(url=f"/miniapp/{name}", status_code=307)
     raise HTTPException(status_code=404, detail="Not Found")
 
