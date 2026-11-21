@@ -44,8 +44,12 @@ services:
     plan: free
     region: frankfurt
     rootDir: .
-    # aiogram 3.20+ падает на Python 3.11 (unhashable type: 'FailFast'),
-    # поэтому версия зажата в requirements.txt (>=3.4.1,<3.20).
+    # Версии подобраны так, чтобы сборка не падала НИ на 3.11, НИ на 3.14
+    # (Render собирал этот сервис на 3.14 — см. DEPLOY.md §4.11):
+    #   aiogram>=3.22,<3.32 → pydantic 2.12+ и aiohttp 3.13+ с готовыми wheel
+    #   под cp311 и cp314;
+    #   верхняя граница <3.32 — потому что 3.33 на Python 3.11 падает при
+    #   импорте (unhashable type: 'FailFast').
     buildCommand: pip install -r requirements.txt
     startCommand: python bot.py
     # Бот — long-polling: Render убивает сервис без открытого порта, поэтому
