@@ -2932,6 +2932,49 @@ def start_keyboard() -> InlineKeyboardMarkup:
     ]])
 
 
+# ================= !АПКА — ССЫЛКА НА MINI APP =================
+APP_LINK_KEYBOARD_TEXT = "🎮 Открыть AURA GAME"
+
+
+def app_link_keyboard() -> InlineKeyboardMarkup:
+    """Кнопки под сообщением `!апка`: открыть приложение и переслать ссылку.
+
+    web_app-кнопка открывает Mini App прямо внутри Telegram (с initData), а
+    url-кнопка ведёт на t.me/<бот>/<short_name> — её удобно пересылать другу.
+    Оба адреса строятся из одного места, поэтому «Not Found» из-за порта в
+    ссылке сюда попасть не может.
+    """
+    rows = [[InlineKeyboardButton(text=APP_LINK_KEYBOARD_TEXT,
+                                  web_app=WebAppInfo(url=miniapp_webapp_url()))]]
+    direct = miniapp_direct_url()
+    if direct:
+        rows.append([InlineKeyboardButton(text="🔗 Ссылка для друзей", url=direct)])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def app_link_text() -> str:
+    """Текст сообщения: адрес виден, но как обычная ссылка на домен aura-api.
+
+    Порта в адресе нет намеренно: у Render Web Service наружу открыт только
+    443, и любой `:PORT` в ссылке превращается в «Not Found».
+    """
+    return (
+        "🎮 <b>AURA GAME</b>\n\n"
+        "Открыть приложение можно кнопкой ниже — она запускает Mini App внутри "
+        "Telegram, со всеми играми и коинами.\n\n"
+        f"Ссылка: {miniapp_webapp_url()}\n\n"
+        "Если кнопка не открывается — обнови Telegram до последней версии."
+    )
+
+
+@dp.message(F.text.func(lambda t: strip_prefix(t).lower().startswith("апка")))
+async def cmd_app_link(message: Message):
+    """`!апка` — показать ссылку и кнопку на Mini App."""
+    await message.answer(app_link_text(), parse_mode="HTML",
+                         reply_markup=app_link_keyboard(),
+                         disable_web_page_preview=True)
+
+
 @dp.message(CommandStart())
 async def cmd_start(message: Message):
     """`/start` — единственная точка входа, которая должна работать всегда.
@@ -2963,7 +3006,7 @@ async def cmd_help_command(message: Message):
     F.text.func(lambda t: strip_prefix(t).lower().startswith("помощь") or strip_prefix(t).lower().startswith("help")))
 async def cmd_help(message: Message):
     text = (
-        "📖 <b>СПИСОК КОМАНД БОТА</b>\n━━━━━━━━━━━━━━━━━━━━\n\n🎟️ <b>Промокоды:</b>\n• <code>промо код</code> — активировать промокод\n\n💰 <b>Экономика:</b>\n• <code>карман</code> — твой баланс\n• <code>карман @user</code> — баланс другого\n• <code>перевод @user сумма</code> — перевести\n• <code>перевод сумма</code> (ответом) — быстрый перевод\n• <code>топ</code> — топ-10 богачей\n• <code>магазин</code> — магазин\n\n🎲 <b>Игры:</b>\n• <code>кубы @user ставка</code> — дуэль в кости\n• <code>кубы ставка</code> (ответом) — быстрый вызов\n\n💗 <b>Отношения:</b>\n• <code>+любовь @user</code> — предложить отношения\n• <code>все рп</code> — список всех РП-команд\n• <code>поцеловать</code>, <code>обнять</code>, <code>погладить</code>… — РП-команды (+10 Love паре)\n• <code>отн инфа</code> — с кем, сколько дней, уровень и Love (только своё)\n• <code>топ отношений</code> — все пары и их Love (одиночки не показываются)\n• <code>-отны</code> — разорвать отношения (у обоих сгорает статус и Love)\n• одному РП-команда даёт +10 Unlove — награды только тебе\n\n• <code>тег</code> — проверка бота\n• <code>помощь</code> — эта справка")
+        "📖 <b>СПИСОК КОМАНД БОТА</b>\n━━━━━━━━━━━━━━━━━━━━\n\n🎟️ <b>Промокоды:</b>\n• <code>промо код</code> — активировать промокод\n\n💰 <b>Экономика:</b>\n• <code>карман</code> — твой баланс\n• <code>карман @user</code> — баланс другого\n• <code>перевод @user сумма</code> — перевести\n• <code>перевод сумма</code> (ответом) — быстрый перевод\n• <code>топ</code> — топ-10 богачей\n• <code>магазин</code> — магазин\n\n🎲 <b>Игры:</b>\n• <code>кубы @user ставка</code> — дуэль в кости\n• <code>кубы ставка</code> (ответом) — быстрый вызов\n\n💗 <b>Отношения:</b>\n• <code>+любовь @user</code> — предложить отношения\n• <code>все рп</code> — список всех РП-команд\n• <code>поцеловать</code>, <code>обнять</code>, <code>погладить</code>… — РП-команды (+10 Love паре)\n• <code>отн инфа</code> — с кем, сколько дней, уровень и Love (только своё)\n• <code>топ отношений</code> — все пары и их Love (одиночки не показываются)\n• <code>-отны</code> — разорвать отношения (у обоих сгорает статус и Love)\n• одному РП-команда даёт +10 Unlove — награды только тебе\n\n• <code>апка</code> — ссылка и кнопка на приложение AURA GAME\n• <code>тег</code> — проверка бота\n• <code>помощь</code> — эта справка")
     await message.answer(text, parse_mode="HTML")
 
 

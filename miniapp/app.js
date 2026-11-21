@@ -225,10 +225,16 @@ let passiveRates = { capsule: 0.1, uniq_capsule: 0.5, ruby: 5, diamond: 20, gala
 // (22:00–08:00) капает вдвое меньше. Числа — с сервера (/api/user → passive_night).
 let passiveNight = { multiplier: 0.5, from: 22, to: 8 };
 let passiveTimer = null;
+// Задача 42: сколько пассивки уже накопилось (с дробной частью). Приходит из
+// /api/user → passive_pending и обновляется после «Забрать».
+// Клиент НИЧЕГО не начисляет — только показывает серверное число.
+let passivePending = { amount: 0, whole: 0, rate: 0, hours: 0, capped: false, night: false };
 let subscriptionChecked = false;
 let loveState = null;
 let referralBound = false;
 const PASSIVE_INTERVAL = 15 * 60 * 1000;      // раз в 15 минут, пока аппка открыта
+const PASSIVE_PENDING_REFRESH = 60 * 1000;    // «накоплено» в профиле — раз в минуту
+let passivePendingTimer = null;
 
 function showMaintenance() {
     if (maintenanceActive) return;
@@ -518,6 +524,9 @@ function applyProfile(data) {
     if (data.passive_rates && typeof data.passive_rates === 'object') {
         passiveRates = Object.assign({}, passiveRates, data.passive_rates);
     }
+    if (data.passive_pending && typeof data.passive_pending === 'object') {
+        applyPassivePending(data.passive_pending);
+    }
     // Шансы апгрейда: дом-эдж и админский множитель — с сервера, чтобы круг
     // не расходился с вердиктом.
     const upgradeConfig = data.economy && data.economy.upgrade;
@@ -683,7 +692,13 @@ function switchTab(tabId, element) {
     document.querySelectorAll('.nav-item').forEach(nav => nav.classList.remove('active'));
     if (element) element.classList.add('active');
     if (tabId === 'top') { loadGlobalTop(); }
-    if (tabId === 'profile') { loadReferralStats(); loadLoveState(); }
+    if (tabId === 'profile') {
+        loadReferralStats(); loadLoveState();
+        // «Сколько накопил» должно быть актуальным на момент открытия профиля:
+        // пересчитываем карточку и подтягиваем серверное число (без начисления).
+        renderPassiveCard();
+        refreshPassivePending();
+    }
 }
 
 function openGame(game) {
@@ -862,6 +877,40 @@ function passiveRateFor(items) {
     }, 0);
 }
 
+// Серверное «сколько накопил» → состояние карточки.
+function applyPassivePending(payload) {
+    if (!payload || typeof payload !== 'object') return;
+    passivePending = {
+        amount: Number(payload.amount || 0),
+        whole: Number(payload.whole || 0),
+        rate: Number(payload.rate || 0),
+        hours: Number(payload.hours || 0),
+        capped: Boolean(payload.capped),
+        night: Boolean(payload.night),
+    };
+    renderPassiveCard();
+}
+
+// Формат накопленного: до 10 коинов показываем с десятыми («3.4»), дальше —
+// целыми: игроку важна сумма, а не «130.123».
+function formatPassiveAmount(amount) {
+    const value = Math.max(0, Number(amount) || 0);
+    if (value <= 0) return '0';
+    if (value < 10) return value.toFixed(1).replace(/\.0$/, '');
+    return String(Math.floor(value));
+}
+
+function renderPassivePending() {
+    const el = document.getElementById('passive-pending');
+    if (!el) return;
+    const amount = Number(passivePending.amount || 0);
+    el.innerHTML = `${formatPassiveAmount(amount)} ${COIN_IMG}`;
+    el.classList.toggle('zero', amount < 1);
+    el.title = passivePending.capped
+        ? 'Накоплено максимум за 24 часа — забери, дальше счёт пойдёт заново'
+        : 'Столько уже накапало — жми «Забрать»';
+}
+
 function renderPassiveCard() {
     const rateEl = document.getElementById('passive-rate');
     const hintEl = document.getElementById('passive-hint');
@@ -870,15 +919,31 @@ function renderPassiveCard() {
     const rate = passiveRateFor();
     // Монета — наша картинка AG (coin.png), эмодзи больше не используем.
     rateEl.innerHTML = `${rate.toFixed(1)} ${COIN_IMG} / час`;
+    renderPassivePending();
     if (hintEl) {
         const nightFrom = String(passiveNight.from || 22).padStart(2, '0');
         const nightTo = String(passiveNight.to || 8).padStart(2, '0');
+        const nightNote = passivePending.night ? ' Сейчас ночь — капает вдвое меньше.' : '';
         hintEl.textContent = rate > 0
-            ? `Твой инвентарь приносит ${rate.toFixed(1)} коинов каждый час. Доход копится, даже когда аппка закрыта: `
-              + `ночью (${nightFrom}:00–${nightTo}:00 МСК) — вдвое меньше.`
+            ? `Твой инвентарь приносит ${rate.toFixed(1)} коинов каждый час. Доход копится, даже когда аппка закрыта `
+              + `(ночью ${nightFrom}:00–${nightTo}:00 МСК — вдвое меньше).${nightNote}`
             : 'Купи капсулы — они приносят коины каждый час, даже когда аппка закрыта.';
+        // «Что мешает забрать» — прямо в подсказке, чтобы кнопка не выглядела сломанной.
+        const whole = Number(passivePending.whole || 0);
+        if (rate > 0 && whole < 1) {
+            const need = Math.max(0, 1 - Number(passivePending.amount || 0));
+            hintEl.textContent = `Копится: ${formatPassiveAmount(passivePending.amount)} коинов. `
+                + `До первой выплаты ${formatPassiveAmount(need)} — целый коин забирается целиком.`;
+        }
     }
-    if (button) button.disabled = rate <= 0;
+    if (button) {
+        // Забирать можно только когда накопился хотя бы 1 целый коин:
+        // сервер отдаёт целые, а дробную часть держит до следующего раза.
+        button.disabled = rate <= 0 || Number(passivePending.whole || 0) < 1;
+        button.textContent = Number(passivePending.whole || 0) >= 1
+            ? `Забрать ${Math.floor(Number(passivePending.whole) || 0)}`
+            : 'Забрать';
+    }
 }
 
 async function claimPassiveIncome(options) {
@@ -896,10 +961,30 @@ async function claimPassiveIncome(options) {
             }
             balance = Number(data.new_balance) || balance;
             balanceKnown = true;
+            applyPassivePending({
+                amount: Number(data.pending || 0),
+                whole: Math.floor(Number(data.pending || 0)),
+                rate: Number(data.rate || 0),
+                hours: Number(data.hours || 0),
+                night: Boolean(data.night),
+            });
             updateUI();
         } else if (!silent) {
-            const hint = data.detail || 'Пока нечего забирать — капсулы копят коины.';
+            const pending = Number(data.pending || data.entitled || 0);
+            const hint = data.detail
+                ? `${data.detail}\n\nНакоплено: ${formatPassiveAmount(pending)} коинов. `
+                  + 'Целый коин можно забрать, как только он набежит.'
+                : 'Пока нечего забирать — капсулы копят коины.';
             tg.showAlert(hint);
+        }
+        if (data && data.pending !== undefined) {
+            applyPassivePending({
+                amount: Number(data.pending || 0),
+                whole: Math.floor(Number(data.pending || 0)),
+                rate: Number(data.rate || 0),
+                hours: Number(data.hours || 0),
+                night: Boolean(data.night),
+            });
         }
         return data;
     } catch (e) {
@@ -910,11 +995,33 @@ async function claimPassiveIncome(options) {
     }
 }
 
+// Задача 42: запросить у сервера, сколько уже накоплено (ничего не начисляет).
+async function refreshPassivePending() {
+    if (!tg.initData || !canPlay) return null;
+    try {
+        const data = await apiPost('/api/passive_preview', {}, { silent: true });
+        if (data && data.ok) applyPassivePending(data);
+        return data;
+    } catch (e) {
+        return null;
+    }
+}
+
 function startPassiveIncomeTimer() {
     if (passiveTimer) return;
     passiveTimer = setInterval(() => {
         if (document.visibilityState === 'visible' && canPlay) claimPassiveIncome({ silent: true });
     }, PASSIVE_INTERVAL);
+    // Пока профиль открыт, обновляем «накоплено» раз в минуту: игрок видит,
+    // как сумма растёт, не перезаходя в приложение.
+    if (!passivePendingTimer) {
+        passivePendingTimer = setInterval(() => {
+            const profile = document.getElementById('tab-profile');
+            if (document.visibilityState === 'visible' && profile && profile.classList.contains('active')) {
+                refreshPassivePending();
+            }
+        }, PASSIVE_PENDING_REFRESH);
+    }
 }
 
 // ================= РЕФЕРАЛЫ =================
@@ -3313,6 +3420,32 @@ function renderArenaCircle(state) {
 // Задача 37: затухание считаем на каждом кадре (requestAnimationFrame).
 const ARENA_POINTER_SPEED = 900;          // °/с — как UPGRADE_ARROW_SPEED
 const ARENA_POINTER_LAND_MS = 5000;       // длительность финишного доезда
+// Задача 42: прокрут как в апгрейде — 3 секунды РАЗГОН (скорость растёт
+// постепенно), потом 5 секунд ТОРМОЖЕНИЕ, причём на последней секунде стрелка
+// уже еле ползёт. Итого 8 секунд — столько же, сколько отдаёт сервер в
+// `team_roll_duration` для командной арены.
+const ARENA_SPIN_UP_MS = 3000;
+const ARENA_SPIN_DOWN_MS = 5000;
+const ARENA_TEAM_ROLL_MS = ARENA_SPIN_UP_MS + ARENA_SPIN_DOWN_MS;
+// Доля пути за разгон при скорости, растущей как 1 − e^(−3u): площадь под
+// такой кривой на отрезке u∈[0,1].
+const ARENA_SPIN_UP_AREA = 1 - (1 - Math.exp(-3)) / 3;
+
+function arenaNowMs() {
+    return (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+}
+
+// Путь, который стрелка проходит за 3 секунды разгона (≈1844°, т.е. ~5 оборотов).
+function arenaSpinUpDistance() {
+    return ARENA_POINTER_SPEED * (ARENA_SPIN_UP_MS / 1000) * ARENA_SPIN_UP_AREA;
+}
+
+// Нормированный пройденный путь за разгон: 0 → 1, скорость в конце ~0.95 полной.
+function arenaSpinUpProgress(u) {
+    if (!(u > 0)) return 0;
+    if (u >= 1) return 1;
+    return (u - (1 - Math.exp(-3 * u)) / 3) / ARENA_SPIN_UP_AREA;
+}
 // Резерв, если в WebView нет requestAnimationFrame: тот же доезд через CSS.
 const ARENA_POINTER_LAND_EASING = 'cubic-bezier(0.1, 0.7, 0.1, 1)';
 // Победителя показываем только ПОСЛЕ того, как стрелка встала / мяч замер.
@@ -3350,32 +3483,6 @@ function arenaResetPointer() {
         pointer.style.transform = 'rotate(0deg)';
         pointer.classList.remove('landing');
     }
-}
-
-function arenaStartPointerSpin() {
-    if (arenaPointer.spinning || arenaPointer.rafId) return;
-    const pointer = arenaPointerNode();
-    if (!pointer) return;
-    pointer.style.transition = 'none';
-    pointer.classList.remove('landing');
-    pointer.classList.add('spinning');
-    arenaPointer.spinning = true;
-    const nowMs = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
-    let last = nowMs();
-    const step = () => {
-        if (!arenaPointer.spinning) { arenaPointer.rafId = null; return; }
-        const now = nowMs();
-        const dt = Math.max(0, Math.min(now - last, 120)) / 1000;
-        last = now;
-        arenaPointer.angle = (arenaPointer.angle + ARENA_POINTER_SPEED * dt) % 360;
-        arenaPointerSetAngle(arenaPointer.angle);
-        arenaPointer.rafId = typeof requestAnimationFrame === 'function'
-            ? requestAnimationFrame(step)
-            : setTimeout(step, 16);
-    };
-    arenaPointer.rafId = typeof requestAnimationFrame === 'function'
-        ? requestAnimationFrame(step)
-        : setTimeout(step, 16);
 }
 
 // Сколько градусов набежит при скорости v(t) = v0·e^(−k·t) за seconds секунд.
@@ -3448,9 +3555,15 @@ function arenaLandPointer(finalX, durationMs) {
         if (finished || token !== arenaPointer.landToken) return;
         const elapsed = Math.max(0, nowMs() - startedAt);
         const progress = Math.min(1, elapsed / total);
-        // Доля пройденного пути по экспоненте: быстро в начале, всё медленнее
-        // к концу (в последнюю секунду стрелка почти останавливается).
-        const factor = norm > 0 ? (1 - Math.exp(-k * (progress * total / 1000))) / norm : progress;
+        // Задача 42: к концу торможения стрелка должна ПОЛЗТИ, а не «доезжать
+        // рывком». Чистая экспонента к последней секунде оставляет заметный
+        // хвост, поэтому складываем две кривые: экспоненту (быстрый сброс
+        // скорости в начале) и кубическое сглаживание (мягкий, почти нулевой
+        // финал). Так на 7-й секунде из 8-ми стрелка делает лишь несколько
+        // градусов и останавливается ровно на секторе победителя.
+        const expo = norm > 0 ? (1 - Math.exp(-k * (progress * total / 1000))) / norm : progress;
+        const easeOut = 1 - Math.pow(1 - progress, 3);
+        const factor = Math.min(1, expo * 0.55 + easeOut * 0.45);
         arenaPointerSetAngle(startAngle + distance * factor);
         if (progress >= 1) return finish();
         requestAnimationFrame(step);
@@ -3498,6 +3611,11 @@ function arenaPool(view) {
 // Снимок обеих арен из ответа /api/hockey_state. Плоские поля оставлены как
 // запасной путь: если сервер старой сборки, клиент всё равно не падает.
 function arenaPoolsFromState(state) {
+    // Задача 42: у каждой арены СВОЙ раунд (статус, таймер, round_id), поэтому
+    // клиент больше не берёт статус «сверху» — он у каждого котла собственный.
+    const arenasFromServer = (state.arenas && typeof state.arenas === 'object') ? state.arenas : {};
+    const normalServer = arenasFromServer.normal || {};
+    const teamServer = arenasFromServer.team || {};
     const normal = {
         id: 'normal',
         players: Array.isArray(state.normal_players) ? state.normal_players
@@ -3506,6 +3624,10 @@ function arenaPoolsFromState(state) {
         bank: Number(state.normal_bank != null ? state.normal_bank : state.bank) || 0,
         winner: state.winner || null,
         winner_team: null,
+        status: normalServer.status || state.normal_status || state.status || 'waiting',
+        timer: Number(normalServer.timer != null ? normalServer.timer : state.normal_timer) || 0,
+        round_id: String(normalServer.round_id || state.normal_round_id || state.round_id || ''),
+        roll_duration: Number(normalServer.roll_duration) || Number(state.roll_duration) || 9,
     };
     const team = {
         id: 'team',
@@ -3516,6 +3638,11 @@ function arenaPoolsFromState(state) {
         bank: Number(state.team_bank) || 0,
         winner: (state.arena_winners && state.arena_winners.team) || null,
         winner_team: state.winner_team || null,
+        status: teamServer.status || state.team_status || 'waiting',
+        timer: Number(teamServer.timer != null ? teamServer.timer : state.team_timer) || 0,
+        round_id: String(teamServer.round_id || state.team_round_id || ''),
+        roll_duration: Number(teamServer.roll_duration) || Number(state.team_roll_duration) || 8,
+        teams_summary: teamServer.teams || state.teams || [],
     };
     const fromServer = state.arenas && typeof state.arenas === 'object' ? state.arenas : {};
     return {
@@ -3644,13 +3771,17 @@ function renderArenaParticipants() {
 
 function renderArenaActive() {
     const state = arenaState.last;
-    if (!state || !state.status) return;
+    if (!state) return;
+    // Задача 42: котлы независимы — рисуем по статусу ТОЙ арены, что открыта.
+    const pool = arenaPool(arenaState.view);
+    const own = Object.assign({}, state, { status: pool.status || 'waiting' },
+        arenaStateForView(state, arenaState.view));
     if (arenaState.view === 'team') {
-        if (arenaShapes(arenaPool('team')).length || state.status === 'waiting') {
-            renderArenaCircle(arenaStateForView(state, 'team'));
+        if (arenaShapes(pool).length || own.status === 'waiting') {
+            renderArenaCircle(own);
         }
     } else {
-        renderNormalArena(arenaStateForView(state, 'normal'));
+        renderNormalArena(own);
     }
 }
 
@@ -3664,6 +3795,13 @@ function arenaStateForView(state, view) {
         bank: Number(pool.bank) || 0,
         winner: pool.winner || null,
         winner_team: view === 'team' ? (pool.winner_team || (pool.winner && pool.winner.id) || null) : null,
+        // Статус/раунд/таймер — ТОЛЬКО своей арены: прежде сюда попадал
+        // status одиночной, и командный круг «замирал» на чужом финише.
+        status: pool.status || 'waiting',
+        timer: Number(pool.timer) || 0,
+        round_id: String(pool.round_id || ''),
+        roll_data: pool.roll_data || state.roll_data || null,
+        roll_duration: Number(pool.roll_duration) || 8,
     });
 }
 
@@ -3727,6 +3865,14 @@ function setArenaMode(mode) {
 
 // Запускает анимацию выбранной арены по последнему известному состоянию.
 function replayArenaAnimation(state, instant) {
+    // Задача 42: статус и round_id берём у открытой арены — её броски идут
+    // независимо от соседнего котла.
+    const pool = arenaPool(arenaState.view);
+    const round = {
+        status: pool.status || 'waiting',
+        round_id: String(pool.round_id || ''),
+    };
+    if (round.round_id) state = Object.assign({}, state, round);
     if (!state || !state.round_id) return;
     if (state.status === 'rolling') {
         if (arenaState.view === 'team') {
@@ -3734,7 +3880,10 @@ function replayArenaAnimation(state, instant) {
                 arenaPointer.roundId = state.round_id;
                 arenaResetPointer();
             }
-            arenaStartPointerSpin();
+            if (!arenaPointer.spinning && !arenaPointer.rafId) {
+                const rollData = (arenaPool('team').roll_data) || state.roll_data || {};
+                arenaBeginTeamRoll(rollData.final_x);
+            }
         } else if (arenaBall.roundId !== String(state.round_id) || !arenaBall.active) {
             startArenaBall(arenaStateForView(state, 'normal'));
         }
@@ -3761,6 +3910,85 @@ function replayArenaAnimation(state, instant) {
 
 // Стрелка сразу на нужном угле: тот же визуальный результат, что после
 // arenaLandPointer, но без повторной прокрутки (для возврата на арену).
+// Задача 42: ОДНА анимация на весь бросок командной арены — 3 секунды
+// раскрута (скорость растёт постепенно) и 5 секунд торможения, причём на
+// последней секунде стрелка делает меньше градуса в кадр и визуально «встаёт».
+// Стартуем в НАЧАЛЕ броска: финальная точка приходит с сервера сразу вместе с
+// началом раунда (roll_data.final_x), поэтому не нужно ничего досчитывать после.
+function arenaBeginTeamRoll(finalX) {
+    const pointer = arenaPointerNode();
+    arenaPointerStopSpin();
+    if (!pointer) return;
+    const token = (arenaPointer.landToken || 0) + 1;
+    arenaPointer.landToken = token;
+
+    const desired = ((arenaAngleForShare(Math.max(0, Math.min(100, Number(finalX) || 0))) % 360) + 360) % 360;
+    const current = ((arenaPointer.angle % 360) + 360) % 360;
+    const delta = ((desired - current) % 360 + 360) % 360;
+    const startAngle = arenaPointer.angle;
+
+    // Торможение укладывается в целые обороты + доводку до победителя.
+    // Разгон НЕ кратен 360°, поэтому его остаток обязательно компенсируем:
+    // иначе стрелка встанет на 40–50° мимо сектора победителя.
+    const spinUp = arenaSpinUpDistance();
+    const downTurns = Math.max(3, Math.round(spinUp / 360));
+    const spinUpRest = ((spinUp % 360) + 360) % 360;
+    const need = ((delta - spinUpRest) % 360 + 360) % 360;
+    const spinDown = downTurns * 360 + need;
+    const total = ARENA_SPIN_UP_MS + ARENA_SPIN_DOWN_MS;
+
+    const nowMs = arenaNowMs;
+    const startedAt = nowMs();
+    // Запоминаем старт и длительность: по ним экран финиша понимает, сколько
+    // осталось до реальной остановки стрелки, и не показывает победителя раньше.
+    arenaPointer.rollStartedAt = startedAt;
+    arenaPointer.rollTotalMs = total;
+    pointer.classList.remove('landing');
+    pointer.classList.add('spinning');
+    pointer.style.transition = 'none';
+    arenaPointer.spinning = true;
+
+    let finished = false;
+    const finish = () => {
+        if (finished) return;
+        finished = true;
+        if (token !== arenaPointer.landToken) return;
+        arenaPointerSetAngle(startAngle + spinUp + spinDown);
+        arenaPointerStopSpin();
+        pointer.classList.add('landing');
+        arenaPointer.landedRound = arenaPointer.roundId;
+    };
+
+    if (typeof requestAnimationFrame !== 'function') {
+        // Резерв для старых WebView: один CSS-переход на всё время броска.
+        pointer.style.transition = `transform ${total}ms ${ARENA_POINTER_LAND_EASING}`;
+        pointer.style.transform = `rotate(${(startAngle + spinUp + spinDown).toFixed(2)}deg)`;
+        arenaPointer.angle = startAngle + spinUp + spinDown;
+        arenaPointer.spinning = false;
+        setTimeout(finish, total + 250);
+        return;
+    }
+
+    const step = () => {
+        if (finished || token !== arenaPointer.landToken) return;
+        const elapsed = Math.max(0, nowMs() - startedAt);
+        let angle;
+        if (elapsed <= ARENA_SPIN_UP_MS) {
+            // Разгон.
+            angle = startAngle + spinUp * arenaSpinUpProgress(elapsed / ARENA_SPIN_UP_MS);
+        } else {
+            // Торможение: кубический ease-out — быстро в начале, почти ноль в конце.
+            const u = Math.min(1, (elapsed - ARENA_SPIN_UP_MS) / ARENA_SPIN_DOWN_MS);
+            const ease = 1 - Math.pow(1 - u, 3);
+            angle = startAngle + spinUp + spinDown * ease;
+            if (elapsed >= total) { finish(); return; }
+        }
+        arenaPointerSetAngle(angle);
+        arenaPointer.rafId = requestAnimationFrame(step);
+    };
+    arenaPointer.rafId = requestAnimationFrame(step);
+}
+
 function arenaPointerJumpTo(finalX) {
     arenaPointerStopSpin();
     arenaPointer.landToken = (arenaPointer.landToken || 0) + 1;
@@ -4068,60 +4296,88 @@ async function pollHockeyState() {
         const arena = document.getElementById('hockey-arena');
 
         // Обе арены приходят одним ответом; какую рисуем — решает игрок.
+        // Задача 42: у каждой арены СВОЙ раунд, поэтому статус/таймер/round_id
+        // берём из пула выбранной арены, а не из «верхних» полей ответа.
         arenaState.last = state;
-        arenaState.status = state.status;
         arenaState.arenas = arenaPoolsFromState(state);
         syncArenaView();
         const isTeamMode = arenaState.view === 'team';
+        const activePool = arenaPool(arenaState.view);
+        const round = {
+            status: activePool.status || 'waiting',
+            timer: Number(activePool.timer) || 0,
+            round_id: String(activePool.round_id || ''),
+        };
+        arenaState.status = round.status;
 
-        if (state.status === 'waiting') {
-            statusEl.innerText = `Ставки: ${state.timer} сек`; statusEl.style.color = '#ffcc00';
+        if (round.status === 'waiting') {
+            statusEl.innerText = `Ставки: ${round.timer} сек`; statusEl.style.color = '#ffcc00';
             document.getElementById('hockey-controls').style.display = 'flex';
             hasShownWinner = false;
             shownWinnerKey = null;
             hideArenaBall();
             // Новый раунд — стрелка в исходное положение. Проверяем по
             // round_id, чтобы не сбрасывать её на каждом опросе.
-            if (arenaPointer.roundId !== state.round_id) {
-                arenaPointer.roundId = state.round_id;
+            if (arenaPointer.roundId !== round.round_id) {
+                arenaPointer.roundId = round.round_id;
                 arenaResetPointer();
             }
             document.getElementById('winner-modal').classList.remove('active');
             document.getElementById('hockey-btn').disabled = false;
-        } else if (state.status === 'rolling') {
+        } else if (round.status === 'rolling') {
             statusEl.innerText = 'Идёт бросок...'; statusEl.style.color = '#007aff';
             document.getElementById('hockey-controls').style.display = 'none';
             if (isTeamMode) {
-                // Командная арена: стрелка крутится весь бросок и на финише
-                // сама тормозит на выигрышном секторе (см. arenaLandPointer).
-                if (arenaPointer.roundId !== state.round_id) {
-                    arenaPointer.roundId = state.round_id;
+                // Командная арена: 3 с разгон + 5 с торможение (как апгрейд).
+                // Запускаем ОДИН раз на раунд, в начале броска; финальную точку
+                // сервер отдаёт сразу, поэтому анимация нигде не «догоняет».
+                if (arenaPointer.roundId !== round.round_id) {
+                    arenaPointer.roundId = round.round_id;
                     arenaResetPointer();
+                    arenaPointer.roundId = round.round_id;
                 }
-                arenaStartPointerSpin();
-            } else if (arenaBall.roundId !== String(state.round_id) || !arenaBall.active) {
+                const teamRoll = activePool.roll_data || state.roll_data || {};
+                if (arenaPointer.landedRound !== round.round_id
+                        && !arenaPointer.spinning && !arenaPointer.rafId) {
+                    arenaBeginTeamRoll(teamRoll.final_x);
+                }
+            } else if (arenaBall.roundId !== String(round.round_id) || !arenaBall.active) {
                 // Обычная арена: один раз на раунд берём траекторию и запускаем мяч.
                 // !active — вернулись с другой арены: продолжаем с текущей точки.
                 startArenaBall(arenaStateForView(state, 'normal'));
             }
-        } else if (state.status === 'finished') {
+        } else if (round.status === 'finished') {
             statusEl.innerText = 'Раунд окончен!'; statusEl.style.color = '#ff3b30';
             // Задача 34: победителя показываем не сразу, а когда анимация
             // доехала до конца. Раньше модалка всплывала через 1 с — стрелка
             // ещё крутилась, и финиш выглядел резким обрывом.
             let winnerDelayMs = ARENA_WINNER_DELAY_MS;
             if (isTeamMode) {
-                // Победитель уже известен серверу — стрелка плавно доезжает до него.
-                if (arenaPointer.landedRound !== state.round_id) {
-                    arenaPointer.landedRound = state.round_id;
-                    const finalX = state.roll_data ? state.roll_data.final_x : 0;
-                    arenaLandPointer(Number(finalX) || 0, ARENA_POINTER_LAND_MS);
-                    winnerDelayMs = ARENA_POINTER_LAND_MS + ARENA_WINNER_AFTER_LAND_MS;
+                // Задача 42: анимация началась в начале броска и длится 8 секунд
+                // (3 разгон + 5 торможение). Победителя показываем не раньше
+                // фиксации стрелки — досчитываем остаток, если сервер успел
+                // закрыть раунд, а мы подключились позже.
+                const rollData = activePool.roll_data || state.roll_data || {};
+                const finalX = Number(rollData.final_x) || 0;
+                if (arenaPointer.landedRound !== round.round_id) {
+                    if (!arenaPointer.spinning && !arenaPointer.rafId) {
+                        arenaPointer.roundId = round.round_id;
+                        arenaBeginTeamRoll(finalX);
+                    }
+                    // Сообщим победителя, когда стрелка реально встанет: берём
+                    // остаток анимации от её старта, а не фиксированные 5 секунд
+                    // (иначе модалка опаздывала на весь разгон).
+                    arenaPointer.pendingWinnerRound = round.round_id;
+                    const rollLeft = (arenaPointer.rollStartedAt && arenaPointer.rollTotalMs)
+                        ? Math.max(0, Number(arenaPointer.rollTotalMs)
+                            - (arenaNowMs() - Number(arenaPointer.rollStartedAt)))
+                        : 0;
+                    winnerDelayMs = rollLeft + ARENA_WINNER_AFTER_LAND_MS;
                 } else {
                     winnerDelayMs = ARENA_WINNER_DELAY_MS;
                 }
             } else {
-                freezeArenaBall(state);
+                freezeArenaBall(arenaStateForView(state, 'normal'));
             }
             const modal = document.getElementById('winner-modal');
             // Победителя показываем по той арене, которую игрок смотрит; если в
@@ -4129,7 +4385,7 @@ async function pollHockeyState() {
             const shownPool = arenaState.view === 'team' ? 'team' : 'normal';
             const otherPool = shownPool === 'team' ? 'normal' : 'team';
             const primary = arenaPool(shownPool).winner ? shownPool : (arenaPool(otherPool).winner ? otherPool : null);
-            const winnerKey = primary ? `${state.round_id}:${primary}` : null;
+            const winnerKey = primary ? `${round.round_id}:${primary}` : null;
             if (primary && shownWinnerKey !== winnerKey) {
                 shownWinnerKey = winnerKey;
                 hasShownWinner = true;
@@ -4169,8 +4425,8 @@ async function pollHockeyState() {
             arena.classList.toggle('team-mode', isTeamMode);
             // Анимации командной арены: «бегущее» кольцо во время броска и
             // золотая пульсация круга после него.
-            arena.classList.toggle('rolling', isTeamMode && state.status === 'rolling');
-            arena.classList.toggle('settled', isTeamMode && state.status === 'finished');
+            arena.classList.toggle('rolling', isTeamMode && round.status === 'rolling');
+            arena.classList.toggle('settled', isTeamMode && round.status === 'finished');
         }
     } catch (e) { console.error(e); }
 }
