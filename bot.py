@@ -9,9 +9,11 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 from dotenv import load_dotenv
 from aiogram import BaseMiddleware, Bot, Dispatcher, F, Router
-from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, FSInputFile, WebAppInfo, Update
+from aiogram.types import (Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton,
+                           FSInputFile, WebAppInfo, Update, MenuButtonWebApp,
+                           BotCommand, BotCommandScopeDefault, BotCommandScopeChat)
 from aiogram.enums import ChatMemberStatus
-from aiogram.filters import StateFilter
+from aiogram.filters import Command, CommandStart, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.exceptions import TelegramUnauthorizedError
@@ -1711,7 +1713,9 @@ async def cmd_services(message: Message):
         f"   • API: <code>{API_URL}</code>\n"
         f"   • Mini App: <code>{WEBAPP_URL}</code> "
         "ℹ️ (только для BotFather; игрокам эту ссылку не отправляйте — "
-        "у них кнопка Mini App в меню бота)\n\n"
+        "у них кнопка Mini App в меню бота)\n"
+        f"   • кнопка меню: <code>{miniapp_webapp_url()}</code>\n"
+        f"   • {safe_text(startup_diagnostics())}\n\n"
         "2️⃣ <b>dan4Bot</b> (aiogram): ✅ этот процесс\n"
         "   • веб-сервер только для порта Render (start_fake_website)\n"
         "   • игровые данные читает из общей базы Supabase\n\n"
@@ -2875,6 +2879,85 @@ async def cmd_db_schema(message: Message):
     await message.answer(db_schema_report(report), parse_mode="HTML")
 
 
+# ================= СТАРТ И КНОПКА MINI APP =================
+# Проблема (задача 41): игрок открывал бота — внизу экрана синяя кнопка
+# «AURA GAME», нажимал её и получал белый экран «Not Found». Причина в том,
+# что кнопку меню в BotFather настраивают ВРУЧНУЮ, и указанный там адрес
+# устаревает (сервис переименовали, Mini App переехал на /miniapp/, старый
+# сервис удалён). Теперь адрес кнопки ставит сам бот при старте — из того же
+# URL, что и в кнопках сообщений, то есть всегда живой.
+
+# Что бот знает о живости aura-api после resolve_api_url().
+# Нужно для `!сервисы` и для строчки в логе: если API лежит, кнопка Mini App
+# откроет ошибку — лучше сказать об этом прямо, чем молчать.
+API_LIVENESS = {"state": "unknown", "checked": [], "at": 0.0}
+
+
+def api_liveness() -> dict:
+    """Состояние aura-api: alive / down / unknown + какие адреса проверяли."""
+    return dict(API_LIVENESS)
+
+
+def startup_diagnostics() -> str:
+    """Одна строка для лога и для админа: куда ведёт кнопка и жив ли API."""
+    live = API_LIVENESS.get("state")
+    if live == "alive":
+        return f"Кнопка Mini App → {miniapp_webapp_url()} (aura-api отвечает)"
+    return (f"⚠️ Кнопка Mini App → {miniapp_webapp_url()}, но aura-api НЕ отвечает. "
+            f"Проверьте AURA_API_URL (сейчас {API_URL}) и что Web Service aura-api запущен.")
+
+
+def miniapp_menu_button() -> MenuButtonWebApp:
+    """Кнопка «AURA GAME» слева от поля ввода — открывает Mini App на aura-api."""
+    return MenuButtonWebApp(text="🎮 AURA GAME", web_app=WebAppInfo(url=miniapp_webapp_url()))
+
+
+async def register_bot_commands() -> None:
+    """Синее меню команд + кнопка Mini App. Ошибки не роняют старт бота."""
+    commands = [
+        BotCommand(command="start", description="🎮 Открыть AURA GAME"),
+        BotCommand(command="help", description="📖 Все команды"),
+    ]
+    try:
+        await bot.set_my_commands(commands, scope=BotCommandScopeDefault())
+        await bot.set_chat_menu_button(menu_button=miniapp_menu_button())
+        logger.info("✅ Кнопка Mini App настроена: %s", miniapp_webapp_url())
+    except Exception as exc:  # noqa: BLE001 — настройка не должна мешать polling
+        logger.warning("Не удалось настроить меню бота: %s: %s", type(exc).__name__, exc)
+
+
+def start_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="🎮 Играть", web_app=WebAppInfo(url=miniapp_webapp_url())),
+    ]])
+
+
+@dp.message(CommandStart())
+async def cmd_start(message: Message):
+    """`/start` — единственная точка входа, которая должна работать всегда.
+
+    Раньше `/start` не обрабатывался вообще: его молча съедал общий хендлер,
+    и игрок не видел ни приветствия, ни кнопки. Адрес Mini App берём из того
+    же miniapp_webapp_url(), что и кнопка меню — поэтому кнопка внутри
+    сообщения не может вести на удалённый сервис.
+    """
+    actor = message_actor(message)
+    name = safe_text(getattr(actor, "first_name", None) or "друг")
+    await message.answer(
+        f"👋 <b>Привет, {name}!</b>\n\n"
+        f"Это <b>AURA GAME</b> — игры, коины и отношения прямо в Telegram.\n\n"
+        f"Жми кнопку ниже, чтобы открыть приложение. Меню бота тоже ведёт в игру.",
+        parse_mode="HTML",
+        reply_markup=start_keyboard(),
+    )
+
+
+@dp.message(Command("help"))
+async def cmd_help_command(message: Message):
+    """`/help` — тот же текст, что и `!помощь`."""
+    return await cmd_help(message)
+
+
 # ================= ПОМОЩЬ =================
 @dp.message(
     F.text.func(lambda t: strip_prefix(t).lower().startswith("помощь") or strip_prefix(t).lower().startswith("help")))
@@ -3072,9 +3155,13 @@ async def resolve_api_url() -> str:
             API_URL = base
             if not os.getenv("AURA_WEBAPP_URL"):
                 WEBAPP_URL = f"{API_URL}/miniapp/"
+            API_LIVENESS.update({"state": "alive", "checked": candidates,
+                                 "at": time.time(), "url": base})
             logger.info("✅ aura-api: %s | Mini App: %s", API_URL, WEBAPP_URL)
             return API_URL
 
+    API_LIVENESS.update({"state": "down", "checked": candidates,
+                         "at": time.time(), "url": API_URL})
     logger.error(
         "❌ aura-api не найден ни по одному адресу (%s). "
         "Проверьте имя Web Service в Render и переменную AURA_API_URL.",
@@ -3377,6 +3464,10 @@ async def main():
         BOT_USERNAME = me.username
     logger.info(f"🤖 Бот: @{me.username} | Mini App: {WEBAPP_URL}")
     logger.info(f"🔗 Прямая ссылка Mini App: {miniapp_direct_url()}")
+    # Кнопка «AURA GAME» в меню — программно, а не руками в BotFather:
+    # адрес в BotFather устаревает и даёт «Not Found» (задача 41).
+    await register_bot_commands()
+    logger.info("ℹ️ %s", startup_diagnostics())
     # Прогрев aura-api: без него бесплатный Render усыпляет сервис через 15 минут
     # и игрок вместо игры видит экран «SERVICE WAKING UP».
     # 1) по активности — любое действие в боте будит API (включено всегда);
