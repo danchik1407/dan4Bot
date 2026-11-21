@@ -85,7 +85,7 @@ async def _http_json(url, method: str = "GET", params=None, payload=None, timeou
 
 # Номер сборки: по нему из /api/health видно, что на сервисе НЕ старый код.
 # Если после деплоя здесь прежнее значение — Render ещё не перезапустился.
-API_BUILD = "2026-10-27-task42-arenas"
+API_BUILD = "2026-10-27-task43-info-arenas"
 
 # Момент старта процесса. По нему видно, что сервис только что «проснулся»:
 # Render на бесплатном тарифе усыпляет Web Service через 15 минут без входящих
@@ -939,7 +939,14 @@ WHALE_NAMES = ["KingPin", "MrMoney", "WhaleGod", "BigBoss", "RichMan", "GoldFing
 WHALE_COLORS = ["#ffd700", "#c0c0c0", "#b8860b", "#ff8c00", "#8b0000", "#daa520"]
 
 
-def _random_arena_bot_count():
+def _random_arena_bot_count(arena: str = "normal"):
+    """Сколько ботов добавляем за раунд в конкретном котле.
+
+    Задача 43: в командной арене ботов должно быть «разы меньше» — максимум
+    2–3 на всю игру, иначе круг превращается в ботов против одного игрока.
+    """
+    if arena == "team":
+        return random.randint(TEAM_BOT_COUNT_MIN, TEAM_BOT_COUNT_MAX)
     # Keep most rounds light; large bot rooms are occasional.
     return random.randint(1, 3) if random.random() < 0.85 else random.randint(4, 10)
 
@@ -1227,6 +1234,11 @@ def _upgrade_economy_config() -> dict:
 
 def _user_payload(row, is_admin, user_id=None):
     """Единый ответ профиля: любые NULL/строки из базы приводим к нормальным типам."""
+    # Первый заход в аппку: если отметки ещё нет — это как раз он.
+    app_first_seen = _app_first_seen_get(user_id) if user_id is not None else None
+    if user_id is not None and app_first_seen is None:
+        _app_first_seen_mark(user_id)
+        app_first_seen = _APP_FIRST_SEEN_MEMORY.get(int(user_id))
     created_at = row.get("created_at")
     if isinstance(created_at, str):
         created_text = created_at
@@ -1252,7 +1264,12 @@ def _user_payload(row, is_admin, user_id=None):
         "admin_only": ADMIN_ONLY_APP,
         "can_play": bool(allowed),
         "created_at": created_text,
-        "days_in_game": _days_in_game(created_at),
+        # Задача 43: дни считаем от ПЕРВОГО ЗАХОДА В АППКУ (app_first_seen),
+        # а не от регистрации в боте. created_at оставлен для совместимости.
+        "days_in_app": _days_since(app_first_seen),
+        "app_first_seen": (_iso_from_timestamp(app_first_seen) if app_first_seen else None),
+        "days_in_game": (_days_since(app_first_seen) if app_first_seen
+                         else _days_in_game(created_at)),
         # Пассивный доход: клиент считает «в час» по своему инвентарю этими ставками.
         "passive_rates": PASSIVE_INCOME_RATES,
         "passive_max_hours": PASSIVE_INCOME_MAX_HOURS,
@@ -1273,6 +1290,59 @@ def _user_payload(row, is_admin, user_id=None):
         },
         "economy": {"upgrade": _upgrade_economy_config()},
     }
+
+
+# Задача 43: «Дней в игре» = сколько прошло с ПЕРВОГО ЗАХОДА В АППКУ,
+# а не с регистрации в боте. Дата регистрации у старых игроков на годы раньше,
+# из-за чего плашка показывала неверное число.
+APP_FIRST_SEEN_TABLE = "app_first_seen"
+_APP_FIRST_SEEN_MEMORY: dict = {}
+
+
+def _app_first_seen_mark(user_id) -> None:
+    """Отмечает первый заход в Mini App (идемпотентно, тихо при ошибке БД)."""
+    try:
+        uid = int(user_id)
+    except (TypeError, ValueError):
+        return
+    if uid in _APP_FIRST_SEEN_MEMORY:
+        return
+    _APP_FIRST_SEEN_MEMORY[uid] = time.time()
+    try:
+        supabase.table(APP_FIRST_SEEN_TABLE).upsert(
+            {"user_id": uid, "first_seen": _iso_from_timestamp(time.time())},
+            on_conflict="user_id").execute()
+    except Exception as exc:  # noqa: BLE001 — нет миграции? профиль не падает
+        logger.debug("app_first_seen недоступна (%s) — работаю на памяти", exc)
+
+
+def _app_first_seen_get(user_id):
+    """Когда игрок впервые открыл аппку (timestamp) или None."""
+    try:
+        uid = int(user_id)
+    except (TypeError, ValueError):
+        return None
+    try:
+        res = (supabase.table(APP_FIRST_SEEN_TABLE).select("first_seen")
+               .eq("user_id", uid).limit(1).execute())
+        if res.data:
+            parsed = _parse_timestamp(res.data[0].get("first_seen"))
+            if parsed:
+                _APP_FIRST_SEEN_MEMORY.setdefault(uid, float(parsed))
+                return float(parsed)
+    except Exception:  # noqa: BLE001
+        pass
+    return _APP_FIRST_SEEN_MEMORY.get(uid)
+
+
+def _days_since(stamp) -> int:
+    """Сколько полных дней прошло с момента stamp."""
+    if not stamp:
+        return 0
+    try:
+        return max(0, int((time.time() - float(stamp)) // 86400))
+    except (TypeError, ValueError):
+        return 0
 
 
 def _days_in_game(created_at):
@@ -1491,6 +1561,12 @@ ARENA_TEAMS = {
 # что рисовать: он работает в любой момент и ничего не блокирует.
 ARENA_VIEWS = ("normal", "team")
 ARENA_MAX_PLAYERS = 20          # на каждый котёл отдельно
+# Задача 43: командная арена — маленький котёл. Максимум 2–3 бота на раунд,
+# ставки 250…500, без «китов»: там играют командами, а не гоняют ботов.
+TEAM_BOT_COUNT_MIN = 2
+TEAM_BOT_COUNT_MAX = 3
+TEAM_BOT_BET_MIN = 250
+TEAM_BOT_BET_MAX = 500
 
 
 def _player_arena(player) -> str:
@@ -1507,12 +1583,12 @@ def _arena_bank(arena: str) -> int:
     return sum(max(0, int(player.get("bet", 0))) for player in _arena_players(arena))
 
 
-def _new_arena_state(mode: str = "both") -> dict:
+def _new_arena_state(mode: str = "both", arena: str = "normal") -> dict:
     # mode оставлен для совместимости со старым клиентом; по умолчанию оба котла.
     return {
         "status": "waiting", "timer": 15, "bank": 0, "players": [], "winner": None,
         "last_update": time.time(), "last_bot_added": time.time(),
-        "target_bots": _random_arena_bot_count(), "is_paid": False,
+        "target_bots": _random_arena_bot_count(arena), "is_paid": False,
         "payout_attempt_at": 0, "round_id": str(int(time.time())), "whales_added": 0,
         "roll_data": None, "rolling_started_at": None, "whale_decided": False,
         "whale_join": False, "whale_trigger_at": None, "whale_arena": "normal",
@@ -1700,11 +1776,26 @@ def _add_hockey_bot(is_whale=False, arena="normal"):
     arena = "team" if arena == "team" else "normal"
     if len(_arena_players(arena)) >= ARENA_MAX_PLAYERS:
         return False
+    if arena == "team":
+        # Задача 43: в командной арене не больше TEAM_BOT_COUNT_MAX ботов и
+        # никаких китов — проверка прямо здесь, чтобы лимит держался при любом
+        # вызове (боты, ручные тесты, старый код).
+        if is_whale:
+            return False
+        team_bots = sum(1 for player in _arena_players("team") if player.get("is_bot"))
+        if team_bots >= TEAM_BOT_COUNT_MAX:
+            return False
 
     if is_whale:
         name = "Лудик" + str(random.randint(1, 99))
         bet = random.randint(500, 2000)
         color = _unique_hockey_color(WHALE_COLORS, arena)
+    elif arena == "team":
+        # Задача 43: в командной арене ставки ботов — 250…500, без «мелочи»
+        # по 10 коинов: иначе банк выглядел пустым и делить было нечего.
+        name = random.choice(BOT_NAMES) + str(random.randint(1, 99))
+        bet = random.randint(TEAM_BOT_BET_MIN, TEAM_BOT_BET_MAX)
+        color = _unique_hockey_color(BOT_COLORS, arena)
     else:
         name = random.choice(BOT_NAMES) + str(random.randint(1, 99))
         bet = random.randint(10, 100)
@@ -1738,14 +1829,18 @@ def _maybe_add_hockey_bots(now, time_left):
     for arena in ARENA_VIEWS:
         state = _arena_state(arena)
         pool = _arena_players(arena)
-        current_bots = sum(1 for p in pool if p.get("is_bot") and p.get("bet", 0) < 500)
-        if (current_bots < state["target_bots"] and len(pool) < ARENA_MAX_PLAYERS
+        current_bots = sum(1 for p in pool if p.get("is_bot"))
+        # В командной арене ботов ровно 2–3 на раунд (задача 43). Игроков это
+        # НЕ ограничивает: лимит только на ботов, иначе не пустили бы живых.
+        limit = ARENA_MAX_PLAYERS
+        if (current_bots < state["target_bots"] and len(pool) < limit
                 and now - state["last_bot_added"] >= random.uniform(0.6, 1.5)):
             if _add_hockey_bot(arena=arena):
                 state["last_bot_added"] = now
 
         # Кит приходит только в свой котёл и по своим таймерам.
-        if (state.get("whale_join") and not state.get("whales_added")
+        # В командную арену китов НЕ пускаем: там фиксированные ставки 250–500.
+        if (arena == "normal" and state.get("whale_join") and not state.get("whales_added")
                 and state.get("whale_trigger_at") is not None
                 and time_left <= state["whale_trigger_at"]
                 and len(pool) < ARENA_MAX_PLAYERS):
@@ -2307,7 +2402,7 @@ def _tick_arena(arena: str, now: float):
             _payout_arena_winner(arena)
         if now - state["last_update"] > finish_hold and state["is_paid"]:
             # Новый раунд именно этого котла. Другой котёл продолжает свой.
-            fresh = _new_arena_state()
+            fresh = _new_arena_state(arena=arena)
             fresh["last_update"] = now
             fresh["last_bot_added"] = now
             # Тот же слот-код, что и в _prepare_hockey_roll: раунды арен не
@@ -4812,11 +4907,23 @@ def _referral_stats(user_id) -> dict:
     if rows == "error":
         return {"available": False, "count": 0, "earned": 0, "invited": [],
                 "detail": "Примените миграцию 20261109000000_economy_social.sql"}
+    # Задача 43: «Заработано» — все начисления по рефералам (в т.ч. ожидающие
+    # подтверждения), иначе цифра оставалась нулём даже после прихода друга.
     earned = sum(_safe_int(row.get("reward"), 0) for row in rows)
+    paid = sum(_safe_int(row.get("reward"), 0) for row in rows
+               if (row.get("status") or "") == "paid")
     return {
         "available": True,
         "count": len(rows),
+        "paid_count": sum(1 for row in rows if (row.get("status") or "") == "paid"),
+        "pending": max(0, len(rows) - sum(1 for row in rows
+                                           if (row.get("status") or "") == "paid")),
         "earned": earned,
+        "earned_paid": paid,
+        # Сколько дают за друга — те же числа, что платит сервер (никаких
+        # захардкоженных «от 500 до 2000» в интерфейсе).
+        "reward_rules": {"base": REFERRAL_REWARD_BASE, "nft2": REFERRAL_REWARD_NFT2,
+                         "premium": REFERRAL_REWARD_PREMIUM},
         "invited": [{"user_id": row.get("referred_id"),
                      "reward": _safe_int(row.get("reward"), 0),
                      "status": row.get("status") or "pending"} for row in rows[:20]],

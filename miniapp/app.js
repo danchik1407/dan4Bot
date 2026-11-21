@@ -517,7 +517,8 @@ function applyProfile(data) {
     keys = Number(data.keys) || 0;
     inventory = Array.isArray(data.inventory) ? data.inventory : [];
     lastChestTime = Number(data.last_chest) || 0;
-    daysInGame = Math.max(0, Number(data.days_in_game) || 0);
+    // Задача 43: «Дней в игре» — это дни с ПЕРВОГО ЗАХОДА В АППКУ.
+    daysInGame = Math.max(0, Number(data.days_in_app != null ? data.days_in_app : data.days_in_game) || 0);
     if (data.passive_night && typeof data.passive_night === 'object') {
         passiveNight = Object.assign({}, passiveNight, data.passive_night);
     }
@@ -692,7 +693,17 @@ function switchTab(tabId, element) {
     document.querySelectorAll('.nav-item').forEach(nav => nav.classList.remove('active'));
     if (element) element.classList.add('active');
     if (tabId === 'top') { loadGlobalTop(); }
+    if (tabId === 'shop') {
+        // Задача 43: витрина рисуется мгновенно (кэш), обновление — фоном.
+        // Раньше каждый вход на вкладку показывал «Загрузка магазина…».
+        renderShop();
+        loadShopItems();
+    }
     if (tabId === 'profile') {
+        // Карточки профиля рисуем ДО сети, чтобы вкладка не «думала»:
+        // пассивка уже известна, рефералы подтянутся фоном.
+        renderPassiveCard();
+        renderReferralStats();
         loadReferralStats(); loadLoveState();
         // «Сколько накопил» должно быть актуальным на момент открытия профиля:
         // пересчитываем карточку и подтягиваем серверное число (без начисления).
@@ -900,6 +911,35 @@ function formatPassiveAmount(amount) {
     return String(Math.floor(value));
 }
 
+// Задача 43: «i» на карточке пассивки — на месте «Накоплено» показываем
+// объяснение (как капает, ночная ставка, почему только целые коины).
+function togglePassiveInfo(force) {
+    const info = document.getElementById('passive-info');
+    const body = document.getElementById('passive-body');
+    const btn = document.getElementById('passive-info-btn');
+    if (!info) return;
+    const show = force === undefined ? info.hidden : Boolean(force);
+    info.hidden = !show;
+    if (body) body.style.display = show ? 'none' : '';
+    if (btn) {
+        btn.classList.toggle('active', show);
+        btn.setAttribute('aria-expanded', show ? 'true' : 'false');
+    }
+}
+
+// То же для рефералов: «i» открывает «за кого какая награда».
+function toggleReferralInfo(force) {
+    const info = document.getElementById('ref-info');
+    const btn = document.getElementById('ref-info-btn');
+    if (!info) return;
+    const show = force === undefined ? info.hidden : Boolean(force);
+    info.hidden = !show;
+    if (btn) {
+        btn.classList.toggle('active', show);
+        btn.setAttribute('aria-expanded', show ? 'true' : 'false');
+    }
+}
+
 function renderPassivePending() {
     const el = document.getElementById('passive-pending');
     if (!el) return;
@@ -1050,6 +1090,45 @@ async function checkReferralStatus() {
     } catch (e) { console.warn('referral_check', e); }
 }
 
+// Задача 43: последние цифры рефералов показываем мгновенно из памяти/localStorage,
+// затем обновляем фоном — карточка больше не «ждёт» сервер.
+const REF_CACHE_KEY = 'aura_ref_cache_v1';
+let referralStats = (() => {
+    try { return JSON.parse(localStorage.getItem(REF_CACHE_KEY) || 'null') || null; }
+    catch (e) { return null; }
+})();
+
+// Задача 43: текст «i» собираем из чисел сервера (reward_rules), а не из
+// захардкоженного диапазона. Если правил нет — остаётся статичный текст из HTML.
+function renderReferralRules(rules) {
+    const box = document.getElementById('ref-info');
+    if (!box || !rules) return;
+    const rows = [];
+    const add = (label, value) => {
+        if (!(Number(value) > 0)) return;
+        rows.push(`${label} — <b>${formatCoins(Number(value))}</b> коинов`);
+    };
+    add('Обычный друг', rules.base);
+    if (Number(rules.base) > 0) {
+        rows.unshift('Награда приходит, когда приглашённый заходит в приложение.');
+    }
+    box.innerHTML = `<b>За кого сколько платят:</b><br>`
+        + (rows.length ? rows.map(r => `• ${r}`).join('<br>') : 'Награда за друга начисляется на твой баланс автоматически.')
+        + `<br><br>За друга с редкими капсулами платят больше: 2+ капсулы — `
+        + `<b>${formatCoins(Number(rules.nft2) || 0)}</b>, premium с капсулой — `
+        + `<b>${formatCoins(Number(rules.premium) || 0)}</b> коинов.`;
+}
+
+function renderReferralStats() {
+    if (!referralStats) return;
+    const countEl = document.getElementById('ref-count');
+    const earnedEl = document.getElementById('ref-earned');
+    const linkEl = document.getElementById('ref-link');
+    if (countEl) countEl.textContent = String(referralStats.count || 0);
+    if (earnedEl) earnedEl.textContent = String(formatCoins(referralStats.earned || 0));
+    if (linkEl && !linkEl.value && referralStats.link) linkEl.value = referralStats.link;
+}
+
 async function loadReferralStats() {
     if (!tg.initData) return;
     try {
@@ -1058,8 +1137,10 @@ async function loadReferralStats() {
         const earnedEl = document.getElementById('ref-earned');
         const linkEl = document.getElementById('ref-link');
         const detailEl = document.getElementById('ref-detail');
+        // В шапке карточки «Заработано» — только число: монета уже нарисована
+        // рядом в разметке (задача 43: раньше монета дублировалась).
         if (countEl) countEl.textContent = String(data.count || 0);
-        if (earnedEl) earnedEl.innerHTML = `${formatCoins(data.earned || 0)} ${COIN_IMG}`;
+        if (earnedEl) earnedEl.textContent = String(formatCoins(data.earned || 0));
         // Имя бота берём у СЕРВЕРА. Раньше здесь был initDataUnsafe.bot_username,
         // то есть имя того бота, из которого открыли страницу: у проекта есть
         // старый бот, и игроки получали ссылку-приглашение на него.
@@ -1072,6 +1153,11 @@ async function loadReferralStats() {
             : `https://t.me/${botName}?startapp=${referralCodeFor(user && user.id)}`;
         if (linkEl) linkEl.value = link;
         if (detailEl) detailEl.textContent = data.available === false ? (data.detail || '') : '';
+        referralStats = {count: Number(data.count) || 0,
+                         earned: Number(data.earned_paid != null ? data.earned_paid : data.earned) || 0,
+                         link: link};
+        renderReferralRules(data.reward_rules);
+        try { localStorage.setItem(REF_CACHE_KEY, JSON.stringify(referralStats)); } catch (e) {}
     } catch (e) { console.warn('referrals', e); }
 }
 
@@ -1610,7 +1696,70 @@ let shopStockUnreliable = false;
 // «Всё распродано», а не «Магазин пуст» — иначе это выглядит как поломка.
 let shopSoldOut = [];
 
+// Задача 43: кэш витрины. Раньше магазин при каждом входе на вкладку заново
+// показывал «Загрузка магазина…» и ждал сеть (на бесплатном Render — до
+// нескольких секунд). Теперь последний ответ рисуется СРАЗУ, а сеть обновляет
+// его в фоне: карточки «раскрываются» мгновенно.
+const SHOP_CACHE_KEY = 'aura_shop_cache_v1';
+const SHOP_CACHE_TTL_MS = 5 * 60 * 1000;
+
+function readShopCache() {
+    try {
+        const raw = localStorage.getItem(SHOP_CACHE_KEY);
+        if (!raw) return null;
+        const parsed = JSON.parse(raw);
+        if (!parsed || typeof parsed !== 'object' || !parsed.items) return null;
+        return parsed;
+    } catch (e) { return null; }
+}
+
+function writeShopCache(payload) {
+    try {
+        localStorage.setItem(SHOP_CACHE_KEY, JSON.stringify({
+            at: Date.now(), items: payload.items,
+            sold_out: payload.sold_out || [], passive_rates: payload.passive_rates || null,
+        }));
+    } catch (e) { /* приватный режим — просто не кэшируем */ }
+}
+
+// Применяет ответ сервера (и кэш) к локальным данным магазина.
+function applyShopPayload(data) {
+    shopSoldOut = Array.isArray(data.sold_out) ? data.sold_out : [];
+    if (data.passive_rates && typeof data.passive_rates === 'object') {
+        passiveRates = Object.assign({}, passiveRates, data.passive_rates);
+    }
+    SHOP_ITEMS = {};
+    (data.items || []).forEach(item => {
+        SHOP_ITEMS[item.id] = {
+            name: item.name,
+            shortName: item.short_name,
+            emoji: item.emoji,
+            price: Number(item.price),
+            shopImage: item.shop_image,
+            inventoryImage: item.inventory_image,
+            dailyLimit: item.daily_limit,
+            unlimited: Boolean(item.unlimited),
+            stock: item.unlimited || item.stock == null ? null : Number(item.stock),
+            stockReady: !item.unlimited && item.stock_ready !== false && !shopStockUnreliable,
+            stockTotal: item.unlimited ? null
+                : ((item.stock_total != null ? item.stock_total : item.total_limit) == null
+                    ? null
+                    : Number(item.stock_total != null ? item.stock_total : item.total_limit))
+        };
+    });
+    shopItemsLoaded = (data.items || []).length > 0;
+}
+
 async function loadShopItems() {
+    // Мгновенная отрисовка из кэша: вкладка не «думает» ни секунды.
+    if (!shopItemsLoaded) {
+        const cached = readShopCache();
+        if (cached) {
+            applyShopPayload(cached);
+            renderShop();
+            updateUI();
+        }
+    }
     try {
         const response = await fetch(`${API_URL}/api/shop_items`, {
             method: 'POST',
@@ -1619,34 +1768,8 @@ async function loadShopItems() {
         });
         const data = await response.json().catch(() => ({}));
         if (!response.ok) throw new Error(data.detail || "Не удалось загрузить магазин");
-        shopSoldOut = Array.isArray(data.sold_out) ? data.sold_out : [];
-        SHOP_ITEMS = {};
-        (data.items || []).forEach(item => {
-            SHOP_ITEMS[item.id] = {
-                name: item.name,
-                shortName: item.short_name,
-                emoji: item.emoji,
-                price: Number(item.price),
-                shopImage: item.shop_image,
-                inventoryImage: item.inventory_image,
-                dailyLimit: item.daily_limit,
-                // Лимиты магазина отключены (задача 17): капсулы бесконечные,
-                // счётчика «Осталось» нет вообще — ни числа, ни подписи.
-                unlimited: Boolean(item.unlimited),
-                // Глобальный тираж: stock — сколько осталось, stockTotal — весь тираж.
-                // stock_total приходит отдельным полем (старый сервер отдавал только
-                // total_limit) — берём то, что есть, чтобы «Осталось: X из Y» не пропадало.
-                stock: item.unlimited || item.stock == null ? null : Number(item.stock),
-                // stock_ready=false — сервер не смог прочитать/списать тираж
-                // (нет миграции или RLS). Тогда «Осталось: X из Y» не показываем:
-                // врать про полный тираж хуже, чем не показывать его вовсе.
-                stockReady: !item.unlimited && item.stock_ready !== false && !shopStockUnreliable,
-                stockTotal: item.unlimited ? null
-                    : ((item.stock_total != null ? item.stock_total : item.total_limit) == null
-                        ? null
-                        : Number(item.stock_total != null ? item.stock_total : item.total_limit))
-            };
-        });
+        applyShopPayload(data);
+        writeShopCache(data);
         shopItemsLoaded = true;
     } catch (e) {
         console.error("Ошибка загрузки магазина", e);
@@ -2197,6 +2320,10 @@ function onCustomMultCommit() {
 function renderUpgradeFromTabs() {
     const box = document.getElementById('up-from-tabs');
     if (!box) return;
+    // Задача 43: полоса капсул в Апгрейде убрана из интерфейса. Ставку задаёт
+    // поле суммы, а источник всегда «Коины». Контейнер скрыт в index.html,
+    // поэтому просто не тратим время на его перерисовку.
+    if (box.hidden) return;
     const tabs = [{
         id: 'coin',
         label: 'Коины',
@@ -3450,7 +3577,10 @@ function arenaSpinUpProgress(u) {
 const ARENA_POINTER_LAND_EASING = 'cubic-bezier(0.1, 0.7, 0.1, 1)';
 // Победителя показываем только ПОСЛЕ того, как стрелка встала / мяч замер.
 const ARENA_WINNER_DELAY_MS = 1200;        // обычная арена: мяч уже замер
-const ARENA_WINNER_AFTER_LAND_MS = 350;    // командная: сразу после посадки
+// Задача 43: после остановки стрелки даём ПАУЗУ 1.6 с — игрок должен увидеть,
+// на каком цвете она встала, и только потом выезжает плашка результата.
+// Раньше плашка появлялась почти сразу, и «торможения» никто не замечал.
+const ARENA_WINNER_AFTER_LAND_MS = 1600;
 
 function arenaPointerNode() { return document.getElementById('arena-pointer'); }
 
@@ -3813,19 +3943,19 @@ function arenaWinnerInfo(poolView, state) {
     const pool = arenaPool(poolView);
     if (!pool.winner) return null;
     if (poolView === 'team') {
+        // Задача 43: в командной арене выигрывает КОМАНДА, а не человек.
+        // Раньше плашка писала ник самого крупного игрока победившей команды —
+        // выглядело так, будто банк достался ему одному.
         const teamId = pool.winner_team || pool.winner.id;
         const players = (pool.players || []).filter(p => p.team === teamId);
-        const humans = players.filter(p => !p.is_bot);
-        const top = humans.length
-            ? humans.reduce((best, p) => ((Number(p.bet) || 0) > (Number(best.bet) || 0) ? p : best))
-            : null;
         const total = players.reduce((sum, p) => sum + (Number(p.bet) || 0), 0) || 1;
         const mine = players.find(p => String(p.id) === String(user && user.id));
         const share = mine ? Math.round((Number(pool.bank) || 0) * (Number(mine.bet) || 0) / total) : 0;
         return {
             key: `team:${teamId}`, team: teamId, arena: 'team',
-            name: top ? top.name : (pool.winner.name || ARENA_TEAM_NAMES[teamId] || 'Команда'),
+            name: ARENA_TEAM_NAMES[teamId] || (teamId === 'blue' ? 'Синие' : 'Красные'),
             amount: share, bank: Number(pool.bank) || 0,
+            members: players.filter(p => !p.is_bot).length,
         };
     }
     const winner = pool.winner;
@@ -4395,11 +4525,14 @@ async function pollHockeyState() {
                     const amountEl = document.getElementById('winner-modal-amount');
                     if (!info) return;
                     // Ник — текстом (не HTML), сумма — innerHTML, потому что внутри картинка монеты.
+                    // В командной арене ника нет: пишем только название команды.
                     const teamLabel = info.team
-                        ? (info.team === 'red' ? '🔴 Красные · ' : '🔵 Синие · ')
+                        ? (info.team === 'red' ? '🔴 ' : '🔵 ')
                         : '';
                     if (nameEl) {
-                        nameEl.innerText = teamLabel + shortName(info.name, 18);
+                        nameEl.innerText = info.team
+                            ? `${teamLabel}${info.name} победили`
+                            : shortName(info.name, 18);
                         nameEl.title = String(info.name || '');
                     }
                     if (amountEl) {

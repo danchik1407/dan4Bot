@@ -12,7 +12,7 @@
     <meta http-equiv="Pragma" content="no-cache">
     <meta http-equiv="Expires" content="0">
     <title>AURA GAME</title>
-    <link rel="stylesheet" href="style.css?v=aura-42">
+    <link rel="stylesheet" href="style.css?v=aura-43">
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
 </head>
 <body>
@@ -195,7 +195,7 @@
                 <div class="stats-row">
                     <div class="stat-box"><span class="stat-icon"><img class="coin-img" src="coin.png" alt="монета"></span><span class="stat-value" id="profile-coins">…</span><span class="stat-label">Баланс</span></div>
                     <div class="stat-box"><span class="stat-icon">🔑</span><span class="stat-value" id="profile-keys">0</span><span class="stat-label">Ключи</span></div>
-                    <div class="stat-box"><span class="stat-icon">📅</span><span class="stat-value" id="profile-days">0</span><span class="stat-label">Дней в игре</span></div>
+                    <div class="stat-box"><span class="stat-icon">📅</span><span class="stat-value" id="profile-days">0</span><span class="stat-label">Дней с нами</span></div>
                 </div>
                 <h3 style="margin-top: 25px; margin-bottom: 10px; text-align: left;">🎒 Инвентарь</h3>
                 <div class="inventory-grid" id="inventory"></div>
@@ -206,12 +206,24 @@
                     <div class="extra-head">
                         <span class="extra-title">💤 Пассивный доход</span>
                         <span class="extra-value" id="passive-rate">0 / час</span>
+                        <!-- Задача 43: кнопка «i» — по тапу на месте суммы
+                             «Накоплено» показывается объяснение. -->
+                        <button class="info-btn" id="passive-info-btn" type="button"
+                                aria-label="Как работает пассивный доход"
+                                onclick="togglePassiveInfo()">i</button>
                     </div>
                     <!-- Задача 42: «сколько накопил» — сумма, которая уже капнула,
                          и сколько из неё можно забрать целыми коинами. -->
-                    <div class="passive-pending">
+                    <div class="passive-pending" id="passive-body">
                         <span class="passive-pending-label">Накоплено</span>
                         <span class="passive-pending-value" id="passive-pending">0</span>
+                    </div>
+                    <!-- Объяснение вместо суммы (показывается по «i»). -->
+                    <div class="passive-info" id="passive-info" hidden>
+                        Капсулы приносят коины каждый час, даже когда аппка закрыта.
+                        Ночь 22:00–08:00 МСК идёт вдвое медленнее. Забираются только
+                        целые коины, а дробный остаток копится и не сгорает.
+                        Больше 24 часов без захода накопление не растёт — забирай вовремя.
                     </div>
                     <div class="extra-hint" id="passive-hint">Купи капсулы — они приносят коины каждый час.</div>
                     <button class="extra-btn" id="passive-btn" onclick="claimPassiveIncome()">Забрать</button>
@@ -221,9 +233,20 @@
                 <div class="profile-extra" id="referral-card">
                     <div class="extra-head">
                         <span class="extra-title">👥 Рефералы</span>
-                        <span class="extra-value" id="ref-earned">0 <img class="coin-img" src="coin.png" alt="AG"></span>
+                        <span class="extra-stats">
+                            <span class="extra-chip">Заработано <b id="ref-earned">0</b> <img class="coin-img" src="coin.png" alt="AG"></span>
+                            <span class="extra-chip">Приглашено <b id="ref-count">0</b></span>
+                        </span>
+                        <button class="info-btn" id="ref-info-btn" type="button"
+                                aria-label="За кого какая награда"
+                                onclick="toggleReferralInfo()">i</button>
                     </div>
-                    <div class="extra-hint">Приглашено: <b id="ref-count">0</b> · за друга дают от 500 до 2 000 коинов</div>
+                    <div class="passive-info" id="ref-info" hidden>
+                        <b>Награда за реферала:</b> первый друг — 500 коинов, каждый
+                        следующий — больше (до 2 000 за друга). Бонус начисляется
+                        тебе, когда приглашённый заходит в аппку. За друга с
+                        капсулой NFT — повышенная награда.
+                    </div>
                     <div class="ref-link-row">
                         <input class="ref-link" id="ref-link" readonly value="">
                         <button class="extra-btn small" onclick="copyReferralLink()">Копировать</button>
@@ -266,7 +289,7 @@
                 <button class="mine-btn" onclick="selectMines(5, this)">5 💣</button>
             </div>
             <div class="mines-grid" id="mines-board"></div>
-            <div class="game-info-bar" id="mines-info"><span>Кэф: <b id="mines-current-coef">x1.00</b></span><span>Забрать: <b id="mines-cashout-amount">0</b> <img class="coin-img" src="coin.png" alt="монета"></span></div>
+            <div class="game-info-bar" id="mines-info"><span>Кэф: <b id="mines-current-coef">x1.00</b></span><span>Забрать: <span id="mines-cashout-amount">0</span></span></div>
             <button class="action-btn" id="mines-btn" onclick="minesAction()">Сделать ставку</button>
         </section>
 
@@ -372,11 +395,12 @@
                         <div class="up-slot-value" id="up-from-value">100 <img class="coin-img" src="coin.png" alt="монета"></div>
                     </div>
 
-                    <div class="up-inventory-title">🎒 Инвентарь</div>
-                    <!-- Вкладки строятся в JS: в игру можно ставить ЛЮБУЮ
-                         капсулу из инвентаря (обычная, уникальная, рубиновая,
-                         алмазная, галактическая и старые легаси). -->
-                    <div class="up-from-tabs" id="up-from-tabs"></div>
+                    <!-- Задача 43: заголовок «🎒 Инвентарь» и полоса капсул
+                         внизу Апгрейда убраны по просьбе игроков — ставка
+                         задаётся суммой коинов, лишний блок только мешал.
+                         Контейнер оставлен скрытым: старый app.js из кэша
+                         продолжает в него рисовать и не падает. -->
+                    <div class="up-from-tabs" id="up-from-tabs" hidden></div>
 
                     <div class="up-amount">
                         <label class="up-label" id="up-amount-label">Сколько ставим?</label>
@@ -539,6 +563,6 @@
         <div class="nav-item" onclick="switchTab('profile', this)"><span class="nav-icon">👤</span> Профиль</div>
     </nav>
 
-    <script src="app.js?v=aura-42" defer></script>
+    <script src="app.js?v=aura-43" defer></script>
 </body>
 </html>

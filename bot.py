@@ -89,13 +89,41 @@ COOLDOWN_SECONDS = 5 * 60 * 60
 # известные варианты имени сервиса. Render на НЕСУЩЕСТВУЮЩЕМ имени сервиса
 # отвечает 404 «Not Found», поэтому адрес нельзя просто «угадать» в константе:
 # при старте бот сам находит живой и пишет в лог.
+# Задача 43: «угаданные» имена сервиса УБРАНЫ. Раньше здесь стояли
+# с двумя «примерными» именами сервиса, и бот молча отправлял игроков на домен,
+# которого может не быть — Render отвечал «Not Found» прямо в Mini App.
+# Теперь адрес берётся ТОЛЬКО из настроек Render (AURA_API_URL / AURA_WEBAPP_URL),
+# а если их нет — из RENDER_EXTERNAL_URL текущего окружения. Никаких догадок.
 API_URL_CANDIDATES = [
-    "https://aura-api-mptt.onrender.com",   # рабочий сервис Render
-    "https://aura-api-mppt.onrender.com",   # старая опечатка, оставлена для авто-поиска
+    (os.getenv("AURA_API_URL") or "").strip().rstrip("/"),
 ]
-API_URL = (os.getenv("AURA_API_URL") or API_URL_CANDIDATES[0]).rstrip("/")
+# Публичный адрес ЭТОГО сервиса — его Render выставляет сам.
+RENDER_EXTERNAL_URL = (os.getenv("RENDER_EXTERNAL_URL") or "").strip().rstrip("/")
+API_URL = (os.getenv("AURA_API_URL") or os.getenv("AURA_WEBAPP_URL")
+           or os.getenv("RENDER_EXTERNAL_URL") or "").strip().rstrip("/")
 # Именно этот адрес должен быть прописан в BotFather → Configure Mini App.
-WEBAPP_URL = os.getenv("AURA_WEBAPP_URL") or f"{API_URL}/miniapp/"
+def _as_miniapp_url(base: str) -> str:
+    """Приводит любой адрес сервиса к виду https://host/miniapp/ (без порта)."""
+    raw = (base or "").strip()
+    if not raw:
+        return ""
+    if "://" not in raw:
+        raw = "https://" + raw
+    raw = raw.split("#")[0].split("?")[0].rstrip("/")
+    if raw.endswith("/miniapp"):
+        raw = raw[: -len("/miniapp")]
+    elif "/miniapp/" in raw:
+        raw = raw[: raw.index("/miniapp/")]
+    if not raw:
+        return ""
+    # Отрезаем путь, оставляем хост без порта. Схема ВСЕГДА https: у Render
+    # наружу опубликован только 443, а Telegram вообще не откроет http-web_app.
+    rest = raw.split("://", 1)[-1]
+    host = rest.split("/")[0].split(":")[0]
+    return f"https://{host}/miniapp/"
+
+
+WEBAPP_URL = _as_miniapp_url(os.getenv("AURA_WEBAPP_URL") or API_URL)
 # Внутри Telegram мини-аппку открывают двумя способами:
 #   1) кнопкой с web_app (WebAppInfo) — работает в личке и не зависит от short_name;
 #   2) прямой ссылкой t.me/<бот>/<short_name> — нужна, чтобы переслать другу.
@@ -117,17 +145,18 @@ def miniapp_webapp_url() -> str:
     попадает — по прямой ссылке на Render Mini App открывается без initData,
     и игрок видит «технические работы» вместо игры.
     """
-    base = (os.getenv("AURA_WEBAPP_URL") or WEBAPP_URL or "").strip()
+    base = (os.getenv("AURA_WEBAPP_URL") or WEBAPP_URL or RENDER_EXTERNAL_URL or "").strip()
     if not base:
-        base = f"{API_URL}/miniapp/"
-    if "://" not in base:
-        base = "https://" + base
-    if not base.startswith("https://"):
-        base = "https://" + base.split("://", 1)[-1]
-    base = base.rstrip("/")
-    if not base.endswith("/miniapp"):
-        base = f"{base}/miniapp"
-    return base + "/"
+        base = API_URL
+    # _as_miniapp_url сам приводит адрес к https://host/miniapp/ и выбрасывает
+    # порт: у Render наружу опубликован только 443, и `:PORT` в ссылке — это
+    # гарантированный «Not Found» в Telegram.
+    url = _as_miniapp_url(base)
+    if not url:
+        # Совсем ничего не настроено: честно отдаём пустую строку, чтобы
+        # вызывающий код показал понятную ошибку, а не битую кнопку.
+        return ""
+    return url
 
 
 def miniapp_direct_url() -> str:
@@ -2927,8 +2956,17 @@ async def register_bot_commands() -> None:
 
 
 def start_keyboard() -> InlineKeyboardMarkup:
+    """Кнопка «Играть». Без настроенного адреса — не битая web_app, а подсказка."""
+    url = miniapp_webapp_url()
+    if not url:
+        # Адрес не задан (нет AURA_API_URL): Telegram отверг бы пустой web_app.
+        # Ведём на прямую ссылку t.me/<бот>/<short_name> — её можно настроить
+        # в BotFather → Configure Mini App, и она не зависит от домена Render.
+        return InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="🎮 Играть", url=miniapp_direct_url()),
+        ]])
     return InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="🎮 Играть", web_app=WebAppInfo(url=miniapp_webapp_url())),
+        InlineKeyboardButton(text="🎮 Играть", web_app=WebAppInfo(url=url)),
     ]])
 
 
@@ -2944,12 +2982,16 @@ def app_link_keyboard() -> InlineKeyboardMarkup:
     Оба адреса строятся из одного места, поэтому «Not Found» из-за порта в
     ссылке сюда попасть не может.
     """
-    rows = [[InlineKeyboardButton(text=APP_LINK_KEYBOARD_TEXT,
-                                  web_app=WebAppInfo(url=miniapp_webapp_url()))]]
+    url = miniapp_webapp_url()
     direct = miniapp_direct_url()
+    rows = []
+    if url:
+        rows.append([InlineKeyboardButton(text=APP_LINK_KEYBOARD_TEXT,
+                                          web_app=WebAppInfo(url=url))])
     if direct:
-        rows.append([InlineKeyboardButton(text="🔗 Ссылка для друзей", url=direct)])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
+        rows.append([InlineKeyboardButton(
+            text="🔗 Ссылка для друзей" if url else APP_LINK_KEYBOARD_TEXT, url=direct)])
+    return InlineKeyboardMarkup(inline_keyboard=rows) if rows else None
 
 
 def app_link_text() -> str:
@@ -2958,11 +3000,22 @@ def app_link_text() -> str:
     Порта в адресе нет намеренно: у Render Web Service наружу открыт только
     443, и любой `:PORT` в ссылке превращается в «Not Found».
     """
+    url = miniapp_webapp_url()
+    if not url:
+        return (
+            "🎮 <b>AURA GAME</b>\n\n"
+            "Адрес приложения не настроен на сервере. Напишите администратору: "
+            "нужно добавить в Render переменную <code>AURA_API_URL</code> с "
+            "адресом сервиса <b>aura-api</b> (только домен, без порта и без "
+            "«/miniapp»).\n\n"
+            "Пока приложение можно открыть кнопкой меню в этом чате "
+            "(🎮 AURA GAME под полем ввода)."
+        )
     return (
         "🎮 <b>AURA GAME</b>\n\n"
-        "Открыть приложение можно кнопкой ниже — она запускает Mini App внутри "
-        "Telegram, со всеми играми и коинами.\n\n"
-        f"Ссылка: {miniapp_webapp_url()}\n\n"
+        "Жми кнопку ниже — приложение откроется прямо в Telegram, со всеми "
+        "играми, коинами и ареной.\n\n"
+        f"Адрес: {url}\n\n"
         "Если кнопка не открывается — обнови Telegram до последней версии."
     )
 
@@ -2970,8 +3023,9 @@ def app_link_text() -> str:
 @dp.message(F.text.func(lambda t: strip_prefix(t).lower().startswith("апка")))
 async def cmd_app_link(message: Message):
     """`!апка` — показать ссылку и кнопку на Mini App."""
+    keyboard = app_link_keyboard()
     await message.answer(app_link_text(), parse_mode="HTML",
-                         reply_markup=app_link_keyboard(),
+                         reply_markup=keyboard,
                          disable_web_page_preview=True)
 
 
@@ -3186,10 +3240,18 @@ async def resolve_api_url() -> str:
     global API_URL, WEBAPP_URL
     override = (os.getenv("AURA_API_URL") or "").strip().rstrip("/")
     candidates = []
-    for base in ([override] if override else []) + [API_URL] + API_URL_CANDIDATES:
+    for base in ([override] if override else []) + [API_URL] + API_URL_CANDIDATES + [RENDER_EXTERNAL_URL]:
         base = (base or "").strip().rstrip("/")
         if base and base not in candidates:
             candidates.append(base)
+    if not candidates:
+        API_LIVENESS.update({"state": "down", "checked": [], "at": time.time(), "url": "",
+                             "error": "АДРЕС API НЕ ЗАДАН"})
+        logger.error(
+            "❌ Не задан адрес aura-api. В Render → dan4Bot → Environment добавьте "
+            "AURA_API_URL = https://<имя сервиса aura-api>.onrender.com (без /miniapp и без порта)."
+        )
+        return ""
 
     for base in candidates:
         if await probe_api(base):
@@ -3197,7 +3259,7 @@ async def resolve_api_url() -> str:
                 logger.warning("aura-api найден по адресу %s (в настройках был %s) — переключаюсь", base, API_URL)
             API_URL = base
             if not os.getenv("AURA_WEBAPP_URL"):
-                WEBAPP_URL = f"{API_URL}/miniapp/"
+                WEBAPP_URL = _as_miniapp_url(API_URL)
             API_LIVENESS.update({"state": "alive", "checked": candidates,
                                  "at": time.time(), "url": base})
             logger.info("✅ aura-api: %s | Mini App: %s", API_URL, WEBAPP_URL)
