@@ -1660,6 +1660,41 @@ Could not find the 'created_at' column of 'subscriptions_history' in the schema 
 Если в отчёте есть `❗`-строки — это блокирующие колонки (например
 `users.inventory`), их надо применить обязательно; `•` — косметика.
 
+## 4.10. `AttributeError: 'NoneType' object has no attribute 'lstrip'` в логах dan4Bot
+
+Симптом в Render → Logs (сервис `dan4Bot`):
+
+```
+File "/opt/render/project/src/bot.py", line 285, in <lambda>
+    @dp.message(F.text.func(lambda t: strip_prefix(t).lower().startswith("адм помощь")))
+File "/opt/render/project/src/bot.py", line 260, in strip_prefix
+    return text.lstrip("!/").strip()
+AttributeError: 'NoneType' object has no attribute 'lstrip'
+```
+
+Что происходило: в aiogram 3 магический фильтр `F.text.func(...)` — это проверка
+**содержимого** `message.text`. У сообщений без текста (фото, стикер, документ,
+гифка, голосовое, опрос) поля `text` нет, поэтому в лямбду приходит `None`,
+а старый `strip_prefix` ждал строку и падал на `.lstrip`. Падал не игрок —
+Telegram получал «ok», но апдейт терялся и в лог сыпался стектрейс.
+
+Что сделано в коде (обновляться ничем не нужно, только задеплоить):
+
+1. `strip_prefix` больше не падает: `None` → `""`, остальное приводится к строке.
+   Все 33 фильтра `F.text.func(lambda t: strip_prefix(t)...)` чинятся этим одним
+   местом — сообщение без текста просто не совпадает ни с одной командой.
+2. `_love_status_filter` зовёт `strip_prefix(text)` без `or ""` — функция уже
+   безопасна.
+3. Зарегистрирован `dp.errors.register(on_error)`: любая будущая ошибка
+   обработчика пишется в лог одной строкой `Ошибка обработки апдейта: Тип: текст`
+   и бот продолжает работать, вместо падения хэндлера.
+4. Попутно два системных сообщения о бане/разбане (`bot.send_message` игроку)
+   получили `parse_mode="HTML"` — раньше там могли показываться сырые `<b>`.
+
+Как проверить после деплоя: отправить боту **фото** (без подписи) и **стикер** —
+в логах не должно быть новых `AttributeError`, а `!помощь` и `/help` должны
+отвечать как раньше.
+
 ## 5. Клиент Mini App
 
 `miniapp/app.js` больше не привязан к захардкоженному домену: адрес API

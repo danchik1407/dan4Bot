@@ -255,9 +255,23 @@ def safe_text(text) -> str:
     return html_module.escape(str(text))
 
 
-def strip_prefix(text: str) -> str:
-    """Убирает ! или / из начала строки"""
-    return text.lstrip("!/").strip()
+def strip_prefix(text) -> str:
+    """Убирает ! или / из начала строки.
+
+    Задача 39: раньше здесь был `text.lstrip("!/")` без проверки на None, и
+    любое сообщение БЕЗ текста (фото, стикер, документ, гифка, голосовое)
+    роняло обработчик aiogram:
+
+        AttributeError: 'NoneType' object has no attribute 'lstrip'
+        в bot.py, строка 260 (strip_prefix) ← фильтр `F.text.func(...)`
+
+    aiogram подставляет в такой фильтр `message.text` = None. Теперь None и
+    любой не-текст превращаются в пустую строку: фильтры просто не совпадут,
+    и апдейт обработается дальше, а не падает в лог стектрейсом.
+    """
+    if text is None:
+        return ""
+    return str(text).lstrip("!/").strip()
 
 
 async def process_random_coin_drop(message: Message):
@@ -752,8 +766,11 @@ async def cmd_admin_ban_unban(message: Message):
             await update_user(target.id, coins=0, keys=0, inventory="[]")
 
             try:
-                await bot.send_message(target.id,
-                                       f"🚫 <b>Вы были забанены в боте.</b>\n\nПричина: <i>{reason}</i>\n\nВы не можете пользоваться ботом и заходить в мини-приложение, пока вас не разбанят.")
+                await bot.send_message(
+                    target.id,
+                    f"🚫 <b>Вы были забанены в боте.</b>\n\nПричина: <i>{reason}</i>\n\n"
+                    "Вы не можете пользоваться ботом и заходить в мини-приложение, пока вас не разбанят.",
+                    parse_mode="HTML")
             except:
                 pass
 
@@ -764,8 +781,10 @@ async def cmd_admin_ban_unban(message: Message):
             await asyncio.to_thread(lambda: supabase.table("bans").delete().eq("user_id", target.id).execute())
             await message.answer(f"✅ Пользователь <b>@{target.username}</b> разбанен.", parse_mode="HTML")
             try:
-                await bot.send_message(target.id,
-                                       "✅ <b>Вы были разбанены!</b>\n\nТеперь вы снова можете пользоваться ботом и мини-приложением.")
+                await bot.send_message(
+                    target.id,
+                    "✅ <b>Вы были разбанены!</b>\n\nТеперь вы снова можете пользоваться ботом и мини-приложением.",
+                    parse_mode="HTML")
             except:
                 pass
     except Exception as e:
@@ -2150,8 +2169,8 @@ _LOVE_INFO_PREFIXES = ("отн инфа", "отн инфо", "инфа отно�
 _RP_LIST_PREFIXES = ("все рп", "рп команды", "рп список", "список рп")
 
 
-def _love_status_filter(text: str) -> bool:
-    clean = strip_prefix(text or "").lower().replace("ё", "е")
+def _love_status_filter(text) -> bool:
+    clean = strip_prefix(text).lower().replace("ё", "е")
     if clean.startswith(_LOVE_INFO_PREFIXES) or clean.startswith(_RP_LIST_PREFIXES):
         return False
     return clean.startswith("любовь") or clean.startswith(("пара", "отношения"))
@@ -3209,6 +3228,20 @@ async def get_me_with_retry(attempts: int = 8, delay: float = 3.0,
     raise last_error
 
 
+async def on_error(event):
+    """Ни одно обновление не должно ронять обработчик стектрейсом в лог.
+
+    Задача 39: фильтры вида `F.text.func(lambda t: strip_prefix(t)...)` получали
+    `message.text = None` (фото, стикер, документ, гифка) и падали с
+    `AttributeError: 'NoneType' object has no attribute 'lstrip'`. Сам `strip_prefix`
+    уже починен, но обработчик ошибок нужен как страховка: любая будущая
+    неожиданность логируется одной строкой с типом и местом, а бот продолжает
+    работать.
+    """
+    logger.error("Ошибка обработки апдейта: %s: %s", type(event.exception).__name__,
+                 event.exception)
+
+
 async def main():
     global BOT_USERNAME
     # Порт открываем ПЕРВЫМ: Render убивает Web Service без слушающего порта,
@@ -3232,6 +3265,7 @@ async def main():
     except Exception as exc:  # noqa: BLE001
         logger.warning(f"Кулдаун РП не загрузился: {exc}")
     dp.update.outer_middleware(WarmApiMiddleware())
+    dp.errors.register(on_error)
     asyncio.create_task(keep_api_warm())
     await dp.start_polling(bot)
 
