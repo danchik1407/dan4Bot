@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 from dotenv import load_dotenv
 from aiogram import BaseMiddleware, Bot, Dispatcher, F, Router
-from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, FSInputFile, WebAppInfo
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, FSInputFile, WebAppInfo, Update
 from aiogram.enums import ChatMemberStatus
 from aiogram.filters import StateFilter
 from aiogram.fsm.context import FSMContext
@@ -274,10 +274,141 @@ def strip_prefix(text) -> str:
     return str(text).lstrip("!/").strip()
 
 
+def message_text(message) -> str:
+    """Текст сообщения, который никогда не бывает None.
+
+    Задача 40: в aiogram `message.text` есть только у текстовых сообщений. У фото,
+    стикера, документа, гифки, голосового, опроса, системного события (вход в
+    чат, смена названия) и у постов в канале поле равно None. Любой код вида
+    `message.text.lower()` или `message.text.split()` на таком апдейте падает
+    с `AttributeError: 'NoneType' object has no attribute ...`.
+
+    Возвращает текст вместе с подписью (caption): у фото с подписью команда
+    `!помощь` тоже должна работать.
+    """
+    if message is None:
+        return ""
+    text = getattr(message, "text", None)
+    if text is None:
+        text = getattr(message, "caption", None)
+    return text or ""
+
+
+def has_text(message) -> bool:
+    """Есть ли у сообщения текст или подпись (иначе текстовая команда не применима)."""
+    return bool(message_text(message))
+
+
+def message_actor(message):
+    """Кто отправил сообщение — с запасным вариантом для постов в канале.
+
+    У `channel_post` нет `from_user` (автор — сам канал), поэтому
+    `message.from_user.id` там падает. Возвращаем `sender_chat`/`chat`
+    как «актёра», чтобы существующие проверки прав не падали.
+    """
+    if message is None:
+        return None
+    actor = getattr(message, "from_user", None)
+    if actor is not None:
+        return actor
+    return getattr(message, "sender_chat", None) or getattr(message, "chat", None)
+
+
+def update_message(update):
+    """Сообщение из апдейта (или None) — включая отредактированные."""
+    if not isinstance(update, Update):
+        return None
+    return (update.message or update.edited_message or update.channel_post
+            or update.edited_channel_post)
+
+
+class AnonymousSenderMiddleware(BaseMiddleware):
+    """Не пропускает к командам сообщения без отправителя (посты в канале).
+
+    У `channel_post` нет `from_user`, и любой хендлер с `message.from_user.id`
+    падал бы на `AttributeError: 'NoneType' object has no attribute 'id'`.
+    Команды в канале бот всё равно не обслуживает, поэтому такие сообщения
+    просто не доходят до хендлеров.
+
+    ВАЖНО: сообщения без ТЕКСТА здесь не отбрасываются — у оплаты Stars
+    (`successful_payment`) текста тоже нет, и платёж должен обрабатываться.
+
+    Регистрируется на `dp.message` (outer), т.е. ДО магических фильтров.
+    """
+
+    async def __call__(self, handler, event, data):
+        if isinstance(event, Message) and getattr(event, "from_user", None) is None:
+            logger.info("Пропускаю сообщение без отправителя (чат %s)",
+                        getattr(getattr(event, "chat", None), "id", "?"))
+            return None
+        return await handler(event, data)
+
+
+class CrashGuardMiddleware(BaseMiddleware):
+    """Ловит ЛЮБОЕ исключение обработки апдейта, включая падения фильтров.
+
+    Задача 40: `dp.errors` в aiogram 3.19 не спасает от исключения В ФИЛЬТРЕ —
+    `HandlerObject.check()` вызывается вне try/except в `observer.trigger()`,
+    поэтому ошибка уходит в лог как «Task exception was never retrieved», а при
+    `feed_update` (webhook) ещё и в ответ. Здесь ловим всё: пишем одну понятную
+    строку и, если хендлер не успел ответить, честно говорим игроку, что
+    что-то пошло не так.
+    """
+
+    async def __call__(self, handler, event, data):
+        try:
+            return await handler(event, data)
+        except Exception as exc:  # noqa: BLE001 — намеренно ловим всё
+            logger.error("Ошибка обработки апдейта: %s: %s", type(exc).__name__, exc)
+            logger.debug("Трассировка ошибки апдейта", exc_info=True)
+            await _apologize(event)
+            return None
+
+
+async def on_error(event):
+    """Ни одно обновление не должно ронять обработчик стектрейсом в лог.
+
+    Задача 39: фильтры вида `F.text.func(lambda t: strip_prefix(t)...)` получали
+    `message.text = None` (фото, стикер, документ, гифка) и падали с
+    `AttributeError: 'NoneType' object has no attribute 'lstrip'`. Сам `strip_prefix`
+    уже починен, но обработчик ошибок нужен как страховка: любая будущая
+    неожиданность логируется одной строкой с типом и местом, а бот продолжает
+    работать.
+
+    Важно: `dp.errors` ловит ошибки ХЕНДЛЕРОВ, но не фильтров — от падений в
+    фильтрах защищает CrashGuardMiddleware выше.
+    """
+    logger.error("Ошибка обработки апдейта: %s: %s", type(event.exception).__name__,
+                 event.exception)
+
+
+async def _apologize(event):
+    """Аккуратный ответ игроку после внутренней ошибки (сам не падает)."""
+    message = update_message(event) or (event if isinstance(event, Message) else None)
+    callback = event.callback_query if isinstance(event, Update) else (
+        event if isinstance(event, CallbackQuery) else None)
+    try:
+        if callback is not None:
+            await callback.answer("⚠️ Что-то пошло не так, попробуй ещё раз.", show_alert=True)
+        elif message is not None:
+            await message.answer("⚠️ Что-то пошло не так, попробуй ещё раз.")
+    except Exception:  # noqa: BLE001 — ответ не должен ронять обработчик
+        pass
+
+
+# Защита всего диспетчера — регистрируется сразу при импорте модуля.
+# CrashGuard снаружи: он ловит и падения фильтров, которые `dp.errors`
+# в aiogram 3.19 не перехватывает (HandlerObject.check вызывается вне try).
+dp.update.outer_middleware(CrashGuardMiddleware())
+dp.message.outer_middleware(AnonymousSenderMiddleware())
+# Плюс штатный обработчик ошибок aiogram — для ошибок внутри самих хендлеров.
+dp.errors.register(on_error)
+
+
 async def process_random_coin_drop(message: Message):
     if not message.from_user or message.from_user.is_bot: return
     if message.chat.type not in ("group", "supergroup"): return
-    text = message.text or ""
+    text = message_text(message)
     if text.startswith("!") or text.startswith("/"): return
     chat_id = message.chat.id
     user = await get_user(message.from_user.id, message.from_user.username, chat_id)
@@ -707,7 +838,7 @@ async def cmd_love_cooldown(message: Message):
     """Секретная админ-команда: посмотреть/поменять кулдаун награды за РП."""
     if not message.from_user or not is_admin(message.from_user.id):
         return      # не админ — молчим, команда скрытая
-    parts = strip_prefix(message.text or "").split()
+    parts = strip_prefix(message_text(message)).split()
     if len(parts) < 2:
         current = await ensure_love_cooldown_loaded()
         default_text = format_love_cooldown(LOVE_ACTION_COOLDOWN_DEFAULT)
@@ -743,8 +874,8 @@ async def cmd_love_cooldown(message: Message):
 async def cmd_admin_ban_unban(message: Message):
     if not is_admin(message.from_user.id): return await message.answer("❌ Только для админов бота.")
 
-    clean_text = strip_prefix(message.text).lower()
-    parts = strip_prefix(message.text).split(maxsplit=2)
+    clean_text = strip_prefix(message_text(message)).lower()
+    parts = strip_prefix(message_text(message)).split(maxsplit=2)
     target = None
     reason = "Багоюз"
 
@@ -813,7 +944,7 @@ async def cmd_admin_banlist(message: Message):
 @dp.message(F.text.func(lambda t: strip_prefix(t).lower().startswith("забрать капсулы")))
 async def cmd_admin_take_caps(message: Message):
     if not is_admin(message.from_user.id): return await message.answer("❌ Только для админов бота.")
-    parts = strip_prefix(message.text).split()
+    parts = strip_prefix(message_text(message)).split()
     target = None
     if message.reply_to_message and message.reply_to_message.from_user:
         target = message.reply_to_message.from_user
@@ -835,7 +966,7 @@ async def cmd_admin_wipe_all(message: Message):
     except:
         pass
     if not is_admin(message.from_user.id): return await message.answer("❌ Только для админов бота.")
-    parts = strip_prefix(message.text).split()
+    parts = strip_prefix(message_text(message)).split()
     target = None
     if message.reply_to_message and message.reply_to_message.from_user:
         target = message.reply_to_message.from_user
@@ -856,14 +987,14 @@ async def cmd_admin_wipe_all(message: Message):
 
 @dp.message(F.text.func(lambda t: strip_prefix(t).lower().startswith("забрать")))
 async def cmd_admin_withdraw(message: Message):
-    clean_text = strip_prefix(message.text).lower()
+    clean_text = strip_prefix(message_text(message)).lower()
     if clean_text.startswith("забрать всё") or clean_text.startswith("забрать капсулы"): return
     try:
         await message.delete()
     except:
         pass
     if not is_admin(message.from_user.id): return await message.answer("❌ Только для админов бота.")
-    parts = strip_prefix(message.text).split()
+    parts = strip_prefix(message_text(message)).split()
     if message.reply_to_message:
         target, amount_idx = message.reply_to_message.from_user, 1
     else:
@@ -890,7 +1021,7 @@ async def cmd_admin_add(message: Message):
     except:
         pass
     if not is_admin(message.from_user.id): return await message.answer("❌ Только для админов бота.")
-    parts = strip_prefix(message.text).split()
+    parts = strip_prefix(message_text(message)).split()
     if message.reply_to_message:
         target, amount_idx = message.reply_to_message.from_user, 2
     else:
@@ -914,7 +1045,7 @@ async def cmd_admin_add(message: Message):
 @dp.message(F.text.func(lambda t: strip_prefix(t).lower().startswith("перевод")))
 async def cmd_transfer(message: Message):
     user = await get_user(message.from_user.id, message.from_user.username)
-    parts = strip_prefix(message.text).split(maxsplit=2)
+    parts = strip_prefix(message_text(message)).split(maxsplit=2)
     comment = ""
     if len(parts) >= 3:
         comment = parts[2]
@@ -983,7 +1114,7 @@ def _new_promo_code() -> str:
 
 def _promo_code_from_message(message: Message):
     """!создать промокод AURA100 — код можно задать сразу, иначе сгенерируем."""
-    parts = strip_prefix(message.text or "").split()
+    parts = strip_prefix(message_text(message)).split()
     return parts[2] if len(parts) >= 3 else None
 
 
@@ -1143,7 +1274,7 @@ async def promo_wizard_amount(message: Message, state: FSMContext):
     if not is_admin(message.from_user.id):
         await state.clear()
         return
-    text = strip_prefix(message.text or "").strip()
+    text = strip_prefix(message_text(message)).strip()
     try:
         amount = int(text)
     except (TypeError, ValueError):
@@ -1170,7 +1301,7 @@ async def promo_wizard_uses(message: Message, state: FSMContext):
     if not is_admin(message.from_user.id):
         await state.clear()
         return
-    text = strip_prefix(message.text or "").strip()
+    text = strip_prefix(message_text(message)).strip()
     try:
         uses = int(text)
     except (TypeError, ValueError):
@@ -1232,7 +1363,7 @@ async def cmd_admin_promocode(message: Message):
         await message.delete()
     except:
         pass
-    parts = strip_prefix(message.text).split()
+    parts = strip_prefix(message_text(message)).split()
     if len(parts) < 4: return await message.answer("❌ Формат: <code>+промокод НАЗВАНИЕ 10 500</code>",
                                                    parse_mode="HTML")
     code = parts[1]
@@ -1264,7 +1395,7 @@ async def cmd_admin_delpromo(message: Message):
         await message.delete()
     except:
         pass
-    parts = strip_prefix(message.text).split()
+    parts = strip_prefix(message_text(message)).split()
     if len(parts) < 3: return await message.answer("❌ Формат: <code>-удалить промокод НАЗВАНИЕ</code>",
                                                    parse_mode="HTML")
     code = parts[2]
@@ -1278,7 +1409,7 @@ async def cmd_admin_delpromo(message: Message):
 
 @dp.message(F.text.func(lambda t: strip_prefix(t).lower().startswith("промо")))
 async def cmd_promo(message: Message):
-    parts = strip_prefix(message.text).split()
+    parts = strip_prefix(message_text(message)).split()
     if len(parts) < 2: return await message.answer("❌ Формат: <code>промо КОД</code>", parse_mode="HTML")
     code = parts[1].strip()
 
@@ -1349,7 +1480,7 @@ async def cmd_promo(message: Message):
 @dp.message(
     F.text.func(lambda t: strip_prefix(t).lower().startswith("карман") or strip_prefix(t).lower().startswith("баланс")))
 async def cmd_pocket(message: Message):
-    parts = strip_prefix(message.text).split()
+    parts = strip_prefix(message_text(message)).split()
 
     target = None
     if message.reply_to_message and message.reply_to_message.from_user:
@@ -1402,7 +1533,7 @@ async def cmd_top(message: Message):
     # `топ отношений` / `топ любви` — отдельная статистика пар. Проверяем здесь,
     # потому что этот хендлер зарегистрирован раньше любовного блока и иначе
     # съел бы команду.
-    clean = strip_prefix(message.text).lower()
+    clean = strip_prefix(message_text(message)).lower()
     # «топ отношений», «топ любви», «топ любовь» — всё это статистика пар.
     # Проверяем по началу фразы: обычный `топ` по коинам не должен попасть сюда.
     if "отношен" in clean or clean.startswith(("топ люб", "top love", "top lov")):
@@ -1601,7 +1732,7 @@ async def cmd_admin_give_key(message: Message):
     except:
         pass
     if not is_admin(message.from_user.id): return await message.answer("❌ Только для админов бота.")
-    parts = strip_prefix(message.text).split()
+    parts = strip_prefix(message_text(message)).split()
     if message.reply_to_message:
         target = message.reply_to_message.from_user
         if len(parts) < 3:
@@ -1631,7 +1762,7 @@ async def cmd_admin_give_key(message: Message):
 # ================= КУБЫ =================
 @dp.message(F.text.func(lambda t: strip_prefix(t).lower().startswith("кубы")))
 async def cmd_dice(message: Message):
-    parts = strip_prefix(message.text).split()
+    parts = strip_prefix(message_text(message)).split()
     if message.reply_to_message:
         target = message.reply_to_message.from_user
         if len(parts) < 2: return await message.answer("🎲 Формат: <code>кубы ставка</code> (ответом)",
@@ -1935,7 +2066,7 @@ async def resolve_partner_target(message: Message):
     if message.reply_to_message and message.reply_to_message.from_user:
         target = message.reply_to_message.from_user
         return target.id, target.username or target.full_name
-    for part in strip_prefix(message.text).split()[1:]:
+    for part in strip_prefix(message_text(message)).split()[1:]:
         if part.startswith("@"):
             found = await get_user_global(part)
             if found:
@@ -2386,7 +2517,7 @@ def _cooldown_keyboard(user_id) -> InlineKeyboardMarkup:
 async def cmd_rp_action(message: Message):
     if not message.from_user or message.from_user.is_bot:
         return
-    action, meta = rp_action_for(strip_prefix(message.text))
+    action, meta = rp_action_for(strip_prefix(message_text(message)))
     if not action:
         return
     actor_id = message.from_user.id
@@ -2671,7 +2802,12 @@ async def on_successful_payment(message: Message):
         return
     payload = (payment.invoice_payload or "").split(":")
     coins = STARS_PACKAGES.get(payload[1], 0) if len(payload) >= 2 else 0
-    user_id = int(payload[2]) if len(payload) >= 3 and payload[2].isdigit() else message.from_user.id
+    actor = message_actor(message)
+    user_id = (int(payload[2]) if len(payload) >= 3 and payload[2].isdigit()
+               else getattr(actor, "id", None))
+    if user_id is None:
+        logger.warning("Оплата Stars без отправителя — начислять некому (payload=%s)", payment.invoice_payload)
+        return
     if coins <= 0:
         return
     ok = await asyncio.to_thread(_credit_stars_payment_sync, payment.telegram_payment_charge_id,
@@ -2757,14 +2893,14 @@ async def cmd_tag(message: Message):
 @dp.message(F.text.func(lambda t: any(strip_prefix(t).lower().startswith(x) for x in
                                       ["all", "стоп", "admins", "админы", "setme", "changeme", "me", "позывной"])))
 async def cmd_misc(message: Message):
-    clean_text = strip_prefix(message.text).lower()
+    clean_text = strip_prefix(message_text(message)).lower()
     if clean_text.startswith("all"):
         if message.chat.type not in ("group", "supergroup"): return await message.answer("❌ Только для групп!")
         if not is_admin(message.from_user.id) and not await is_chat_admin(message.from_user.id,
                                                                           message.chat.id): return await message.answer(
             "❌ Только для админов.")
         if active_summons.get(message.chat.id): return await message.answer("⚠️ Созыв уже идёт!")
-        parts = strip_prefix(message.text).split(maxsplit=1)
+        parts = strip_prefix(message_text(message)).split(maxsplit=1)
         call_text = parts[1] if len(parts) > 1 else "📢 Общий сбор!"
         await message.answer(f"🔄 Начинаю созыв...", parse_mode="HTML")
         asyncio.create_task(summon_all_members(message.chat.id, call_text, message.from_user.id))
@@ -2780,7 +2916,7 @@ async def cmd_misc(message: Message):
             await message.answer("❌ Активных созывов нет.")
     elif clean_text.startswith("admins") or clean_text.startswith("админы"):
         if message.chat.type not in ("group", "supergroup"): return await message.answer("❌ Только для групп!")
-        parts = strip_prefix(message.text).split(maxsplit=1)
+        parts = strip_prefix(message_text(message)).split(maxsplit=1)
         call_text = parts[1] if len(parts) > 1 else "📢 Сбор администраторов!"
         try:
             members = await bot.get_chat_administrators(chat_id=message.chat.id)
@@ -2801,7 +2937,7 @@ async def cmd_misc(message: Message):
                 parse_mode="HTML")
     elif clean_text.startswith("setme"):
         try:
-            emoji = strip_prefix(message.text).split(maxsplit=1)[1].strip()
+            emoji = strip_prefix(message_text(message)).split(maxsplit=1)[1].strip()
             if len(emoji) > 8: return await message.answer("❌ Слишком длинный позывной.")
             await update_user(message.from_user.id, call_sign=emoji)
             await message.answer(f"✅ Новый позывной: {emoji}")
@@ -3228,20 +3364,6 @@ async def get_me_with_retry(attempts: int = 8, delay: float = 3.0,
     raise last_error
 
 
-async def on_error(event):
-    """Ни одно обновление не должно ронять обработчик стектрейсом в лог.
-
-    Задача 39: фильтры вида `F.text.func(lambda t: strip_prefix(t)...)` получали
-    `message.text = None` (фото, стикер, документ, гифка) и падали с
-    `AttributeError: 'NoneType' object has no attribute 'lstrip'`. Сам `strip_prefix`
-    уже починен, но обработчик ошибок нужен как страховка: любая будущая
-    неожиданность логируется одной строкой с типом и местом, а бот продолжает
-    работать.
-    """
-    logger.error("Ошибка обработки апдейта: %s: %s", type(event.exception).__name__,
-                 event.exception)
-
-
 async def main():
     global BOT_USERNAME
     # Порт открываем ПЕРВЫМ: Render убивает Web Service без слушающего порта,
@@ -3264,8 +3386,8 @@ async def main():
         logger.info(f"⏳ Кулдаун награды за РП: {format_love_cooldown()}")
     except Exception as exc:  # noqa: BLE001
         logger.warning(f"Кулдаун РП не загрузился: {exc}")
+    # Прогрев aura-api по активности в боте (был и раньше — не теряем).
     dp.update.outer_middleware(WarmApiMiddleware())
-    dp.errors.register(on_error)
     asyncio.create_task(keep_api_warm())
     await dp.start_polling(bot)
 
