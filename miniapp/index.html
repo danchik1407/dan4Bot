@@ -12,7 +12,7 @@
     <meta http-equiv="Pragma" content="no-cache">
     <meta http-equiv="Expires" content="0">
     <title>AURA GAME</title>
-    <link rel="stylesheet" href="style.css?v=aura-34">
+    <link rel="stylesheet" href="style.css?v=aura-42">
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
 </head>
 <body>
@@ -206,6 +206,12 @@
                     <div class="extra-head">
                         <span class="extra-title">💤 Пассивный доход</span>
                         <span class="extra-value" id="passive-rate">0 / час</span>
+                    </div>
+                    <!-- Задача 42: «сколько накопил» — сумма, которая уже капнула,
+                         и сколько из неё можно забрать целыми коинами. -->
+                    <div class="passive-pending">
+                        <span class="passive-pending-label">Накоплено</span>
+                        <span class="passive-pending-value" id="passive-pending">0</span>
                     </div>
                     <div class="extra-hint" id="passive-hint">Купи капсулы — они приносят коины каждый час.</div>
                     <button class="extra-btn" id="passive-btn" onclick="claimPassiveIncome()">Забрать</button>
@@ -533,6 +539,6 @@
         <div class="nav-item" onclick="switchTab('profile', this)"><span class="nav-icon">👤</span> Профиль</div>
     </nav>
 
-    <script src="app.js?v=aura-34" defer></script>
+    <script src="app.js?v=aura-42" defer></script>
 </body>
 </html>
