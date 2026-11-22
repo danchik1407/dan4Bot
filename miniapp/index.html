@@ -12,7 +12,7 @@
     <meta http-equiv="Pragma" content="no-cache">
     <meta http-equiv="Expires" content="0">
     <title>AURA GAME</title>
-    <link rel="stylesheet" href="style.css?v=aura-44">
+    <link rel="stylesheet" href="style.css?v=aura-45">
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
 </head>
 <body>
@@ -395,12 +395,11 @@
                         <div class="up-slot-value" id="up-from-value">100 <img class="coin-img" src="coin.png" alt="монета"></div>
                     </div>
 
-                    <!-- Задача 43: заголовок «🎒 Инвентарь» и полоса капсул
-                         внизу Апгрейда убраны по просьбе игроков — ставка
-                         задаётся суммой коинов, лишний блок только мешал.
-                         Контейнер оставлен скрытым: старый app.js из кэша
-                         продолжает в него рисовать и не падает. -->
-                    <div class="up-from-tabs" id="up-from-tabs" hidden></div>
+                    <!-- Задача 45: инвентарь ВНИЗУ нужен — апгрейд капсул без
+                         него невозможен (нечего ставить). Полоса «🎒 Инвентарь»
+                         снова видна: кнопки «Коины» + каждая капсула из инвентаря. -->
+                    <div class="up-from-title" id="up-from-title">🎒 Инвентарь</div>
+                    <div class="up-from-tabs" id="up-from-tabs"></div>
 
                     <div class="up-amount">
                         <label class="up-label" id="up-amount-label">Сколько ставим?</label>
@@ -444,22 +443,12 @@
                         <button class="up-chip" data-target="mult:50" onclick="selectUpgradeQuick('mult', 50, this)">x50</button>
                     </div>
 
-                    <button class="up-upgrade-btn" id="upgrade-btn" onclick="onUpgradeButtonClick()">АПГРЕЙД</button>
-                    <div class="up-result" id="upgrade-result">Выбери предмет и цель</div>
-                </section>
+                    <!-- Задача 45: цель выбирается ЗДЕСЬ (никакого «ВЫБОРА ПРЕДМЕТА»
+                         справа). x1.12…x50 — множители коинов, а когда в инвентаре
+                         выбран предмет, сетка сама показывает предметы-цели. -->
+                    <div class="up-to-grid up-to-grid-center" id="up-to-grid"></div>
 
-                <!-- ПРАВАЯ ПАНЕЛЬ: множитель цели.
-                     Задача 44: блок «ВЫБОР ПРЕДМЕТА» (табы «Коины/Капсулы», сетка
-                     из 6 предметов и строка «Шанс = 90 / X …») убран — цель
-                     выбирается плитками множителей слева/в центре, а свой X —
-                     ползунком ниже. Пустые контейнеры оставлены скрытыми: старый
-                     app.js из кэша продолжает пытаться в них рисовать и не падает. -->
-                <section class="up-panel up-panel-to">
-                    <header class="up-panel-head">Множитель цели</header>
-                    <div class="up-to-tabs" id="up-to-tabs" hidden></div>
-                    <!-- Свой множитель: ползунок от x1.12 до x50 по логарифмической
-                         шкале. Шанс считается по той же формуле 90 / X, что и у
-                         плиток, поэтому «свой» X не даёт преимущества. -->
+                    <!-- Задача 45: свой множитель переехал сюда из правой панели. -->
                     <div class="up-custom-mult" id="up-custom-mult">
                         <div class="up-custom-head">
                             <span>Свой множитель</span>
@@ -475,9 +464,17 @@
                             <span>x50</span>
                         </div>
                     </div>
-                    <div class="up-to-grid" id="up-to-grid" hidden></div>
-                    <div class="up-to-hint" id="up-to-hint" hidden></div>
+
+                    <button class="up-upgrade-btn" id="upgrade-btn" onclick="onUpgradeButtonClick()">АПГРЕЙД</button>
+                    <div class="up-result" id="upgrade-result">Выбери множитель и жми АПГРЕЙД</div>
                 </section>
+
+                <!-- Задача 45: правой панели «ВЫБОР ПРЕДМЕТА» больше нет (ни
+                     табов «Коины/Капсулы», ни сетки 6 предметов, ни строки
+                     «Шанс = 90 / X …»). Эти контейнеры оставлены пустыми и
+                     скрытыми только для старого app.js из кэша. -->
+                <div class="up-to-tabs" id="up-to-tabs" hidden></div>
+                <div class="up-to-hint" id="up-to-hint" hidden></div>
             </div>
 
             <div class="up-stats-inline" id="upgrade-stats-inline">
@@ -537,7 +534,10 @@
     <div id="winner-modal" class="winner-modal">
         <div class="winner-content">
             <div class="winner-icon">🏆</div>
-            <div class="winner-title">Победитель</div>
+            <div class="winner-title" id="winner-modal-title">Победитель</div>
+            <!-- Задача 45: в командной арене побеждает КОМАНДА — показываем плашку
+                 цвета победившей команды, а не ник игрока. -->
+            <div class="winner-team-badge" id="winner-modal-team">Синие</div>
             <div class="winner-name" id="winner-modal-name">Nil_Ven</div>
             <div class="winner-amount" id="winner-modal-amount">+7 348 <img class="coin-img" src="coin.png" alt="монета"></div>
             <button class="action-btn" style="background: #ffcc00; color: #000; margin-top: 20px;" onclick="closeWinnerModal()">Продолжить</button>
@@ -565,6 +565,6 @@
         <div class="nav-item" onclick="switchTab('profile', this)"><span class="nav-icon">👤</span> Профиль</div>
     </nav>
 
-    <script src="app.js?v=aura-44" defer></script>
+    <script src="app.js?v=aura-45" defer></script>
 </body>
 </html>

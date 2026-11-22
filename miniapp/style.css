@@ -1170,3 +1170,62 @@ body.maintenance { overflow: hidden; }
     flex: 0 0 auto;
 }
 .arena-team-row .row-bet { margin-left: 4px; }
+
+/* ЗАДАЧА 45. Апгрейд: заголовок инвентаря вернулся, правой панели нет. */
+.up-from-title {
+    font-size: 10px;
+    font-weight: 900;
+    letter-spacing: 0.6px;
+    text-transform: uppercase;
+    color: #6f8bb5;
+    margin: 2px 0 4px;
+}
+/* Панель цели была третьей колонкой — без неё «Ваш предмет» и круг делят экран. */
+.up-layout { grid-template-columns: minmax(0, 1fr) minmax(0, 1.15fr) !important; }
+.up-panel-center .up-custom-mult { margin: 6px 0 8px; }
+@media (min-width: 720px) {
+    .up-layout { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) !important; }
+}
+
+/* ЗАДАЧА 45. Командная арена: честная выплата по ставке. */
+.arena-team-row .row-payout { color: #7ee787; }
+.arena-team-row .row-payout.muted { color: #7f8794; }
+
+/* ЗАДАЧА 45. Плашка победителя командной арены: только команда. */
+.winner-name { white-space: normal; }
+.winner-name small, .winner-amount small {
+    display: inline-block;
+    font-size: 11px;
+    font-weight: 700;
+    color: #8e8e93;
+    margin-left: 6px;
+}
+
+/* Плашка результата в командной арене — отдельно от ника. */
+.winner-team-badge {
+    display: none;
+    margin: 4px auto 8px;
+    padding: 5px 14px;
+    border-radius: 999px;
+    font-size: 15px;
+    font-weight: 900;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+}
+.winner-team-badge.blue { display: inline-block; background: rgba(59, 130, 246, 0.22); color: #8fc0ff; border: 1px solid rgba(88, 166, 255, 0.6); }
+.winner-team-badge.red { display: inline-block; background: rgba(239, 68, 68, 0.22); color: #ffb0b0; border: 1px solid rgba(255, 110, 110, 0.6); }
+
+/* ЗАДАЧА 45. Сетка целей в центре: 3 колонки, компактные плитки. */
+.up-to-grid-center {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 6px;
+    width: 100%;
+    margin: 6px 0 4px;
+}
+.up-to-grid-center .up-to-tile { padding: 7px 4px; border-radius: 11px; }
+.up-to-grid-center .up-to-tile-icon { font-size: 16px; }
+.up-to-grid-center .up-to-tile-icon .coin-img { width: 18px; height: 18px; }
+.up-to-grid-center .up-to-tile-name { font-size: 11px; }
+.up-to-grid-center .up-to-tile-value { font-size: 9px; }
+.up-to-grid-center .up-to-tile-chance { font-size: 10px; }

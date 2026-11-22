@@ -85,7 +85,7 @@ async def _http_json(url, method: str = "GET", params=None, payload=None, timeou
 
 # Номер сборки: по нему из /api/health видно, что на сервисе НЕ старый код.
 # Если после деплоя здесь прежнее значение — Render ещё не перезапустился.
-API_BUILD = "2026-10-27-task44-warns-open-app"
+API_BUILD = "2026-10-27-task45-appka-upgrade-payout"
 
 # Момент старта процесса. По нему видно, что сервис только что «проснулся»:
 # Render на бесплатном тарифе усыпляет Web Service через 15 минут без входящих
@@ -1927,19 +1927,37 @@ def _arena_payout_plan(arena: str) -> list:
         if winner and bank > 0:
             winner_team = winner.get("team") or winner.get("id")
             team_players = [p for p in _arena_players("team") if p.get("team") == winner_team]
-            team_total = sum(max(0, int(p.get("bet", 0))) for p in team_players)
+            # Задача 45: делим ВЕСЬ банк между реальными игроками победившей
+            # команды пропорционально их ставкам. Ставки ботов в знаменатель не
+            # идут: бот — не претендент, его доля достаётся живым игрокам.
+            # Игрок со ставкой 50 из 150 получает bank * 50/150 — это и есть
+            # «ставка + выигрыш», ровно как ожидает игрок.
+            humans = []
+            for player in team_players:
+                if player.get("is_bot"):
+                    continue
+                try:
+                    numeric_id = int(player["id"])
+                except (TypeError, ValueError):
+                    continue
+                humans.append((numeric_id, max(0, int(player.get("bet", 0))), player.get("name")))
+            team_total = sum(bet for _, bet, _ in humans)
             if team_total > 0:
-                for player in team_players:
-                    if player.get("is_bot"):
-                        continue
-                    try:
-                        numeric_id = int(player["id"])
-                    except (TypeError, ValueError):
-                        continue
-                    amount = int(bank * max(0, int(player.get("bet", 0))) / team_total)
-                    if amount > 0:
-                        plan.append({"user_id": numeric_id, "amount": amount,
-                                     "name": player.get("name"), "arena": "team"})
+                # Остаток от округления (1-2 коина) раздаём по крупнейшей
+                # дробной части — иначе сумма выплат была бы меньше банка.
+                raw = [(uid, bank * bet / team_total, bet, name)
+                       for uid, bet, name in humans]
+                amounts = {uid: int(value) for uid, value, _, _ in raw}
+                leftover = bank - sum(amounts.values())
+                for uid, value, _bet, _name in sorted(raw, key=lambda item: -(item[1] - int(item[1]))):
+                    if leftover <= 0:
+                        break
+                    amounts[uid] += 1
+                    leftover -= 1
+                for uid, _value, _bet, name in raw:
+                    if amounts.get(uid, 0) > 0:
+                        plan.append({"user_id": uid, "amount": amounts[uid],
+                                     "name": name, "arena": "team"})
     elif winner and not winner.get("is_bot") and bank > 0:
         try:
             numeric_id = int(winner["id"])

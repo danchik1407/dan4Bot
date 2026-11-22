@@ -3357,30 +3357,26 @@ APP_LINK_KEYBOARD_TEXT = "🎮 Открыть AURA GAME"
 
 
 def app_link_keyboard(allow_web_app: bool = True) -> InlineKeyboardMarkup:
-    """Кнопки под сообщением `!апка`: открыть приложение и переслать ссылку.
+    """Кнопки под сообщением `!апка`.
 
-    Задача 44: в ГРУППАХ Telegram не разрешает inline-кнопку `web_app`
-    (BUTTON_TYPE_INVALID: «BUTTON_TYPE_WEB_APP_INVALID»). Раньше `!апка` в чате
-    уходила с такой кнопкой, Telegram отклонял sendMessage, и игрок вместо
-    ссылки получал «⚠️ Что-то пошло не так, попробуй ещё раз.».
-    Поэтому web_app-кнопку показываем только в личке, а в группах — обычные
-    url-кнопки (они разрешены везде).
+    Задача 45: в ГРУППАХ Telegram не разрешает inline-кнопку `web_app`
+    (BUTTON_TYPE_INVALID), поэтому раньше `!апка` в чате падала с «Что-то пошло
+    не так». Теперь набор кнопок ОДИН И ТОТ ЖЕ, а в группе первая кнопка — обычная
+    url-ссылка на тот же адрес Mini App (в личке — web_app, чтобы открывалось
+    прямо в Telegram). Второй кнопки «Ссылка для друзей» больше нет: игрок
+    просил ровно одну кнопку «Открыть AURA GAME».
     """
     url = miniapp_webapp_url()
-    direct = miniapp_direct_url()
-    rows = []
+    target = url or miniapp_direct_url()
+    if not target:
+        return None
     if url and allow_web_app:
-        rows.append([InlineKeyboardButton(text=APP_LINK_KEYBOARD_TEXT,
-                                          web_app=WebAppInfo(url=url))])
-    if direct:
-        rows.append([InlineKeyboardButton(
-            text="🔗 Ссылка для друзей" if (url and allow_web_app) else APP_LINK_KEYBOARD_TEXT,
-            url=direct)])
-    elif url:
-        # Прямая ссылка не собрана (нет username бота) — ведём обычной url-кнопкой
-        # на сам адрес Mini App: она работает и в группе.
-        rows.append([InlineKeyboardButton(text=APP_LINK_KEYBOARD_TEXT, url=url)])
-    return InlineKeyboardMarkup(inline_keyboard=rows) if rows else None
+        return InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text=APP_LINK_KEYBOARD_TEXT, web_app=WebAppInfo(url=url)),
+        ]])
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text=APP_LINK_KEYBOARD_TEXT, url=target),
+    ]])
 
 
 def _is_private_chat(message) -> bool:
@@ -3390,11 +3386,12 @@ def _is_private_chat(message) -> bool:
 
 
 def app_link_text() -> str:
-    """Текст сообщения `!апка`. Задача 44: строку «Адрес: …» убрали.
+    """Текст сообщения `!апка` — ОДИН и тот же в личке и в группе.
 
-    Игроку нужен только вход в приложение, а голая ссылка на домен в чате
-    выглядела как техническая свалка. Ссылку отдаёт кнопка (web_app в личке,
-    url в группе).
+    Задача 44: строку «Адрес: https://…/miniapp/» убрали (игрок просил дважды —
+    она осталась в старой сборке на сервисе). Задача 45: в группе текст больше
+    не дополняется ссылкой — он совпадает с личкой символ в символ, адрес отдаёт
+    кнопка.
     """
     url = miniapp_webapp_url()
     if not url:
@@ -3411,8 +3408,7 @@ def app_link_text() -> str:
         "🎮 <b>AURA GAME</b>\n\n"
         "Жми кнопку ниже — приложение откроется прямо в Telegram, со всеми "
         "играми, коинами и ареной.\n\n"
-        "Если кнопка не открывается — обнови Telegram до последней версии.\n\n"
-        "<i>Команда работает даже во время игнора: приложение открывается всегда.</i>"
+        "Если кнопка не открывается — обнови Telegram до последней версии."
     )
 
 
@@ -3427,10 +3423,6 @@ async def cmd_app_link(message: Message):
     private = _is_private_chat(message)
     keyboard = app_link_keyboard(allow_web_app=private)
     text = app_link_text()
-    if not private:
-        # В группе кнопку-приложение открыть нельзя, поэтому даём ссылку
-        # текстом: игрок всё равно сможет открыть игру.
-        text += f"\n\n🔗 <a href=\"{miniapp_webapp_url() or miniapp_direct_url()}\">Открыть AURA GAME</a>"
     try:
         await message.answer(text, parse_mode="HTML",
                              reply_markup=keyboard,

@@ -1049,8 +1049,11 @@ async function refreshPassivePending() {
 
 function startPassiveIncomeTimer() {
     if (passiveTimer) return;
+    // Задача 45: раз в PASSIVE_INTERVAL только ПЕРЕСЧИТЫВАЕМ «сколько накоплено».
+    // Раньше здесь вызывался claimPassiveIncome — коины падали на баланс сами,
+    // без нажатия «Забрать».
     passiveTimer = setInterval(() => {
-        if (document.visibilityState === 'visible' && canPlay) claimPassiveIncome({ silent: true });
+        if (document.visibilityState === 'visible' && canPlay) refreshPassivePending();
     }, PASSIVE_INTERVAL);
     // Пока профиль открыт, обновляем «накоплено» раз в минуту: игрок видит,
     // как сумма растёт, не перезаходя в приложение.
@@ -2330,10 +2333,12 @@ function onCustomMultCommit() {
 function renderUpgradeFromTabs() {
     const box = document.getElementById('up-from-tabs');
     if (!box) return;
-    // Задача 43: полоса капсул в Апгрейде убрана из интерфейса. Ставку задаёт
-    // поле суммы, а источник всегда «Коины». Контейнер скрыт в index.html,
-    // поэтому просто не тратим время на его перерисовку.
-    if (box.hidden) return;
+    // Задача 45: полоса «🎒 Инвентарь» снова показывается — без неё нельзя
+    // поставить в апгрейд капсулу (игрок просил вернуть, а убирать надо было
+    // выбор ПРЕДМЕТА-ЦЕЛИ).
+    if (box.hidden) { box.hidden = false; box.style.display = ''; }
+    const title = document.getElementById('up-from-title');
+    if (title) { title.hidden = false; title.style.display = ''; }
     const tabs = [{
         id: 'coin',
         label: 'Коины',
@@ -2389,6 +2394,7 @@ function renderUpgrade() {
         slider.min = limits.min; slider.max = limits.max; slider.step = limits.step;
         if (String(slider.value) !== String(upgradeFromAmount)) slider.value = upgradeFromAmount;
     }
+    upgradeToTab = upgradeFrom === 'coin' ? 'coin' : 'capsule';
     setText('up-amount-label', upgradeFrom === 'coin' ? 'Сколько ставим?' : 'Сколько капсул?');
     setText('up-amount-min', upgradeFrom === 'coin' ? formatCoins(limits.min) : String(limits.min));
     setText('up-amount-max', upgradeFrom === 'coin' ? formatCoins(limits.max) : String(limits.max));
@@ -2462,10 +2468,25 @@ function renderUpgrade() {
 function renderUpgradeTargets() {
     const grid = document.getElementById('up-to-grid');
     if (!grid) return;
+    // Задача 45: сетка цели теперь в центральной панели и видна всегда.
+    if (grid.hidden) { grid.hidden = false; grid.style.display = ''; }
+    // Источник-капсула требует цели-предмета: молча переводим множитель в предмет
+    // (иначе плитки-множители не дадут выбрать капсулу и апгрейд станет невозможен).
+    if (upgradeFrom !== 'coin' && upgradeTarget.kind !== 'item') {
+        upgradeTarget = { kind: 'item', value: 'capsule' };
+    }
+    if (upgradeFrom === 'coin' && upgradeTarget.kind === 'item') {
+        upgradeTarget = { kind: 'mult', value: 2 };
+    }
     const fromValue = upgradeSourceValue();
     const tiles = [];
 
-    if (upgradeToTab === 'coin') {
+    // Задача 45: цель зависит от ИСТОЧНИКА. Ставим коины — цель выбирается
+    // множителем (x1.12 … x50). Ставим капсулу — цель выбирается предметом
+    // (капсула → капсула и т.д.), иначе «капсулы нельзя получать».
+    const targetMode = upgradeFrom === 'coin' ? 'coin' : 'item';
+
+    if (targetMode === 'coin') {
         UPGRADE_MULTS.forEach(mult => {
             const toValue = fromValue * mult;
             // Шанс берём из таблицы «множитель → шанс», а не 1/множитель:
@@ -3838,6 +3859,15 @@ function renderTeamBoards() {
         if (p.team === 'red' || p.team === 'blue') banks[p.team] += Math.max(0, Number(p.bet) || 0);
     });
     const winnerTeam = pool.winner_team || (pool.winner && pool.winner.id) || null;
+    // Задача 45: бот — не претендент на банк. Доля считается только по живым
+    // игрокам победившей команды (та же формула, что в api.py).
+    const humansBank = { red: 0, blue: 0 };
+    players.forEach(p => {
+        if ((p.team === 'red' || p.team === 'blue') && !p.is_bot) {
+            humansBank[p.team] += Math.max(0, Number(p.bet) || 0);
+        }
+    });
+    const teamHumanTotal = (winnerTeam && humansBank[winnerTeam]) || 0;
     ['blue', 'red'].forEach(team => {
         const listEl = document.getElementById(`team-board-${team}-list`);
         const sumEl = document.getElementById(`team-board-${team}-sum`);
@@ -3850,8 +3880,8 @@ function renderTeamBoards() {
         // Задача 44: в командной арене детализируем плитку — сколько игроков,
         // какой общий банк и сколько получит каждый при победе команды.
         const totalBank = (Number(pool.bank) || 0) || (banks.red + banks.blue);
-        const signature = `${team}:${winnerTeam || ''}:${totalBank}:`
-            + members.map(p => `${p.id}:${p.bet}`).join(',');
+        const signature = `${team}:${winnerTeam || ''}:${totalBank}:${teamHumanTotal}:`
+            + members.map(p => `${p.id}:${p.bet}:${p.is_bot ? 1 : 0}`).join(',');
         // coinAmount() отдаёт готовый HTML (внутри картинка монеты), поэтому
         // только innerHTML — иначе на плитке видно "<img class=coin-img ...>".
         if (sumEl) {
@@ -3876,12 +3906,19 @@ function renderTeamBoards() {
             const name = escapeHtml(shortName(String(p.name || '?'), 10));
             const bet = Math.max(0, Number(p.bet) || 0);
             const percent = total ? (bet / total * 100).toFixed(0) : '0';
-            // Потенциальная выплата: победившая команда забирает общий банк,
-            // внутри команды он делится пропорционально ставкам.
-            const payout = total > 0 ? Math.round(totalBank * bet / total) : 0;
+            // Задача 45: выигрыш делится ЧЕСТНО — весь банк между живыми
+            // игроками победившей команды пропорционально ставкам:
+            // 50 / 100 против 200 → банк 350 → 117 и 233 (ставка + выигрыш).
+            const payout = (team === winnerTeam && teamHumanTotal > 0)
+                ? Math.round(totalBank * bet / teamHumanTotal) : 0;
+            const payoutHtml = p.is_bot
+                ? `<span class="row-payout muted" title="Бот не участвует в дележе банка">бот</span>`
+                : `<span class="row-payout${payout > bet ? '' : ' muted'}" `
+                  + `title="Выплата, если команда победит (ставка + доля банка)">`
+                  + `${payout > 0 ? coinAmount(payout) : '—'}</span>`;
             row.innerHTML = `<span class="row-name" title="${escapeHtml(String(p.name || ''))}">${name}</span>`
                 + `<span class="row-bet">${coinAmount(bet)} · ${percent}%</span>`
-                + `<span class="row-payout" title="Если команда победит">≈${coinAmount(payout)}</span>`;
+                + payoutHtml;
             listEl.appendChild(row);
         });
     });
@@ -3973,13 +4010,17 @@ function arenaWinnerInfo(poolView, state) {
         // выглядело так, будто банк достался ему одному.
         const teamId = pool.winner_team || pool.winner.id;
         const players = (pool.players || []).filter(p => p.team === teamId);
-        const total = players.reduce((sum, p) => sum + (Number(p.bet) || 0), 0) || 1;
+        // Боты не делят банк: считаем долю только по живым игрокам команды.
+        const humans = players.filter(p => !p.is_bot);
+        const total = humans.reduce((sum, p) => sum + (Number(p.bet) || 0), 0) || 1;
         const mine = players.find(p => String(p.id) === String(user && user.id));
-        const share = mine ? Math.round((Number(pool.bank) || 0) * (Number(mine.bet) || 0) / total) : 0;
+        // Ставка игрока и его доля банка (та же формула, что на сервере).
+        const mineBet = mine ? Number(mine.bet) || 0 : 0;
+        const share = mine ? Math.round((Number(pool.bank) || 0) * mineBet / total) : 0;
         return {
             key: `team:${teamId}`, team: teamId, arena: 'team',
             name: ARENA_TEAM_NAMES[teamId] || (teamId === 'blue' ? 'Синие' : 'Красные'),
-            amount: share, bank: Number(pool.bank) || 0,
+            amount: share, bet: mineBet, bank: Number(pool.bank) || 0,
             members: players.filter(p => !p.is_bot).length,
         };
     }
@@ -4554,19 +4595,47 @@ async function pollHockeyState() {
                     const teamLabel = info.team
                         ? (info.team === 'red' ? '🔴 ' : '🔵 ')
                         : '';
+                    const titleEl = document.getElementById('winner-modal-title');
+                    const teamEl = document.getElementById('winner-modal-team');
+                    if (titleEl) titleEl.textContent = info.team ? 'Победила команда' : 'Победитель';
+                    if (teamEl) {
+                        // Задача 45: ника игрока в командной плашке НЕТ — только
+                        // «🔴 КРАСНЫЕ» / «🔵 СИНИЕ» цветом своей команды.
+                        if (info.team) {
+                            teamEl.className = `winner-team-badge ${info.team === 'red' ? 'red' : 'blue'}`;
+                            teamEl.innerText = `${teamLabel}${String(info.name || '').toUpperCase()}`;
+                            teamEl.style.display = 'inline-block';
+                        } else {
+                            teamEl.className = 'winner-team-badge';
+                            teamEl.style.display = 'none';
+                            teamEl.innerText = '';
+                        }
+                    }
                     if (nameEl) {
-                        nameEl.innerText = info.team
-                            ? `${teamLabel}${info.name} победили`
-                            : shortName(info.name, 18);
-                        nameEl.title = String(info.name || '');
+                        // В командной арене имя в модалке не показываем вовсе.
+                        if (info.team) {
+                            nameEl.innerText = 'Банк поделён по ставкам';
+                            nameEl.style.fontSize = '15px';
+                            nameEl.title = 'Выигрыш делится пропорционально ставкам победившей команды';
+                        } else {
+                            nameEl.innerText = shortName(info.name, 18);
+                            nameEl.style.fontSize = '';
+                            nameEl.title = String(info.name || '');
+                        }
                     }
                     if (amountEl) {
-                        // Ботам банк не выплачивается, а проигравшему нечего
-                        // показывать как «+» — в этих случаях пишем размер банка.
+                        // Задача 45: в командной арене показываем ЧЕСТНУЮ выплату —
+                        // ставка + доля банка (ровно столько придёт на баланс).
+                        // Кладём в подпись «всего», чтобы не путали с «+чистыми».
+                        const mineBet = Number(info.bet) || 0;
                         amountEl.classList.toggle('muted', info.amount <= 0);
-                        amountEl.innerHTML = info.amount > 0
-                            ? `+${coinAmount(info.amount)}`
-                            : `Банк: ${coinAmount(info.bank)}`;
+                        if (info.amount > 0) {
+                            amountEl.innerHTML = info.team
+                                ? `${coinAmount(info.amount)} <small>(ставка ${coinAmount(mineBet)} + ${coinAmount(Math.max(0, info.amount - mineBet))})</small>`
+                                : `+${coinAmount(info.amount)}`;
+                        } else {
+                            amountEl.innerHTML = `Банк: ${coinAmount(info.bank)}`;
+                        }
                         amountEl.style.display = '';
                     }
                     modal.classList.add('active');
@@ -4986,8 +5055,10 @@ document.addEventListener('DOMContentLoaded', async () => {
     // Подписка на канал: тихая проверка. Бонус уже получен — задание скрыто;
     // иначе плашка ждёт тапа (задание придёт в личку бота).
     checkSubscription();
-    // Пассивный доход: начисляем накопленное при входе и далее раз в 15 минут.
-    claimPassiveIncome({ silent: true });
+    // Пассивный доход НЕ забираем автоматически (задача 45): коины копятся на
+    // сервере, а на баланс попадают только по кнопке «Забрать». При входе лишь
+    // спрашиваем «сколько накоплено», само начисление делает тап по кнопке.
+    refreshPassivePending();
     startPassiveIncomeTimer();
     // Отношения — для плашки в профиле.
     loadLoveState();
