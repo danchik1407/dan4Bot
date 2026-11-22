@@ -2605,6 +2605,17 @@ function renderUpgrade() {
         circle.classList.toggle('invalid', upgradePlacedChance === null && !upgradeChanceIsValid(liveChance));
     }
     if (!upgradeBusy) setText('up-chance', chance.toFixed(2) + '%');
+    // Задача 64: когда шанс вне допустимого диапазона, под кольцом появляется
+    // строка-объяснение (раньше текст ошибки прилетал поверх кольца и
+    // накладывался на цифру). Надпись живёт в обычном блоке в потоке.
+    if (!upgradeBusy && upgradePlacedChance === null && !upgradeChanceIsValid(liveChance)) {
+        // Строка короткая: блок под кольцом рассчитан на одну-две строки, длинный
+        // текст распирал экран и наезжал на кнопку «Закрыть» у подсказки.
+        const why = liveChance > UPGRADE_MAX_CHANCE
+            ? `Шанс ${liveChance.toFixed(2)}% — выбери цель подороже`
+            : `Шанс ${liveChance.toFixed(2)}% — выбери цель подешевле`;
+        if (!upgradeResultState || upgradeResultState === 'error') setUpgradeResult(why, 'error');
+    }
     const outcome = document.getElementById('up-outcome');
     if (outcome) {
         outcome.innerHTML = `Выигрыш: <b>${upgradeRewardText()}</b>`;

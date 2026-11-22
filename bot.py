@@ -3565,12 +3565,58 @@ async def love_cooldown_left(user_id, action=None) -> int:
     return max(0, best)
 
 
+async def love_cooldown_clear(user_id, action=None) -> None:
+    """Снять отметку кулдауна (награда не выдалась — ждать нечего)."""
+    key = str(action or "*all").strip().lower()
+    _LOVE_COOLDOWN_MEMORY.pop((int(user_id), key), None)
+
+    def _delete():
+        try:
+            supabase.table(LOVE_COOLDOWNS_TABLE).delete().eq(
+                "user_id", int(user_id)).eq("action", key).execute()
+        except Exception as exc:  # noqa: BLE001 — старая схема без action
+            logger.debug("Отметку кулдауна снять не удалось: %s", exc)
+
+    try:
+        await asyncio.to_thread(_delete)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("Отметку кулдауна снять не удалось: %s", exc)
+
+
+# Задача 64: гонка двух одинаковых команд. Два сообщения «обнять» подряд (или
+# команда + кнопка) успевали пройти проверку КД до того, как первый запишет
+# отметку, — награда приходила дважды. Блокируем только пару (игрок, команда),
+# чтобы разные действия по-прежнему шли параллельно.
+_COOLDOWN_LOCKS = {}
+
+
+def love_action_lock(user_id, action=None):
+    """asyncio-блокировка на пару (игрок, команда) для проверки и начисления."""
+    key = (int(user_id), str(action or "*all").strip().lower())
+    lock = _COOLDOWN_LOCKS.get(key)
+    if lock is None:
+        lock = asyncio.Lock()
+        _COOLDOWN_LOCKS[key] = lock
+    # Словарь не должен расти бесконечно: держим только активные блокировки.
+    if len(_COOLDOWN_LOCKS) > 2000:
+        for stale_key, stale_lock in list(_COOLDOWN_LOCKS.items()):
+            if not stale_lock.locked() and stale_key != key:
+                _COOLDOWN_LOCKS.pop(stale_key, None)
+    return lock
+
+
 async def love_cooldown_touch(user_id, action=None):
-    """Отметить «награда за эту команду получена сейчас»."""
+    """Отметить «награда за эту команду получена сейчас».
+
+    Задача 64: отметку в памяти ставим ПЕРВОЙ строкой — даже если запись в базу
+    упадёт (нет таблицы, RLS, не применена миграция), кулдаун продолжит
+    работать до рестарта. Раньше при сбое записи КД фактически исчезал, и игрок
+    получал «+10» за каждое действие подряд.
+    """
     stamp = datetime_now_iso()
     key = str(action or "*all").strip().lower()
-    # Память — запасной источник, если миграции love_cooldowns нет. Ключ —
-    # (игрок, команда): «обнять» не должно блокировать «поцеловать».
+    # Память — полноценный источник: ключ (игрок, команда), поэтому «обнять»
+    # не блокирует «поцеловать».
     _LOVE_COOLDOWN_MEMORY[(int(user_id), key)] = stamp
 
     def _write():
@@ -3781,22 +3827,31 @@ async def cmd_rp_action(message: Message):
 
     # Задача 61: кулдаун — свой для каждой команды («обнять» не блокирует
     # «поцеловать») и настраивается админ-командой «кд <команда> <время>».
-    left = await love_cooldown_left(actor_id, action)
-    if left > 0:
-        # Кулдаун: награда за эту команду уже получена недавно. Можно «докупить».
-        return await message.answer(
-            f"{text}\n\n⏳ {_cooldown_wait_text(action, left)}\n"
-            f"Можно не ждать — выполнить действие за {LOVE_ICE_COST} i¢ (донат-валюта).",
-            parse_mode="HTML", reply_markup=_cooldown_keyboard(actor_id, action))
+    # Задача 64: проверка и начисление идут под блокировкой (игрок + команда).
+    # Без неё два сообщения «обнять» подряд проходили проверку одновременно, и
+    # награда начислялась дважды — на скрине видно 10 → 20 → 30 → 40 → 50
+    # в одну минуту.
+    async with love_action_lock(actor_id, action):
+        left = await love_cooldown_left(actor_id, action)
+        if left > 0:
+            # Кулдаун: награда за эту команду уже получена недавно. Можно «докупить».
+            return await message.answer(
+                f"{text}\n\n⏳ {_cooldown_wait_text(action, left)}\n"
+                f"Можно не ждать — выполнить действие за {LOVE_ICE_COST} i¢ (донат-валюта).",
+                parse_mode="HTML", reply_markup=_cooldown_keyboard(actor_id, action))
 
-    new_score, granted, saved = await add_love_points(row, LOVE_ACTION_BONUS)
-    if not saved:
-        # Задача 55: не рисуем «+10», если база не приняла запись — иначе игрок
-        # видит рост в ответе и ноль в «любовь инфа».
-        return await message.answer(
-            f"{text}\n\n⚠️ Love не записался в базу — бонус не начислен.\n"
-            f"{love_write_hint()}", parse_mode="HTML")
-    await love_cooldown_touch(actor_id, action)
+        # Отметку ставим ДО начисления: пока идёт запись в базу, второй заход
+        # уже увидит кулдаун и не выдаст награду повторно.
+        await love_cooldown_touch(actor_id, action)
+        new_score, granted, saved = await add_love_points(row, LOVE_ACTION_BONUS)
+        if not saved:
+            # Задача 55: не рисуем «+10», если база не приняла запись — иначе
+            # игрок видит рост в ответе и ноль в «любовь инфа». Отметку КД
+            # снимаем: награды не было, значит и ждать нечего.
+            await love_cooldown_clear(actor_id, action)
+            return await message.answer(
+                f"{text}\n\n⚠️ Love не записался в базу — бонус не начислен.\n"
+                f"{love_write_hint()}", parse_mode="HTML")
     reply = (f"{text}\n\n💗 +{LOVE_ACTION_BONUS} Love (всего {new_score})\n"
              f"➡️ {safe_text(next_level_text(new_score))}")
     # Задача 61: награда за этап выдаётся ВСЕГДА и сразу, но игрок должен видеть,
@@ -3826,19 +3881,23 @@ async def solo_rp_action(message: Message, meta: dict, target_id, target_name):
     # виден в ответе («+10 Unlove (всего N)»).
 
     action_key = rp_action_for(strip_prefix(message_text(message)))[0]
-    left = await love_cooldown_left(actor_id, action_key)
-    if left > 0:
-        return await message.answer(
-            f"{text}\n\n⏳ {_cooldown_wait_text(action_key, left, SOLO_CURRENCY)}\n"
-            f"Можно не ждать — выполнить действие за {LOVE_ICE_COST} i¢ (донат-валюта).",
-            parse_mode="HTML", reply_markup=_cooldown_keyboard(actor_id, action_key))
+    # Задача 64: та же блокировка, что и в парной ветке, — без неё два «обнять»
+    # подряд без пары начисляли награду дважды (скрин заказчика: 10 → 20 → 30…).
+    async with love_action_lock(actor_id, action_key):
+        left = await love_cooldown_left(actor_id, action_key)
+        if left > 0:
+            return await message.answer(
+                f"{text}\n\n⏳ {_cooldown_wait_text(action_key, left, SOLO_CURRENCY)}\n"
+                f"Можно не ждать — выполнить действие за {LOVE_ICE_COST} i¢ (донат-валюта).",
+                parse_mode="HTML", reply_markup=_cooldown_keyboard(actor_id, action_key))
 
-    score, granted, saved = await add_solo_points(actor_id, LOVE_ACTION_BONUS)
-    if not saved:
-        return await message.answer(
-            f"{text}\n\n⚠️ {SOLO_CURRENCY} не записался в базу — бонус не начислен.\n"
-            f"{love_write_hint()}", parse_mode="HTML")
-    await love_cooldown_touch(actor_id, action_key)
+        await love_cooldown_touch(actor_id, action_key)
+        score, granted, saved = await add_solo_points(actor_id, LOVE_ACTION_BONUS)
+        if not saved:
+            await love_cooldown_clear(actor_id, action_key)
+            return await message.answer(
+                f"{text}\n\n⚠️ {SOLO_CURRENCY} не записался в базу — бонус не начислен.\n"
+                f"{love_write_hint()}", parse_mode="HTML")
     reply = (f"{text}\n\n💔 +{LOVE_ACTION_BONUS} {SOLO_CURRENCY} (всего {score})\n"
              f"➡️ {safe_text(next_level_text(score, SOLO_CURRENCY))}")
     # Одиночке награда тоже выдаётся всегда — говорим об этом прямо.
