@@ -20,6 +20,7 @@ from aiogram.exceptions import TelegramUnauthorizedError
 import aiohttp                     # клиент для проверки сервиса aura-api (/api/health)
 from aiohttp import web            # только для start_fake_website (порт Render)
 from supabase import create_client, Client
+from mentions import clean_name, parse_names
 from love import (
     LOVE_ACTION_BONUS,
     LOVE_ACTION_COOLDOWN,
@@ -2454,23 +2455,107 @@ def _days_text(days: int) -> str:
     return f"{days} {word}"
 
 
+_NAME_CACHE: dict[int, tuple[float, str]] = {}
+_NAME_CACHE_TTL = 300     # 5 минут: ники меняются редко, лишние SELECT не нужны
+
+
+def _names_sync(user_ids) -> dict:
+    """Ники пачкой: один запрос на всех (задача 53).
+
+    Раньше `_player_name` делал отдельный SELECT на каждого игрока, и топ
+    отношений из 10 пар превращался в 20 запросов подряд.
+    """
+    ids = []
+    for uid in user_ids or []:
+        try:
+            value = int(uid)
+        except (TypeError, ValueError):
+            continue
+        if value and value not in ids:
+            ids.append(value)
+    if not ids:
+        return {}
+    res = (supabase.table("users").select("user_id, username")
+           .in_("user_id", ids).execute())
+    return parse_names(res.data or [])
+
+
+async def _names_map(user_ids) -> dict:
+    """Ники с кэшем на 5 минут; при сбое базы — что есть в кэше (не падаем)."""
+    now = time.time()
+    ids = []
+    for uid in user_ids or []:
+        try:
+            value = int(uid)
+        except (TypeError, ValueError):
+            continue
+        if value and value not in ids:
+            ids.append(value)
+    wanted = [uid for uid in ids
+              if not (_NAME_CACHE.get(uid) and now - _NAME_CACHE[uid][0] < _NAME_CACHE_TTL)]
+    if wanted:
+        try:
+            fetched = await asyncio.to_thread(_names_sync, wanted)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Ники игроков не прочитались: %s", exc)
+            fetched = {}
+        for uid in wanted:
+            _NAME_CACHE[uid] = (now, fetched.get(uid, ""))
+    return {uid: _NAME_CACHE[uid][1] for uid in ids if uid in _NAME_CACHE}
+
+
+async def _player_names(rows, keys=("user_a", "user_b")) -> dict:
+    """Ники всех участников пары: `{id: ник}` без запросов по одному."""
+    ids = []
+    for row in rows or []:
+        for key in keys:
+            try:
+                value = int(row.get(key))
+            except (TypeError, ValueError):
+                continue
+            if value and value not in ids:
+                ids.append(value)
+    return await _names_map(ids)
+
+
 async def _player_name(user_id) -> str:
     """Ник игрока без «@»: из базы, иначе id<число>.
 
     Задача 44: @username в ответах бота больше не выводим — вместо ника
     отдаём ссылку на профиль (`tg://user?id=…`), см. _player_mention.
+    Задача 53: ник берём из общего кэша имён (один SELECT на всех), поэтому
+    на каждое РП-действие больше не уходит отдельный запрос в базу.
     """
     if not user_id:
         return "игрок"
-    def _read():
-        res = supabase.table("users").select("username").eq("user_id", int(user_id)).execute()
-        return (res.data[0].get("username") if res.data else None)
+    names = await _names_map([user_id])
+    name = clean_name(names.get(int(user_id)))
+    return name or f"id{int(user_id)}"
 
+
+async def _display_name(message, user_id, known=None) -> str:
+    """Как назвать игрока в чате: известное имя → база → участник чата → id.
+
+    Задача 53: если в базе ника нет (человек писал боту без username), бот
+    спрашивает имя у Telegram. Без этого в ответе появлялось «id123456789»,
+    и игрок снова не понимал, о ком речь.
+    """
+    name = clean_name(known)
+    if name:
+        return name
+    if not user_id:
+        return "игрок"
+    names = await _names_map([user_id])
+    name = clean_name(names.get(int(user_id)))
+    if name:
+        return name
     try:
-        raw = await asyncio.to_thread(_read)
-    except Exception:
-        raw = None
-    name = str(raw or "").strip().lstrip("@")
+        member = await message.bot.get_chat_member(message.chat.id, int(user_id))
+        person = getattr(member, "user", None)
+        name = clean_name(getattr(person, "full_name", None)
+                          or getattr(person, "first_name", None))
+    except Exception:  # noqa: BLE001 — нет прав/игрока нет в чате
+        name = ""
     return name or f"id{int(user_id)}"
 
 
@@ -2656,7 +2741,7 @@ def _love_int(value):
 
 
 def _love_short(value, limit: int = 14) -> str:
-    text = str(value or "игрок")
+    text = str(value or "игрок")   # пустое имя подменяет вызывающий (id<число>)
     return text if len(text) <= limit else text[:limit - 1] + "…"
 
 
@@ -2675,17 +2760,13 @@ async def love_top_rows():
                     ids.add(int(row.get(key)))
                 except (TypeError, ValueError):
                     continue
+        # Задача 53: один запрос только по нужным id (раньше тянулась вся
+        # таблица users целиком — на большом боте это тысячи строк).
         names = {}
         if ids:
-            # Один запрос на всех: иначе топ из 100 пар — это 200 запросов.
-            users = supabase.table("users").select("user_id, username").execute().data or []
-            for user in users:
-                try:
-                    user_id = int(user.get("user_id"))
-                except (TypeError, ValueError):
-                    continue
-                if user_id in ids:
-                    names[user_id] = str(user.get("username") or f"id{user_id}")
+            users = (supabase.table("users").select("user_id, username")
+                     .in_("user_id", sorted(ids)).execute().data) or []
+            names = parse_names(users)
         return rows, names
 
     return await asyncio.to_thread(_fetch)
@@ -2725,7 +2806,8 @@ async def cmd_top_love(message: Message):
     medals = ["🥇", "🥈", "🥉"]
     for index, row in enumerate(rows[:10]):
         score = int(row.get("love") or 0)
-        pair = [(uid, names.get(uid, "игрок"))
+        # Задача 53: если ника нет — подпись id<число>, но не безликий «игрок».
+        pair = [(uid, names.get(uid) or f"id{uid}")
                 for uid in (_love_int(row.get("user_a")), _love_int(row.get("user_b")))]
         # Задача 44: вместо @username — ник со ссылкой на профиль.
         shown = " 💞 ".join(_player_mention(uid, _love_short(name)) for uid, name in pair)
@@ -3006,9 +3088,13 @@ async def cmd_rp_action(message: Message):
     if target_id and target_id != partner_id:
         return await message.answer("💔 Это не твой партнёр — РП-команды работают только для пары.")
 
+    # Задача 53: раньше здесь было «… обнимает партнёра» — без ника и без
+    # ссылки, поэтому в чате выглядело как обращение в пустоту. Теперь второй
+    # участник подписан своим ником (и остаётся кликабельным).
+    partner_name = await _display_name(message, partner_id, target_name)
     text = (f"{meta['emoji']} <a href=\"tg://user?id={actor_id}\">"
             f"{safe_text(message.from_user.full_name)}</a> {meta['text']} "
-            f"<a href=\"tg://user?id={partner_id}\">партнёра</a>")
+            f"{_player_mention(partner_id, partner_name)}")
 
     left = await love_cooldown_left(actor_id)
     if left > 0:
@@ -3040,7 +3126,8 @@ async def solo_rp_action(message: Message, meta: dict, target_id, target_name):
     text = (f"{meta['emoji']} <a href=\"tg://user?id={actor_id}\">"
             f"{safe_text(message.from_user.full_name)}</a> {meta['text']}")
     if target_id and target_id != actor_id:
-        text += f" <a href=\"tg://user?id={target_id}\">{safe_text(target_name or 'игрока')}</a>"
+        # Задача 53: ник вместо безымянного «игрока».
+        text += f" {_player_mention(target_id, await _display_name(message, target_id, target_name))}"
     # Задача 37: убрали длинное объяснение «Пока один(а) — копится Unlove…» —
     # оно занимало пол-сообщения и повторялось на каждое действие. Счёт и так
     # виден в ответе («+10 Unlove (всего N)»).
