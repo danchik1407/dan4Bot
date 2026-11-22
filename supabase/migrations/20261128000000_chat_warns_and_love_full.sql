@@ -63,10 +63,10 @@ begin
         where n.nspname = 'public' and t.relname = 'chat_warns'
           and c.contype in ('p', 'u')
           and (
-                select array_agg(a.attname order by a.attname)
+                select array_agg(a.attname::text order by a.attname)
                 from unnest(c.conkey) as u(attnum)
                 join pg_attribute a on a.attrelid = t.oid and a.attnum = u.attnum
-              ) = array['chat_id', 'user_id']
+              ) = array['chat_id', 'user_id']::text[]
     ) into pair_key;
 
     if pair_key then
@@ -118,6 +118,16 @@ create index if not exists chat_warns_chat_idx on public.chat_warns (chat_id);
 -- ############################################################################
 
 -- 2.1 users: колонки, без которых не работают награды и профиль.
+--     Если таблицы users нет вовсе (совсем пустая база) — создаём минимум.
+create table if not exists public.users (
+    user_id    bigint primary key,
+    username   text,
+    coins      bigint      not null default 0,
+    keys       integer     not null default 0,
+    inventory  jsonb       not null default '[]'::jsonb,
+    created_at timestamptz not null default now()
+);
+
 alter table public.users add column if not exists coins      bigint      not null default 0;
 alter table public.users add column if not exists keys       integer     not null default 0;
 alter table public.users add column if not exists inventory  jsonb       not null default '[]'::jsonb;
@@ -342,10 +352,10 @@ select '2. chat_warns ключ (chat_id, user_id)',
                 join pg_namespace n on n.oid = t.relnamespace
                 where n.nspname = 'public' and t.relname = 'chat_warns'
                   and c.contype in ('p', 'u')
-                  and (select array_agg(a.attname order by a.attname)
+                  and (select array_agg(a.attname::text order by a.attname)
                          from unnest(c.conkey) as u(attnum)
                          join pg_attribute a on a.attrelid = t.oid and a.attnum = u.attnum)
-                      = array['chat_id', 'user_id'])
+                      = array['chat_id', 'user_id']::text[])
             then 'ok' else 'НЕТ — бот не сможет сохранять предупреждения' end
 union all
 select '3. relationships + solo_love + колонка love',

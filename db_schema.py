@@ -93,17 +93,17 @@ MIGRATION_BY_COLUMN = {
     "inventory": "20261027000000_shop_daily_limits.sql",
     # Задача 57: эти колонки (и solo_love) закрывает один файл — он же лечит
     # «Love не записался в базу» из скриншотов.
-    "bank": "20261128000000_chat_warns_and_love_full.sql",
-    "love": "20261128000000_chat_warns_and_love_full.sql",
-    "status": "20261128000000_chat_warns_and_love_full.sql",
-    "action_at": "20261128000000_chat_warns_and_love_full.sql",
-    "relationship_id": "20261128000000_chat_warns_and_love_full.sql",
+    "bank": "20261129000000_full_schema_all_points.sql",
+    "love": "20261129000000_full_schema_all_points.sql",
+    "status": "20261129000000_full_schema_all_points.sql",
+    "action_at": "20261129000000_full_schema_all_points.sql",
+    "relationship_id": "20261129000000_full_schema_all_points.sql",
     "stage": "20261122000000_solo_love.sql",
     # Задача 57: один файл закрывает и предупреждения, и любовь.
-    "chat_id": "20261128000000_chat_warns_and_love_full.sql",
-    "warns": "20261128000000_chat_warns_and_love_full.sql",
-    "muted_until": "20261128000000_chat_warns_and_love_full.sql",
-    "carry": "20261128000000_chat_warns_and_love_full.sql",
+    "chat_id": "20261129000000_full_schema_all_points.sql",
+    "warns": "20261129000000_full_schema_all_points.sql",
+    "muted_until": "20261129000000_full_schema_all_points.sql",
+    "carry": "20261129000000_full_schema_all_points.sql",
 }
 
 RELOAD_HINT = ("Если миграция уже применена — обновите кэш схемы PostgREST: "
@@ -172,10 +172,14 @@ def audit(client) -> dict:
 # Задача 57: в базе две известные «дыры» закрывает один готовый файл. Если
 # аудит нашёл в них хоть что-то, подсказываем именно его, а не «примените
 # миграции из папки» — админ должен получить копипастой.
-FULL_MIGRATION_FILE = "supabase/migrations/20261128000000_chat_warns_and_love_full.sql"
+# Задача 58: теперь это ОДИН файл на всю базу — он же закрывает апгрейд,
+# арену, сундуки, магазин и всё остальное, чего не хватало для очков.
+FULL_MIGRATION_FILE = "supabase/migrations/20261129000000_full_schema_all_points.sql"
 FULL_MIGRATION_TABLES = {"chat_warns", "relationships", "solo_love",
                          "solo_love_stage_rewards", "love_stage_rewards",
-                         "passive_carry"}
+                         "passive_carry", "upgrade_log", "arena_rounds",
+                         "arena_payouts", "chest_claims", "capsule_stock",
+                         "idempotency_keys", "passive_income"}
 
 
 def build_sql(missing_tables, missing_columns) -> str:
@@ -186,7 +190,7 @@ def build_sql(missing_tables, missing_columns) -> str:
     lines = []
     if needs_full:
         lines.append(f"-- Примените целиком: {FULL_MIGRATION_FILE}")
-        lines.append("-- (там chat_warns.warns, relationships/solo_love, RLS и reload кэша)")
+        lines.append("-- (там все таблицы/колонки/RLS для очков и reload кэша схемы)")
     for table in tables:
         if needs_full and table in FULL_MIGRATION_TABLES:
             continue

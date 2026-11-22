@@ -780,23 +780,42 @@ function closeGame() {
 function addBet(game, amount) {
     const input = document.getElementById(game + '-bet');
     if (!input) return;
-    // Задача 56: у арены минимум 100. Раньше «+10» при пустом поле подставляло
-    // 10 коинов и уходило на сервер (теперь он бы отказал).
-    const floor = game === 'hockey' ? ARENA_MIN_BET_CLIENT : 1;
-    let current = parseInt(input.value) || floor;
+    // Задача 58: пустое поле — это 0, а НЕ минимум. Раньше «+10» на пустом поле
+    // молча превращало ставку в 100 (минимум арены): игрок вводил 10, нажимал
+    // плюс и видел, что «оно ставит 100». Теперь кнопка честно прибавляет к тому,
+    // что видно, а минимум проверяется только при отправке и подсвечивается.
+    const value = parseInt(input.value);
+    let current = Number.isFinite(value) ? value : 0;
     current += amount;
-    if (current > 100000) current = 100000;
-    if (current < floor) current = floor;
+    const max = game === 'hockey' ? 10000 : 100000;
+    if (current > max) current = max;
+    if (current < 0) current = 0;
     input.value = current;
+    markArenaBetTooLow(game, current);
 }
 function getBet(game) {
     const input = document.getElementById(game + '-bet');
-    const floor = game === 'hockey' ? ARENA_MIN_BET_CLIENT : 1;
-    if (!input) return floor;
-    let val = parseInt(input.value) || floor;
-    if (val < floor) val = floor;
-    if (val > 100000) val = 100000;
+    if (!input) return 0;
+    const value = parseInt(input.value);
+    let val = Number.isFinite(value) ? value : 0;
+    const max = game === 'hockey' ? 10000 : 100000;
+    if (val > max) val = max;
+    if (val < 0) val = 0;
     return val;
+}
+
+// Задача 58: подсветка «ставка меньше минимума» — без молчаливой подстановки.
+function markArenaBetTooLow(game, value) {
+    const input = document.getElementById(game + '-bet');
+    if (!input) return;
+    const floor = game === 'hockey' ? ARENA_MIN_BET_CLIENT : 1;
+    const tooLow = Number(value) > 0 && Number(value) < floor;
+    input.classList.toggle('bet-too-low', tooLow);
+    const hint = document.getElementById(game + '-bet-hint');
+    if (hint) {
+        hint.textContent = tooLow ? `Минимум ${floor}` : '';
+        hint.classList.toggle('active', tooLow);
+    }
 }
 
 // ================= ЛИДЕРБОРД =================
@@ -3693,10 +3712,17 @@ const ARENA_MIN_BET_CLIENT = 100;
 async function placeHockeyBet(team) {
     if (isProcessing) return;
     const input = document.getElementById('hockey-bet');
-    // Задача 56: минимум арены — 100 (было «|| 10», и пустое поле отправляло
-    // ставку в 10 коинов). Сервер проверяет то же число.
-    const bet = Math.max(ARENA_MIN_BET_CLIENT, parseInt(input && input.value) || ARENA_MIN_BET_CLIENT);
-    if (bet < ARENA_MIN_BET_CLIENT) return tg.showAlert(`Минимальная ставка ${ARENA_MIN_BET_CLIENT} коинов`);
+    // Задача 56: минимум арены — 100. Задача 58: НЕ подставляем его молча.
+    // Раньше `Math.max(100, 10)` превращало введённые 10 в 100 и выглядело как
+    // «ставлю 10, оно ставит 100». Теперь показываем, что не так, и не отправляем.
+    const entered = parseInt(input && input.value);
+    const bet = Number.isFinite(entered) ? entered : 0;
+    if (bet < ARENA_MIN_BET_CLIENT) {
+        markArenaBetTooLow('hockey', bet);
+        return tg.showAlert(`Минимальная ставка ${ARENA_MIN_BET_CLIENT} коинов. `
+            + `Вы ввели ${bet > 0 ? bet : 'пустое поле'} — уменьшить минимум нельзя.`);
+    }
+    markArenaBetTooLow('hockey', bet);
     if (balance < bet) return tg.showAlert("Недостаточно коинов!");
     if (!isAdminId(user && user.id) && bet > 10000) return tg.showAlert("Максимальная ставка 10 000 коинов");
 
@@ -5007,6 +5033,8 @@ async function crashAction() {
 
         if (s.my_status === 'none' || (s.my_status === 'bet' && s.status === 'waiting')) {
             const bet = getBet('crash');
+            // Задача 58: пустое поле больше не молчит нулём — объясняем игроку.
+            if (bet < 1) { isProcessing = false; return tg.showAlert("Минимальная ставка 1 коин"); }
             if (balance < bet) { isProcessing = false; return tg.showAlert("Недостаточно коинов!"); }
             if (!isAdminId(user && user.id) && bet > 10000) { isProcessing = false; return tg.showAlert("Максимальная ставка 10 000 коинов"); }
 

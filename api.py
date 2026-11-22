@@ -85,7 +85,7 @@ async def _http_json(url, method: str = "GET", params=None, payload=None, timeou
 
 # Номер сборки: по нему из /api/health видно, что на сервисе НЕ старый код.
 # Если после деплоя здесь прежнее значение — Render ещё не перезапустился.
-API_BUILD = "2026-10-27-task57-admins-only-and-sql-migrations"
+API_BUILD = "2026-10-27-task58-points-fixes-and-full-schema"
 
 # Момент старта процесса. По нему видно, что сервис только что «проснулся»:
 # Render на бесплатном тарифе усыпляет Web Service через 15 минут без входящих
@@ -4788,9 +4788,31 @@ def _upgrade_log_write(user_id, **fields):
         return None
 
 
+def _upgrade_missing_table_text(exc) -> str:
+    """Текст ошибки базы → что именно чинить. Задача 58.
+
+    На скрине игрок видел «Не удалось запустить апгрейд» — общую фразу без
+    причины: исключение Supabase превращалось в 500 и терялось. Теперь
+    причины разные и по каждой видно, что делать.
+    """
+    text = f"{type(exc).__name__}: {exc}"
+    low = text.lower()
+    if "upgrade_log" in low:
+        return "upgrade_log: примените миграцию 20261029000000_upgrade_log.sql"
+    if "idempotency_keys" in low:
+        return "idempotency_keys: примените миграцию 20261101000000_server_rls_policies.sql"
+    if "row-level security" in low or "42501" in low or "permission denied" in low:
+        return "RLS: примените 20261129000000_full_schema_all_points.sql (там политики и grant)"
+    if "pgrst204" in low or "column" in low:
+        return "нет колонки в users: примените 20261129000000_full_schema_all_points.sql"
+    if "pgrst205" in low or "does not exist" in low or "schema cache" in low:
+        return "нет таблицы/кэш схемы: выполните NOTIFY pgrst, 'reload schema'"
+    return text[:200]
+
+
 @app.post("/api/upgrade_action")
 async def upgrade_action(data: UpgradeAction):
-    """Апгрейд предмета: слева ставка, справа цель. Шанс = стоимость слева / стоимость справа."""
+    """Апгрейд предмета: слева ставка, справа цель. Шанс = 90 / X."""
     user = verify_telegram_data(data.initData)
     if not user:
         raise HTTPException(status_code=401, detail="Invalid auth data")
@@ -4812,7 +4834,13 @@ async def upgrade_action(data: UpgradeAction):
         cached["idempotent_replay"] = True
         return cached
 
-    source, amount, target, _ = _upgrade_normalize_request(data)
+    try:
+        source, amount, target, _ = _upgrade_normalize_request(data)
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001 — мусор в запросе не должен давать 500
+        logger.warning("Апгрейд: некорректный запрос (%s)", exc)
+        raise HTTPException(status_code=400, detail="Некорректный запрос апгрейда")
 
     if source == "coin":
         if amount < UPGRADE_MIN_BET:
@@ -4830,7 +4858,17 @@ async def upgrade_action(data: UpgradeAction):
     )
 
     for _attempt in range(5):
-        raw_coins, raw_inventory, row_id = _upgrade_read_user(user_id)
+        # Задача 58: ошибка чтения профиля больше не превращается в 500 без
+        # текста. Раньше игра отвечала «Не удалось запустить апгрейд», потому
+        # что исключение базы уходило наверх пустым.
+        try:
+            raw_coins, raw_inventory, row_id = _upgrade_read_user(user_id)
+        except HTTPException:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Апгрейд: не удалось прочитать профиль %s: %s", user_id, exc)
+            raise HTTPException(status_code=503,
+                                detail="База не отвечает: " + _upgrade_missing_table_text(exc))
         inventory = parse_inventory(raw_inventory)
 
         # Списание сразу — до броска, чтобы ставку нельзя было абузить.
@@ -4933,7 +4971,12 @@ async def upgrade_action(data: UpgradeAction):
             idempotency_store(idem_key, user_id, "upgrade", payload)
             return payload
 
-    raise HTTPException(status_code=409, detail="Апгрейд уже обрабатывается. Попробуйте ещё раз.")
+    # Задача 58: 5 попыток не прошли (гонка двух запросов или параллельная
+    # запись баланса). Ставка НЕ списана — сообщаем об этом прямо, иначе
+    # игрок видел «Не удалось запустить апгрейд» и не знал, вернулись ли коины.
+    raise HTTPException(
+        status_code=409,
+        detail="Ставка не списана: баланс изменился во время раунда. Попробуйте ещё раз")
 
 
 @app.post("/api/upgrade_pending")
