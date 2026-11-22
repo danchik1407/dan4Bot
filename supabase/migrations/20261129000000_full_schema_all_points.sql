@@ -730,6 +730,11 @@ alter table public.love_cooldowns add column if not exists user_id bigint;
 alter table public.love_cooldowns add column if not exists action_at timestamptz default now();
 update public.love_cooldowns set action_at = now() where action_at is null;
 alter table public.love_cooldowns alter column action_at set default now();
+-- Задача 61: кулдаун стал НА КОМАНДУ. Здесь только колонка (чтобы код писал
+-- per-action отметки сразу); первичный ключ (user_id, action) и перенос старых
+-- отметок в '*all' делает 20261201000000_love_cooldown_per_action.sql —
+-- его нужно применить следом, иначе кулдаун останется общим на игрока.
+alter table public.love_cooldowns add column if not exists action text;
 
 -- Один активный роман на игрока (двойное «Да» не создаст две пары).
 create or replace function public.love_single_active_relationship()

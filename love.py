@@ -8,6 +8,11 @@
 
 # Этапы отношений. min/max — границы по «Love коинам» пары (общий банк),
 # reward — сколько получает КАЖДЫЙ партнёр при первом достижении этапа.
+#
+# Задача 61 (уточнение заказчика): «1 этап: Случайное знакомство 0/50, как только
+# достигают 50 — каждому по 1000 коинов». Значит этап «закрыт» уже на его ПРАВОЙ
+# границе: 50 Love = 2-й этап, 200 = 3-й и т.д. Поэтому `min` следующего этапа и
+# есть «сколько нужно» (поле `need` в публичной карточке).
 LOVE_STAGES = [
     {"index": 0, "min": 0, "max": 50, "title": "Случайное знакомство", "reward": 1000},
     {"index": 1, "min": 50, "max": 200, "title": "Дружба влюблённых", "reward": 2000},
@@ -19,22 +24,45 @@ LOVE_STAGES = [
     {"index": 7, "min": 20000, "max": None, "title": "Вечная любовь", "reward": 500000},
 ]
 
+# Сколько Love нужно, чтобы получить награду этапа (правая граница этапа).
+# Нужно для честного текста «Достигли этапа N: +X коинов каждому».
+LOVE_STAGE_TARGETS = [50, 200, 500, 2000, 5000, 12000, 20000]
+
 # Экономика Love.
 LOVE_ACTION_BONUS = 10              # +10 Love коинов в общий банк пары за действие
-# Задача 34: кулдаун ВРЕМЕННО выключен (0), чтобы можно было за один вечер
-# прогнать уровень и проверить награды. Значение можно менять на лету
-# секретной админ-командой `кд` (см. bot.py) — она пишет его в game_settings.
-LOVE_ACTION_COOLDOWN = 0
-LOVE_ACTION_COOLDOWN_DEFAULT = 5 * 3600   # «как задумано» — вернуть сюда
+# Задача 61: кулдаун ВКЛЮЧЁН и равен 5 часам — «обнять можно раз в пять часов,
+# и это кд настраивается командой кд». Раньше здесь стоял 0 (задача 34, временно),
+# и награда капала за каждое действие подряд.
+# Кулдаун считается НА КОМАНДУ: «обнять» и «поцеловать» — разные действия со
+# своими отметками (см. love_cooldowns.action). Общее значение по умолчанию
+# меняется админ-командой `кд <время>`, конкретная команда — `кд <команда> <время>`.
+LOVE_ACTION_COOLDOWN = 5 * 3600
+LOVE_ACTION_COOLDOWN_DEFAULT = 5 * 3600   # «как задумано»
 LOVE_ICE_COST = 3                   # «ускорить» за 3 i¢ (донат-валюта)
 
 # Текущий кулдаун в секундах. Живёт в памяти процесса и переопределяется
 # админ-командой; и бот (награды), и API (цифра в Mini App) читают его отсюда.
+#
+# Задача 61: кулдаун считается НА КОМАНДУ — «обнять» и «поцеловать» независимы.
+# Здесь лежит общее значение (по умолчанию для всех команд), а персональные
+# переопределения — в `_COOLDOWN_OVERRIDES` (команда → секунды). В базе это
+# одна строка game_settings `love_cooldown_actions` в виде JSON.
 _COOLDOWN_STATE = {"seconds": LOVE_ACTION_COOLDOWN}
+_COOLDOWN_OVERRIDES: dict = {}
 
 
-def love_cooldown_seconds() -> int:
-    """Действующий кулдаун награды за РП, в секундах (0 — без ограничения)."""
+def love_cooldown_seconds(action=None) -> int:
+    """Кулдаун конкретной команды (или общий, если команда не задана), в секундах.
+
+    0 — без ограничения. Для неизвестной команды действует общее значение.
+    """
+    if action:
+        key = str(action).strip().lower()
+        if key in _COOLDOWN_OVERRIDES:
+            try:
+                return max(0, int(_COOLDOWN_OVERRIDES[key]))
+            except (TypeError, ValueError):
+                pass
     try:
         value = int(_COOLDOWN_STATE.get("seconds") or 0)
     except (TypeError, ValueError):
@@ -42,20 +70,58 @@ def love_cooldown_seconds() -> int:
     return max(0, value)
 
 
-def set_love_cooldown_seconds(seconds) -> int:
-    """Поставить кулдаун награды. Возвращает применённое значение."""
+def set_love_cooldown_seconds(seconds, action=None) -> int:
+    """Поставить кулдаун. Без `action` — общий, с `action` — для этой команды.
+
+    Возвращает применённое значение.
+    """
     try:
-        value = int(seconds)
+        value = max(0, int(seconds))
     except (TypeError, ValueError):
         value = 0
-    value = max(0, value)
-    _COOLDOWN_STATE["seconds"] = value
+    if action:
+        _COOLDOWN_OVERRIDES[str(action).strip().lower()] = value
+    else:
+        _COOLDOWN_STATE["seconds"] = value
     return value
 
 
-def format_love_cooldown(seconds=None) -> str:
-    """«без ограничения» / «5 ч» / «30 мин» / «45 сек» — для сообщений."""
-    value = love_cooldown_seconds() if seconds is None else max(0, int(seconds))
+def love_cooldown_overrides() -> dict:
+    """Копия персональных кулдаунов: {команда: секунды} — для сохранения в базу."""
+    return dict(_COOLDOWN_OVERRIDES)
+
+
+def load_love_cooldown_overrides(raw) -> None:
+    """Загрузить персональные кулдауны (JSON-строка или уже словарь)."""
+    data = raw
+    if isinstance(raw, str):
+        try:
+            import json as _json
+            data = _json.loads(raw) if raw.strip() else {}
+        except Exception:
+            return
+    if not isinstance(data, dict):
+        return
+    _COOLDOWN_OVERRIDES.clear()
+    for key, value in data.items():
+        try:
+            _COOLDOWN_OVERRIDES[str(key).strip().lower()] = max(0, int(value))
+        except (TypeError, ValueError):
+            continue
+
+
+def reset_love_cooldown_override(action) -> int:
+    """Убрать персональный кулдаун команды. Возвращает действующее значение."""
+    _COOLDOWN_OVERRIDES.pop(str(action or "").strip().lower(), None)
+    return love_cooldown_seconds(action)
+
+
+def format_love_cooldown(seconds=None, action=None) -> str:
+    """«без ограничения» / «5 ч» / «30 мин» / «45 сек» — для сообщений.
+
+    `action` — показать кулдаун конкретной РП-команды.
+    """
+    value = love_cooldown_seconds(action) if seconds is None else max(0, int(seconds))
     if value <= 0:
         return "без ограничения"
     if value % 3600 == 0:
@@ -152,6 +218,14 @@ def stages_reached(previous_score, new_score) -> list:
     return [dict(stage) for stage in LOVE_STAGES[previous_index + 1:new_index + 1]]
 
 
+def _safe_int(value, default=0):
+    """Терпимое к мусору число: None/«abc» → default."""
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return default
+
+
 # ==================== ПУБЛИЧНАЯ ЧАСТЬ ЭТАПОВ ====================
 # Задача 29: этапы и награды за них — СЕКРЕТНАЯ механика. Игрок видит только
 # текущий уровень пары и Love коины, без сумм наград и без «следующего этапа»:
@@ -176,6 +250,9 @@ def public_stage(score) -> dict:
         # Границы этапа: от «стало» до «нужно».
         "stage_min": current["min"],
         "stage_max": current["max"],
+        # Задача 61: «до 50 Love» / для финального этапа — None (только растёт).
+        # Сумму награды клиенту НЕ отдаём: призы не показываются заранее.
+        "need": current["max"],
         "next_level": (index + 2) if nxt else None,
         "next_title": nxt["title"] if nxt else None,
         # Сколько Love осталось до следующего уровня (None — максимальный).
@@ -184,8 +261,9 @@ def public_stage(score) -> dict:
 
 
 def public_stages() -> list:
-    """Список уровней для клиента — тоже без наград."""
-    return [{"level": stage["index"] + 1, "index": stage["index"], "title": stage["title"]}
+    """Список уровней для клиента: номер, название и «сколько нужно Love»."""
+    return [{"level": stage["index"] + 1, "index": stage["index"],
+             "title": stage["title"], "need": stage["max"], "min": stage["min"]}
             for stage in LOVE_STAGES]
 
 
@@ -199,6 +277,39 @@ def next_level_text(score, currency: str = "Love") -> str:
     if info["next_level"] is None:
         return "Максимальный уровень"
     return f"До уровня {info['next_level']} — {info['to_next']} {currency}"
+
+
+def stage_reached_text(stage, amount_per_partner) -> str:
+    """«Вы достигли 2 уровня отношений «Дружба влюблённых» — каждому по 2 000».
+
+    Задача 61: награда за этап всегда начисляется (её не нужно «забирать»), но
+    игрок должен узнать об этом — иначе рост баланса выглядит случайным.
+    """
+    title = str((stage or {}).get("title") or "")
+    level = _safe_int((stage or {}).get("index"), 0) + 1
+    amount = _safe_int(amount_per_partner, 0)
+    head = f"💗 Вы достигли {level} уровня отношений"
+    if title:
+        head += f" «{title}»"
+    return f"{head} — каждому участнику +{amount} коинов!"
+
+
+def rp_action_key(raw):
+    """Нормализовать имя команды из админ-сообщения: «Обнять» → «обнять».
+
+    Возвращает ключ из RP_ACTIONS или None, если такой команды нет. Нужно для
+    настройки кулдауна по конкретному действию (`кд обнять 1ч`).
+    """
+    text = str(raw or "").strip().lower().replace("ё", "е")
+    if not text:
+        return None
+    text = " ".join(text.split())
+    for key in RP_ACTIONS:
+        normalized = key.replace("ё", "е")
+        if text == normalized:
+            return key
+    action, _meta = rp_action_for(text)
+    return action
 
 
 def rp_action_for(text) -> tuple:
@@ -221,13 +332,6 @@ def rp_action_for(text) -> tuple:
 # (при открытии Mini App) вызывают одну и ту же функцию, поэтому награда не
 # может быть выдана дважды или не выдана вовсе.
 LOVE_REWARDS_TABLE = "love_stage_rewards"
-
-
-def _safe_int(value, default=0):
-    try:
-        return int(float(value))
-    except (TypeError, ValueError):
-        return default
 
 
 def paid_stages(supabase, relationship_id) -> set:
