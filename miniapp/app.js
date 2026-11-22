@@ -3788,6 +3788,9 @@ function arenaPoolsFromState(state) {
         winner: state.winner || null,
         winner_team: null,
         status: normalServer.status || state.normal_status || state.status || 'waiting',
+        // Задача 47: закрыт ли раунд по деньгам ('pending' → деньги ещё идут).
+        payout_status: normalServer.payout_status || 'none',
+        payout_error: normalServer.payout_error || '',
         timer: Number(normalServer.timer != null ? normalServer.timer : state.normal_timer) || 0,
         round_id: String(normalServer.round_id || state.normal_round_id || state.round_id || ''),
         roll_duration: Number(normalServer.roll_duration) || Number(state.roll_duration) || 9,
@@ -3799,19 +3802,39 @@ function arenaPoolsFromState(state) {
             : (Array.isArray(state.teams) ? state.teams : []),
         teams: Array.isArray(state.teams) ? state.teams : [],
         bank: Number(state.team_bank) || 0,
-        winner: (state.arena_winners && state.arena_winners.team) || null,
-        winner_team: state.winner_team || null,
+        // Задача 47: победитель командной арены — объект КОМАНДЫ. Старый
+        // ответ присылал только id в winner_team, поэтому плашку было нечем
+        // заполнить; поддерживаем оба вида.
+        winner: teamServer.winner
+            || (state.arena_winners && state.arena_winners.team)
+            || (teamServer.winner_team || state.winner_team
+                ? { id: teamServer.winner_team || state.winner_team,
+                    team: teamServer.winner_team || state.winner_team, is_team: true }
+                : null),
+        winner_team: teamServer.winner_team || state.winner_team
+            || (teamServer.winner && (teamServer.winner.team || teamServer.winner.id)) || null,
         status: teamServer.status || state.team_status || 'waiting',
+        payout_status: teamServer.payout_status || 'none',
+        payout_error: teamServer.payout_error || '',
+        // Задача 47: имя победителя — ТОЛЬКО своё. Раньше здесь стоял
+        // normalServer.winner_name, и в командную арену попадал победитель
+        // одиночной — та самая «плашка не из того режима».
+        winner_name: teamServer.winner_name || '',
         timer: Number(teamServer.timer != null ? teamServer.timer : state.team_timer) || 0,
         round_id: String(teamServer.round_id || state.team_round_id || ''),
         roll_duration: Number(teamServer.roll_duration) || Number(state.team_roll_duration) || 8,
         teams_summary: teamServer.teams || state.teams || [],
     };
     const fromServer = state.arenas && typeof state.arenas === 'object' ? state.arenas : {};
-    return {
-        normal: Object.assign({}, normal, fromServer.normal || {}),
-        team: Object.assign({}, team, fromServer.team || {}),
-    };
+    const normalMerged = Object.assign({}, normal, fromServer.normal || {});
+    const teamMerged = Object.assign({}, team, fromServer.team || {});
+    // Задача 47: поля победителя НЕ перетираем сырым блоком сервера. Старый
+    // ответ присылал winner: null в командной арене, и Object.assign затирал
+    // нормализованное значение — плашка «Победитель: команда …» не появлялась.
+    normalMerged.winner = (fromServer.normal && fromServer.normal.winner) || normal.winner || null;
+    teamMerged.winner = (fromServer.team && fromServer.team.winner) || team.winner || null;
+    teamMerged.winner_team = (fromServer.team && fromServer.team.winner_team) || team.winner_team || null;
+    return { normal: normalMerged, team: teamMerged };
 }
 
 function arenaSelfIn(view) {
@@ -3995,6 +4018,78 @@ function arenaStateForView(state, view) {
         roll_data: pool.roll_data || state.roll_data || null,
         roll_duration: Number(pool.roll_duration) || 8,
     });
+}
+
+// Задача 47: плашка победителя заполняется ТОЛЬКО данными своей арены.
+// info берётся из arenaWinnerInfo(view), поэтому подставить победителя другого
+// режима физически нечем. Возвращает false, если показывать нечего.
+function applyArenaWinnerModal(view, info) {
+    if (!info) return false;
+    const modal = document.getElementById('winner-modal');
+    if (!modal) return false;
+    // Ник — текстом (не HTML), сумма — innerHTML, потому что внутри картинка монеты.
+    // В командной арене ника нет: пишем только название команды.
+    const teamLabel = info.team ? (info.team === 'red' ? '🔴 ' : '🔵 ') : '';
+    const teamName = String(info.name || '').toUpperCase();
+    const poolNow = arenaPool(view) || {};
+    // Задача 47: сервер ещё не подтвердил выплату — так и пишем, а не «0».
+    const payoutPending = poolNow.payout_status === 'pending';
+    const payoutFailed = poolNow.payout_status === 'failed';
+
+    const titleEl = document.getElementById('winner-modal-title');
+    const teamEl = document.getElementById('winner-modal-team');
+    if (titleEl) {
+        // Задача 47: в командной арене заголовок дословно «Победитель: команда
+        // Красные» — раньше была отдельная строка «Победила команда» и плашка
+        // ниже, из-за чего в чате/логе выглядело, будто победителя нет.
+        titleEl.textContent = info.team
+            ? `Победитель: команда ${teamName}`
+            : 'Победитель';
+    }
+    if (teamEl) {
+        // Задача 45: ника игрока в командной плашке НЕТ — только цвет команды.
+        if (info.team) {
+            teamEl.className = `winner-team-badge ${info.team === 'red' ? 'red' : 'blue'}`;
+            teamEl.innerText = `${teamLabel}${teamName}`;
+            teamEl.style.display = 'inline-block';
+        } else {
+            teamEl.className = 'winner-team-badge';
+            teamEl.style.display = 'none';
+            teamEl.innerText = '';
+        }
+    }
+    const nameEl = document.getElementById('winner-modal-name');
+    if (nameEl) {
+        if (info.team) {
+            nameEl.innerText = 'Банк поделён по ставкам';
+            nameEl.style.fontSize = '15px';
+            nameEl.title = 'Выигрыш делится пропорционально ставкам победившей команды';
+        } else {
+            nameEl.innerText = shortName(info.name, 18);
+            nameEl.style.fontSize = '';
+            nameEl.title = String(info.name || '');
+        }
+    }
+    const amountEl = document.getElementById('winner-modal-amount');
+    if (amountEl) {
+        // Задача 45: в командной арене показываем ЧЕСТНУЮ выплату — ставка +
+        // доля банка (ровно столько придёт на баланс).
+        const mineBet = Number(info.bet) || 0;
+        amountEl.classList.toggle('muted', info.amount <= 0);
+        if (info.amount > 0) {
+            amountEl.innerHTML = info.team
+                ? `${coinAmount(info.amount)} <small>(ставка ${coinAmount(mineBet)} + ${coinAmount(Math.max(0, info.amount - mineBet))})</small>`
+                : `+${coinAmount(info.amount)}`;
+        } else if (payoutPending) {
+            amountEl.innerHTML = 'Выигрыш зачисляется…';
+        } else if (payoutFailed) {
+            amountEl.innerHTML = 'Выплата повторяется — баланс не потерян';
+        } else {
+            amountEl.innerHTML = `Банк: ${coinAmount(info.bank)}`;
+        }
+        amountEl.style.display = '';
+    }
+    return true;
 }
 
 // Кто и сколько выиграл в конкретном котле — для модалки.
@@ -4509,6 +4604,9 @@ async function pollHockeyState() {
         if (round.status === 'waiting') {
             statusEl.innerText = `Ставки: ${round.timer} сек`; statusEl.style.color = '#ffcc00';
             document.getElementById('hockey-controls').style.display = 'flex';
+            // Задача 47: ключ «кому уже показали» — свой на каждую арену.
+            // Общий ключ не давал показать победителя командной после того,
+            // как плашку одиночной уже увидели (и наоборот).
             hasShownWinner = false;
             shownWinnerKey = null;
             hideArenaBall();
@@ -4575,69 +4673,19 @@ async function pollHockeyState() {
             } else {
                 freezeArenaBall(arenaStateForView(state, 'normal'));
             }
-            const modal = document.getElementById('winner-modal');
-            // Победителя показываем по той арене, которую игрок смотрит; если в
-            // ней ставок не было — по другой, чтобы результат не пропадал.
-            const shownPool = arenaState.view === 'team' ? 'team' : 'normal';
-            const otherPool = shownPool === 'team' ? 'normal' : 'team';
-            const primary = arenaPool(shownPool).winner ? shownPool : (arenaPool(otherPool).winner ? otherPool : null);
-            const winnerKey = primary ? `${round.round_id}:${primary}` : null;
-            if (primary && shownWinnerKey !== winnerKey) {
+            // Задача 47: режимы независимы — победитель показывается ТОЛЬКО
+            // для той арены, которую смотрит игрок. Раньше при пустой своей
+            // арене подставлялся победитель другой, и в командной арене
+            // всплывал ник игрока из одиночной (и наоборот).
+            const primary = arenaState.view === 'team' ? 'team' : 'normal';
+            const winnerKey = `${primary}:${round.round_id}:${arenaPool(primary).winner_team || ''}`;
+            if (arenaPool(primary).winner && shownWinnerKey !== winnerKey) {
                 shownWinnerKey = winnerKey;
                 hasShownWinner = true;
                 const info = arenaWinnerInfo(primary, state);
                 setTimeout(() => {
-                    const nameEl = document.getElementById('winner-modal-name');
-                    const amountEl = document.getElementById('winner-modal-amount');
-                    if (!info) return;
-                    // Ник — текстом (не HTML), сумма — innerHTML, потому что внутри картинка монеты.
-                    // В командной арене ника нет: пишем только название команды.
-                    const teamLabel = info.team
-                        ? (info.team === 'red' ? '🔴 ' : '🔵 ')
-                        : '';
-                    const titleEl = document.getElementById('winner-modal-title');
-                    const teamEl = document.getElementById('winner-modal-team');
-                    if (titleEl) titleEl.textContent = info.team ? 'Победила команда' : 'Победитель';
-                    if (teamEl) {
-                        // Задача 45: ника игрока в командной плашке НЕТ — только
-                        // «🔴 КРАСНЫЕ» / «🔵 СИНИЕ» цветом своей команды.
-                        if (info.team) {
-                            teamEl.className = `winner-team-badge ${info.team === 'red' ? 'red' : 'blue'}`;
-                            teamEl.innerText = `${teamLabel}${String(info.name || '').toUpperCase()}`;
-                            teamEl.style.display = 'inline-block';
-                        } else {
-                            teamEl.className = 'winner-team-badge';
-                            teamEl.style.display = 'none';
-                            teamEl.innerText = '';
-                        }
-                    }
-                    if (nameEl) {
-                        // В командной арене имя в модалке не показываем вовсе.
-                        if (info.team) {
-                            nameEl.innerText = 'Банк поделён по ставкам';
-                            nameEl.style.fontSize = '15px';
-                            nameEl.title = 'Выигрыш делится пропорционально ставкам победившей команды';
-                        } else {
-                            nameEl.innerText = shortName(info.name, 18);
-                            nameEl.style.fontSize = '';
-                            nameEl.title = String(info.name || '');
-                        }
-                    }
-                    if (amountEl) {
-                        // Задача 45: в командной арене показываем ЧЕСТНУЮ выплату —
-                        // ставка + доля банка (ровно столько придёт на баланс).
-                        // Кладём в подпись «всего», чтобы не путали с «+чистыми».
-                        const mineBet = Number(info.bet) || 0;
-                        amountEl.classList.toggle('muted', info.amount <= 0);
-                        if (info.amount > 0) {
-                            amountEl.innerHTML = info.team
-                                ? `${coinAmount(info.amount)} <small>(ставка ${coinAmount(mineBet)} + ${coinAmount(Math.max(0, info.amount - mineBet))})</small>`
-                                : `+${coinAmount(info.amount)}`;
-                        } else {
-                            amountEl.innerHTML = `Банк: ${coinAmount(info.bank)}`;
-                        }
-                        amountEl.style.display = '';
-                    }
+                    const modal = document.getElementById('winner-modal');
+                    if (!applyArenaWinnerModal(primary, info)) return;
                     modal.classList.add('active');
 
                     // The database is the only balance source; never optimistically add the pot here.
