@@ -1060,6 +1060,21 @@ def _random_arena_bot_count(arena: str = "normal"):
 
 
 # ==================== ОБЩИЕ ХЕЛПЕРЫ ЭКОНОМИКИ ====================
+def _primary_user_row(rows):
+    """Строка профиля, которую видит ИГРОК: максимум коинов (как в /api/user).
+
+    Задача 69: в базе бывают старые дубли users с одним user_id. Профиль
+    показывает строку с максимумом коинов, а списание ставки брало res.data[0] —
+    «мёртвую» строку с 0. Игрок видел 1 000 коинов, а игра отвечала
+    «Недостаточно коинов»; если суммы хватало — коины уходили не с того баланса.
+    Теперь везде, где читаем/пишем деньги, берём строку по одному правилу.
+    """
+    rows = [row for row in (rows or []) if isinstance(row, dict)]
+    if not rows:
+        return None
+    return max(rows, key=lambda row: _safe_int(row.get("coins"), 0))
+
+
 def _safe_int(value, default=0):
     """NULL / строка / float из базы не должны ронять эндпоинт в 500."""
     if value is None or value == "":
@@ -1276,10 +1291,22 @@ def _db_update_user(user_id, **fields):
     if uid is None:
         return False
     _LAST_USER_WRITE_ERROR = None
+    # Задача 69: если у игрока остались старые дубли профиля, писать надо только
+    # в ТУ строку, которую он видит (максимум коинов). Иначе `update(...).eq(
+    # "user_id", uid)` менял все строки сразу: коины начислялись дважды, а
+    # покупка списывалась с «мёртвой» строки.
+    try:
+        row, rows = _read_user_row(uid)
+    except Exception as exc:  # noqa: BLE001 — читать не смогли, работаем по старинке
+        row, rows = None, []
+        logger.warning("Не удалось прочитать профиль user_id=%s перед записью: %s", uid, exc)
     # Строка могла быть сохранена как int, а могла — как текст (старые записи).
     for key in (uid, str(uid)):
         try:
-            updated = supabase.table("users").update(payload).eq("user_id", key).select("user_id").execute()
+            query = supabase.table("users").update(payload).eq("user_id", key)
+            if len(rows) > 1 and row and str(row.get("id")).strip() not in ("", "None"):
+                query = query.eq("id", row["id"])
+            updated = query.select("user_id").execute()
         except Exception as exc:  # noqa: BLE001
             _LAST_USER_WRITE_ERROR = exc
             logger.error("Не удалось обновить users по user_id=%s (%s): %s",
@@ -1288,6 +1315,39 @@ def _db_update_user(user_id, **fields):
         if updated.data:
             return True
     return False
+
+
+def _read_user_row(user_id):
+    """Профиль игрока целиком: (строка, который видит игрок; все строки).
+
+    Нужен там, где деньги читаются и тут же пишутся: чтобы записать в ТУ ЖЕ
+    строку, что показываем игроку (задача 69 — дубли user_id).
+    """
+    try:
+        res = (supabase.table("users")
+               .select("id, user_id, coins, inventory")
+               .eq("user_id", int(user_id)).execute())
+    except Exception:  # noqa: BLE001 — старая база без id/inventory: читаем что есть
+        res = supabase.table("users").select("coins").eq("user_id", int(user_id)).execute()
+    rows = res.data or []
+    return _primary_user_row(rows), rows
+
+
+def _write_primary_coins(user_id, coins: int) -> bool:
+    """Записать баланс ровно в ту строку профиля, которую видит игрок.
+
+    Задача 69: `update({"coins": ...}).eq("user_id", uid)` менял ВСЕ дубли
+    сразу — деньги начислялись дважды, а списание уходило в «мёртвую» строку.
+    Пишем по id живой строки, а по user_id — только если id в базе нет.
+    """
+    row, _rows = _read_user_row(user_id)
+    if row and str(row.get("id")).strip() not in ("", "None"):
+        updated = (supabase.table("users").update({"coins": coins})
+                   .eq("id", row["id"]).select("user_id").execute())
+        return bool(updated.data)
+    updated = (supabase.table("users").update({"coins": coins})
+               .eq("user_id", int(user_id)).select("user_id").execute())
+    return bool(updated.data)
 
 
 def _backfill_user_created_at(user_id, value) -> bool:
@@ -2293,10 +2353,11 @@ def _direct_arena_credit(user_id: int, amount: int) -> None:
     res = supabase.table("users").select("coins").eq("user_id", user_id).execute()
     if not res.data:
         raise RuntimeError(f"Победитель Арены user_id={user_id} не найден в users")
-    new_coins = int(res.data[0].get("coins", 0)) + int(amount)
-    updated = supabase.table("users").update({"coins": new_coins}).eq(
-        "user_id", user_id).select("user_id").execute()
-    if not updated.data:
+    _row = _primary_user_row(res.data)
+    if _row is None:
+        raise RuntimeError(f"Победитель Арены user_id={user_id} не найден в users")
+    new_coins = _safe_int(_row.get("coins"), 0) + int(amount)
+    if not _write_primary_coins(user_id, new_coins):
         raise RuntimeError(f"Supabase не подтвердил выплату user_id={user_id}")
 
 
@@ -3237,12 +3298,12 @@ async def place_bet(data: PlaceBet):
 
     res = supabase.table("users").select("coins").eq("user_id", int(user_id)).execute()
     if not res.data: raise HTTPException(status_code=404, detail="User not found")
-    current_coins = int(res.data[0].get("coins", 0))
+    _row = _primary_user_row(res.data)
+    current_coins = _safe_int(_row.get("coins"), 0) if _row else 0
     if current_coins < data.amount: raise HTTPException(status_code=400, detail="Not enough coins")
 
     new_coins = current_coins - data.amount
-    updated = supabase.table("users").update({"coins": new_coins}).eq("user_id", int(user_id)).select("user_id").execute()
-    if not updated.data:
+    if not _write_primary_coins(user_id, new_coins):
         raise HTTPException(status_code=500, detail="Не удалось списать ставку")
 
     if existing_player is not None:
@@ -3492,12 +3553,11 @@ async def crash_bet(data: CrashBet):
     _enforce_bet_limit(user_id, int(existing["bet"] if existing else 0) + int(data.amount))
     res = supabase.table("users").select("coins").eq("user_id", int(user_id)).execute()
     if not res.data: raise HTTPException(status_code=404, detail="User not found")
-    current_coins = int(res.data[0].get("coins", 0))
+    _row = _primary_user_row(res.data)
+    current_coins = _safe_int(_row.get("coins"), 0) if _row else 0
     if current_coins < data.amount: raise HTTPException(status_code=400, detail="Недостаточно коинов")
 
-    updated = supabase.table("users").update({"coins": current_coins - data.amount}).eq(
-        "user_id", int(user_id)).select("user_id").execute()
-    if not updated.data:
+    if not _write_primary_coins(user_id, current_coins - data.amount):
         raise HTTPException(status_code=500, detail="Не удалось списать ставку")
     if existing:
         existing["bet"] += data.amount
@@ -3529,10 +3589,9 @@ async def crash_cashout(data: CrashCashout):
     res = supabase.table("users").select("coins").eq("user_id", int(user_id)).execute()
     if not res.data:
         raise HTTPException(status_code=404, detail="Пользователь не найден")
-    new_coins = int(res.data[0].get("coins", 0)) + win_amount
-    updated = supabase.table("users").update({"coins": new_coins}).eq(
-        "user_id", int(user_id)).select("user_id").execute()
-    if not updated.data:
+    _row = _primary_user_row(res.data)
+    new_coins = (_safe_int(_row.get("coins"), 0) if _row else 0) + win_amount
+    if not _write_primary_coins(user_id, new_coins):
         raise HTTPException(status_code=500, detail="Не удалось зачислить выигрыш")
     player["cashout_mult"] = cashout_mult
     return {"success": True, "win_amount": win_amount, "mult": cashout_mult, "new_balance": new_coins}
@@ -4752,39 +4811,65 @@ def _upgrade_read_user(user_id: int):
 
 
 def _pg_filter_safe(value) -> bool:
-    """PostgREST ломает запрос, если в значении есть , : ( ) или кавычки.
+    """Можно ли безопасно передать значение в фильтр PostgREST.
 
-    Инвентарь — это JSON-строка вида ["capsule","capsule"]: запятые и кавычки там
-    обычное дело. Раньше такой фильтр уходил как есть, PostgREST не мог его
-    разобрать, и апгрейд падал с 500. Поэтому сверяем инвентарь только когда
-    значение безопасно передать (чаще всего — один предмет)."""
+    Оставлено для обратной совместимости с другими вызовами. В апгрейде этот
+    фильтр больше НЕ используется (задача 69): подробности в
+    `_upgrade_write_user`.
+    """
     if not isinstance(value, str):
         return False
     return not any(char in value for char in ',:()"')
 
 
+# Причина последней неудачной записи (см. _upgrade_write_user, задача 69).
+_UPGRADE_WRITE_ERROR = None
+
+
 def _upgrade_write_user(user_id: int, raw_coins: int, raw_inventory, coins: int, inventory: list,
                         row_id=None) -> bool:
-    """Оптимистичная запись: применяется, только если баланс (и по возможности
-    инвентарь) не изменились с момента чтения. Ошибка сети/PostgREST — это
-    False, а не 500: выше стоит повторное чтение и ещё одна попытка.
+    """Оптимистичная запись результата апгрейда.
+
+    Применяется, только если баланс не изменился с момента чтения. Ошибка
+    сети/PostgREST — это False, а не 500: выше стоит повторное чтение и ещё
+    одна попытка.
 
     Задача 54: если известен id строки, пишем ИМЕННО в неё. Раньше update шёл по
     всем строкам с этим user_id, и при старых дублях можно было перезаписать не
     ту запись (игрок видел баланс одной строки, а менялась другая).
+
+    Задача 69: убран фильтр по инвентарю — из-за него апгрейд отвечал «баланс
+    изменился во время раунда», хотя баланс никто не трогал. Причины:
+
+      * inventory в базе — колонка JSONB. Фильтр `inventory=eq.<json-строка>`
+        уходил как текст («["capsule"]»), а PostgREST сравнивает его с jsonb:
+        запрос либо не находил ни одной строки (0 обновлений → заказчик видел
+        ошибку на ПЕРВОМ же апгрейде), либо падал с ошибкой типов;
+      * после первой же записи Postgres хранит jsonb в своём формате
+        (пробелы, порядок), и прочитанная строка перестаёт совпадать с тем,
+        что мы передаём обратно — снова 0 обновлений.
+
+    Инвентарь по-прежнему защищён: мы читали его в той же транзакции, что и
+    баланс, а любой другой апгрейд или игра меняют `coins` (у апгрейда баланс
+    меняется всегда — ставка списывается до броска). Если инвентарь поменялся,
+    а баланс нет, пишем по `id` конкретной строки — это ровно та строка,
+    которую читали.
     """
     update_values = {"coins": coins, "inventory": json.dumps(inventory, ensure_ascii=False)}
     query = supabase.table("users").update(update_values).eq("user_id", user_id).eq("coins", raw_coins)
     # Задача 59: пишем по id только когда он реально есть (на старой базе его нет).
     if row_id is not None and str(row_id).strip() not in ("", "None"):
         query = query.eq("id", row_id)
-    if raw_inventory is not None and _pg_filter_safe(raw_inventory):
-        query = query.eq("inventory", raw_inventory)
     try:
         updated = query.select("user_id").execute()
-    except Exception:
+    except Exception as exc:  # noqa: BLE001 — текст ошибки нужен игроку
         logger.warning("Не удалось записать результат апгрейда", exc_info=True)
+        # Задача 69: техническая причина (нет колонки, RLS, тип) — это не
+        # «кто-то поменял баланс». Запоминаем причину, чтобы 409 сказал правду.
+        global _UPGRADE_WRITE_ERROR
+        _UPGRADE_WRITE_ERROR = _upgrade_missing_table_text(exc)
         return False
+    _UPGRADE_WRITE_ERROR = None
     return bool(updated.data)
 
 
@@ -5076,9 +5161,16 @@ async def upgrade_action(data: UpgradeAction):
             idempotency_store(idem_key, user_id, "upgrade", payload)
             return payload
 
-    # Задача 58: 5 попыток не прошли (гонка двух запросов или параллельная
-    # запись баланса). Ставка НЕ списана — сообщаем об этом прямо, иначе
-    # игрок видел «Не удалось запустить апгрейд» и не знал, вернулись ли коины.
+    # Задача 58: ни одна из попыток не записалась. Ставка НЕ списана — говорим
+    # об этом прямо, иначе игрок не понимает, вернулись ли коины.
+    # Задача 69: если причина техническая (база не приняла запись), нельзя
+    # врать про «баланс изменился» — это сбивало заказчика с толку: баланс на
+    # экране не менялся, а текст утверждал обратное.
+    if _UPGRADE_WRITE_ERROR:
+        logger.warning("Апгрейд не записан (user_id=%s): %s", user_id, _UPGRADE_WRITE_ERROR)
+        raise HTTPException(
+            status_code=409,
+            detail=f"Ставка не списана: база не приняла запись. Попробуйте ещё раз ({_UPGRADE_WRITE_ERROR})")
     raise HTTPException(
         status_code=409,
         detail="Ставка не списана: баланс изменился во время раунда. Попробуйте ещё раз")
@@ -5229,7 +5321,8 @@ async def update_balance(data: UpdateBalance):
 
     res = supabase.table("users").select("coins").eq("user_id", user_id).execute()
     if not res.data: raise HTTPException(status_code=404, detail="User not found")
-    current_coins = int(res.data[0].get("coins", 0) or 0)
+    _row = _primary_user_row(res.data)
+    current_coins = _safe_int(_row.get("coins"), 0) if _row else 0
     new_coins = max(0, current_coins + data.amount)
     if not _db_update_user(user_id, coins=new_coins):
         raise HTTPException(status_code=500, detail="Не удалось обновить баланс")
