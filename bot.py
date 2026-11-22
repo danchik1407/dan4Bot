@@ -4022,6 +4022,15 @@ async def cmd_start(message: Message):
     же miniapp_webapp_url(), что и кнопка меню — поэтому кнопка внутри
     сообщения не может вести на удалённый сервис.
     """
+    # Задача 60: deep-link `start=ref_<id>` — приглашение. Раньше параметр
+    # терялся, и ссылка `t.me/<бот>?start=ref_<id>` не давала ничего, пока
+    # приглашённый сам не откроет Mini App. В части клиентов команда приходит
+    # как «/start ref_123», в части — как «start ref_123».
+    text = message_text(message).strip()
+    parts = text.split(maxsplit=1)
+    code = _referral_code_from_args(parts[1]) if len(parts) > 1 else ""
+    if code and await handle_referral_start(message, code):
+        return
     actor = message_actor(message)
     name = safe_text(getattr(actor, "first_name", None) or "друг")
     await message.answer(
@@ -4031,6 +4040,97 @@ async def cmd_start(message: Message):
         parse_mode="HTML",
         reply_markup=start_keyboard(),
     )
+
+
+# ================= РЕФЕРАЛЫ В БОТЕ (задача 60) =================
+# Ссылка вида `t.me/<бот>?start=ref_<id>` бот раньше не обрабатывал: параметр
+# `start` уходил в общий хендлер и терялся, поэтому приглашение по такой ссылке
+# не записывалось, пока приглашённый сам не откроет Mini App. Теперь команда
+# `/start ref_<id>` (и просто `start ref_<id>`) привязывает реферала прямо в
+# боте — через тот же API, чтобы правила награды остались в одном месте.
+
+
+def _referral_code_from_args(raw_args) -> str:
+    """`ref_123` / `123` / `startapp=ref_123` → `ref_123` ('' если не код)."""
+    text = str(raw_args or "").strip()
+    if not text:
+        return ""
+    # Приходит "ref_123", "start=ref_123" или "startapp=ref_123" (payload ссылки).
+    # Ищем по метке, а не «по первому =»: в подписи Telegram бывают пробелы.
+    if "startapp=" in text:
+        text = text.split("startapp=", 1)[1]
+    elif "start=" in text:
+        text = text.split("start=", 1)[1]
+    text = text.split("&", 1)[0].strip()
+    if text.lower().startswith("ref_"):
+        text = text[4:]
+    return f"ref_{text}" if text.isdigit() else ""
+
+
+async def _bind_referral_via_api(user_id: int, init_data: str, code: str) -> dict:
+    """Привязка реферала через aura-api (одни правила награды на всех)."""
+    if not API_URL:
+        return {}
+    url = f"{API_URL.rstrip('/')}/api/referral_bind"
+    try:
+        timeout = aiohttp.ClientTimeout(total=10)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.post(url, json={"initData": init_data, "ref_code": code}) as resp:
+                return await resp.json(content_type=None)
+    except Exception as exc:  # noqa: BLE001 — привязка не должна мешать /start
+        logger.warning("Реферал в боте: API не ответил (%s)", exc)
+        return {}
+
+
+def _referral_start_init_data(user_id: int, username: str = "", first_name: str = "") -> str:
+    """Подписанный initData для запроса от имени игрока.
+
+    api.py проверяет подпись тем же BOT_TOKEN, поэтому собрать данные может
+    только сервер — клиенту такое не подделать (в Mini App initData приходит
+    от Telegram, здесь его формирует сам бот).
+    """
+    if not BOT_TOKEN:
+        return ""
+    user = {"id": int(user_id)}
+    if username:
+        user["username"] = username
+    if first_name:
+        user["first_name"] = first_name
+    fields = {
+        "auth_date": str(int(time.time())),
+        "query_id": f"bot{int(time.time())}{user_id % 100000}",
+        "user": json.dumps(user, separators=(",", ":"), ensure_ascii=False),
+    }
+    check_string = "\n".join(f"{key}={fields[key]}" for key in sorted(fields))
+    secret = hmac.new(b"WebAppData", BOT_TOKEN.encode(), hashlib.sha256).digest()
+    fields["hash"] = hmac.new(secret, check_string.encode(), hashlib.sha256).hexdigest()
+    return urlencode(fields)
+
+
+async def handle_referral_start(message: Message, code: str) -> bool:
+    """Привязать реферала из deep-link. True — если это был код приглашения."""
+    if not code:
+        return False
+    actor = message_actor(message)
+    if actor is None:
+        return False
+    uid = int(actor.id)
+    init_data = _referral_start_init_data(uid, getattr(actor, "username", "") or "",
+                                         getattr(actor, "first_name", "") or "")
+    result = await _bind_referral_via_api(uid, init_data, code) if init_data else {}
+    # Сначала «уже учтено»: у такого ответа тоже ok=true, и раньше игроку
+    # писали «Приглашение принято» во второй раз — выглядело как новая награда.
+    if result.get("already"):
+        await message.answer("🎁 Приглашение уже учтено — просто открой игру.",
+                             parse_mode="HTML", reply_markup=start_keyboard())
+        return True
+    if result.get("ok"):
+        await message.answer("🎁 <b>Приглашение принято!</b>\n\n"
+                             "Жми «Играть» — другу начислятся коины за тебя.",
+                             parse_mode="HTML", reply_markup=start_keyboard())
+        return True
+    # Код битый/свой/старый — не мешаем входу, показываем обычное приветствие.
+    return False
 
 
 @dp.message(Command("help"))

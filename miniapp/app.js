@@ -193,12 +193,33 @@ function requestId() {
 }
 
 // Универсальный POST к API: JSON-ответ + понятная ошибка.
+// Задача 60: таймаут в 21 секунду. Раньше запрос мог «висеть» бесконечно
+// (Render просыпается, сеть в метро пропала) — и вызывающий код (проверка
+// реферала, пассивка, любовь) ждал ответа всю сессию, а интерфейс оставался
+// в состоянии «загружаю». Теперь по таймауту выбрасывается ошибка, и её
+// обрабатывает тот же catch, что и обычный сбой.
+const API_POST_TIMEOUT = 21000;
+
 async function apiPost(path, payload, options) {
-    const res = await fetch(`${API_URL}${path}`, {
+    const controller = typeof AbortController === 'function' ? new AbortController() : null;
+    const timer = controller ? setTimeout(() => { try { controller.abort(); } catch (e) {} }, API_POST_TIMEOUT) : null;
+    const init = {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(Object.assign({ initData: tg.initData }, payload || {})),
-    });
+    };
+    if (controller) init.signal = controller.signal;
+    let res;
+    try {
+        res = await fetch(`${API_URL}${path}`, init);
+    } catch (e) {
+        const error = new Error((options && options.fallback)
+            || (e && e.name === 'AbortError' ? 'Сервер не ответил вовремя' : 'Ошибка соединения'));
+        error.status = 0;
+        throw error;
+    } finally {
+        if (timer) clearTimeout(timer);
+    }
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
         const error = new Error((data && data.detail) || (options && options.fallback) || 'Ошибка сервера');
@@ -523,11 +544,21 @@ function applyProfile(data) {
     // списания»: показываем не больше, чем баланс до ставки минус сама ставка.
     // Раньше на экране до конца анимации висела старая сумма — это и выглядело
     // как «баланс списывается только после прокрута».
-    if (upgradeRoundActive) {
+    //
+    // Задача 60: обрезаем ТОЛЬКО пока блокировка Apгрейда действительно жива
+    // (раунд идёт прямо сейчас). Раньше хватало флага upgradeRoundActive, а он
+    // оставался взведённым после прерванного раунда — и каждый фоновый профиль
+    // ставил limit = floor - stake, срезая баланс (в пределе до 0; на скрине
+    // игрока так обнулилось всё при ставке 100). Просроченную блокировку снимаем.
+    if (!upgradeBalanceLockLive() && (upgradeRoundActive || Number.isFinite(upgradeBalanceFloor))) {
+        clearUpgradeBalanceLock();
+    }
+    if (upgradeBalanceLockLive()) {
         const stake = Math.max(0, Number(upgradePendingStake) || 0);
-        let limit = Number.isFinite(upgradeBalanceFloor) ? upgradeBalanceFloor - stake : null;
-        if (limit !== null && balance > limit) balance = limit;
-        if (limit !== null && balance < 0) balance = 0;
+        const limit = Math.max(0, upgradeBalanceFloor - stake);
+        // Пришло «до ставки» (или больше) — это устаревший ответ профиля.
+        // Меньше блокировочного лимита — наоборот, свежие данные, их и берём.
+        if (balance >= upgradeBalanceFloor && balance > limit) balance = limit;
     }
     keys = Number(data.keys) || 0;
     inventory = Array.isArray(data.inventory) ? data.inventory : [];
@@ -764,10 +795,17 @@ function openGame(game) {
         startHockeyPolling();
     }
     if (game === 'crash') { lastCrashStatus = null; startCrashPolling(); }
+    // Задача 60: вошли в Апгрейд — проверяем, что блокировка баланса от прошлого
+    // раунда не осталась. Иначе первый же фоновый /api/user обрежет баланс.
+    if (game === 'upgrade' && !upgradeBalanceLockLive()) clearUpgradeBalanceLock();
 }
 
 function closeGame() {
     stopHockeyPolling(); stopCrashPolling();
+    // Задача 60: вышли из экрана — незавершённый раунд больше не «идёт».
+    // Сторож и так снимет upgradeBusy, но блокировка баланса не должна ждать:
+    // иначе баланс на главной оставался обрезанным.
+    if (!upgradeFetchPending) clearUpgradeBalanceLock();
     document.querySelectorAll('.winner-modal, .chest-win-modal').forEach(m => m.classList.remove('active'));
     document.querySelectorAll('.game-screen').forEach(s => s.classList.remove('active'));
     document.getElementById('main-header').style.display = 'flex';
@@ -1156,24 +1194,61 @@ function startPassiveIncomeTimer() {
 // когда приглашённый заходит в Mini App (сервер проверяет его NFT/premium).
 function referralCodeFor(userId) { return `ref_${Number(userId) || 0}`; }
 
+// Задача 60: код приглашения ищем по-разному, потому что ссылка бывает двух
+// видов: `?startapp=ref_<id>` (start_param) и `?start=ref_<id>` (startapp-параметр
+// приходит как start_param, а обычный start — как start_param тоже, но старые
+// ссылки несли `start=ref_...`). Раньше любая строка, где встречалось «ref»,
+// уходила на сервер как код — и привязка молча не срабатывала.
+function referralCodeFromParams() {
+    const fromStart = (tg.initDataUnsafe && tg.initDataUnsafe.start_param) || '';
+    const candidates = [fromStart];
+    try {
+        const query = new URLSearchParams((window.location && window.location.search) || '');
+        candidates.push(query.get('startapp') || '', query.get('start') || '', query.get('ref') || '');
+    } catch (e) {}
+    // Иногда Telegram присылает строку целиком: «startapp=ref_123».
+    for (const raw of candidates) {
+        let text = String(raw || '').trim();
+        if (!text) continue;
+        if (text.includes('startapp=')) text = text.split('startapp=')[1];
+        else if (text.includes('start=')) text = text.split('start=')[1];
+        text = text.split('&')[0].toLowerCase();
+        if (text.startsWith('ref_')) text = text.slice(4);
+        // id в Telegram — числа; 1–2 знака тоже принимаем (это стенд/тест),
+        // а настоящую проверку всё равно делает сервер (/api/referral_bind).
+        if (/^\d{1,12}$/.test(text)) return `ref_${text}`;
+    }
+    return '';
+}
+
+// Привязка живёт ровно один раз за запуск, но если сервер ответил ошибкой
+// (сеть/таблица), попытку нужно повторить при следующем входе — раньше флаг
+// ставился ДО запроса, и одна неудача «съедала» приглашение навсегда.
 async function bindReferralFromStartParam() {
     if (referralBound) return;
-    const params = (tg.initDataUnsafe && tg.initDataUnsafe.start_param) || '';
-    if (!params || !String(params).toLowerCase().includes('ref')) return;
-    referralBound = true;
+    const code = referralCodeFromParams();
+    if (!code) return;
     try {
-        await apiPost('/api/referral_bind', { ref_code: params });
+        const data = await apiPost('/api/referral_bind', { ref_code: code }, { silent: true });
+        // «Уже учтено», «нельзя себя» и «пригласивший не найден» — окончательные
+        // ответы, повторять их незачем. Ошибкой считаем только отсутствие ответа.
+        if (data && (data.ok || data.already || data.detail)) referralBound = true;
+        if (data && data.detail) console.info('Реферал:', data.detail);
     } catch (e) { console.warn('Не удалось привязать реферала', e); }
 }
 
 async function checkReferralStatus() {
-    if (!tg.initData) return;
+    if (!tg.initData) return null;
     try {
-        const data = await apiPost('/api/referral_check', {});
+        const data = await apiPost('/api/referral_check', {}, { silent: true });
         if (data && data.paid && data.reward) {
             console.info('Реферальная награда начислена:', data.reward);
         }
-    } catch (e) { console.warn('referral_check', e); }
+        // Награда могла прийти пригласившему прямо сейчас — обновляем карточку,
+        // иначе «Заработано» показывало старую цифру до перезахода.
+        if (data && data.referred) loadReferralStats();
+        return data;
+    } catch (e) { console.warn('referral_check', e); return null; }
 }
 
 // Задача 43: последние цифры рефералов показываем мгновенно из памяти/localStorage,
@@ -1304,7 +1379,6 @@ function freeLoveLabel() {
 function renderLoveBadge() {
     const badge = document.getElementById('profile-love-badge');
     const freeBadge = document.getElementById('profile-love-free');
-    const partner = document.getElementById('profile-love-partner');
     const stage = document.getElementById('profile-love-stage');
     const freeText = document.getElementById('profile-love-free-text');
     const freeStageEl = document.getElementById('profile-love-free-stage');
@@ -1325,19 +1399,13 @@ function renderLoveBadge() {
         }
         return;
     }
-    if (partner) partner.textContent = loveState.partner_name || 'партнёр';
+    // Задача 60: в плашке остаётся ТОЛЬКО название ранга. Раньше там же
+    // висели партнёр (`id1615872008` — сырой id из базы), «0 Love», «до ур. 2: 50»
+    // и дни: игрок видел четыре разных числа и не понимал, что из этого важно.
+    // Уровень и прогресс остаются в карточке отношений, в плашке — только ранг.
     if (stage) {
-        const score = Number(loveState.love) || 0;
-        const title = loveState.stage && loveState.stage.title ? ` · ${loveState.stage.title}` : '';
-        const days = Number(loveState.days) > 0 ? ` · ${loveState.days} дн.` : '';
-        // Задача 55: «до следующего уровня» прямо в плашке — иначе Love 0 при
-        // уровне 1 выглядит как «счёт не растёт» и непонятно, что его двигает.
-        const nextLevel = Number(loveState.stage && loveState.stage.next_level);
-        const toNext = Number(loveState.stage && loveState.stage.to_next);
-        const left = Number.isFinite(nextLevel) && nextLevel > 0 && Number.isFinite(toNext)
-            ? ` · до ур. ${nextLevel}: ${formatCoins(toNext)}`
-            : '';
-        stage.textContent = `${title}${days} · ${score} Love${left}`;
+        const title = loveState.stage && loveState.stage.title ? String(loveState.stage.title) : '';
+        stage.textContent = title;
     }
 }
 
@@ -1701,9 +1769,11 @@ async function openChest(type) {
     // claim_id: число (строка в chest_claims) или строку «mem-…» (награда ждёт
     // в памяти процесса, если таблицы нет). Никакого «начислили сразу».
     chestRewardCredited = data.credited === true;
-    if (chestRewardCredited && data.new_balance != null) {
-        balance = Number(data.new_balance) || 0;
-        balanceKnown = true;
+    if (chestRewardCredited) {
+        // Задача 60: НЕ «|| 0». Если сервер не прислал new_balance, старая
+        // запись обнуляла баланс прямо на глазах у игрока (0 в шапке).
+        const credited = Number(data.new_balance);
+        if (Number.isFinite(credited)) { balance = credited; balanceKnown = true; }
     }
     // claim_id не приводим к Number: строковый id «mem-…» отправится как есть.
     pendingChestClaimId = data.claim_id != null ? data.claim_id : null;
@@ -1769,8 +1839,11 @@ async function claimChestReward() {
             tg.showAlert(data.detail || "Не удалось забрать награду");
             return;
         }
-        balance = Number(data.new_balance) || 0; balanceKnown = true;
-        keys = Number(data.new_keys) || 0;
+        // Задача 60: без «|| 0» — иначе отсутствие поля в ответе = 0 коинов.
+        const chestBalance = Number(data.new_balance);
+        if (Number.isFinite(chestBalance)) { balance = chestBalance; balanceKnown = true; }
+        const chestKeys = Number(data.new_keys);
+        if (Number.isFinite(chestKeys)) keys = chestKeys;
         // Капсула приходит в инвентаре ответа — обновляем сразу, чтобы её было
         // видно в профиле без перезагрузки.
         if (Array.isArray(data.inventory)) inventory = data.inventory;
@@ -1949,8 +2022,10 @@ async function buyItem(itemId) {
             if (res.status === 400 || res.status === 403) loadShopItems();
             return;
         }
-        balance = data.new_balance; balanceKnown = true;
-        inventory = data.inventory || [];
+        // Задача 60: пустое поле в ответе раньше превращало баланс в undefined.
+        const shopBalance = Number(data.new_balance);
+        if (Number.isFinite(shopBalance)) { balance = shopBalance; balanceKnown = true; }
+        if (Array.isArray(data.inventory)) inventory = data.inventory;
         updateUI();
         showWin("✅ Успешно куплено!");
         playSound('click');
@@ -2314,6 +2389,9 @@ function resetUpgradeRound() {
 // иначе upgradeBusy остаётся true и кнопка не реагирует до перезагрузки аппки.
 function releaseUpgradeBusy() {
     upgradeBusy = false;
+    // Задача 60: раунда больше нет — снимаем и «потолок» баланса, иначе он
+    // переживёт раунд и будет резать баланс на каждом обновлении профиля.
+    if (!upgradeFetchPending) clearUpgradeBalanceLock();
     if (upgradeBusyTimer) { clearTimeout(upgradeBusyTimer); upgradeBusyTimer = null; }
     const circle = document.getElementById('up-circle');
     if (circle) circle.classList.remove('spinning');
@@ -2877,10 +2955,24 @@ async function syncUpgradeBalanceFromLog() {
         // новый баланс. Ничего не меняем, финальный ответ всё поправит.
         return false;
     }
-    if (Number.isFinite(coins) && (!upgradeRoundActive || coins <= balance)) {
+    // Задача 60: блокировка снята (раунд закончился/просрочен) — серверное число
+    // единственная правда, даже если оно больше текущего (выигрыш). Раньше здесь
+    // стояло «coins <= balance», поэтому после обнуления баланс не возвращался.
+    const logLockLive = upgradeBalanceLockLive();
+    if (!logLockLive && (upgradeRoundActive || Number.isFinite(upgradeBalanceFloor))) {
+        clearUpgradeBalanceLock();
+    }
+    const serverBalance = Number.isFinite(coins);
+    if (serverBalance && (!logLockLive || coins <= balance)) {
         balance = coins;
         balanceKnown = true;
         updateUI();
+    } else if (!serverBalance) {
+        // Задача 60: сервер вообще не отдал баланс (users недоступен) — вместо
+        // того чтобы молчать, спрашиваем профиль. Раньше число из журнала
+        // подставлялось как есть, а с новым контрактом coins=null молчание
+        // оставило бы игрока со старым значением на экране.
+        loadUserData().catch(() => {});
     }
     // Раунд сыгран, но игрок его не видел именно СЕЙЧАС (закрыл аппку на
     // прокруте) — показываем результат. Старые раунды не всплывают: их
@@ -2890,7 +2982,8 @@ async function syncUpgradeBalanceFromLog() {
     const justFinished = fresh && !seenFresh && fresh.won !== undefined
         && Number.isFinite(age) && age >= 0 && age < recentMs;
     if (justFinished) {
-        showMissedUpgradeResult(fresh);
+        // coins из /api/upgrade_pending — живой баланс из users (задача 60).
+        showMissedUpgradeResult(fresh, coins);
     }
     return false;
 }
@@ -2908,6 +3001,10 @@ async function openUpgrade() {
     // Если раунд «пропал» (ни анимации, ни ожидания ответа), не блокируем вход:
     // раньше кнопка навсегда оставалась в «КРУТИМ...» и перезаход не помогал.
     if (upgradeBusy && upgradeArrowRaf === null && !upgradeFetchPending) releaseUpgradeBusy();
+    // Задача 60: вход в игру — точка, где «залипший» раунд видно лучше всего.
+    // Если сервер сейчас ничего не считает, блокировка баланса не нужна: без
+    // этого она жила до перезагрузки страницы и резала баланс в ноль.
+    if (!upgradeBalanceLockLive()) clearUpgradeBalanceLock();
     // Не сбрасываем незавершённый раунд: раньше вход в игру во время прокрутки
     // «съедал» результат (ставка списана, приз не показан).
     if (!upgradeBusy) {
@@ -3096,15 +3193,46 @@ let upgradeRoundActive = false;
 // балансом «до списания» (или пришёл позже ответа), эту сумму вычитаем сами,
 // иначе игрок видит старый баланс и думает, что ставка не списалась.
 let upgradePendingStake = 0;
+// Задача 60: когда блокировка поставлена. Ограничение живёт только на время
+// реального раунда — иначе «залипший» раунд резал баланс при каждом обновлении
+// профиля (вплоть до 0 при ставке «всё в банк»).
+let upgradeBalanceLockedAt = 0;
+const UPGRADE_BALANCE_LOCK_TTL = 60000;
 
 function lockUpgradeBalance(baseBalance) {
     if (Number.isFinite(Number(baseBalance))) upgradeBalanceFloor = Number(baseBalance);
+    upgradeBalanceLockedAt = Date.now();
+}
+
+// Блокировка баланса имеет смысл ТОЛЬКО пока раунд действительно идёт с
+// сервером. Раньше флаги снимались лишь в applyUpgradeServerState и
+// restoreUpgradeStakePreview: если ответ терялся, сторож (15 с) оживлял кнопку,
+// а upgradeRoundActive/upgradeBalanceFloor оставались взведёнными навсегда.
+// Дальше каждое обновление профиля считало limit = floor - stake и обрезало
+// баланс — на скрине игрока оставался 0 при ставке 100. Теперь просроченная
+// блокировка снимается сама.
+function upgradeBalanceLockLive() {
+    if (!Number.isFinite(upgradeBalanceFloor)) return false;
+    // Раунд уже не идёт (ответ пришёл, сторож снял busy, игрок вышел) —
+    // ограничивать нечего.
+    if (!(upgradeBusy || upgradeFetchPending)) return false;
+    if (Date.now() - upgradeBalanceLockedAt > UPGRADE_BALANCE_LOCK_TTL) return false;
+    return true;
+}
+
+function clearUpgradeBalanceLock() {
+    upgradeRoundActive = false;
+    upgradeBalanceFloor = null;
+    upgradePendingStake = 0;
+    upgradeBalanceLockedAt = 0;
 }
 
 function applyUpgradeStakePreview() {
     const amount = Math.max(0, Math.round(Number(upgradeFromAmount) || 0));
     if (!amount || upgradeStakePreview) return null;
-    upgradePendingStake = amount;      // сумма, которую сервер списал (или спишет)
+    // Задача 60: upgradePendingStake ставим только когда превью реально
+    // применилось. Раньше он выставлялся до проверок, и при неудаче в памяти
+    // оставалась «ставка», которой на балансе уже нет.
     const preview = { source: upgradeFrom, amount, inventory: null };
     if (upgradeFrom === 'coin') {
         // Без известного баланса «минусовать» нечего — ждём сервер.
@@ -3122,6 +3250,7 @@ function applyUpgradeStakePreview() {
         preview.inventoryBefore = inventory;
         inventory = next;
     }
+    upgradePendingStake = amount;      // сумма, которую сервер списал (или спишет)
     upgradeStakePreview = preview;
     updateUI();
     return preview;
@@ -3130,9 +3259,9 @@ function applyUpgradeStakePreview() {
 function restoreUpgradeStakePreview() {
     const preview = upgradeStakePreview;
     upgradeStakePreview = null;
-    upgradePendingStake = 0;
-    upgradeRoundActive = false;      // раунд не состоялся — баланс снова обычный
-    upgradeBalanceFloor = null;
+    // Раунд не состоялся — баланс снова обычный (задача 60: снимаем всю
+    // блокировку разом, чтобы она не пережила раунд).
+    clearUpgradeBalanceLock();
     if (!preview) return;
     if (preview.source === 'coin' && Number.isFinite(preview.balanceBefore)) {
         balance = preview.balanceBefore;
@@ -3200,8 +3329,11 @@ async function startUpgrade() {
 
     // Ставка уходит с баланса сразу — до анимации и до ответа сервера.
     // База фиксируется ДО списания: столько уже точно не должно вернуться.
+    // Задача 60: флаг раунда ставим только вместе с живой блокировкой — иначе
+    // «потолок» баланса жил дольше самого раунда (см. upgradeBalanceLockLive).
     lockUpgradeBalance(balance);
     upgradeRoundActive = true;
+    upgradeBalanceLockedAt = Date.now();
     applyUpgradeStakePreview();
 
     const chance = upgradeChance();
@@ -3309,9 +3441,7 @@ async function startUpgrade() {
 function applyUpgradeServerState(data) {
     if (!data) return false;
     // Серверное состояние — единственная правда: раунд закрыт, ограничение снято.
-    upgradeRoundActive = false;
-    upgradeBalanceFloor = null;
-    upgradePendingStake = 0;
+    clearUpgradeBalanceLock();
     upgradeStakePreview = null;      // пришло серверное состояние — превью не нужно
     const nextBalance = Number(data.new_balance);
     if (Number.isFinite(nextBalance)) {
@@ -3368,7 +3498,7 @@ async function loadUpgradeHistory() {
 
 // Показываем результат, который сервер уже выплатил, но игрок его не видел
 // (закрыл приложение, таймаут запроса, перезапуск анимации).
-function showMissedUpgradeResult(row) {
+function showMissedUpgradeResult(row, liveCoins) {
     if (!row || upgradeBusy) return false;
     const rowId = Number(row.id);
     if (Number.isFinite(rowId)) {
@@ -3378,7 +3508,12 @@ function showMissedUpgradeResult(row) {
     const won = Boolean(row.won);
     const chance = Number(row.chance) || 0;
     lockUpgradeChance(chance);
-    applyUpgradeServerState({ new_balance: row.coins_after });
+    // Задача 60: баланс берём из живого профиля (сервер отдаёт его в coins),
+    // а coins_after из журнала — только запасной вариант. Иначе «прошлый раунд»
+    // с недописанным журналом показывал 0 вместо настоящего баланса.
+    applyUpgradeServerState({
+        new_balance: Number.isFinite(liveCoins) ? liveCoins : row.coins_after,
+    });
 
     const circle = document.getElementById('up-circle');
     if (circle) {
@@ -3420,7 +3555,8 @@ async function checkPendingUpgradeResult() {
     if (upgradeBusy) return false;
     const data = await loadUpgradeHistory();
     if (!data || !data.available || !data.last_unseen) return false;
-    return showMissedUpgradeResult(data.last_unseen);
+    // coins — живой баланс профиля из /api/upgrade_history (задача 60).
+    return showMissedUpgradeResult(data.last_unseen, Number(data.coins));
 }
 
 // Результат уже посчитан сервером: здесь только показываем его игроку.
