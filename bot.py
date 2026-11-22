@@ -38,6 +38,7 @@ from love import (
     solo_saved,
     format_love_cooldown,
     load_love_cooldown_overrides,
+    LOVE_COOLDOWN_FIXED,
     love_cooldown_overrides,
     love_cooldown_seconds,
     next_level_text,
@@ -419,12 +420,11 @@ def _env_flag(name: str, default: bool = False) -> bool:
     return default
 
 
-# Задача 62: игра ОТКРЫТА всем. Задача 65: закрывающий флаг переехал на новое
-# имя. В render.yaml на ветке main остался ADMINS_ONLY_BOT=1 (значение задачи
-# 57), blueprint его не перезаписывает — и обычные игроки в чате получали
-# «Технические работы», хотя код уже всё открыл. Старое имя теперь игнорируется,
-# закрыть чат при аварии можно осознанно: AURA_ADMINS_ONLY_BOT=1.
-ADMINS_ONLY_BOT = _env_flag("AURA_ADMINS_ONLY_BOT", False)
+# Задача 67: «ОТКРОЙ АПКУ ЧТОБЫ ВСЕ МОГЛИ ВХОДИТЬ» — в чате играют все и всегда.
+# Флаг оставлен только для совместимости (его читает AdminOnlyMiddleware), но
+# значение всегда False: ни ADMINS_ONLY_BOT, ни AURA_ADMINS_ONLY_BOT больше
+# не закрывают команды. Бан и модерация чата работают отдельно, как раньше.
+ADMINS_ONLY_BOT = False
 
 # Что остаётся доступным не-админам, пока идёт закрытие: вход в бот и
 # модерация чата. Это не игра — денег эти команды не начисляют.
@@ -642,14 +642,12 @@ async def cmd_admin_help(message: Message):
         "• <code>all Текст</code> — пингануть всех в чате\n"
         "• <code>админы</code> — пингануть админов чата\n"
         "• <code>стоп</code> — остановить созыв\n\n"
-        "💗 <b>Отношения (кулдаун — у каждой команды свой):</b>\n"
-        "• <code>кд</code> — показать общий кулдаун и свои значения команд\n"
-        "• <code>кд 5ч</code> / <code>кд 30м</code> / <code>кд 3600</code> — общий кулдаун\n"
-        "• <code>кд 0</code> — выключить общий кулдаун\n"
-        "• <code>кд обнять 1ч</code> — только для «обнять»\n"
-        "• <code>кд поцеловать 0</code> — выключить у «поцеловать»\n"
-        "• <code>кд обнять сброс</code> — вернуть команде общий кулдаун\n"
-        "• <code>кд проверка</code> — диагностика: применяется ли КД и пишется ли отметка\n\n"
+        "💗 <b>Отношения (кулдаун — 5 часов на каждую команду):</b>\n"
+        "• <code>кд</code> — показать правило и ужесточённые значения\n"
+        "• <code>кд обнять 6ч</code> — ужесточить одну команду\n"
+        "• <code>кд обнять сброс</code> — вернуть к 5 часам\n"
+        "• <code>кд проверка</code> — диагностика: применяется ли КД и пишется ли отметка\n"
+        "• выключить или уменьшить нельзя: 5 ч — правило сервера\n\n"
         "📊 <b>Статистика:</b>\n"
         "• <code>стата бота</code> — общая статистика (работает только в ЛС)\n"
         "• <code>бд</code> — проверка схемы базы: каких миграций не хватает\n\n"
@@ -949,14 +947,14 @@ async def cb_sub_check(callback: CallbackQuery):
 
 
 # ================= КУЛДАУН НАГРАДЫ ЗА РП (секретная админ-команда) =================
-# Задача 61: у КАЖДОЙ РП-команды свой кулдаун (по умолчанию 5 часов). Здесь же
-# хранятся значения из game_settings, поэтому настройка переживает рестарт.
-# Команда в общую справку не входит — только в `адм помощь`.
-#   кд                 — показать общее значение и команды со своим
-#   кд 5ч / 30м / 0     — общий кулдаун (для команд без своего значения)
-#   кд обнять 1ч       — только для «обнять»
-#   кд обнять 0        — выключить кулдаун у «обнять»
-#   кд обнять сброс    — вернуть «обнять» к общему значению
+# Задача 61: у КАЖДОЙ РП-команды свой кулдаун. Задача 67: он ЖЁСТКО 5 часов.
+# Здесь же хранятся значения из game_settings, поэтому ужесточение переживает
+# рестарт. Команда в общую справку не входит — только в `адм помощь`.
+#   кд                 — показать правило и ужесточённые команды
+#   кд 6ч              — ужесточить общий кулдаун (меньше 5 ч код не примет)
+#   кд обнять 6ч       — ужесточить только «обнять»
+#   кд обнять 0        — НЕ выключит: код поднимет до 5 часов
+#   кд обнять сброс    — вернуть «обнять» к общим 5 часам
 #   кд обнять          — показать кулдаун команды
 #   кд проверка        — диагностика: что реально лежит в базе и почему КД
 #                        может не срабатывать (задача 63)
@@ -1095,8 +1093,11 @@ def love_cooldown_diagnostics_sync(user_id=None) -> str:
     # сборках он стоял по умолчанию, а ноль в game_settings означал не
     # «выключено админом», а просто остаток задачи 34.
     common = love_cooldown_seconds()
-    state = ("❌ ВЫКЛЮЧЕН (0 сек) — награда за каждое действие" if common <= 0
-             else f"✅ включён: {format_love_cooldown(common)}")
+    # Задача 67: выключить нельзя, поэтому «❌ ВЫКЛЮЧЕН» больше невозможен —
+    # если увидел такое, значит на сервисе старый код.
+    state = (f"✅ включён: {format_love_cooldown(common)} на каждую команду"
+             if common > 0 else
+             "❌ ВЫКЛЮЧЕН (0 сек) — это старый код на сервере, не текущий")
     lines = [f"⏳ Кулдаун: {state}",
              f"• свои значения: {love_cooldown_overrides() or 'нет'}"]
     try:
@@ -1105,15 +1106,19 @@ def love_cooldown_diagnostics_sync(user_id=None) -> str:
         settings_text = (", ".join(
             f"{row.get('key')}={row.get('value')}" for row in (probe.data or [])) or "пусто")
         lines.append("• game_settings: " + settings_text)
-        # Ноль здесь — не настройка админа, а остаток старых сборок: код такое
-        # значение игнорирует и держит «как задумано» (5 ч). Выключить можно
-        # только командой `кд 0` — она пишет "off".
+        # Задача 67: любое старое значение в базе (0, "off", «30 минут») код
+        # поднимает до 5 часов — сообщаем это прямо в диагностике.
         raw_common = next((str(row.get("value")) for row in (probe.data or [])
                            if str(row.get("key")) == LOVE_COOLDOWN_SETTING_KEY), None)
-        if raw_common is not None and raw_common.strip().lower() in ("0", "0.0", ""):
-            lines.append(f"   ⚠️ в базе ноль — это остаток старых сборок, "
-                         f"игнорирую (действует {format_love_cooldown(common)}). "
-                         f"Выключить осознанно: <code>кд 0</code>.")
+        if raw_common is not None:
+            try:
+                raw_value = int(float(raw_common))
+            except (TypeError, ValueError):
+                raw_value = 0
+            if raw_common.strip().lower() in ("off", "выкл") or raw_value < 18_000:
+                lines.append(f"   ⚠️ в базе {raw_common!r} — правило задачи 67 "
+                             f"игнорирует это, действует "
+                             f"{format_love_cooldown(common)} на каждую команду.")
     except Exception as exc:  # noqa: BLE001
         lines.append(f"• game_settings: ❌ {type(exc).__name__}: {exc}")
     uid = int(user_id or 0)
@@ -1148,21 +1153,19 @@ def love_cooldown_diagnostics_sync(user_id=None) -> str:
 def _cooldown_overview() -> str:
     """Сводка: общий кулдаун + у каких команд своё значение."""
     lines = ["⏳ <b>Кулдаун награды за РП</b>",
-             f"• по умолчанию для всех команд: <b>{format_love_cooldown()}</b>"]
+             f"• <b>{format_love_cooldown()}</b> на КАЖДУЮ команду отдельно"]
     overrides = love_cooldown_overrides()
     if overrides:
-        lines.append("• свои значения:")
+        lines.append("• ужесточено для команд:")
         for action in sorted(overrides):
             lines.append(f"   — <code>{action}</code>: {format_love_cooldown(action=action)}")
-    else:
-        lines.append("• свои значения: ни у одной команды (все — по умолчанию)")
     lines.append("")
-    lines.append("Поставить всем: <code>кд 5ч</code>, <code>кд 30м</code>, <code>кд 0</code>.")
-    lines.append("Одной команде: <code>кд обнять 1ч</code>, <code>кд поцеловать 30м</code>, "
-                 "<code>кд обнять 0</code>.")
-    lines.append("Вернуть команду к общему значению: <code>кд обнять сброс</code>.")
-    lines.append(f"Все команды: <code>все рп</code>. Задумано было "
-                 f"{format_love_cooldown(LOVE_ACTION_COOLDOWN_DEFAULT)}.")
+    lines.append("Задача 67: кулдаун зафиксирован — 5 часов на каждое РП-действие. "
+                 "Выключить или уменьшить нельзя (защита от накрутки Love).")
+    lines.append("Можно только ужесточить: <code>кд обнять 6ч</code>. "
+                 "Вернуть к 5 часам: <code>кд обнять сброс</code>.")
+    lines.append("Проверить, что реально работает: <code>кд проверка</code>. "
+                 "Все команды: <code>все рп</code>.")
     return "\n".join(lines)
 
 
@@ -1172,11 +1175,12 @@ async def cmd_love_cooldown(message: Message):
     """Секретная админ-команда: кулдаун награды за РП — общий или на команду.
 
     Задача 61: у каждого РП-действия СВОЙ кулдаун.
+    Задача 67: минимум 5 часов, выключить нельзя.
         кд                  — показать всё
-        кд 5ч               — общий кулдаун для всех команд без своего значения
-        кд обнять 30м       — только «обнять»
-        кд обнять 0         — выключить кулдаун у «обнять»
-        кд обнять сброс     — вернуть «обнять» к общему значению
+        кд 6ч               — ужесточить общий кулдаун
+        кд обнять 6ч        — ужесточить только «обнять»
+        кд обнять сброс     — вернуть «обнять» к общим 5 часам
+        кд обнять 0         — не выключит: код поднимет до 5 часов
     """
     if not message.from_user or not is_admin(message.from_user.id):
         return      # не админ — молчим, команда скрытая
@@ -1197,10 +1201,9 @@ async def cmd_love_cooldown(message: Message):
         return await message.answer(
             f"⏳ Кулдаун команды «{action}»: "
             f"<b>{format_love_cooldown(action=action)}</b>.\n\n"
-            f"Изменить: <code>кд {action} 1ч</code>, выключить: "
-            f"<code>кд {action} 0</code>, вернуть общий: "
-            f"<code>кд {action} сброс</code>.\n"
-            f"Общий кулдаун: <b>{format_love_cooldown()}</b>.",
+            f"Минимум — 5 часов, выключить нельзя. Ужесточить: "
+            f"<code>кд {action} 6ч</code>, вернуть к общему: "
+            f"<code>кд {action} сброс</code>.",
             parse_mode="HTML")
     if action and len(parts) >= 3:
         raw = " ".join(parts[2:])
@@ -1215,18 +1218,24 @@ async def cmd_love_cooldown(message: Message):
         seconds = parse_cooldown_text(raw)
         if seconds is None:
             return await message.answer(
-                f"❌ Не понял значение для «{action}». Примеры: <code>кд {action} 0</code>, "
-                f"<code>кд {action} 30м</code>, <code>кд {action} 5ч</code>.",
+                f"❌ Не понял значение для «{action}». Примеры: "
+                f"<code>кд {action} 6ч</code>, <code>кд {action} 12ч</code>, "
+                f"<code>кд {action} 1д</code>.",
                 parse_mode="HTML")
         applied = set_love_cooldown_seconds(seconds, action)
         saved = await asyncio.to_thread(_cooldown_save_sync, applied, action)
         note = "" if saved else "\n<i>⚠️ В базу не сохранилось — после рестарта сбросится.</i>"
-        if applied <= 0:
-            text = (f"✅ У команды «{action}» кулдаун выключен: награда за каждое действие.\n"
-                    f"Вернуть: <code>кд {action} 5ч</code>.")
+        if applied <= LOVE_COOLDOWN_FIXED:
+            # Просили 0 или меньше 5 часов → команда просто осталась на общем
+            # правиле; говорим это прямо, без «✅ поставлено».
+            text = (f"ℹ️ У «{action}» и так общий кулдаун: "
+                    f"<b>{format_love_cooldown(applied)}</b>.\n"
+                    f"Меньше 5 часов поставить нельзя — 5 ч правило сервера. "
+                    f"Ужесточить: <code>кд {action} 6ч</code>.")
         else:
             text = (f"✅ Кулдаун команды «{action}»: <b>{format_love_cooldown(applied)}</b>.\n"
-                    f"Другие команды не меняются. Выключить: <code>кд {action} 0</code>.")
+                    f"Другие команды не меняются. Вернуть к 5 часам: "
+                    f"<code>кд {action} сброс</code>.")
         return await message.answer(text + note, parse_mode="HTML")
 
     # Вариант 2: «кд <значение>» — общий кулдаун (он же значение по умолчанию).
@@ -1234,21 +1243,17 @@ async def cmd_love_cooldown(message: Message):
     seconds = parse_cooldown_text(raw)
     if seconds is None:
         return await message.answer(
-            "❌ Не понял значение. Примеры: <code>кд 0</code>, <code>кд 30м</code>, "
-            "<code>кд 5ч</code>, <code>кд 3600</code> или "
-            "<code>кд обнять 1ч</code>.", parse_mode="HTML")
+            "❌ Не понял значение. Примеры: <code>кд 5ч</code>, <code>кд 6ч</code>, "
+            "<code>кд 1д</code> или <code>кд обнять 6ч</code>.", parse_mode="HTML")
 
     applied = set_love_cooldown_seconds(seconds)
     saved = await asyncio.to_thread(_cooldown_save_sync, applied)
     note = "" if saved else "\n<i>⚠️ В базу не сохранилось — после рестарта сбросится.</i>"
-    if applied <= 0:
-        text = ("✅ Общий кулдаун выключен: награда за РП начисляется за каждое действие "
-                "(у команд со своим значением ничего не изменилось).\n"
-                "Вернуть: <code>кд 5ч</code>.")
-    else:
-        text = (f"✅ Общий кулдаун награды за РП: <b>{format_love_cooldown(applied)}</b> "
-                f"({applied} сек) — для всех команд без своего значения.\n"
-                f"Выключить: <code>кд 0</code>.")
+    # Задача 67: меньше 5 часов и «выключить» больше не бывает — set_love_cooldown_seconds
+    # поднимает любое значение до пяти часов, поэтому здесь всегда 5 ч или больше.
+    text = (f"✅ Кулдаун награды за РП: <b>{format_love_cooldown(applied)}</b> "
+            f"({applied} сек) на каждую команду.\n"
+            f"Меньше 5 часов нельзя: 5 ч — правило сервера. Вернуть: <code>кд 5ч</code>.")
     await message.answer(text + note, parse_mode="HTML")
 
 
@@ -3495,15 +3500,9 @@ async def cmd_rp_list(message: Message):
         meta = RP_ACTIONS[key]
         lines.append(f"{meta['emoji']} <code>{key}</code> — {meta['text']}")
     lines.append("")
-    # Задача 61: кулдаун у КАЖДОЙ команды свой — показываем общее правило и
-    # отдельно те команды, у которых админ выставил своё значение.
-    cooldown_text = format_love_cooldown()
-    if cooldown_text == "без ограничения":
-        lines.append(f"💗 За РП-действие пара получает +{LOVE_ACTION_BONUS} Love "
-                     f"(сейчас бонус без ограничения по времени).")
-    else:
-        lines.append(f"💗 За РП-действие пара получает +{LOVE_ACTION_BONUS} Love "
-                     f"(бонус не чаще, чем раз в {cooldown_text}).")
+    # Задача 67: правило одно и то же для всех команд — 5 часов на каждую.
+    lines.append(f"💗 За действие пара получает +{LOVE_ACTION_BONUS} Love. "
+                 f"Кулдаун: <b>{format_love_cooldown()}</b> на каждую команду.")
     own = love_cooldown_overrides()
     if own:
         lines.append("⏳ Своё время у команд: " + ", ".join(

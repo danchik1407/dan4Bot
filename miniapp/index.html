@@ -12,7 +12,7 @@
     <meta http-equiv="Pragma" content="no-cache">
     <meta http-equiv="Expires" content="0">
     <title>AURA GAME</title>
-    <link rel="stylesheet" href="style.css?v=aura-66">
+    <link rel="stylesheet" href="style.css?v=aura-67">
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
 </head>
 <body>
@@ -23,18 +23,17 @@
         <div class="app-loader-text">Загружаем игру…</div>
     </div>
 
-    <!-- Техработы: экран показывается ТОЛЬКО когда сервер прямо сказал
-         «техработы» (can_play: false / maintenance: true). Задача 65: при
-         обычной сетевой ошибке (Render спит, нет связи) показываем баннер
-         «Баланс не загрузился» и повторяем запрос, а не тупик «Технические
-         работы — скоро откроем всем».
+    <!-- Задача 67: «Технических работ» для игроков больше нет — вход открыт всем.
+         Этот экран остался только на случай «сервер не ответил» (Render спит или
+         нет интернета): заголовок и текст ставит showMaintenance() в app.js,
+         кнопка перезапрашивает профиль без перезагрузки страницы.
          Пока экран активен, хедер, вкладки и навигация скрыты (body.maintenance). -->
     <div id="maintenance-screen" class="maintenance-screen" role="dialog" aria-modal="true">
         <div class="maint-glow"></div>
         <div class="maint-card">
-            <div class="maint-icon">🛠️</div>
-            <div class="maint-title" id="maint-title">Технические<br>работы</div>
-            <div class="maint-sub" id="maint-sub">Мы обновляем AURA GAME и скоро вернёмся.<br>Игры, магазин и сундуки временно недоступны.</div>
+            <div class="maint-icon">📡</div>
+            <div class="maint-title" id="maint-title">Нет связи<br>с сервером</div>
+            <div class="maint-sub" id="maint-sub">Сервер не ответил — возможно, он просыпается.<br>Нажми «Проверить снова» через пару секунд.</div>
             <div class="maint-note" id="maint-note">Спасибо за терпение 💙</div>
             <!-- Задача 65: без перезагрузки страницы — иначе в Telegram теряется
                  сессия и игрок снова видит заставку вместо повторной проверки. -->
@@ -588,6 +587,6 @@
         <div class="nav-item" onclick="switchTab('profile', this)"><span class="nav-icon">👤</span> Профиль</div>
     </nav>
 
-    <script src="app.js?v=aura-66" defer></script>
+    <script src="app.js?v=aura-67" defer></script>
 </body>
 </html>
