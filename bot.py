@@ -790,6 +790,24 @@ def _sub_new_user_sync(uid):
     return False, RuntimeError("users: не удалось создать строку игрока")
 
 
+def _primary_user_row(rows):
+    """Строка профиля, которую видит игрок: максимум коинов (задача 69).
+
+    В users иногда остаются старые дубли с одним user_id. Профиль показывает
+    строку с максимумом коинов, а начисление брало data[0] — «мёртвую» с нулём,
+    и игрок получал коины не на тот баланс, который видел.
+    """
+    rows = [row for row in (rows or []) if isinstance(row, dict)]
+    if not rows:
+        return None
+    def coins_of(row):
+        try:
+            return int(float(row.get("coins") or 0))
+        except (TypeError, ValueError):
+            return 0
+    return max(rows, key=coins_of)
+
+
 def _award_coins_sync(uid, amount):
     """Начислить коины. (new_balance, error)."""
     try:
@@ -800,7 +818,8 @@ def _award_coins_sync(uid, amount):
                 return None, err
             coins = 0
         else:
-            coins = int(res.data[0].get("coins") or 0)
+            _row = _primary_user_row(res.data)
+            coins = int(_row.get("coins") or 0) if _row else 0
         new_coins = coins + int(amount)
         supabase.table("users").update({"coins": new_coins}).eq("user_id", uid).execute()
         return new_coins, None
@@ -4101,7 +4120,8 @@ def _credit_stars_payment_sync(charge_id: str, user_id: int, coins: int, stars: 
         res = supabase.table("users").select("coins").eq("user_id", int(user_id)).execute()
         if not res.data:
             return False
-        new_coins = int(res.data[0].get("coins") or 0) + int(coins)
+        _row = _primary_user_row(res.data)
+        new_coins = (int(_row.get("coins") or 0) if _row else 0) + int(coins)
         supabase.table("users").update({"coins": new_coins}).eq("user_id", int(user_id)).execute()
         return True
     except Exception as e:
