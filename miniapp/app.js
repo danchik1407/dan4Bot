@@ -257,7 +257,13 @@ const PASSIVE_INTERVAL = 15 * 60 * 1000;      // раз в 15 минут, пок
 const PASSIVE_PENDING_REFRESH = 60 * 1000;    // «накоплено» в профиле — раз в минуту
 let passivePendingTimer = null;
 
-function showMaintenance() {
+// Задача 65: экран-заглушка больше не появляется из-за сетевой ошибки.
+// Раньше он показывался при любом неответившем профиле (Render спит, нет связи),
+// причём с текстом «Пока доступ к игре есть только у администраторов — скоро
+// откроем всем» — на скриншоте заказчика это выглядело как «апку так и не
+// открыли». Теперь так: сервер сказал «техработы» → экран техработ; не смогли
+// получить профиль → баннер «Баланс не загрузился» + автоповтор.
+function showMaintenance(options) {
     if (maintenanceActive) return;
     maintenanceActive = true;
     canPlay = false;
@@ -267,15 +273,44 @@ function showMaintenance() {
     try { document.querySelectorAll('.game-screen').forEach(screen => screen.classList.remove('active')); } catch (e) {}
     document.body.classList.add('maintenance');
     const screen = document.getElementById('maintenance-screen');
+    const offline = Boolean(options && options.offline);
     if (screen) {
         screen.classList.add('active');
+        screen.classList.toggle('offline', offline);
+        // Заголовок и подпись зависят от причины: техработы с сервера или
+        // «не дозвонились» (Render спит / нет связи). Игрок не должен читать
+        // «идёт обновление», когда проблема на его стороне.
+        const title = document.getElementById('maint-title');
+        if (title) title.innerHTML = offline
+            ? 'Нет связи<br>с сервером'
+            : 'Технические<br>работы';
+        const sub = document.getElementById('maint-sub');
+        if (sub) sub.innerHTML = offline
+            ? 'Сервер не ответил — возможно, он просыпается.<br>Нажми «Проверить снова» через пару секунд.'
+            : 'Мы обновляем AURA GAME и скоро вернёмся.<br>Игры, магазин и сундуки временно недоступны.';
         // Текст с сервера (если пришёл) кладём в нижнюю строку, не ломая вёрстку.
-        const note = screen.querySelector('.maint-note');
-        if (note && maintenanceMessage) note.textContent = maintenanceMessage;
+        const note = document.getElementById('maint-note');
+        if (note) note.textContent = offline
+            ? 'Спасибо за терпение 💙'
+            : (maintenanceMessage || 'Спасибо за терпение 💙');
+        const btn = screen.querySelector('.maint-btn');
+        if (btn) btn.onclick = () => { retryAccessFromMaintenance(); };
     }
     // Заставку НЕ обрываем: приветственная анимация должна доиграть (минимум 1 с),
     // а экран техработ лежит под ней и просто проявляется, когда она гаснет.
     try { hideLoader(); } catch (e) {}
+}
+
+// «Проверить снова»: перезапрос профиля без перезагрузки страницы — так
+// незакрытая сессия Telegram не теряется, и игрок не видит заставку заново.
+async function retryAccessFromMaintenance() {
+    hideMaintenance();
+    accessKnown = false;
+    const ok = await loadUserData({ attempts: 2, retryDelay: 800 });
+    if (ok && canPlay) { hideMaintenance(); try { updateUI(); } catch (e) {} return; }
+    if (accessKnown && !canPlay) { showMaintenance(); return; }
+    // Не дозвонились: остаёмся на экране-заглушке, но с честным текстом.
+    showMaintenance({ offline: true });
 }
 
 function hideMaintenance() {
@@ -637,7 +672,17 @@ function scheduleProfileRetry(delay = 5000) {
         if (userDataLoaded) return;
         if (document.visibilityState === 'hidden') { scheduleProfileRetry(8000); return; }
         profileRetryCount += 1;
-        await loadUserData({ attempts: 2, retryDelay: 1500 });
+        const ok = await loadUserData({ attempts: 2, retryDelay: 1500 });
+        // Задача 65: профиль доехал после «Нет связи с сервером» — снимаем
+        // заглушку сами, игроку не нужно жать «Проверить снова».
+        if (ok) {
+            if (accessKnown && !canPlay) { showMaintenance(); return; }
+            hideMaintenance();
+            try { updateUI(); } catch (e) {}
+            try { checkChestCooldown(); } catch (e) {}
+            return;
+        }
+        scheduleProfileRetry(8000);
     }, delay);
 }
 
@@ -2673,21 +2718,52 @@ function renderUpgrade() {
 
 function renderUpgradeTargets() {
     const grid = document.getElementById('up-to-grid');
-    // Задача 56: «ВАША ЦЕЛЬ» убрана со скрина — цель выбирается ползунком и
-    // пресетами ниже. Сетку оставляем скрытой, но её состояние поддерживаем:
-    // по нему видно, какая цель активна (applyCustomMult/selectUpgradeTarget).
-    if (grid) { grid.hidden = true; grid.style.display = 'none'; }
+
+    // Сначала приводим цель к источнику — ДО того, как решаем, что рисовать.
+    // Раньше при ставке капсулой здесь оставался множитель, и проверка ниже
+    // «цель — предмет?» давала false: сетка целей пряталась, а цель молча
+    // переписывалась на «обычную капсулу» уже после отрисовки — отсюда 100.00%
+    // на круге и «выбери цель подороже» без единой цели на экране.
+    if (upgradeFrom === 'coin') {
+        upgradeCapsuleCoinTarget = false;
+        if (upgradeTarget.kind === 'item') {
+            // Задача 52: возвращаемся к цели из сетки, а не к «x2», которой там нет.
+            upgradeTarget = { kind: 'mult', value: UPGRADE_DEFAULT_MULT };
+        }
+    } else {
+        const sourceValue = upgradeSourceValue();
+        // Цель-предмет годится, только если она СТРОГО дороже ставки: иначе
+        // шанс 100% и сервер отвечает «выбери цель подороже» (скрин заказчика).
+        if (upgradeTarget.kind === 'item'
+            && upgradePrice(upgradeTarget.value) > sourceValue) {
+            upgradeCapsuleCoinTarget = false;
+        } else if (upgradeTarget.kind === 'mult' && upgradeCapsuleCoinTarget) {
+            // Капсула → коины: множитель уже выбран игроком, не трогаем.
+        } else {
+            // Задача 65: цель по умолчанию — ближайшая ДОРОЖЕ ставки. Нет такой
+            // (галактическая капсула) — уходим в коины, а не в заведомые 100%.
+            const dearer = upgradePickDearerTarget();
+            if (dearer) {
+                upgradeTarget = { kind: 'item', value: dearer };
+                upgradeCapsuleCoinTarget = false;
+            } else {
+                upgradeTarget = { kind: 'mult', value: UPGRADE_DEFAULT_MULT };
+                upgradeCapsuleCoinTarget = true;
+            }
+        }
+    }
+
+    // Задача 65: при ставке КОИНАМИ цель — множитель (ползунок и чипы), сетка
+    // скрыта (задача 56). При ставке КАПСУЛОЙ цель выбирается карточками
+    // предметов: без этого шанс всегда был 100%, а «выбери цель подороже»
+    // предлагало то, чего на экране нет.
+    upgradeItemGridVisible = upgradeFrom !== 'coin';
+    renderUpgradeItemTargets();
     renderUpgradePresets();
+    // Дальше по функции — старая отрисовка в скрытую сетку: она нужна только
+    // коинам (множители/своя цель), при капсулах выходим сразу.
+    if (upgradeItemGridVisible) return;
     if (!grid) return;
-    // Источник-капсула требует цели-предмета: молча переводим множитель в предмет
-    // (иначе плитки-множители не дадут выбрать капсулу и апгрейд станет невозможен).
-    if (upgradeFrom !== 'coin' && upgradeTarget.kind !== 'item') {
-        upgradeTarget = { kind: 'item', value: 'capsule' };
-    }
-    if (upgradeFrom === 'coin' && upgradeTarget.kind === 'item') {
-        // Задача 52: возвращаемся к цели из сетки, а не к «x2», которой там нет.
-        upgradeTarget = { kind: 'mult', value: UPGRADE_DEFAULT_MULT };
-    }
     // Ползунок всегда стоит на выбранном множителе: плитка «СВОЙ X» и плашка
     // под сеткой показывают одно и то же число (задача 52).
     const customSlider = document.getElementById('up-custom-range');
@@ -2793,6 +2869,87 @@ function renderUpgradeTargets() {
             else selectUpgradeTarget(kind, Number(value));
         });
     });
+}
+
+// ================= ЦЕЛЬ ПРИ СТАВКЕ КАПСУЛОЙ (задача 65) =================
+// На скрине заказчика: слева капсула, справа на круге «100.00%», под кольцом
+// «выбери цель подороже» — и выбрать её НЕЛЬЗЯ. Причина: при источнике-капсуле
+// цель жёстко ставилась в {kind:'item', value:'capsule'}, то есть «обычная
+// капсула → обычная капсула»: шанс всегда 100%, а сетка целей была спрятана
+// (её убрали в задаче 56 вместе с множителями). Теперь сетка целей-предметов
+// показывается при капсуле: цель можно выбрать, и «подороже» действительно есть.
+let upgradeItemGridVisible = false;
+// Задача 65: апгрейд капсулы в КОИНЫ. Нужен, когда ставить нечего дороже:
+// например галактическая капсула (10 000) — самая дорогая в игре, «цель
+// подороже» для неё не существует, и предметный апгрейд всегда упирался бы в
+// 100%. Тогда цель — коины, шанс считается как обычно 90 / X.
+let upgradeCapsuleCoinTarget = false;
+
+function renderUpgradeItemTargets() {
+    const grid = document.getElementById('up-to-grid');
+    if (!grid) return;
+    if (!upgradeItemGridVisible) {
+        grid.hidden = true; grid.style.display = 'none';
+        return;
+    }
+    grid.hidden = false; grid.style.display = '';
+    const fromValue = upgradeSourceValue();
+    // Плитки: предметы + «Коины» (апгрейд капсулы в коины по множителю).
+    const coinActive = upgradeCapsuleCoinTarget && upgradeTarget.kind === 'mult';
+    const coinTile = `<button type="button" class="up-to-tile${coinActive ? ' active' : ''}"`
+        + ` data-item="__coin">`
+        + `<div class="up-to-tile-icon"><img class="coin-img" src="coin.png" alt="монета"></div>`
+        + `<div class="up-to-tile-name">Коины</div>`
+        + `<div class="up-to-tile-value">x${Number(upgradeTarget.kind === 'mult' ? upgradeTarget.value : UPGRADE_DEFAULT_MULT).toFixed(2)}</div>`
+        + `<div class="up-to-tile-chance">${upgradeDisplayChance(upgradeMultChance(upgradeTarget.kind === 'mult' ? upgradeTarget.value : UPGRADE_DEFAULT_MULT)).toFixed(2)}%</div>`
+        + `</button>`;
+    grid.innerHTML = coinTile + UPGRADE_ITEM_CATALOG.map(item => {
+        const toValue = upgradePrice(item.id);
+        const shownChance = upgradeDisplayChance(fromValue > 0 && toValue > 0
+            ? (fromValue / toValue) * 100 : 0);
+        const active = upgradeTarget.kind === 'item' && upgradeTarget.value === item.id;
+        // Цель дешевле ставки = шанс выше 95%: сервер такой апгрейд отклонит,
+        // поэтому плитка неактивна и честно говорит «дешевле», а не «дешевле
+        // или равно».
+        const tooCheap = shownChance > UPGRADE_MAX_CHANCE;
+        const disabled = !upgradeChanceIsValid(shownChance) && !tooCheap;
+        return `<button type="button" class="up-to-tile${active ? ' active' : ''}`
+            + `${tooCheap ? ' hard-disabled' : ''}${disabled ? ' disabled' : ''}"`
+            + ` data-item="${item.id}" ${tooCheap ? 'disabled' : ''}>`
+            + `<div class="up-to-tile-icon">${upgradeItemEmoji(item.id)}</div>`
+            + `<div class="up-to-tile-name">${item.short}</div>`
+            + `<div class="up-to-tile-value">${coinAmount(toValue)}</div>`
+            + `<div class="up-to-tile-chance">${tooCheap ? 'дешевле' : shownChance.toFixed(2) + '%'}</div>`
+            + `</button>`;
+    }).join('');
+    grid.querySelectorAll('.up-to-tile').forEach(button => {
+        button.addEventListener('click', () => {
+            if (button.disabled) return;
+            if (button.dataset.item === '__coin') {
+                // Капсула → коины: цель снова множитель, шанс 90 / X.
+                upgradeCapsuleCoinTarget = true;
+                upgradeTarget = { kind: 'mult', value: UPGRADE_DEFAULT_MULT };
+                clearUpgradeResult();
+                playSound('click');
+                renderUpgrade();
+                return;
+            }
+            upgradeCapsuleCoinTarget = false;
+            selectUpgradeTarget('item', button.dataset.item);
+        });
+    });
+}
+
+// Подобрать ближайшую ДОРОЖЕ цель, чтобы шанс стал допустимым. Нужно для кнопки
+// «выбрать цель подороже» и для автоматического перевода формы в рабочее
+// состояние: игрок видит 100% только пока сам не выбрал цель, а не как тупик.
+function upgradePickDearerTarget() {
+    const fromValue = upgradeSourceValue();
+    const options = UPGRADE_ITEM_CATALOG
+        .map(item => ({ id: item.id, price: upgradePrice(item.id) }))
+        .filter(item => item.price > fromValue)          // строго дороже ставки
+        .sort((a, b) => a.price - b.price);
+    return options.length ? options[0].id : null;
 }
 
 // Быстрые пресеты множителя (задача 56). Раньше это были шесть плиток с ценой
@@ -2903,12 +3060,21 @@ async function ensureUserLoaded() {
     return userDataLoaded;
 }
 
-// Доступ к Апгрейду решает СПИСОК ID (ADMIN_UI_IDS = ADMIN_IDS): у остальных
-// карточка серая и неактивная, сервер дополнительно отвечает 403.
+// Доступ к Апгрейду (задача 62/65): открыт всем, кто может играть. Раньше
+// решал список ADMIN_UI_IDS — обычный игрок видел серую карточку «Скоро...».
 function upgradeAccessGranted() {
-    // Пока профиль не пришёл, isAdmin ещё false — не мигаем «Скоро...» админу.
-    if (!userDataLoaded && isAdminId(user && user.id)) return true;
-    return isAdminId(user && user.id) || Boolean(isAdmin);
+    // Задача 65: «Скоро...» на карточке апгрейда висело у ОБЫЧНЫХ игроков —
+    // проверка пускала только админов. Апгрейд открыт всем (UPGRADE_ADMIN_ONLY=0
+    // в api.py), поэтому единственное условие — сервер разрешил играть.
+    // Техработы (MAINTENANCE_MODE=1) по-прежнему закрывают и апгрейд: тогда
+    // canPlay === false и экран техработ показывается раньше самого экрана.
+    return Boolean(canPlay);
+}
+
+// Текст отказа: не «Скоро...» (оно выглядело как «апгрейд закрыт навсегда»),
+// а причина от сервера — техработы или бан.
+function accessBlockedText() {
+    return maintenanceMessage || 'Игра сейчас на техработах — загляни чуть позже';
 }
 
 function updateUpgradeAccess() {
@@ -2921,7 +3087,7 @@ function updateUpgradeAccess() {
     const lock = document.getElementById('upgrade-lock-icon');
     if (lock) lock.style.display = allowed ? 'none' : 'inline';
     const sub = document.getElementById('upgrade-card-sub');
-    if (sub) sub.innerText = allowed ? 'Улучшай капсулы' : 'Скоро...';
+    if (sub) sub.innerText = allowed ? 'Улучшай капсулы' : 'Техработы';
 }
 
 function updateUpgradeStatsUI() {
@@ -2999,14 +3165,17 @@ async function syncUpgradeBalanceFromLog() {
 }
 
 async function openUpgrade() {
-    // Проверяем ДО любых сетевых запросов: обычный игрок не должен даже на миг
-    // увидеть экран Апгрейда. Список админов — ADMIN_IDS в app.js.
-    if (!upgradeAccessGranted()) return tg.showAlert('Скоро...');
+    // Задача 65: апгрейд открыт всем. Раньше здесь стояла проверка по списку
+    // админов, и обычный игрок получал «Скоро...» (на скрине — та же карточка).
+    // Единственное ограничение — сервер не разрешил играть (техработы/бан).
+    if (!upgradeAccessGranted()) {
+        return tg.showAlert(accessBlockedText());
+    }
     const loaded = await ensureUserLoaded();
     if (!loaded) return tg.showAlert('Не удалось загрузить профиль. Проверьте соединение.');
     if (!upgradeAccessGranted()) {
         updateUpgradeAccess();
-        return tg.showAlert('Скоро...');
+        return tg.showAlert(accessBlockedText());
     }
     // Если раунд «пропал» (ни анимации, ни ожидания ответа), не блокируем вход:
     // раньше кнопка навсегда оставалась в «КРУТИМ...» и перезаход не помогал.
@@ -3284,7 +3453,7 @@ function restoreUpgradeStakePreview() {
 
 async function startUpgrade() {
     if (upgradeBusy) return;
-    if (!upgradeAccessGranted()) { updateUpgradeAccess(); return tg.showAlert('Скоро...'); }
+    if (!upgradeAccessGranted()) { updateUpgradeAccess(); return tg.showAlert(accessBlockedText()); }
 
     // Блокировка ставится до любых await: иначе двойной клик во время загрузки
     // профиля отправил бы две ставки.
@@ -3300,10 +3469,11 @@ async function startUpgrade() {
             releaseUpgradeBusy();
             return tg.showAlert('Не удалось загрузить баланс. Проверьте соединение.');
         }
-        if (!isAdmin) {
+        // Задача 65: та же проверка, что и у карточки — апгрейд открыт всем.
+        if (!upgradeAccessGranted()) {
             upgradeFetchPending = false;
             releaseUpgradeBusy();
-            return tg.showAlert('Скоро...');
+            return tg.showAlert('Апгрейд сейчас недоступен — обновите приложение');
         }
         if (!upgradeCanStart()) {
             upgradeFetchPending = false;
@@ -3420,7 +3590,9 @@ async function startUpgrade() {
         releaseUpgradeBusy();
         setUpgradeResult(errorText || 'Не удалось запустить апгрейд', 'error');
         if (btn) { btn.disabled = false; btn.innerText = 'АПГРЕЙД'; }
-        if (unauthorized) { isAdmin = false; updateUpgradeAccess(); }
+        // 403 теперь значит только «техработы/бан» — права админа не трогаем,
+        // иначе после одного такого ответа апгрейд запирался до перезагрузки.
+        if (unauthorized) updateUpgradeAccess();
         tg.showAlert(errorText || 'Не удалось запустить апгрейд');
         renderUpgrade();
         // Ставка могла уйти на сервер, даже если ответ потерялся — сверяем баланс
@@ -3485,7 +3657,7 @@ async function ackUpgradeLog(logId) {
 
 // Статистика апгрейдов живёт на сервере: иначе счётчики сбрасывались при каждом открытии.
 async function loadUpgradeHistory() {
-    if (!isAdmin || !tg.initData) return null;
+    if (!tg.initData) return null;
     try {
         const res = await fetch(`${API_URL}/api/upgrade_history`, {
             method: 'POST',
@@ -5507,11 +5679,19 @@ document.addEventListener('DOMContentLoaded', async () => {
     startApiHeartbeat();
     // ---- Техработы ----
     // Решение принимаем ПОСЛЕ заставки: профиль уже пришёл, поэтому экран не мигает.
-    // Если профиль не загрузился (нет сети / Render спит), доступа не даём —
-    // безопаснее показать заглушку, чем пустить непроверенного игрока.
-    if (!accessKnown || !canPlay) {
+    // Задача 65: экран техработ — только если сервер прямо сказал «закрыто».
+    // Если профиль не загрузился (Render спит / нет сети), показываем честное
+    // «Нет связи с сервером» с кнопкой «Проверить снова» и включаем интерфейс:
+    // данные всё равно придут с сервера, а игрок не упирается в тупик. Раньше
+    // любая сетевая ошибка выглядела как «идёт обновление, скоро откроем».
+    if (accessKnown && !canPlay) {
         showMaintenance();
         return;
+    }
+    if (!accessKnown) {
+        showMaintenance({ offline: true });
+        // Автоповтор: как только сервер проснётся, экран уберём сами.
+        scheduleProfileRetry(4000);
     }
     // Апгрейд: синхронизация поля ввода, ползунка и быстрых кнопок.
     const upgradeAmountInput = document.getElementById('upgrade-amount');

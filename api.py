@@ -86,7 +86,7 @@ async def _http_json(url, method: str = "GET", params=None, payload=None, timeou
 
 # Номер сборки: по нему из /api/health видно, что на сервисе НЕ старый код.
 # Если после деплоя здесь прежнее значение — Render ещё не перезапустился.
-API_BUILD = "2026-10-27-task64-cooldown-race-upgrade-layout"
+API_BUILD = "2026-10-27-task65-open-app-upgrade-targets"
 
 # Момент старта процесса. По нему видно, что сервис только что «проснулся»:
 # Render на бесплатном тарифе усыпляет Web Service через 15 минут без входящих
@@ -96,6 +96,7 @@ APP_STARTED_AT = time.time()
 logger = logging.getLogger("aura-api")
 if not logger.handlers:
     logging.basicConfig(level=logging.INFO)
+
 
 # Схему и документацию уводим под /api: корневые /docs и /openapi.json заняты
 # статикой Mini App, а «Not Found» на них только путал при настройке.
@@ -756,17 +757,40 @@ IDEMPOTENCY_TTL = 86400
 # к API нельзя). Открыть игру = MAINTENANCE_MODE=0 и ADMIN_ONLY_APP=0 в Render.
 # Апгрейд от этого флага НЕ зависит: он отдельно закрыт списком ADMIN_IDS
 # (см. UPGRADE_ADMIN_ONLY ниже).
+# Задача 65: старые переменные больше НЕ закрывают игру.
+#
+# Почему пришлось менять имена: в render.yaml на ветке main (по ней развёрнут
+# сервис) жёстко прописаны MAINTENANCE_MODE=1, ADMIN_ONLY_APP=1 и
+# ADMINS_ONLY_BOT=1 — значения от задачи 57. Blueprint при обновлении кода их не
+# переписывает, поэтому новый код всё равно видел «1» и показывал экран
+# «Технические работы» всем, кроме админов — на скрине заказчика это был старый
+# текст «пока доступ есть лишь у админов, скоро откроем всем».
+#
+# Теперь аварийный стоп живёт только под НОВЫМ именем, которого на Render нет,
+# поэтому игра открыта всем сразу после деплоя — без правок в дашборде.
+# Включить осознанно при аварии: AURA_EMERGENCY_MAINTENANCE=1.
+LEGACY_ACCESS_FLAGS = ("MAINTENANCE_MODE", "ADMIN_ONLY_APP")
+
+
+def _legacy_access_flags_enabled() -> list:
+    """Какие старые «закрывающие» переменные всё ещё стоят в единице."""
+    return [name for name in LEGACY_ACCESS_FLAGS if _env_flag(name, False)]
+
+
 def _maintenance_enabled() -> bool:
-    """Аварийные техработы. По умолчанию ВКЛЮЧЕНЫ (задача 57): «кроме админов
-    зайти никто не может» должно работать сразу после деплоя, без правок в
-    Render. Выключить техработы = MAINTENANCE_MODE=0 (и только вместе с
-    ADMIN_ONLY_APP=0 игра откроется всем)."""
-    return _env_flag("MAINTENANCE_MODE", True)
+    """Аварийный стоп. По умолчанию выключен, старое имя игнорируется."""
+    return _env_flag("AURA_EMERGENCY_MAINTENANCE", False)
 
 
-# Задача 62: аварийные техработы по умолчанию ВЫКЛЮЧЕНЫ — игра доступна всем.
-# Включить при аварии можно осознанно: MAINTENANCE_MODE=1 в Render у aura-api.
-MAINTENANCE_MODE = _env_flag("MAINTENANCE_MODE", False)
+MAINTENANCE_MODE = _maintenance_enabled()
+# Задача 65: видно в логах Render, почему игра всё-таки открыта, хотя в
+# окружении остались «закрывающие» переменные от задачи 57.
+if _legacy_access_flags_enabled():
+    logger.warning(
+        "MAINTENANCE_MODE/ADMIN_ONLY_APP больше не закрывают игру (задача 65): "
+        "%s остались в окружении, но игнорируются. Аварийный стоп теперь — "
+        "только AURA_EMERGENCY_MAINTENANCE=1.",
+        ", ".join(_legacy_access_flags_enabled()))
 MAINTENANCE_MESSAGE = "🛠️ Технические работы: скоро вернёмся"
 
 
@@ -976,6 +1000,11 @@ UPGRADE_QUICK_CHANCES = [35, 55, 75]
 UPGRADE_ITEM_PRICES = {"capsule": 100, "uniq_capsule": 500, "ruby": 1000,
                        "diamond": 5000, "galactic": 10000,
                        "malachite": 3000, "emerald": 5000}
+# Названия для подсказок в отказах: игрок читает «Рубиновая капсула», а не «ruby».
+UPGRADE_ITEM_TITLES = {"capsule": "Обычная капсула", "uniq_capsule": "Уникальная капсула",
+                       "ruby": "Рубиновая капсула", "diamond": "Алмазная капсула",
+                       "galactic": "Галактическая капсула", "malachite": "Малахитовая капсула",
+                       "emerald": "Изумрудная капсула"}
 UPGRADE_SOURCES = ("coin",) + tuple(UPGRADE_ITEM_PRICES)
 UPGRADE_TARGETS = ("coin",) + tuple(UPGRADE_ITEM_PRICES)
 # В апгрейде пока играют только админы — шанс честный. Когда откроем для всех,
@@ -985,7 +1014,10 @@ UPGRADE_NON_ADMIN_DIVIDER = 1
 # игра открыта ДЛЯ ВСЕХ, апгрейд больше не спрятан. Шанс при этом честный для
 # всех — делитель ниже выключен, иначе новичок играл бы вдвое хуже админа.
 # Закрыть снова: UPGRADE_ADMIN_ONLY=1 в Render.
-UPGRADE_ADMIN_ONLY = _env_flag("UPGRADE_ADMIN_ONLY", False)
+# Задача 65: то же самое, что с техработами — старое имя UPGRADE_ADMIN_ONLY
+# осталось в render.yaml со значением 1 и перекрывало открытый апгрейд.
+# Отдельный стоп живёт под новым именем: AURA_UPGRADE_ADMIN_ONLY=1.
+UPGRADE_ADMIN_ONLY = _env_flag("AURA_UPGRADE_ADMIN_ONLY", False)
 UPGRADE_ADMIN_ONLY_MESSAGE = "Апгрейд доступен только администраторам"
 
 # ДОМ-ЭДЖ ПО БАЛАНСУ (задача 18): с баланса 1000 коинов и выше играем чаще
@@ -4640,9 +4672,23 @@ def _upgrade_target_value(source: str, amount: int, target: str,
 
     visual_chance = (priced_chance if priced_chance is not None
                      else from_value / to_value * 100.0)
+    # Задача 65: в тексте отказа сразу говорим, что выбрать. Раньше игрок
+    # получал «выбери цель подороже» на экране, где цели выбрать было негде
+    # (при ставке капсулой сетка целей была спрятана) — и апгрейд выглядел
+    # сломанным: 100.00% на круге и отказ на кнопку.
     if visual_chance > UPGRADE_MAX_CHANCE:
+        hint = ""
+        if target in UPGRADE_ITEM_PRICES:
+            dearer = sorted((price, name) for name, price in UPGRADE_ITEM_PRICES.items()
+                            if price > from_value)
+            if dearer:
+                cheapest = dearer[0][1]
+                hint = (f" — ближайшая дороже: «{UPGRADE_ITEM_TITLES.get(cheapest, cheapest)}»"
+                        f" ({dearer[0][0]} коинов)")
+            else:
+                hint = " — эта капсула самая дорогая, поставь цель «Коины»"
         raise HTTPException(status_code=400,
-                            detail=f"Шанс {visual_chance:.2f}% слишком высокий — выбери цель подороже")
+                            detail=f"Шанс {visual_chance:.2f}% слишком высокий{hint}")
     if visual_chance < UPGRADE_MIN_CHANCE:
         raise HTTPException(status_code=400,
                             detail=f"Шанс {visual_chance:.2f}% слишком низкий — выбери цель подешевле")

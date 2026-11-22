@@ -619,7 +619,7 @@ main { padding: 0 16px; }
 /* Задача 64: место под две строки резервируем сразу — иначе при появлении
    текста ошибки экран прыгал и подпись подлезала под кнопку «Закрыть» у
    подсказки. Перенос по словам, без вылезания за панель. */
-.up-result { min-height: 32px; text-align: center; font-size: 12px; font-weight: 800; color: #6f8bb5; padding: 0 6px; line-height: 1.25; overflow-wrap: anywhere; }
+.up-result { display: block; width: 100%; box-sizing: border-box; min-height: 32px; text-align: center; font-size: 12px; font-weight: 800; color: #6f8bb5; padding: 0 6px; line-height: 1.25; overflow-wrap: anywhere; }
 .up-result.error { color: #fbbf24; text-shadow: 0 0 14px rgba(251, 191, 36, 0.35); }
 .up-result.win { color: #34d399; }
 .up-result.lose { color: #ff5b5b; font-size: 13px; font-weight: 900; text-shadow: 0 0 14px rgba(239, 68, 68, 0.45); }
@@ -639,6 +639,11 @@ main { padding: 0 16px; }
 .up-to-tile-value { font-size: 10px; font-weight: 700; color: #8aa7cc; font-variant-numeric: tabular-nums; }
 .up-to-tile-chance { font-size: 11px; font-weight: 900; color: #58a6ff; font-variant-numeric: tabular-nums; }
 .up-to-tile.disabled { opacity: 0.4; cursor: not-allowed; }
+/* Задача 65: цель дешевле ставки даёт шанс выше 95% — сервер такой апгрейд
+   отклонит. Плитка гасится сильнее и подписана «дешевле», чтобы игрок не
+   выбирал заведомо невозможную цель. */
+.up-to-tile.hard-disabled { opacity: 0.32; cursor: not-allowed; }
+.up-to-tile.hard-disabled .up-to-tile-chance { color: #f59e0b; }
 .up-to-hint { font-size: 10px; color: #5d7899; text-align: center; line-height: 1.35; }
 
 .up-stats-inline { display: flex; justify-content: center; gap: 14px; flex-wrap: wrap; margin-top: 12px; font-size: 10px; font-weight: 700; color: #5d7899; }
@@ -1424,7 +1429,9 @@ body.maintenance { overflow: hidden; }
 
 /* --- кнопка: последний штрих, всегда внизу панели --- */
 .up-layout-v2 .up-upgrade-btn { margin-top: 2px; padding: 15px 18px; font-size: 17px; }
-.up-layout-v2 .up-result { min-height: 15px; font-size: 11px; }
+/* Задача 64/65: высота под две строки и здесь — текст ошибки не должен
+   уезжать под круг/кнопку в узком layout v2. */
+.up-layout-v2 .up-result { min-height: 30px; font-size: 11.5px; }
 
 @media (max-width: 420px) {
     .up-layout-v2 .up-circle, .up-layout-v2 #up-circle { width: min(64vw, 200px); height: min(64vw, 200px); }

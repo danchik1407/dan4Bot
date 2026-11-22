@@ -12,7 +12,7 @@
     <meta http-equiv="Pragma" content="no-cache">
     <meta http-equiv="Expires" content="0">
     <title>AURA GAME</title>
-    <link rel="stylesheet" href="style.css?v=aura-64">
+    <link rel="stylesheet" href="style.css?v=aura-65">
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
 </head>
 <body>
@@ -23,16 +23,22 @@
         <div class="app-loader-text">Загружаем игру…</div>
     </div>
 
-    <!-- Техработы: показывается всем, кроме админов, сразу после заставки.
+    <!-- Техработы: экран показывается ТОЛЬКО когда сервер прямо сказал
+         «техработы» (can_play: false / maintenance: true). Задача 65: при
+         обычной сетевой ошибке (Render спит, нет связи) показываем баннер
+         «Баланс не загрузился» и повторяем запрос, а не тупик «Технические
+         работы — скоро откроем всем».
          Пока экран активен, хедер, вкладки и навигация скрыты (body.maintenance). -->
     <div id="maintenance-screen" class="maintenance-screen" role="dialog" aria-modal="true">
         <div class="maint-glow"></div>
         <div class="maint-card">
             <div class="maint-icon">🛠️</div>
-            <div class="maint-title">Технические<br>работы</div>
-            <div class="maint-sub">Мы обновляем AURA GAME и скоро вернёмся.<br>Игры, магазин и сундуки временно недоступны.</div>
-            <div class="maint-note">Спасибо за терпение 💙</div>
-            <button class="maint-btn" onclick="location.reload()">Проверить снова</button>
+            <div class="maint-title" id="maint-title">Технические<br>работы</div>
+            <div class="maint-sub" id="maint-sub">Мы обновляем AURA GAME и скоро вернёмся.<br>Игры, магазин и сундуки временно недоступны.</div>
+            <div class="maint-note" id="maint-note">Спасибо за терпение 💙</div>
+            <!-- Задача 65: без перезагрузки страницы — иначе в Telegram теряется
+                 сессия и игрок снова видит заставку вместо повторной проверки. -->
+            <button class="maint-btn" onclick="retryAccessFromMaintenance()">Проверить снова</button>
         </div>
     </div>
 
@@ -582,6 +588,6 @@
         <div class="nav-item" onclick="switchTab('profile', this)"><span class="nav-icon">👤</span> Профиль</div>
     </nav>
 
-    <script src="app.js?v=aura-64" defer></script>
+    <script src="app.js?v=aura-65" defer></script>
 </body>
 </html>
