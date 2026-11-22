@@ -12,7 +12,7 @@
     <meta http-equiv="Pragma" content="no-cache">
     <meta http-equiv="Expires" content="0">
     <title>AURA GAME</title>
-    <link rel="stylesheet" href="style.css?v=aura-55">
+    <link rel="stylesheet" href="style.css?v=aura-56">
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
 </head>
 <body>
@@ -339,7 +339,8 @@
             </div>
             <div class="hockey-controls" id="hockey-controls">
                 <div class="bet-input-container">
-                    <input type="number" id="hockey-bet" class="bet-input" value="10" min="10" max="10000">
+                    <!-- Задача 56: минимум арены 100 (сервер отвечает тем же числом). -->
+                    <input type="number" id="hockey-bet" class="bet-input" value="100" min="100" max="10000">
                     <div class="bet-buttons">
                         <button onclick="addBet('hockey', 10)">+10</button>
                         <button onclick="addBet('hockey', 100)">+100</button>
@@ -445,23 +446,22 @@
                          кругом и целью была простыня пустоты, а кнопка уезжала
                          вниз. Цель теперь в отдельной панели ниже. -->
                     <button class="up-upgrade-btn" id="upgrade-btn" onclick="onUpgradeButtonClick()">АПГРЕЙД</button>
-                    <div class="up-result" id="upgrade-result">Выбери цель и жми АПГРЕЙД</div>
+                    <div class="up-result" id="upgrade-result">Выбери множитель и жми АПГРЕЙД</div>
                 </section>
 
-                <!-- НИЗ: цель, свой множитель. Раньше плитки множителей были
-                     выбором цели, а свой X молча перебивал этот выбор. -->
+                <!-- НИЗ: свой множитель + короткие пресеты (задача 56).
+                     Игрок просил убрать «ВАША ЦЕЛЬ»: шесть больших плиток с ценой
+                     и шансом дублировали ползунок и занимали пол-экрана. Оставили
+                     ползунок (он и есть выбор X) и компактные чипы-пресеты для
+                     быстрого тапа — без «СВОЙ МНОЖИТЕЛЬ» мелким шрифтом. -->
                 <section class="up-panel up-panel-to">
-                    <header class="up-panel-head up-target-head">Ваша цель</header>
-                    <div class="up-to-grid up-to-grid-center" id="up-to-grid"></div>
+                    <!-- Сетку целей держим в разметке скрытой: её рисует app.js,
+                         и старые обработчики не должны падать. -->
+                    <div class="up-to-grid up-to-grid-center" id="up-to-grid" hidden></div>
 
-                    <!-- Задача 52: свой множитель — ОТДЕЛЬНАЯ плитка в конце сетки.
-                         Ползунок только показывает X и шанс, а применяется тапом
-                         по плитке «СВОЙ X»: выбор цели всегда однозначен. -->
+                    <!-- Задача 52: свой множитель — ОТДЕЛЬНАЯ карточка.
+                         Задача 56: она и есть единственный выбор цели. -->
                     <div class="up-custom-mult" id="up-custom-mult">
-                        <div class="up-custom-head">
-                            <span>Свой множитель</span>
-                            <button class="up-custom-apply" onclick="applyCustomMult()">ПРИМЕНИТЬ</button>
-                        </div>
                         <div class="up-custom-row">
                             <input type="range" id="up-custom-range" class="up-custom-range"
                                    min="0" max="1000" step="1" value="117"
@@ -474,6 +474,9 @@
                             <span class="up-custom-chance" id="up-custom-chance">51.43%</span>
                             <span>x50</span>
                         </div>
+                        <!-- Быстрые пресеты: тот же выбор X, но одним тапом.
+                             Список рисует app.js (renderUpgradePresets). -->
+                        <div class="up-presets" id="up-presets"></div>
                     </div>
                 </section>
 
@@ -571,6 +574,6 @@
         <div class="nav-item" onclick="switchTab('profile', this)"><span class="nav-icon">👤</span> Профиль</div>
     </nav>
 
-    <script src="app.js?v=aura-55" defer></script>
+    <script src="app.js?v=aura-56" defer></script>
 </body>
 </html>
