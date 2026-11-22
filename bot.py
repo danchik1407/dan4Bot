@@ -30,7 +30,6 @@ from love import (
     COOLDOWN_OFF_MARKER,
     LOVE_ACTION_COOLDOWN_DEFAULT,
     cooldown_from_setting,
-    LOVE_ICE_COST,
     RP_ACTIONS,
     SOLO_CURRENCY,
     add_solo_love,
@@ -643,6 +642,7 @@ async def cmd_admin_help(message: Message):
         "• <code>админы</code> — пингануть админов чата\n"
         "• <code>стоп</code> — остановить созыв\n\n"
         "💗 <b>Отношения (кулдаун — 5 часов на каждую команду):</b>\n"
+        "• после действия бот пишет, сколько ждать; ускорить нельзя — просто ждём\n"
         "• <code>кд</code> — показать правило и ужесточённые значения\n"
         "• <code>кд обнять 6ч</code> — ужесточить одну команду\n"
         "• <code>кд обнять сброс</code> — вернуть к 5 часам\n"
@@ -3765,16 +3765,6 @@ async def drop_solo_status(user_id):
         logger.warning(f"Не удалось сбросить Unlove: {e}")
 
 
-def _cooldown_keyboard(user_id, action=None) -> InlineKeyboardMarkup:
-    """Кнопка «ускорить за i¢» — помнит, какую команду игрок хотел выполнить."""
-    data = f"love_ice|{user_id}"
-    if action:
-        data += f"|{action}"
-    return InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text=f"⚡ За {LOVE_ICE_COST} i¢", callback_data=data[:64])
-    ]])
-
-
 def _human_left(seconds) -> str:
     """«5 ч 0 мин» / «12 мин» / «40 сек» — сколько ждать до следующей награды."""
     left = max(0, int(seconds or 0))
@@ -3787,14 +3777,16 @@ def _human_left(seconds) -> str:
 
 
 def _cooldown_wait_text(action, left, currency="Love") -> str:
-    """«обнять» уже было — награду за него получишь через 4 ч 12 мин.
+    """«обнять» уже было — награда через 4 ч 12 мин.
 
-    Задача 61: игрок должен видеть, что у КАЖДОЙ команды свой кулдаун и что
-    другие действия сейчас доступны.
+    Задача 68: заказчик оставил только сам кулдаун — ни «можно не ждать за
+    i¢», ни кнопки под сообщением. У каждого действия свой счётчик, поэтому
+    фраза «другое действие можно сейчас» осталась: она объясняет, почему
+    «поцеловать» работает, хотя «обнять» ещё нет.
     """
     name = f"«{action}»" if action else "Это действие"
     return (f"{name} уже было — {currency}-бонус через {_human_left(left)}. "
-            f"У каждой команды свой кулдаун: другое действие можно сделать сейчас.")
+            f"Кулдаун считается отдельно для каждой команды.")
 
 
 async def _notify_stage_rewards(row, actor_id, granted) -> None:
@@ -3863,11 +3855,11 @@ async def cmd_rp_action(message: Message):
     async with love_action_lock(actor_id, action):
         left = await love_cooldown_left(actor_id, action)
         if left > 0:
-            # Кулдаун: награда за эту команду уже получена недавно. Можно «докупить».
+            # Задача 68: обычный кулдаун и ничего больше. Заказчик прямо убрал
+            # «докупить за i¢» и кнопку под сообщением — игрок просто ждёт.
             return await message.answer(
-                f"{text}\n\n⏳ {_cooldown_wait_text(action, left)}\n"
-                f"Можно не ждать — выполнить действие за {LOVE_ICE_COST} i¢ (донат-валюта).",
-                parse_mode="HTML", reply_markup=_cooldown_keyboard(actor_id, action))
+                f"{text}\n\n⏳ {_cooldown_wait_text(action, left)}",
+                parse_mode="HTML")
 
         # Отметку ставим ДО начисления: пока идёт запись в базу, второй заход
         # уже увидит кулдаун и не выдаст награду повторно.
@@ -3916,9 +3908,8 @@ async def solo_rp_action(message: Message, meta: dict, target_id, target_name):
         left = await love_cooldown_left(actor_id, action_key)
         if left > 0:
             return await message.answer(
-                f"{text}\n\n⏳ {_cooldown_wait_text(action_key, left, SOLO_CURRENCY)}\n"
-                f"Можно не ждать — выполнить действие за {LOVE_ICE_COST} i¢ (донат-валюта).",
-                parse_mode="HTML", reply_markup=_cooldown_keyboard(actor_id, action_key))
+                f"{text}\n\n⏳ {_cooldown_wait_text(action_key, left, SOLO_CURRENCY)}",
+                parse_mode="HTML")
 
         await love_cooldown_touch(actor_id, action_key)
         score, granted, saved = await add_solo_points(actor_id, LOVE_ACTION_BONUS)
@@ -3939,66 +3930,18 @@ async def solo_rp_action(message: Message, meta: dict, target_id, target_name):
 
 @dp.callback_query(F.data.startswith("love_ice|"))
 async def cb_love_ice(callback: CallbackQuery):
-    # callback_data: love_ice|<owner_id>|<команда?>. Раньше id брался как всё
-    # после первого «|», поэтому с задачей 61 («…|111|обнять») получался
-    # ValueError и кнопка молча не работала.
-    _parts = (callback.data or "").split("|")
+    """Задача 68: покупки ускорения больше нет — кнопка из старых сообщений молчит.
+
+    Заказчик убрал и текст «выполнить за 3 i¢», и кнопку под сообщением: обычное
+    КД, просто ждёшь. Игрок мог нажать старую кнопку в истории чата, поэтому
+    обработчик не удаляем совсем, а честно отвечаем «уже не работает» и ничего
+    не списываем. Раньше здесь были списание i¢ и выдача Love в обход кулдауна.
+    """
     try:
-        owner_id = int(_parts[1] if len(_parts) > 1 else 0)
-    except (TypeError, ValueError):
-        return await callback.answer("Кнопка устарела — напиши команду заново",
-                                     show_alert=True)
-    if callback.from_user.id != owner_id:
-        return await callback.answer("Это не твоя кнопка", show_alert=True)
-
-    def _spend():
-        res = supabase.table("users").select("ice").eq("user_id", int(owner_id)).execute()
-        ice = int((res.data[0].get("ice") or 0)) if res.data else 0
-        if ice < LOVE_ICE_COST:
-            return None, ice
-        supabase.table("users").update({"ice": ice - LOVE_ICE_COST}).eq("user_id", int(owner_id)).execute()
-        return True, ice - LOVE_ICE_COST
-
-    try:
-        ok, balance_left = await asyncio.to_thread(_spend)
-    except Exception as e:
-        logger.warning(f"i¢ недоступны: {e}")
-        return await callback.answer("i¢ пока недоступны", show_alert=True)
-    if not ok:
-        return await callback.answer(f"Недостаточно i¢ (нужно {LOVE_ICE_COST}, есть {balance_left})", show_alert=True)
-
-    # Действие, которое «докупаем»: кулдаун у каждой команды свой, поэтому
-    # кнопка помнит, какую именно команду хотел выполнить игрок.
-    action_key = None
-    if (callback.data or "").count("|") >= 2:
-        action_key = (callback.data or "").split("|", 2)[2].strip() or None
-    row = await get_relationship(owner_id)
-    if not row:
-        # Одиночка: ускорение работает так же, только в свою копилку Unlove.
-        score, granted, saved = await add_solo_points(owner_id, LOVE_ACTION_BONUS)
-        if not saved:
-            return await callback.answer(
-                "⚠️ База не приняла начисление — i¢ не списаны, попробуй позже",
-                show_alert=True)
-        await love_cooldown_touch(owner_id, action_key)
-        text = (f"⚡ Готово за {LOVE_ICE_COST} i¢. 💔 +{LOVE_ACTION_BONUS} "
-                f"{SOLO_CURRENCY} (всего {score})")
-        for stage in granted:
-            text += "\n" + stage_reached_text(stage, stage.get("reward"))
-        return await callback.answer(text[:190], show_alert=True)
-
-    new_score, granted, saved = await add_love_points(row, LOVE_ACTION_BONUS)
-    if not saved:
-        return await callback.answer(
-            "⚠️ База не приняла начисление — i¢ не списаны, попробуй позже",
-            show_alert=True)
-    await love_cooldown_touch(owner_id, action_key)
-    text = f"⚡ Действие выполнено за {LOVE_ICE_COST} i¢. 💗 +{LOVE_ACTION_BONUS} Love (всего {new_score})"
-    for stage in granted:
-        text += "\n" + stage_reached_text(stage, stage.get("reward"))
-    if granted:
-        await _notify_stage_rewards(row, owner_id, granted)
-    await callback.answer(text[:190], show_alert=True)
+        await callback.answer("Это уже не работает — просто дождись конца кулдауна 🙂",
+                              show_alert=True)
+    except Exception:  # noqa: BLE001 — протухший callback не должен ломать поллинг
+        pass
 
 
 # ================= АДМИН-ПАНЕЛЬ (/admin) =================
