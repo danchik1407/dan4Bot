@@ -85,7 +85,7 @@ async def _http_json(url, method: str = "GET", params=None, payload=None, timeou
 
 # Номер сборки: по нему из /api/health видно, что на сервисе НЕ старый код.
 # Если после деплоя здесь прежнее значение — Render ещё не перезапустился.
-API_BUILD = "2026-10-27-task58-points-fixes-and-full-schema"
+API_BUILD = "2026-10-27-task59-users-id-and-old-schema"
 
 # Момент старта процесса. По нему видно, что сервис только что «проснулся»:
 # Render на бесплатном тарифе усыпляет Web Service через 15 минут без входящих
@@ -4635,12 +4635,28 @@ def _upgrade_read_user(user_id: int):
     который видит игрок, — и получалось «списали не сразу / не тот баланс».
     Теперь правило выбора то же, что в /api/user: строка с максимумом коинов.
     """
-    response = (
-        supabase.table("users")
-        .select("coins, inventory, id")
-        .eq("user_id", user_id)
-        .execute()
-    )
+    # Задача 59: колонки id в старых базах может не быть (PGRST204 «нет колонки
+    # id в users» роняло апгрейд целиком). Тогда читаем без неё: id нужен только
+    # для «пиши именно в эту строку», а на базе без id строки и так уникальны.
+    try:
+        response = (
+            supabase.table("users")
+            .select("coins, inventory, id")
+            .eq("user_id", user_id)
+            .execute()
+        )
+    except Exception as exc:  # noqa: BLE001
+        column, table = _sql_error_column_table(str(exc))
+        if column != "id" or (table and table != "users"):
+            raise
+        logger.warning("users.id нет в базе — апгрейд работает без него "
+                       "(примените 20261129000000_full_schema_all_points.sql)")
+        response = (
+            supabase.table("users")
+            .select("coins, inventory")
+            .eq("user_id", user_id)
+            .execute()
+        )
     if not response.data:
         raise HTTPException(status_code=404, detail="Пользователь не найден")
     rows = response.data
@@ -4680,7 +4696,8 @@ def _upgrade_write_user(user_id: int, raw_coins: int, raw_inventory, coins: int,
     """
     update_values = {"coins": coins, "inventory": json.dumps(inventory, ensure_ascii=False)}
     query = supabase.table("users").update(update_values).eq("user_id", user_id).eq("coins", raw_coins)
-    if row_id is not None:
+    # Задача 59: пишем по id только когда он реально есть (на старой базе его нет).
+    if row_id is not None and str(row_id).strip() not in ("", "None"):
         query = query.eq("id", row_id)
     if raw_inventory is not None and _pg_filter_safe(raw_inventory):
         query = query.eq("inventory", raw_inventory)
@@ -4794,6 +4811,10 @@ def _upgrade_missing_table_text(exc) -> str:
     На скрине игрок видел «Не удалось запустить апгрейд» — общую фразу без
     причины: исключение Supabase превращалось в 500 и терялось. Теперь
     причины разные и по каждой видно, что делать.
+
+    Задача 59: колонку и таблицу берём ИЗ САМОГО ответа базы. Раньше текст
+    всегда говорил «нет колонки в users», даже если дело было в upgrade_log
+    или chest_claims, и админ правил не то.
     """
     text = f"{type(exc).__name__}: {exc}"
     low = text.lower()
@@ -4803,8 +4824,13 @@ def _upgrade_missing_table_text(exc) -> str:
         return "idempotency_keys: примените миграцию 20261101000000_server_rls_policies.sql"
     if "row-level security" in low or "42501" in low or "permission denied" in low:
         return "RLS: примените 20261129000000_full_schema_all_points.sql (там политики и grant)"
-    if "pgrst204" in low or "column" in low:
-        return "нет колонки в users: примените 20261129000000_full_schema_all_points.sql"
+    if "pgrst204" in low or "42703" in low or "column" in low:
+        column, table = _sql_error_column_table(text)
+        where = f"{table or 'таблице'}»" if column else "одной из таблиц"
+        if column:
+            return (f"нет колонки «{column}» в {where}: примените "
+                    "20261129000000_full_schema_all_points.sql")
+        return "нет колонки: примените 20261129000000_full_schema_all_points.sql"
     if "pgrst205" in low or "does not exist" in low or "schema cache" in low:
         return "нет таблицы/кэш схемы: выполните NOTIFY pgrst, 'reload schema'"
     return text[:200]
