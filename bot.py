@@ -467,7 +467,7 @@ async def cmd_admin_help(message: Message):
         "👑 <b>АДМИН-ПАНЕЛЬ</b>\n"
         "━━━━━━━━━━━━━━━━━━━━\n\n"
         "🚫 <b>Баны и модерация:</b>\n"
-        "• <code>бан @user Причина</code> — забанить (обнуляет баланс и капсулы)\n"
+        "• <code>!апбан @user Причина</code> — забанить (обнуляет баланс и капсулы)\n"
         "• <code>разбан @user</code> — разбанить\n"
         "• <code>список банов</code> — список всех забаненных\n"
         "• <code>забрать капсулы @user</code> — удалить все капсулы\n"
@@ -899,13 +899,315 @@ async def cmd_love_cooldown(message: Message):
     await message.answer(text + note, parse_mode="HTML")
 
 
+# ================= ПРЕДУПРЕЖДЕНИЯ В ЧАТЕ (задача 44) =================
+# `!аурапред` — «фиолетовые» (создатели/админы) выдают предупреждение игроку.
+# Счёт идёт ОТДЕЛЬНО В КАЖДОМ ЧАТЕ: у каждого чата свой лист предупреждений.
+# На 3-м предупреждении — игнор на 5 часов ТОЛЬКО в этом чате, счётчик в 0.
+# Пока игнор активен, бот не реагирует ни на одну команду игрока в этом чате,
+# а один раз отвечает «вы наказаны в течение (время)».
+CHAT_WARNS_TABLE = "chat_warns"
+WARN_LIMIT = 3                 # сколько предупреждений до игнора
+WARN_MUTE_SECONDS = 5 * 3600   # игнор после третьего предупреждения — 5 часов
+# Память процесса: если миграции chat_warns ещё нет, предупреждения всё равно
+# работают (и сбрасываются только рестартом бота). Ключ — (chat_id, user_id).
+_CHAT_WARN_MEMORY = {}
+_WARN_MUTE_NOTICE_AT = {}
+
+
+def _warn_now() -> float:
+    """Единый источник времени для варнов: тесты подменяют только его."""
+    return time.time()
+
+
+def _warn_row_key(chat_id, user_id):
+    return (int(chat_id), int(user_id))
+
+
+def _chat_warn_read(chat_id, user_id) -> dict:
+    """(warns, muted_until) из базы; при любой ошибке — из памяти процесса."""
+    key = _warn_row_key(chat_id, user_id)
+    try:
+        res = (supabase.table(CHAT_WARNS_TABLE).select("warns, muted_until")
+               .eq("chat_id", int(chat_id)).eq("user_id", int(user_id)).limit(1).execute())
+        row = res.data[0] if res.data else {}
+        record = {"warns": int(row.get("warns") or 0),
+                  "muted_until": _parse_iso_stamp(row.get("muted_until"))}
+        _CHAT_WARN_MEMORY[key] = record
+        return record
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("chat_warns недоступна (работаю на памяти): %s", exc)
+        return dict(_CHAT_WARN_MEMORY.get(key) or {"warns": 0, "muted_until": 0.0})
+
+
+def _parse_iso_stamp(raw) -> float:
+    """ISO-строка из базы → timestamp. Пустое/битое значение → 0."""
+    if not raw:
+        return 0.0
+    try:
+        from datetime import datetime, timezone
+        if isinstance(raw, (int, float)):
+            stamp = datetime.fromtimestamp(float(raw), tz=timezone.utc)
+        else:
+            stamp = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        if stamp.tzinfo is None:
+            stamp = stamp.replace(tzinfo=timezone.utc)
+        return stamp.timestamp()
+    except Exception:  # noqa: BLE001
+        return 0.0
+
+
+def _chat_warn_write(chat_id, user_id, warns: int, muted_until: float) -> bool:
+    key = _warn_row_key(chat_id, user_id)
+    _CHAT_WARN_MEMORY[key] = {"warns": int(warns), "muted_until": float(muted_until or 0.0)}
+    payload = {"chat_id": int(chat_id), "user_id": int(user_id),
+               "warns": int(warns),
+               "muted_until": (_iso_from_stamp(muted_until) if muted_until else None),
+               "updated_at": datetime_now_iso()}
+    try:
+        supabase.table(CHAT_WARNS_TABLE).upsert(
+            payload, on_conflict="chat_id,user_id").execute()
+        return True
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("chat_warns: не удалось сохранить (%s): %s", key, exc)
+        return False
+
+
+def _iso_from_stamp(stamp: float) -> str:
+    from datetime import datetime, timezone
+    return datetime.fromtimestamp(float(stamp), tz=timezone.utc).isoformat()
+
+
+def _mute_left(record: dict) -> int:
+    """Сколько секунд игнора осталось (0 — не наказан)."""
+    left = float(record.get("muted_until") or 0.0) - _warn_now()
+    return max(0, int(round(left)))
+
+
+async def chat_mute_left(chat_id, user_id) -> int:
+    """Игнор игрока в конкретном чате (секунды). 0 — можно писать."""
+    record = await asyncio.to_thread(_chat_warn_read, chat_id, user_id)
+    return _mute_left(record)
+
+
+async def _warn_is_allowed(message) -> bool:
+    """Кто может выдавать предупреждения: админы бота и админы/создатель чата."""
+    actor = message_actor(message)
+    user_id = getattr(actor, "id", None)
+    if not user_id:
+        return False
+    if is_admin(int(user_id)):
+        return True
+    chat = getattr(message, "chat", None)
+    chat_id = getattr(chat, "id", None)
+    if not chat_id or int(chat_id) == int(user_id):
+        return False            # личка — только админы бота
+    return await is_chat_admin(int(user_id), int(chat_id))
+
+
+async def _warn_target_from_parts(message):
+    """Ответ на сообщение или @ник в тексте → (id, имя) или (None, None)."""
+    reply = getattr(message, "reply_to_message", None)
+    if reply is not None and getattr(reply, "from_user", None):
+        who = reply.from_user
+        return int(who.id), (getattr(who, "username", None) or getattr(who, "first_name", None))
+    parts = strip_prefix(message_text(message)).split()
+    for part in parts[1:]:
+        if part.startswith("@"):
+            found = await get_user_global(part)
+            if found:
+                return int(found.id), found.username
+            return None, part.lstrip("@")
+    return None, None
+
+
+def _warn_mention(user_id, name: str) -> str:
+    """Ссылка на профиль вместо @username (задача 44)."""
+    import html as html_module
+    label = html_module.escape(str(name or f"id{user_id}").lstrip("@"))
+    return f'<a href="tg://user?id={int(user_id)}">{label}</a>'
+
+
+def _mute_until_text(seconds: int) -> str:
+    """«5 ч 0 мин» — сколько ещё длится игнор (для ответа наказанному)."""
+    seconds = max(0, int(seconds))
+    hours, minutes = divmod(seconds // 60, 60)
+    if hours and minutes:
+        return f"{hours} ч {minutes} мин"
+    if hours:
+        return f"{hours} ч"
+    return f"{max(1, minutes)} мин"
+
+
+async def _warn_reply_muted(message, left: int) -> None:
+    """Один ответ на игнор в чате (не спамим на каждое сообщение)."""
+    key = _warn_row_key(message.chat.id, message.from_user.id)
+    now = _warn_now()
+    if now - float(_WARN_MUTE_NOTICE_AT.get(key) or 0.0) < 300:
+        return              # чаще раза в 5 минут не повторяем
+    _WARN_MUTE_NOTICE_AT[key] = now
+    await message.answer(
+        f"🚫 <b>Вы наказаны в течение {_mute_until_text(left)}</b>\n\n"
+        "Пока игнор не снят, бот не отвечает на команды в этом чате. "
+        "В других чатах ограничения нет.",
+        parse_mode="HTML")
+
+
+@dp.message(F.text.func(lambda t: strip_prefix(t).lower().replace("ё", "е").startswith(
+    ("аурапредлист", "аурапред лист", "аураварны"))))
+async def cmd_warn_list(message: Message):
+    """`!аурапредлист` — кто и сколько предупреждений набрал В ЭТОМ ЧАТЕ."""
+    if not await _warn_is_allowed(message):
+        return
+    chat_id = message.chat.id
+    try:
+        res = (supabase.table(CHAT_WARNS_TABLE).select("user_id, warns, muted_until")
+               .eq("chat_id", int(chat_id)).execute())
+        rows = res.data or []
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("аурапредлист: база недоступна (%s): %s", chat_id, exc)
+        rows = [{"user_id": uid, "warns": rec.get("warns"),
+                 "muted_until": (rec.get("muted_until") or None)}
+                for (cid, uid), rec in _CHAT_WARN_MEMORY.items() if cid == int(chat_id)]
+    rows = [row for row in rows
+            if int(row.get("warns") or 0) > 0 or _mute_left(
+                {"muted_until": _parse_iso_stamp(row.get("muted_until"))}) > 0]
+    if not rows:
+        return await message.answer(
+            "📋 <b>Предупреждения в этом чате</b>\n\nПока ни у кого нет "
+            "предупреждений. Так и держать 🙂", parse_mode="HTML")
+    rows.sort(key=lambda row: (-int(row.get("warns") or 0), int(row.get("user_id") or 0)))
+    lines = ["📋 <b>ПРЕДУПРЕЖДЕНИЯ В ЭТОМ ЧАТЕ</b>",
+             "━━━━━━━━━━━━━━━━━━━━",
+             f"👥 Всего на листе: <b>{len(rows)}</b> · лимит {WARN_LIMIT} → "
+             f"игнор {WARN_MUTE_SECONDS // 3600} ч", ""]
+    for row in rows[:50]:
+        user_id = int(row.get("user_id") or 0)
+        name = await _player_name(user_id)
+        warns = int(row.get("warns") or 0)
+        mute_until = _parse_iso_stamp(row.get("muted_until"))
+        if mute_until and mute_until > _warn_now():
+            # После 3-го варна счётчик обнуляется, остаётся только игнор.
+            lines.append(f"• {_warn_mention(user_id, name)} — 🚫 игнор ещё "
+                         f"{_mute_until_text(int(mute_until - _warn_now()))} "
+                         f"(варны сброшены)")
+        else:
+            lines.append(f"• {_warn_mention(user_id, name)} — <b>{warns}</b>/{WARN_LIMIT}")
+    lines.append("\n<i>У каждого чата свой лист. Счёт сбрасывается после игнора.</i>")
+    await message.answer("\n".join(lines), parse_mode="HTML")
+
+
+@dp.message(F.text.func(lambda t: strip_prefix(t).lower().replace("ё", "е").startswith(
+    ("аурапред", "аура пред", "аураварн"))))
+async def cmd_warn(message: Message):
+    """`!аурапред` — предупреждение игроку в этом чате (только «фиолетовые»)."""
+    if not await _warn_is_allowed(message):
+        return await message.answer(
+            "🔒 Команда только для создателей и админов чата.", parse_mode="HTML")
+    chat = getattr(message, "chat", None)
+    chat_type = str(getattr(chat, "type", ""))
+    if chat_type in ("private", "None", ""):
+        return await message.answer(
+            "📋 Предупреждения работают только в чатах: в личке наказывать некого.",
+            parse_mode="HTML")
+
+    actor = message_actor(message)
+    target_id, target_name = await _warn_target_from_parts(message)
+    if target_id is None:
+        return await message.answer(
+            "📋 Формат: <code>!аурапред @ник причина</code> "
+            "(или ответом на сообщение нарушителя).\n"
+            "Список: <code>!аурапредлист</code>", parse_mode="HTML")
+    if int(target_id) == int(getattr(actor, "id", 0)):
+        return await message.answer("🙃 Себя предупреждать не нужно.")
+    if is_admin(int(target_id)):
+        return await message.answer("👑 Админа бота предупредить нельзя.")
+    # Бот сам не должен оказаться «наказанным»: иначе модерация в этом чате
+    # перестанет работать до конца игнора.
+    if getattr(bot, "id", None) and int(target_id) == int(bot.id):
+        return await message.answer("🤖 Бота предупреждать не нужно.")
+
+    chat_id = int(chat.id)
+    record = await asyncio.to_thread(_chat_warn_read, chat_id, target_id)
+    muted_left = _mute_left(record)
+    if muted_left > 0:
+        return await message.answer(
+            f"🚫 {_warn_mention(target_id, target_name)} уже наказан(а) в этом чате "
+            f"ещё на {_mute_until_text(muted_left)}.", parse_mode="HTML")
+
+    warns = int(record.get("warns") or 0) + 1
+    muted_until = 0.0
+    if warns >= WARN_LIMIT:
+        muted_until = _warn_now() + WARN_MUTE_SECONDS
+        warns = 0            # счётчик сбрасывается: наказание выдано
+    saved = await asyncio.to_thread(_chat_warn_write, chat_id, target_id, warns, muted_until)
+
+    if muted_until:
+        _WARN_MUTE_NOTICE_AT.pop(_warn_row_key(chat_id, target_id), None)
+        text = (f"🚫 {_warn_mention(target_id, target_name)} получает "
+                f"<b>{WARN_LIMIT}-е предупреждение</b>.\n\n"
+                f"⏱ Игнор <b>{_mute_until_text(WARN_MUTE_SECONDS)}</b> только в этом "
+                f"чате: бот не будет отвечать на команды.\n"
+                f"Счётчик предупреждений сброшен в 0.")
+    else:
+        text = (f"📝 {_warn_mention(target_id, target_name)} — предупреждение "
+                f"<b>{warns} из {WARN_LIMIT}</b>.\n\n"
+                f"На {WARN_LIMIT}-м — игнор {_mute_until_text(WARN_MUTE_SECONDS)} "
+                f"в этом чате.")
+    if not saved:
+        text += "\n<i>⚠️ В базу не сохранилось — после рестарта бота счёт сбросится.</i>"
+    text += "\nСписок: <code>!аурапредлист</code>"
+    await message.answer(text, parse_mode="HTML")
+
+
+class ChatWarnMiddleware(BaseMiddleware):
+    """Игнор наказанных в конкретном чате (задача 44).
+
+    Стоит ПЕРЕД всеми хендлерами сообщений: пока игрок наказан, бот не
+    реагирует ни на одну его команду в этом чате. Ответ «вы наказаны в
+    течение (время)» даётся не на каждое сообщение, а раз в 5 минут, чтобы
+    бот не превращался в спамера. В других чатах ограничения нет — игнор
+    привязан к паре (чат, игрок).
+    """
+
+    async def __call__(self, handler, event, data):
+        try:
+            message = event
+            actor = getattr(message, "from_user", None)
+            chat = getattr(message, "chat", None)
+            chat_id = getattr(chat, "id", None)
+            chat_type = str(getattr(chat, "type", ""))
+            if (actor is None or chat_id is None
+                    or getattr(actor, "is_bot", False)
+                    or chat_type in ("private", "")):
+                return await handler(event, data)
+            if is_admin(int(actor.id)):
+                return await handler(event, data)     # админа бота не блокируем
+            # Служебные команды проходят всегда: иначе в чате некому было бы
+            # выдать предупреждение наказанному и не открыть приложение.
+            low = strip_prefix(message_text(message)).lower().replace("ё", "е")
+            if low.startswith(("апка", "аурапред", "аурапредлист", "аурапред лист",
+                               "аураварн", "аураварны", "разбан")):
+                return await handler(event, data)
+            left = await chat_mute_left(chat_id, actor.id)
+            if left <= 0:
+                return await handler(event, data)
+            if message_text(message):
+                await _warn_reply_muted(message, left)
+            return None                                # команду не обрабатываем
+        except Exception:  # noqa: BLE001 — модерация не должна ломать бота
+            logger.exception("Проверка игнора в чате не сработала")
+            return await handler(event, data)
+
+
 # ================= БАНЫ =================
 @dp.message(
-    F.text.func(lambda t: strip_prefix(t).lower().startswith("бан") or strip_prefix(t).lower().startswith("разбан")))
+    F.text.func(lambda t: strip_prefix(t).lower().replace("ё", "е").startswith(
+        ("апбан", "разбан"))))
 async def cmd_admin_ban_unban(message: Message):
+    """`!апбан` (задача 44: старое `бан` переименовано) и `разбан`."""
     if not is_admin(message.from_user.id): return await message.answer("❌ Только для админов бота.")
 
-    clean_text = strip_prefix(message_text(message)).lower()
+    clean_text = strip_prefix(message_text(message)).lower().replace("ё", "е")
     parts = strip_prefix(message_text(message)).split(maxsplit=2)
     target = None
     reason = "Багоюз"
@@ -919,10 +1221,10 @@ async def cmd_admin_ban_unban(message: Message):
             if not target: return await message.answer("❌ Пользователь не найден в базе.")
             if len(parts) >= 3: reason = parts[2]
         else:
-            return await message.answer("❌ Формат: <code>бан @user Причина</code>", parse_mode="HTML")
+            return await message.answer("❌ Формат: <code>!апбан @user Причина</code>", parse_mode="HTML")
 
     try:
-        if clean_text.startswith("бан"):
+        if clean_text.startswith("апбан"):
             await asyncio.to_thread(
                 lambda: supabase.table("bans").upsert({"user_id": target.id, "reason": reason}).execute())
             await update_user(target.id, coins=0, keys=0, inventory="[]")
@@ -937,11 +1239,14 @@ async def cmd_admin_ban_unban(message: Message):
                 pass
 
             await message.answer(
-                f"✅ Пользователь <b>@{target.username}</b> забанен.\nПричина: <i>{reason}</i>\nБаланс обнулен, капсулы удалены.",
+                f"✅ Пользователь <b>{_player_mention(target.id, target.username)}</b> "
+                f"забанен.\nПричина: <i>{reason}</i>\nБаланс обнулен, капсулы удалены.",
                 parse_mode="HTML")
         elif clean_text.startswith("разбан"):
             await asyncio.to_thread(lambda: supabase.table("bans").delete().eq("user_id", target.id).execute())
-            await message.answer(f"✅ Пользователь <b>@{target.username}</b> разбанен.", parse_mode="HTML")
+            await message.answer(
+                f"✅ Пользователь <b>{_player_mention(target.id, target.username)}</b> разбанен.",
+                parse_mode="HTML")
             try:
                 await bot.send_message(
                     target.id,
@@ -1525,11 +1830,13 @@ async def cmd_pocket(message: Message):
     user = await get_user(target.id, getattr(target, 'username', None))
 
     if target.id in ADMIN_IDS and message.from_user.id != target.id:
-        return await message.answer(f"💰 <b>Карман @{safe_text(target.username)}</b>\n\n👛 Баланс: <b>Скрыто</b> 🔒",
-                                    parse_mode="HTML")
+        # Задача 44: вместо @username — ник со ссылкой на профиль.
+        return await message.answer(
+            f"💰 <b>Карман {_player_mention(target.id, getattr(target, 'username', None))}</b>"
+            f"\n\n👛 Баланс: <b>Скрыто</b> 🔒", parse_mode="HTML")
 
     inv = parse_inventory(user.get("inventory"))
-    name = f"@{safe_text(target.username)}" if getattr(target, 'username', None) else f"id{target.id}"
+    name = _player_mention(target.id, getattr(target, "username", None))
     text = f"💰 <b>Карман {name}</b>\n\n👛 Баланс: <b>{user['coins']}</b> коинов\n"
     if user.get("keys", 0) > 0: text += f"🔑 Ключи: <b>{user['keys']}</b>\n"
     inventory_lines = []
@@ -1921,6 +2228,9 @@ async def cb_buy_uniq_capsule_legacy(callback: CallbackQuery):
 # поэтому бот и профиль не могут показать разные цифры.
 RELATIONSHIPS_TABLE = "relationships"
 LOVE_COOLDOWNS_TABLE = "love_cooldowns"
+# Задача 44: запасная отметка кулдауна РП в памяти процесса — чтобы награда
+# не «размножалась» за каждое действие, если таблицы love_cooldowns нет.
+_LOVE_COOLDOWN_MEMORY = {}
 
 # Предложения отношений ждут ответа не дольше 15 минут. Храним в памяти:
 # если бот перезапустится — предложение просто истечёт (деньги не теряются).
@@ -1929,9 +2239,22 @@ LOVE_PROPOSAL_TTL = 15 * 60
 
 
 def _relationship_sync(user_id):
-    """Активная пара игрока (в базе user_id бывает и числом, и строкой)."""
-    res = supabase.table(RELATIONSHIPS_TABLE).select("*").eq("status", "active").execute()
-    for row in res.data or []:
+    """Активная пара игрока (в базе user_id бывает и числом, и строкой).
+
+    Задача 44: колонки `status` может не быть (старая схема). Тогда фильтр по
+    статусу падает, и раньше это выглядело как «пары нет» — хотя пара уже
+    создана. Второй проход читает без фильтра и отсекает неактивные в Python.
+    """
+    try:
+        res = supabase.table(RELATIONSHIPS_TABLE).select("*").eq("status", "active").execute()
+        rows = res.data or []
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("relationships: чтение по статусу не удалось (%s) — читаю всё", exc)
+        rows = supabase.table(RELATIONSHIPS_TABLE).select("*").execute().data or []
+    for row in rows:
+        status = str(row.get("status") or "active").lower()
+        if status not in ("active", ""):
+            continue
         if str(row.get("user_a")) == str(user_id) or str(row.get("user_b")) == str(user_id):
             return row
     return None
@@ -1973,7 +2296,12 @@ def _missing_column_from_error(text: str):
 
 
 def _create_relationship(proposer_id, target_id, logger_prefix="ПАРА: "):
-    """Вставка пары с повтором без колонок, которых нет в старой таблице."""
+    """Вставка пары с повтором без колонок, которых нет в старой таблице.
+
+    Задача 44: если `status` в таблице нет, запись всё равно проходит — а
+    значит ищется она через _relationship_sync (он смотрит status='active' и
+    молча ничего не находил → «пары нет» сразу после создания).
+    """
     payload = {
         "user_a": int(proposer_id), "user_b": int(target_id),
         "love": 0, "bank": 0, "status": "active",
@@ -2066,8 +2394,12 @@ def _days_text(days: int) -> str:
     return f"{days} {word}"
 
 
-async def _player_display(user_id) -> str:
-    """Как показать игрока: @username из базы, иначе id<число>."""
+async def _player_name(user_id) -> str:
+    """Ник игрока без «@»: из базы, иначе id<число>.
+
+    Задача 44: @username в ответах бота больше не выводим — вместо ника
+    отдаём ссылку на профиль (`tg://user?id=…`), см. _player_mention.
+    """
     if not user_id:
         return "игрок"
     def _read():
@@ -2079,7 +2411,23 @@ async def _player_display(user_id) -> str:
     except Exception:
         raw = None
     name = str(raw or "").strip().lstrip("@")
-    return f"@{name}" if name else f"id{int(user_id)}"
+    return name or f"id{int(user_id)}"
+
+
+def _player_mention(user_id, name=None) -> str:
+    """Ник со ссылкой на профиль (HTML). Без «@» — так требует задача 44."""
+    if not user_id:
+        return "игрок"
+    import html as html_module
+    label = html_module.escape(str(name or f"id{int(user_id)}").strip().lstrip("@"))
+    return f'<a href="tg://user?id={int(user_id)}">{label}</a>'
+
+
+async def _player_display(user_id) -> str:
+    """Как показать игрока в тексте с parse_mode=HTML — только ссылкой."""
+    if not user_id:
+        return "игрок"
+    return _player_mention(int(user_id), await _player_name(user_id))
 
 
 async def _relationship_notice(row, user_id, subject: str, about_self: bool = False) -> str:
@@ -2117,19 +2465,20 @@ async def cmd_love_propose(message: Message):
     target_id, target_name = await resolve_partner_target(message)
     if target_id is None:
         return await message.answer(
-            "💗 Формат: <code>+любовь @username</code> (или ответом на сообщение).\n"
-            "Все РП-команды: <code>все рп</code> · своя пара: <code>отн инфа</code>",
+            "💗 Формат: <code>+любовь</code> ответом на сообщение или "
+            "<code>+любовь @ник</code>.\n"
+            "Все РП-команды: <code>все рп</code> · своя пара: <code>любовь инфа</code>",
             parse_mode="HTML")
     if target_id == proposer_id:
         return await message.answer("🙃 Себя любить можно, но пару так не создать.")
     existing = await get_relationship(proposer_id)
     if existing:
         notice = await _relationship_notice(existing, proposer_id, "Ты", about_self=True)
-        return await message.answer(f"{notice}\nСначала <code>-отны</code>.", parse_mode="HTML")
+        return await message.answer(f"{notice}\nСначала <code>-любовь</code>.", parse_mode="HTML")
     target_relationship = await get_relationship(target_id)
     if target_relationship:
         # Работает в ЛЮБОМ чате: отношения общие, и второй пары быть не может.
-        subject = f"<a href=\"tg://user?id={target_id}\">{safe_text(target_name or 'Этот игрок')}</a>"
+        subject = _player_mention(target_id, target_name or "Этот игрок")
         notice = await _relationship_notice(target_relationship, target_id, subject)
         return await message.answer(notice, parse_mode="HTML")
 
@@ -2140,8 +2489,8 @@ async def cmd_love_propose(message: Message):
     ]])
     await message.answer(
         f"💌 <b>Предложение отношений</b>\n\n"
-        f"<a href=\"tg://user?id={target_id}\">{safe_text(target_name or 'Игрок')}</a>, "
-        f"<a href=\"tg://user?id={proposer_id}\">{safe_text(message.from_user.full_name)}</a> "
+        f"{_player_mention(target_id, target_name or 'Игрок')}, "
+        f"{_player_mention(proposer_id, message.from_user.full_name)} "
         f"зовёт тебя в пару!\n\n"
         f"За РП-команды пара получает +{LOVE_ACTION_BONUS} Love коинов. "
         f"Список команд: <code>все рп</code>.",
@@ -2169,9 +2518,11 @@ async def cb_love_answer(callback: CallbackQuery):
         love_proposals.pop(target_id, None)
         row = own or other
         owner = target_id if own else proposer_id
-        partner_name = await _player_display(_partner_of(row, owner))
+        partner_id = _partner_of(row, owner)
+        # alert — обычный текст: HTML там не работает, поэтому ник без тегов.
+        partner_name = await _player_name(partner_id)
         return await callback.answer(
-            f"💔 Уже есть пара: {partner_name}. Сначала -отны.", show_alert=True)
+            f"💔 Уже есть пара: {partner_name}. Сначала -любовь.", show_alert=True)
 
     try:
         await asyncio.to_thread(_create_relationship, proposer_id, target_id)
@@ -2187,18 +2538,21 @@ async def cb_love_answer(callback: CallbackQuery):
         f"💗 <b>Теперь вы пара!</b>\n\n{_stage_text(0)}\n\n"
         f"Пишите друг другу РП-команды: <code>поцеловать</code>, <code>обнять</code>, "
         f"<code>прижать</code>… — так копится Love.\n"
-        f"Весь список: <code>все рп</code> · ваша пара: <code>отн инфа</code>",
+        f"Весь список: <code>все рп</code> · ваша пара: <code>любовь инфа</code>",
         parse_mode="HTML")
     await callback.answer("💗")
 
 
-# Разрыв: `-отны` (основная команда), плюс `-отн`, `-отношения`, `-пара`,
-# `-любовь` и старое `разлюбить` — все варианты продолжают работать, чтобы
-# игроки, привыкшие к короткой форме, ничего не заметили.
+# Разрыв: `-любовь` (основная команда с задачи 44), плюс `-отны`, `-отн`,
+# `-отношения`, `-пара` и старое `разлюбить` — все варианты продолжают
+# работать, чтобы игроки, привыкшие к старой форме, ничего не заметили.
 # Удаляем СТРОКУ пары, а не помечаем её broken: у обоих исчезает статус и весь
 # накопленный Love, а заново начать историю можно с чистого листа. Уже
 # выплаченные награды за этапы не отзываются (деньги не отбираем).
-_BREAK_PREFIXES = ("-отны", "-отн", "-отношения", "-отнош", "-пара", "-любовь",
+# ВАЖНО: порядок проверки в фильтре — сначала «-любовь», потом остальные.
+# Отдельного хендлера на «-любовь» больше нет (задача 44), поэтому старый
+# «-отны» и короткие формы остаются синонимами.
+_BREAK_PREFIXES = ("-любовь", "-отны", "-отн", "-отношения", "-отнош", "-пара",
                    "разлюбить")
 
 
@@ -2211,7 +2565,7 @@ async def cmd_love_break(message: Message):
     if not row:
         return await message.answer(
             "💔 Ты пока ни с кем не в отношениях.\n\n"
-            "Своя пара: <code>отн инфа</code> · РП-команды: <code>все рп</code>",
+            "Своя пара: <code>любовь инфа</code> · РП-команды: <code>все рп</code>",
             parse_mode="HTML")
     try:
         await asyncio.to_thread(lambda: supabase.table(RELATIONSHIPS_TABLE)
@@ -2222,15 +2576,15 @@ async def cmd_love_break(message: Message):
     partner = _partner_of(row, message.from_user.id)
     love_proposals.pop(partner, None)
     love_proposals.pop(message.from_user.id, None)
-    partner_name = await _player_display(partner)
+    partner_mention = await _player_display(partner)
     await message.answer(
         f"💔 <b>Отношения завершены.</b>\n\n"
-        f"Вы с {safe_text(partner_name)} снова свободны: статус снят у обоих, "
+        f"Вы с {partner_mention} снова свободны: статус снят у обоих, "
         f"накопленные Love сброшены.\n"
         f"Заработанные награды остаются у вас — их никто не отбирает.\n\n"
         f"Теперь можно копить <b>{SOLO_CURRENCY}</b> в одиночку "
-        f"(<code>отн инфа</code>) или начать новую историю: "
-        f"<code>+любовь @ник</code>.",
+        f"(<code>любовь инфа</code>) или начать новую историю: "
+        f"<code>+любовь</code> ответом на сообщение.",
         parse_mode="HTML")
 
 
@@ -2295,7 +2649,8 @@ async def cmd_top_love(message: Message):
     if not rows:
         return await message.answer(
             "💗 <b>ТОП ОТНОШЕНИЙ</b>\n━━━━━━━━━━━━━━━━━━━━\n\n"
-            "Пока ни одной пары. Начни первым: <code>+любовь @username</code>",
+            "Пока ни одной пары. Начни первым: <code>+любовь</code> ответом на сообщение"
+            " или <code>+любовь @ник</code>",
             parse_mode="HTML")
 
     total_love = sum(int(row.get("love") or 0) for row in rows)
@@ -2310,26 +2665,29 @@ async def cmd_top_love(message: Message):
     medals = ["🥇", "🥈", "🥉"]
     for index, row in enumerate(rows[:10]):
         score = int(row.get("love") or 0)
-        partner_a = names.get(_love_int(row.get("user_a")), "игрок")
-        partner_b = names.get(_love_int(row.get("user_b")), "игрок")
+        pair = [(uid, names.get(uid, "игрок"))
+                for uid in (_love_int(row.get("user_a")), _love_int(row.get("user_b")))]
+        # Задача 44: вместо @username — ник со ссылкой на профиль.
+        shown = " 💞 ".join(_player_mention(uid, _love_short(name)) for uid, name in pair)
         place = medals[index] if index < 3 else f"{index + 1}."
         days = _love_days(row)
         lines.append(
-            f"{place} <b>{safe_text(_love_short(partner_a))}</b> 💞 "
-            f"<b>{safe_text(_love_short(partner_b))}</b>\n"
+            f"{place} <b>{shown}</b>\n"
             f"    💗 {coin_amount(score)} Love · вместе {_days_text(days)}")
     if len(rows) > 10:
         lines.append(f"\n…и ещё {len(rows) - 10} пар(ы).")
     lines.append("\n<i>Отношения общие для всех чатов. Второй пары быть не может.\n"
-                 f"Одиночки в топ не попадают — здесь только пары.</i>")
+                 "Одиночки в топ не попадают — здесь только пары.</i>")
     await message.answer("\n".join(lines), parse_mode="HTML")
 
 
 # Команды «инфо» и «список РП» начинаются со слов, которые этот фильтр тоже
 # ловит («отношения инфо»), поэтому исключаем их явно — иначе до своего
 # обработчика дело не доходило бы: aiogram берёт первый совпавший хендлер.
-_LOVE_INFO_PREFIXES = ("отн инфа", "отн инфо", "инфа отношений",
-                       "отношения инфа", "отношения инфо")
+# Задача 44: основная команда — «любовь инфа» (старые формы остаются рабочими).
+_LOVE_INFO_PREFIXES = ("любовь инфа", "любовь инфо", "отн инфа", "отн инфо",
+                       "инфа отношений", "отношения инфа", "отношения инфо",
+                       "любовь инфо")
 _RP_LIST_PREFIXES = ("все рп", "рп команды", "рп список", "список рп")
 
 
@@ -2337,6 +2695,8 @@ def _love_status_filter(text) -> bool:
     clean = strip_prefix(text).lower().replace("ё", "е")
     if clean.startswith(_LOVE_INFO_PREFIXES) or clean.startswith(_RP_LIST_PREFIXES):
         return False
+    if clean.startswith(("-", "+")):
+        return False        # «-любовь» — разрыв, «+любовь» — предложение
     return clean.startswith("любовь") or clean.startswith(("пара", "отношения"))
 
 
@@ -2352,15 +2712,15 @@ async def cmd_love_status(message: Message):
             f"💔 <b>Пока один(а)</b> · {SOLO_CURRENCY}: <b>{coin_amount(solo)}</b>\n"
             f"🏅 Уровень: <b>{info['level']} · {safe_text(info['title'])}</b>\n\n"
             f"РП-команды работают и без пары — {SOLO_CURRENCY} капает только тебе.\n"
-            f"Предложить отношения: <code>+любовь @username</code>\n"
-            f"Все РП-команды: <code>все рп</code> · подробно: <code>отн инфа</code>",
+            f"Предложить отношения: <code>+любовь</code> ответом на сообщение\n"
+            f"Все РП-команды: <code>все рп</code> · подробно: <code>любовь инфа</code>",
             parse_mode="HTML")
     partner_id = _partner_of(row, message.from_user.id)
-    partner_name = await _player_display(partner_id)
+    partner_mention = await _player_display(partner_id)
     score = int(row.get("love") or 0)
     await message.answer(
-        f"💗 <b>В отношениях</b> с <b>{safe_text(partner_name)}</b>\n\n{_stage_text(score)}\n\n"
-        f"Подробно: <code>отн инфа</code> · РП: <code>все рп</code>",
+        f"💗 <b>В отношениях</b> с {partner_mention}\n\n{_stage_text(score)}\n\n"
+        f"Подробно: <code>любовь инфа</code> · РП: <code>все рп</code>",
         parse_mode="HTML")
 
 
@@ -2385,13 +2745,14 @@ async def cmd_love_info(message: Message):
     if target_id != viewer_id and not is_admin_viewer:
         return await message.answer(
             "🔒 Отношения — личное. Этот игрок должен написать "
-            "<code>отн инфа</code> сам, чужие отношения видят только админы.",
+            "<code>любовь инфа</code> сам, чужие отношения видят только админы.",
             parse_mode="HTML")
 
     row = await get_relationship(target_id)
-    who = "твои" if target_id == viewer_id else await _player_display(target_id)
+    who_name = await _player_name(target_id)
+    # Задача 44: без @username — ник со ссылкой на профиль (как и в остальных ответах).
     header = ("ТВОИ ОТНОШЕНИЯ" if target_id == viewer_id
-              else f"ОТНОШЕНИЯ · {who.lstrip('@').upper()}")
+              else f"ОТНОШЕНИЯ · {safe_text(who_name.upper())}")
     if not row:
         solo = await get_solo_love(target_id)
         info = public_stage(solo)
@@ -2407,7 +2768,8 @@ async def cmd_love_info(message: Message):
                 f"+{LOVE_ACTION_BONUS} {SOLO_CURRENCY} только тебе.\n"
                 f"Передать {SOLO_CURRENCY} другому нельзя — только заработать.\n"
                 f"Вступишь в отношения — одиночный счёт сгорит, начнёте общий.\n\n"
-                f"Список РП: <code>все рп</code> · предложить пару: <code>+любовь @ник</code>",
+                f"Список РП: <code>все рп</code> · предложить пару: <code>+любовь</code> "
+                f"ответом на сообщение",
                 parse_mode="HTML")
         return await message.answer(
             f"💔 У этого игрока сейчас нет отношений.\n"
@@ -2415,14 +2777,14 @@ async def cmd_love_info(message: Message):
             parse_mode="HTML")
 
     partner_id = _partner_of(row, target_id)
-    partner_name = await _player_display(partner_id)
+    partner_mention = await _player_display(partner_id)
     score = int(row.get("love") or 0)
     info = public_stage(score)
     days = _love_days(row)
     await message.answer(
         f"💗 <b>{header}</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"💞 В паре с: <b>{safe_text(partner_name)}</b>\n"
+        f"💞 В паре с: <b>{partner_mention}</b>\n"
         f"📅 Вместе: <b>{_days_text(days)}</b>\n"
         f"🏅 Уровень: <b>{info['level']} · {safe_text(info['title'])}</b>\n"
         f"💗 Love коинов: <b>{coin_amount(score)}</b>",
@@ -2449,12 +2811,17 @@ async def cmd_rp_list(message: Message):
                      f"(бонус не чаще, чем раз в {cooldown_text}).")
     lines.append(f"💔 Без пары то же действие даёт +{LOVE_ACTION_BONUS} {SOLO_CURRENCY} "
                  f"— и только тому, кто пишет: передать Love другому нельзя.")
-    lines.append("💞 Своя пара: <code>отн инфа</code> · все пары: <code>топ отношений</code>")
+    lines.append("💞 Своя пара: <code>любовь инфа</code> · все пары: <code>топ отношений</code>")
     await message.answer("\n".join(lines), parse_mode="HTML")
 
 
 async def love_cooldown_left(user_id) -> int:
-    """Сколько секунд осталось до следующего +10 Love (0 — можно получать)."""
+    """Сколько секунд осталось до следующего +10 Love (0 — можно получать).
+
+    Задача 44: если таблицы love_cooldowns нет, берём отметку из памяти
+    процесса. Раньше при ошибке возвращался 0, и кулдаун просто переставал
+    работать (награда капала за каждое действие без сохранения).
+    """
     def _read():
         res = supabase.table(LOVE_COOLDOWNS_TABLE).select("action_at").eq("user_id", user_id).execute()
         return res.data[0].get("action_at") if res.data else None
@@ -2462,7 +2829,7 @@ async def love_cooldown_left(user_id) -> int:
     try:
         raw = await asyncio.to_thread(_read)
     except Exception:
-        return 0
+        raw = _LOVE_COOLDOWN_MEMORY.get(int(user_id))
     if not raw:
         return 0
     try:
@@ -2480,9 +2847,12 @@ async def love_cooldown_left(user_id) -> int:
 
 
 async def love_cooldown_touch(user_id):
+    stamp = datetime_now_iso()
+    # Память — запасной источник, если миграции love_cooldowns нет.
+    _LOVE_COOLDOWN_MEMORY[int(user_id)] = stamp
     def _write():
         supabase.table(LOVE_COOLDOWNS_TABLE).upsert(
-            {"user_id": int(user_id), "action_at": datetime_now_iso()}, on_conflict="user_id").execute()
+            {"user_id": int(user_id), "action_at": stamp}, on_conflict="user_id").execute()
     try:
         await asyncio.to_thread(_write)
     except Exception as e:
@@ -2495,15 +2865,27 @@ def datetime_now_iso() -> str:
 
 
 async def add_love_points(row, amount: int):
-    """+Love коины паре и награды за перешагнутые этапы. Возвращает (new_love, granted)."""
+    """+Love коины паре и награды за перешагнутые этапы. Возвращает (new_love, granted).
+
+    Задача 44: если `bank` в таблице нет (старая схема), пишем только love —
+    раньше update падал целиком и Love не рос, хотя игрок видел успех.
+    """
     old_score = int(row.get("love") or 0)
     new_score = old_score + int(amount)
-    await asyncio.to_thread(lambda: supabase.table(RELATIONSHIPS_TABLE).update({
-        "love": new_score, "bank": new_score,
-    }).eq("id", row["id"]).execute())
+    for payload in ({"love": new_score, "bank": new_score}, {"love": new_score}):
+        try:
+            await asyncio.to_thread(lambda p=payload: supabase.table(RELATIONSHIPS_TABLE)
+                                    .update(p).eq("id", row["id"]).execute())
+            break
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Love не записался (%s): %s", list(payload), exc)
     row = dict(row)
     row["love"] = new_score
-    granted = await asyncio.to_thread(claim_stage_rewards, supabase, row)
+    try:
+        granted = await asyncio.to_thread(claim_stage_rewards, supabase, row)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Награды за этап Love не выданы: %s", exc)
+        granted = []
     return new_score, granted
 
 
@@ -2616,7 +2998,7 @@ async def solo_rp_action(message: Message, meta: dict, target_id, target_name):
     await love_cooldown_touch(actor_id)
     reply = f"{text}\n\n💔 +{LOVE_ACTION_BONUS} {SOLO_CURRENCY} (всего {score})"
     if granted:
-        reply += "\n💗 Стало теплее — загляни в <code>отн инфа</code>."
+        reply += "\n💗 Стало теплее — загляни в <code>любовь инфа</code>."
     await message.answer(reply, parse_mode="HTML")
 
 
@@ -2738,7 +3120,7 @@ async def cmd_admin_panel(message: Message):
         f"👥 Рефералов: <b>{stats['referrals']}</b>\n\n"
         "🎛 Шанс апгрейда зафиксирован: <b>90 / X</b> (x1.75 → 51.43%). "
         "Крутить его нечем — что видит игрок, по тому и играем.\n\n"
-        "Команды: <code>+пополнить карман @user 500</code>, <code>бан @user причина</code>, "
+        "Команды: <code>+пополнить карман @user 500</code>, <code>!апбан @user причина</code>, "
         "<code>разбан @user</code>"
     )
     await message.answer(text, parse_mode="HTML", reply_markup=_admin_keyboard())
@@ -2782,7 +3164,7 @@ async def cb_admin_panel(callback: CallbackQuery):
     if action == "ban":
         await callback.message.answer(
             "🚫 <b>Баны</b>\n\n"
-            "Забанить: <code>бан @username причина</code>\n"
+            "Забанить: <code>!апбан @username причина</code>\n"
             "Разбанить: <code>разбан @username</code>\n"
             "Список: <code>список банов</code>", parse_mode="HTML")
         return await callback.answer()
@@ -2974,31 +3356,45 @@ def start_keyboard() -> InlineKeyboardMarkup:
 APP_LINK_KEYBOARD_TEXT = "🎮 Открыть AURA GAME"
 
 
-def app_link_keyboard() -> InlineKeyboardMarkup:
+def app_link_keyboard(allow_web_app: bool = True) -> InlineKeyboardMarkup:
     """Кнопки под сообщением `!апка`: открыть приложение и переслать ссылку.
 
-    web_app-кнопка открывает Mini App прямо внутри Telegram (с initData), а
-    url-кнопка ведёт на t.me/<бот>/<short_name> — её удобно пересылать другу.
-    Оба адреса строятся из одного места, поэтому «Not Found» из-за порта в
-    ссылке сюда попасть не может.
+    Задача 44: в ГРУППАХ Telegram не разрешает inline-кнопку `web_app`
+    (BUTTON_TYPE_INVALID: «BUTTON_TYPE_WEB_APP_INVALID»). Раньше `!апка` в чате
+    уходила с такой кнопкой, Telegram отклонял sendMessage, и игрок вместо
+    ссылки получал «⚠️ Что-то пошло не так, попробуй ещё раз.».
+    Поэтому web_app-кнопку показываем только в личке, а в группах — обычные
+    url-кнопки (они разрешены везде).
     """
     url = miniapp_webapp_url()
     direct = miniapp_direct_url()
     rows = []
-    if url:
+    if url and allow_web_app:
         rows.append([InlineKeyboardButton(text=APP_LINK_KEYBOARD_TEXT,
                                           web_app=WebAppInfo(url=url))])
     if direct:
         rows.append([InlineKeyboardButton(
-            text="🔗 Ссылка для друзей" if url else APP_LINK_KEYBOARD_TEXT, url=direct)])
+            text="🔗 Ссылка для друзей" if (url and allow_web_app) else APP_LINK_KEYBOARD_TEXT,
+            url=direct)])
+    elif url:
+        # Прямая ссылка не собрана (нет username бота) — ведём обычной url-кнопкой
+        # на сам адрес Mini App: она работает и в группе.
+        rows.append([InlineKeyboardButton(text=APP_LINK_KEYBOARD_TEXT, url=url)])
     return InlineKeyboardMarkup(inline_keyboard=rows) if rows else None
 
 
-def app_link_text() -> str:
-    """Текст сообщения: адрес виден, но как обычная ссылка на домен aura-api.
+def _is_private_chat(message) -> bool:
+    """Личка? Именно там разрешены web_app-кнопки."""
+    chat = getattr(message, "chat", None)
+    return str(getattr(chat, "type", "")) in ("private", "ChatType.PRIVATE")
 
-    Порта в адресе нет намеренно: у Render Web Service наружу открыт только
-    443, и любой `:PORT` в ссылке превращается в «Not Found».
+
+def app_link_text() -> str:
+    """Текст сообщения `!апка`. Задача 44: строку «Адрес: …» убрали.
+
+    Игроку нужен только вход в приложение, а голая ссылка на домен в чате
+    выглядела как техническая свалка. Ссылку отдаёт кнопка (web_app в личке,
+    url в группе).
     """
     url = miniapp_webapp_url()
     if not url:
@@ -3015,18 +3411,34 @@ def app_link_text() -> str:
         "🎮 <b>AURA GAME</b>\n\n"
         "Жми кнопку ниже — приложение откроется прямо в Telegram, со всеми "
         "играми, коинами и ареной.\n\n"
-        f"Адрес: {url}\n\n"
-        "Если кнопка не открывается — обнови Telegram до последней версии."
+        "Если кнопка не открывается — обнови Telegram до последней версии.\n\n"
+        "<i>Команда работает даже во время игнора: приложение открывается всегда.</i>"
     )
 
 
 @dp.message(F.text.func(lambda t: strip_prefix(t).lower().startswith("апка")))
 async def cmd_app_link(message: Message):
-    """`!апка` — показать ссылку и кнопку на Mini App."""
-    keyboard = app_link_keyboard()
-    await message.answer(app_link_text(), parse_mode="HTML",
-                         reply_markup=keyboard,
-                         disable_web_page_preview=True)
+    """`!апка` — показать кнопку на Mini App.
+
+    Задача 44: в группе кнопка web_app запрещена Telegram'ом — отправляем
+    обычную url-кнопку. Если Telegram всё равно отклонит разметку, сообщение
+    уходит без кнопок и со ссылкой в тексте (а не «Что-то пошло не так»).
+    """
+    private = _is_private_chat(message)
+    keyboard = app_link_keyboard(allow_web_app=private)
+    text = app_link_text()
+    if not private:
+        # В группе кнопку-приложение открыть нельзя, поэтому даём ссылку
+        # текстом: игрок всё равно сможет открыть игру.
+        text += f"\n\n🔗 <a href=\"{miniapp_webapp_url() or miniapp_direct_url()}\">Открыть AURA GAME</a>"
+    try:
+        await message.answer(text, parse_mode="HTML",
+                             reply_markup=keyboard,
+                             disable_web_page_preview=True)
+    except Exception as exc:  # noqa: BLE001 — разметка не должна ронять команду
+        logger.warning("!апка: не удалось отправить с кнопкой (%s: %s)", type(exc).__name__, exc)
+        await message.answer(text, parse_mode="HTML", reply_markup=None,
+                             disable_web_page_preview=True)
 
 
 @dp.message(CommandStart())
@@ -3060,7 +3472,7 @@ async def cmd_help_command(message: Message):
     F.text.func(lambda t: strip_prefix(t).lower().startswith("помощь") or strip_prefix(t).lower().startswith("help")))
 async def cmd_help(message: Message):
     text = (
-        "📖 <b>СПИСОК КОМАНД БОТА</b>\n━━━━━━━━━━━━━━━━━━━━\n\n🎟️ <b>Промокоды:</b>\n• <code>промо код</code> — активировать промокод\n\n💰 <b>Экономика:</b>\n• <code>карман</code> — твой баланс\n• <code>карман @user</code> — баланс другого\n• <code>перевод @user сумма</code> — перевести\n• <code>перевод сумма</code> (ответом) — быстрый перевод\n• <code>топ</code> — топ-10 богачей\n• <code>магазин</code> — магазин\n\n🎲 <b>Игры:</b>\n• <code>кубы @user ставка</code> — дуэль в кости\n• <code>кубы ставка</code> (ответом) — быстрый вызов\n\n💗 <b>Отношения:</b>\n• <code>+любовь @user</code> — предложить отношения\n• <code>все рп</code> — список всех РП-команд\n• <code>поцеловать</code>, <code>обнять</code>, <code>погладить</code>… — РП-команды (+10 Love паре)\n• <code>отн инфа</code> — с кем, сколько дней, уровень и Love (только своё)\n• <code>топ отношений</code> — все пары и их Love (одиночки не показываются)\n• <code>-отны</code> — разорвать отношения (у обоих сгорает статус и Love)\n• одному РП-команда даёт +10 Unlove — награды только тебе\n\n• <code>апка</code> — ссылка и кнопка на приложение AURA GAME\n• <code>тег</code> — проверка бота\n• <code>помощь</code> — эта справка")
+        "📖 <b>СПИСОК КОМАНД БОТА</b>\n━━━━━━━━━━━━━━━━━━━━\n\n🎟️ <b>Промокоды:</b>\n• <code>промо код</code> — активировать промокод\n\n💰 <b>Экономика:</b>\n• <code>карман</code> — твой баланс\n• <code>карман @user</code> — баланс другого\n• <code>перевод @user сумма</code> — перевести\n• <code>перевод сумма</code> (ответом) — быстрый перевод\n• <code>топ</code> — топ-10 богачей\n• <code>магазин</code> — магазин\n\n🎲 <b>Игры:</b>\n• <code>кубы @user ставка</code> — дуэль в кости\n• <code>кубы ставка</code> (ответом) — быстрый вызов\n\n💗 <b>Отношения:</b>\n• <code>+любовь</code> (ответом на сообщение) — предложить отношения\n• <code>все рп</code> — список всех РП-команд\n• <code>поцеловать</code>, <code>обнять</code>, <code>погладить</code>… — РП-команды (+10 Love паре)\n• <code>любовь инфа</code> — с кем, сколько дней, уровень и Love (только своё)\n• <code>топ отношений</code> — все пары и их Love (одиночки не показываются)\n• <code>-любовь</code> — разорвать отношения (у обоих сгорает статус и Love)\n• одному РП-команда даёт +10 Unlove — награды только тебе\n\n🛡️ <b>Модерация чата:</b>\n• <code>!аурапред</code> (ответом или @ник) — предупреждение: 3 из 3 → игнор 5 ч в этом чате\n• <code>!аурапредлист</code> — предупреждения в этом чате\n\n• <code>апка</code> — ссылка и кнопка на приложение AURA GAME\n• <code>тег</code> — проверка бота\n• <code>помощь</code> — эта справка")
     await message.answer(text, parse_mode="HTML")
 
 
@@ -3582,6 +3994,8 @@ async def main():
         logger.info(f"⏳ Кулдаун награды за РП: {format_love_cooldown()}")
     except Exception as exc:  # noqa: BLE001
         logger.warning(f"Кулдаун РП не загрузился: {exc}")
+    # Задача 44: игнор наказанных в чате — до всех хендлеров сообщений.
+    dp.message.outer_middleware(ChatWarnMiddleware())
     # Прогрев aura-api по активности в боте (был и раньше — не теряем).
     dp.update.outer_middleware(WarmApiMiddleware())
     asyncio.create_task(keep_api_warm())

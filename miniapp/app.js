@@ -1100,26 +1100,26 @@ let referralStats = (() => {
 
 // Задача 43: текст «i» собираем из чисел сервера (reward_rules), а не из
 // захардкоженного диапазона. Если правил нет — остаётся статичный текст из HTML.
+// Правила рефералов — ДОСЛОВНО формулировка заказчика (задача 44).
+// Слова «капсулы» здесь быть не должно: речь о НФТ и подарках в профиле.
 function renderReferralRules(rules) {
     const box = document.getElementById('ref-info');
-    if (!box || !rules) return;
-    const rows = [];
-    const add = (label, value) => {
-        if (!(Number(value) > 0)) return;
-        rows.push(`${label} — <b>${formatCoins(Number(value))}</b> коинов`);
-    };
-    add('Обычный друг', rules.base);
-    if (Number(rules.base) > 0) {
-        rows.unshift('Награда приходит, когда приглашённый заходит в приложение.');
-    }
-    box.innerHTML = `<b>За кого сколько платят:</b><br>`
-        + (rows.length ? rows.map(r => `• ${r}`).join('<br>') : 'Награда за друга начисляется на твой баланс автоматически.')
-        + `<br><br>За друга с редкими капсулами платят больше: 2+ капсулы — `
-        + `<b>${formatCoins(Number(rules.nft2) || 0)}</b>, premium с капсулой — `
-        + `<b>${formatCoins(Number(rules.premium) || 0)}</b> коинов.`;
+    if (!box) return;
+    const base = Number((rules && rules.base) || 500);
+    const nft2 = Number((rules && rules.nft2) || 800);
+    const premium = Number((rules && rules.premium) || 2000);
+    box.innerHTML = '<b>За каждого реферала</b><br>'
+        + `Обычного даётся = <b>${formatCoins(base)}</b> коинов<br>`
+        + `Обычный с минимум 2 нфт и подарками в профиле = <b>${formatCoins(nft2)}</b> коинов<br>`
+        + `За премиум с рейтингом и минимум 1 нфт = <b>${formatCoins(premium)}</b> коинов`;
 }
 
 function renderReferralStats() {
+    // Правила видны всегда: цифры приходят из API, но если ответа нет —
+    // показываем базовые 500 / 800 / 2000, чтобы «подробнее» не было пустым.
+    if (document.getElementById('ref-info')) {
+        renderReferralRules((referralStats && referralStats.reward_rules) || null);
+    }
     if (!referralStats) return;
     const countEl = document.getElementById('ref-count');
     const earnedEl = document.getElementById('ref-earned');
@@ -1164,15 +1164,25 @@ async function loadReferralStats() {
 function copyReferralLink() {
     const linkEl = document.getElementById('ref-link');
     const link = linkEl ? linkEl.value : '';
-    if (!link) return;
+    if (!link) {
+        tg.showAlert('Ссылка появится через пару секунд — открой профиль ещё раз.');
+        return;
+    }
     const copy = (text) => {
         try {
             if (navigator.clipboard && navigator.clipboard.writeText) return navigator.clipboard.writeText(text);
         } catch (e) {}
         return Promise.reject(e);
     };
-    copy(link).then(() => tg.showAlert('Ссылка скопирована — отправь её другу'))
-        .catch(() => tg.showAlert(`Скопируй ссылку вручную: ${link}`));
+    // Задача 44: кнопка «Позвать друга» должна ещё и поделиться ссылкой —
+    // так приглашение в один тап, а не «скопируй и вставь сам».
+    const done = () => {
+        try {
+            if (tg && typeof tg.shareUrl === 'function') { tg.shareUrl(link); return; }
+        } catch (e) {}
+        tg.showAlert('Ссылка скопирована — отправь её другу 🎁');
+    };
+    copy(link).then(done).catch(() => tg.showAlert(`Скопируй ссылку вручную: ${link}`));
 }
 
 // ================= ОТНОШЕНИЯ =================
@@ -3547,12 +3557,12 @@ function renderArenaCircle(state) {
 // Задача 37: затухание считаем на каждом кадре (requestAnimationFrame).
 const ARENA_POINTER_SPEED = 900;          // °/с — как UPGRADE_ARROW_SPEED
 const ARENA_POINTER_LAND_MS = 5000;       // длительность финишного доезда
-// Задача 42: прокрут как в апгрейде — 3 секунды РАЗГОН (скорость растёт
-// постепенно), потом 5 секунд ТОРМОЖЕНИЕ, причём на последней секунде стрелка
-// уже еле ползёт. Итого 8 секунд — столько же, сколько отдаёт сервер в
-// `team_roll_duration` для командной арены.
-const ARENA_SPIN_UP_MS = 3000;
-const ARENA_SPIN_DOWN_MS = 5000;
+// Задача 42: прокрут как в апгрейде — РАЗГОН (скорость растёт постепенно),
+// потом ТОРМОЖЕНИЕ, причём на последней секунде стрелка уже еле ползёт.
+// Задача 44: весь бросок сокращён до 5–6 секунд — 2 с разгон + 3.5 с торможение
+// = 5.5 с. Раньше было 8 с, и игроки жаловались, что «слишком долго крутится».
+const ARENA_SPIN_UP_MS = 2000;
+const ARENA_SPIN_DOWN_MS = 3500;
 const ARENA_TEAM_ROLL_MS = ARENA_SPIN_UP_MS + ARENA_SPIN_DOWN_MS;
 // Доля пути за разгон при скорости, растущей как 1 − e^(−3u): площадь под
 // такой кривой на отрезке u∈[0,1].
@@ -3564,6 +3574,8 @@ function arenaNowMs() {
 
 // Путь, который стрелка проходит за 3 секунды разгона (≈1844°, т.е. ~5 оборотов).
 function arenaSpinUpDistance() {
+    // Оборотов должно быть столько же, сколько раньше: короткий бросок не
+    // должен выглядеть «ленивым» — скорость подстраивается под новую длину.
     return ARENA_POINTER_SPEED * (ARENA_SPIN_UP_MS / 1000) * ARENA_SPIN_UP_AREA;
 }
 
@@ -3580,7 +3592,7 @@ const ARENA_WINNER_DELAY_MS = 1200;        // обычная арена: мяч 
 // Задача 43: после остановки стрелки даём ПАУЗУ 1.6 с — игрок должен увидеть,
 // на каком цвете она встала, и только потом выезжает плашка результата.
 // Раньше плашка появлялась почти сразу, и «торможения» никто не замечал.
-const ARENA_WINNER_AFTER_LAND_MS = 1600;
+const ARENA_WINNER_AFTER_LAND_MS = 1100;
 
 function arenaPointerNode() { return document.getElementById('arena-pointer'); }
 
@@ -3835,10 +3847,18 @@ function renderTeamBoards() {
             .filter(p => p.team === team)
             .sort((a, b) => (Number(b.bet) || 0) - (Number(a.bet) || 0));
         const total = banks[team] || 0;
-        const signature = `${team}:${winnerTeam || ''}:` + members.map(p => `${p.id}:${p.bet}`).join(',');
+        // Задача 44: в командной арене детализируем плитку — сколько игроков,
+        // какой общий банк и сколько получит каждый при победе команды.
+        const totalBank = (Number(pool.bank) || 0) || (banks.red + banks.blue);
+        const signature = `${team}:${winnerTeam || ''}:${totalBank}:`
+            + members.map(p => `${p.id}:${p.bet}`).join(',');
         // coinAmount() отдаёт готовый HTML (внутри картинка монеты), поэтому
         // только innerHTML — иначе на плитке видно "<img class=coin-img ...>".
-        if (sumEl) sumEl.innerHTML = coinAmount(total);
+        if (sumEl) {
+            const humans = members.filter(p => !p.is_bot).length;
+            sumEl.innerHTML = `${coinAmount(total)}<span class="team-board-meta">`
+                + `${humans} игр. · ставок ${members.length}</span>`;
+        }
         if (board) board.classList.toggle('win', Boolean(winnerTeam) && winnerTeam === team);
         if (listEl.dataset.signature === signature) return;
         listEl.dataset.signature = signature;
@@ -3854,9 +3874,14 @@ function renderTeamBoards() {
             const row = document.createElement('div');
             row.className = 'arena-team-row' + (String(p.id) === String(user && user.id) ? ' mine' : '');
             const name = escapeHtml(shortName(String(p.name || '?'), 10));
-            const percent = total ? ((Number(p.bet) || 0) / total * 100).toFixed(0) : '0';
-            row.innerHTML = `<span class="row-name"><span title="${escapeHtml(String(p.name || ''))}">${name}</span></span>`
-                + `<span class="row-bet">${coinAmount(p.bet)} · ${percent}%</span>`;
+            const bet = Math.max(0, Number(p.bet) || 0);
+            const percent = total ? (bet / total * 100).toFixed(0) : '0';
+            // Потенциальная выплата: победившая команда забирает общий банк,
+            // внутри команды он делится пропорционально ставкам.
+            const payout = total > 0 ? Math.round(totalBank * bet / total) : 0;
+            row.innerHTML = `<span class="row-name" title="${escapeHtml(String(p.name || ''))}">${name}</span>`
+                + `<span class="row-bet">${coinAmount(bet)} · ${percent}%</span>`
+                + `<span class="row-payout" title="Если команда победит">≈${coinAmount(payout)}</span>`;
             listEl.appendChild(row);
         });
     });

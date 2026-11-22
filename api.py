@@ -85,7 +85,7 @@ async def _http_json(url, method: str = "GET", params=None, payload=None, timeou
 
 # Номер сборки: по нему из /api/health видно, что на сервисе НЕ старый код.
 # Если после деплоя здесь прежнее значение — Render ещё не перезапустился.
-API_BUILD = "2026-10-27-task43-info-arenas"
+API_BUILD = "2026-10-27-task44-warns-open-app"
 
 # Момент старта процесса. По нему видно, что сервис только что «проснулся»:
 # Render на бесплатном тарифе усыпляет Web Service через 15 минут без входящих
@@ -633,7 +633,10 @@ def _env_flag(name: str, default: bool = False) -> bool:
     return default
 
 
-ADMIN_ONLY_APP = _env_flag("ADMIN_ONLY_APP", True)
+# Задача 44 (п.14): игра ОТКРЫТА ДЛЯ ВСЕХ. Раньше по умолчанию стоял True и
+# Mini App открывался только админам бота — обычный игрок видел «только для
+# админов». Закрыть снова можно переменной Render: ADMIN_ONLY_APP=1.
+ADMIN_ONLY_APP = _env_flag("ADMIN_ONLY_APP", False)
 ADMIN_ONLY_MESSAGE = ("🛠️ Идут технические работы. Пока доступ к игре есть "
                       "только у администраторов — скоро откроем всем.")
 
@@ -915,11 +918,12 @@ UPGRADE_SOURCES = ("coin",) + tuple(UPGRADE_ITEM_PRICES)
 UPGRADE_TARGETS = ("coin",) + tuple(UPGRADE_ITEM_PRICES)
 # В апгрейде пока играют только админы — шанс честный. Когда откроем для всех,
 # реальный шанс = визуальный / этот делитель (то есть x2 = 25%).
-UPGRADE_NON_ADMIN_DIVIDER = 2
-# Апгрейд пока закрыт для всех, кроме ADMIN_IDS (задача 21): техработы сняты
-# и играют все, но апгрейд — отдельная проверка, от MAINTENANCE_MODE не зависит.
-# Когда решишь открыть апгрейд всем — поставь здесь False.
-UPGRADE_ADMIN_ONLY = True
+UPGRADE_NON_ADMIN_DIVIDER = 1
+# Апгрейд закрывался для всех, кроме ADMIN_IDS (задача 21). Задача 44 (п.14):
+# игра открыта ДЛЯ ВСЕХ, апгрейд больше не спрятан. Шанс при этом честный для
+# всех — делитель ниже выключен, иначе новичок играл бы вдвое хуже админа.
+# Закрыть снова: UPGRADE_ADMIN_ONLY=1 в Render.
+UPGRADE_ADMIN_ONLY = _env_flag("UPGRADE_ADMIN_ONLY", False)
 UPGRADE_ADMIN_ONLY_MESSAGE = "Апгрейд доступен только администраторам"
 
 # ДОМ-ЭДЖ ПО БАЛАНСУ (задача 18): с баланса 1000 коинов и выше играем чаще
@@ -1667,17 +1671,21 @@ HOCKEY_WAIT_DURATION = 15.0
 HOCKEY_FINISH_HOLD = 9.0
 HOCKEY_ROUND_PERIOD = HOCKEY_WAIT_DURATION + HOCKEY_ROLL_DURATION + HOCKEY_FINISH_HOLD
 # Задача 42: у КОМАНДНОЙ арены свой тайминг — это отдельная игра, а не «второй
-# вид» одиночной. Бросок = разгон стрелки 3 с + торможение 5 с = 8 с, ровно как
-# анимация апгрейда (arenaLandPointer в miniapp/app.js).
+# вид» одиночной. Бросок стрелки синхронизирован с клиентом (arenaLandPointer
+# в miniapp/app.js); задача 44 сократила его с 8 с до 5.5 с.
 HOCKEY_TEAM_WAIT_DURATION = 15.0     # набор ставок в командной — свой, независимый
-HOCKEY_TEAM_SPIN_UP = 3.0
-HOCKEY_TEAM_SPIN_DOWN = 5.0
+# Задача 44: бросок сокращён до 5.5 с (2 с разгон + 3.5 с торможение) — ровно
+# столько же длится анимация стрелки в miniapp/app.js (ARENA_SPIN_UP_MS /
+# ARENA_SPIN_DOWN_MS). Сервер и клиент обязаны совпадать, иначе плашка
+# победителя выезжает до остановки стрелки.
+HOCKEY_TEAM_SPIN_UP = 2.0
+HOCKEY_TEAM_SPIN_DOWN = 3.5
 HOCKEY_TEAM_ROLL_DURATION = HOCKEY_TEAM_SPIN_UP + HOCKEY_TEAM_SPIN_DOWN
 HOCKEY_TEAM_FINISH_HOLD = 6.0
 
 
 def _round_roll_duration(arena: str) -> float:
-    """Сколько крутится конкретная арена: одиночная мяч 9 с, командная стрелка 8 с."""
+    """Сколько крутится конкретная арена: одиночная мяч 9 с, командная стрелка 5.5 с."""
     return HOCKEY_TEAM_ROLL_DURATION if arena == "team" else HOCKEY_ROLL_DURATION
 
 
@@ -4460,20 +4468,32 @@ def _subscription_claimed(user_id) -> Optional[bool]:
     применена, — иначе приложение продолжало бы показывать выполненное задание.
     """
     uid = int(user_id)
+    saw_table = False
     try:
-        res = (supabase.table(SUBSCRIPTIONS_TABLE).select("user_id, bonus_claimed")
+        # Только user_id: если колонки bonus_claimed в старой схеме нет,
+        # select по ней падал и отметка «получено» терялась.
+        res = (supabase.table(SUBSCRIPTIONS_TABLE).select("user_id")
                .eq("user_id", uid).limit(1).execute())
+        saw_table = True
         if res.data:
             return True
     except Exception as exc:  # noqa: BLE001
         logger.warning("subscriptions_history недоступна: %s", exc)
+    # Задача 44: ВСЕГДА проверяем запасную отметку в game_settings, а не только
+    # при ошибке таблицы. Бот пишет её, если insert в subscriptions_history не
+    # прошёл (RLS/нет колонки) — из-за этого плашка «+200 коинов» появлялась
+    # снова при повторном входе в аппку.
     try:
         res = (supabase.table("game_settings").select("value")
                .eq("key", f"sub_bonus_{uid}").limit(1).execute())
-        return bool(res.data and str(res.data[0].get("value") or "").strip())
+        if res.data and str(res.data[0].get("value") or "").strip():
+            return True
+        if saw_table:
+            return False
+        return None
     except Exception as exc:  # noqa: BLE001
         logger.debug("game_settings недоступна для отметки бонуса: %s", exc)
-        return None
+        return None if not saw_table else False
 
 
 def _channel_status_payload(uid) -> dict:
@@ -4570,18 +4590,31 @@ _PASSIVE_WARNED = {"once": False}
 
 
 def _passive_last_at(user_id):
-    """Момент последнего начисления. None — не начисляли, 'error' — нет таблицы."""
+    """Момент последнего начисления. None — не начисляли, 'error' — нет таблицы.
+
+    Задача 44: при недоступной базе возвращаем отметку из ПАМЯТИ. Раньше всегда
+    возвращалось 'error', а вызывающий код читал память только если она уже
+    была — в результате на КАЖДОМ заходе `last` считался пустым, отметка
+    ставилась на «сейчас», и накопление никогда не начиналось (игрок видел
+    «Накоплено 0», хотя капсулы есть). Теперь память — полноценный источник.
+    """
+    uid = int(user_id)
     try:
         res = (supabase.table(PASSIVE_INCOME_TABLE).select("last_at")
-               .eq("user_id", int(user_id)).limit(1).execute())
+               .eq("user_id", uid).limit(1).execute())
+        if res.data:
+            parsed = _parse_timestamp(res.data[0].get("last_at"))
+            if parsed:
+                _PASSIVE_MEMORY.setdefault(uid, float(parsed))
+                return float(parsed)
+            return None
     except Exception as exc:  # noqa: BLE001
         if not _PASSIVE_WARNED["once"]:
             logger.warning("passive_income недоступна (работаю на памяти): %s", exc)
             _PASSIVE_WARNED["once"] = True
-        return "error"
-    if not res.data:
-        return None
-    return _parse_timestamp(res.data[0].get("last_at"))
+    # База пуста ИЛИ недоступна — но если процесс уже видел начисление, время
+    # идёт от него. Это и есть «копить, пока игрок офлайн».
+    return _PASSIVE_MEMORY.get(uid, "error")
 
 
 def _passive_touch(user_id, stamp: float) -> bool:
@@ -4797,7 +4830,8 @@ async def passive_income(data: PassiveIncomeRequest):
     last = _passive_last_at(uid)
     degraded = last == "error"
     if degraded:
-        # Таблицы нет — считаем по отметке в памяти, а не показываем ошибку.
+        # Таблицы нет И процесс ещё не видел начислений — считаем от метки в
+        # памяти; если её тоже нет, начисление просто стартует сейчас.
         last = _PASSIVE_MEMORY.get(int(uid))
     if last is None:
         _passive_touch(uid, now)
@@ -4825,6 +4859,9 @@ async def passive_income(data: PassiveIncomeRequest):
                                   f"{PASSIVE_NIGHT_END_HOUR:02d}:00 МСК"}
     if accrued < 1 or rate <= 0:
         # Ничего не выдаём, отметку НЕ двигаем: копим дальше (в том числе мелочь).
+        # Задача 44: отметку кладём в память, чтобы следующий заход (даже при
+        # недоступной таблице) считал накопление от неё, а не начинал с нуля.
+        _PASSIVE_MEMORY[int(uid)] = float(last)
         pending = max(0.0, entitled)
         return {"ok": True, "accrued": 0, "rate": rate, "hours": round(hours, 3),
                 "real_hours": round(real_hours, 3),

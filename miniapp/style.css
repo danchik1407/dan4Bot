@@ -1100,3 +1100,73 @@ body.maintenance { overflow: hidden; }
     filter: drop-shadow(0 2px 6px rgba(0, 0, 0, 0.45));
     pointer-events: none;
 }
+
+/* ============================================================================
+   ЗАДАЧА 44. Рефералы: карточка должна «продавать» себя.
+   Золотая рамка + мягкий блеск по краю + крупная кнопка приглашения.
+   ========================================================================== */
+.ref-reward-card {
+    position: relative;
+    border: 1px solid rgba(255, 196, 84, 0.55) !important;
+    background: linear-gradient(160deg, rgba(255, 186, 61, 0.16), rgba(20, 14, 4, 0.35) 55%, rgba(255, 138, 61, 0.12)) !important;
+    box-shadow: 0 0 0 1px rgba(255, 214, 128, 0.16) inset, 0 8px 24px rgba(255, 168, 40, 0.16);
+    overflow: hidden;
+}
+.ref-reward-card::after {
+    content: '';
+    position: absolute;
+    top: -60%;
+    left: -30%;
+    width: 45%;
+    height: 220%;
+    background: linear-gradient(100deg, transparent, rgba(255, 255, 255, 0.16), transparent);
+    transform: rotate(12deg);
+    animation: refShine 4.5s ease-in-out infinite;
+    pointer-events: none;
+}
+@keyframes refShine {
+    0%, 55% { left: -40%; opacity: 0; }
+    70% { opacity: 1; }
+    100% { left: 130%; opacity: 0; }
+}
+.ref-reward-card .extra-title { color: #ffd98a; }
+.ref-invite-btn {
+    width: 100%;
+    margin-top: 8px;
+    padding: 11px 12px;
+    border: none;
+    border-radius: 12px;
+    cursor: pointer;
+    font-size: 13px;
+    font-weight: 900;
+    letter-spacing: 0.2px;
+    color: #2a1a03;
+    background: linear-gradient(180deg, #ffd469, #ffab2e);
+    box-shadow: 0 6px 16px rgba(255, 168, 40, 0.35), inset 0 0 0 1px rgba(255, 255, 255, 0.5);
+    transition: transform 0.12s ease, box-shadow 0.12s ease;
+}
+.ref-invite-btn:active { transform: scale(0.985); box-shadow: 0 3px 10px rgba(255, 168, 40, 0.3); }
+
+/* ЗАДАЧА 44. Командная арена: детализация плиток (банк команды, выплата). */
+.arena-team-head .arena-team-sum {
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 0;
+    line-height: 1.15;
+}
+.arena-team-sum .team-board-meta {
+    display: block;
+    font-size: 9px;
+    font-weight: 700;
+    color: #7f8794;
+    letter-spacing: 0.2px;
+}
+.arena-team-row .row-payout {
+    margin-left: auto;
+    font-size: 10px;
+    font-weight: 800;
+    color: #ffd166;
+    white-space: nowrap;
+    flex: 0 0 auto;
+}
+.arena-team-row .row-bet { margin-left: 4px; }
