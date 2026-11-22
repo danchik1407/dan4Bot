@@ -1388,14 +1388,13 @@ function renderLoveBadge() {
     if (freeBadge) freeBadge.hidden = inRelationship;
     if (!inRelationship) {
         if (freeText) freeText.textContent = freeLoveLabel();
-        // Задача 30: у одиночки своя валюта (Unlove). Показываем её только если
-        // она уже накоплена — на нуле плашка остаётся короткой, как раньше.
+        // Задача 63: в плашке оставляем ТОЛЬКО уровень — деньги (Unlove) из неё
+        // убраны по просьбе заказчика: сумма в плашке дублировала баланс и
+        // путала («ур. 1 · 10 Unlove» рядом с коинами). Счёт игрока виден в
+        // карточке отношений и в «любовь инфа».
         if (freeStageEl) {
-            const unlove = Number(loveState && loveState.unlove) || 0;
             const level = Number(loveState && loveState.solo_level) || 1;
-            freeStageEl.textContent = unlove > 0
-                ? ` · ур. ${level} · ${formatCoins(unlove)} Unlove`
-                : '';
+            freeStageEl.textContent = ` · ур. ${level}`;
         }
         return;
     }
