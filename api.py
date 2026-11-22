@@ -6,7 +6,7 @@ from pydantic import BaseModel
 import asyncio
 import uuid
 import logging
-import os, hashlib, hmac, json, time, random, secrets, uvicorn, datetime, math, urllib.request, urllib.parse
+import threading, os, hashlib, hmac, json, time, random, secrets, uvicorn, datetime, math, urllib.request, urllib.parse
 from urllib.parse import parse_qsl
 from dotenv import load_dotenv
 from supabase import create_client, Client
@@ -85,7 +85,7 @@ async def _http_json(url, method: str = "GET", params=None, payload=None, timeou
 
 # Номер сборки: по нему из /api/health видно, что на сервисе НЕ старый код.
 # Если после деплоя здесь прежнее значение — Render ещё не перезапустился.
-API_BUILD = "2026-10-27-task45-appka-upgrade-payout"
+API_BUILD = "2026-10-27-task47-team-arena-payout"
 
 # Момент старта процесса. По нему видно, что сервис только что «проснулся»:
 # Render на бесплатном тарифе усыпляет Web Service через 15 минут без входящих
@@ -1593,7 +1593,12 @@ def _new_arena_state(mode: str = "both", arena: str = "normal") -> dict:
         "status": "waiting", "timer": 15, "bank": 0, "players": [], "winner": None,
         "last_update": time.time(), "last_bot_added": time.time(),
         "target_bots": _random_arena_bot_count(arena), "is_paid": False,
-        "payout_attempt_at": 0, "round_id": str(int(time.time())), "whales_added": 0,
+        "payout_attempt_at": 0,
+        # Задача 47: свой слот раунда уже на старте — раньше оба котла
+        # получали ОДИН round_id (одна и та же секунда), и клиент мог
+        # перепутать, чей это раунд.
+        "round_id": str(int(time.time()) * 10 + (0 if arena == "normal" else 7)),
+        "whales_added": 0,
         "roll_data": None, "rolling_started_at": None, "whale_decided": False,
         "whale_join": False, "whale_trigger_at": None, "whale_arena": "normal",
         "mode": "both",
@@ -1610,7 +1615,7 @@ def _new_arena_state(mode: str = "both", arena: str = "normal") -> dict:
 # отдельная игра со своим таймингом (разгон 3 с + торможение 5 с) и своим
 # розыгрышем. Теперь их можно смотреть и ставить в любую независимо, а раунды
 # не совпадают по времени.
-ARENAS: dict = {"normal": _new_arena_state(), "team": _new_arena_state()}
+ARENAS: dict = {"normal": _new_arena_state(arena="normal"), "team": _new_arena_state(arena="team")}
 
 
 def _arena_state(arena: str = "normal") -> dict:
@@ -1976,41 +1981,451 @@ def _hockey_payout_plan() -> list:
     return _arena_payout_plan("normal") + _arena_payout_plan("team")
 
 
-def _payout_arena_winner(arena: str):
-    """Выплатить банк конкретного котла, повторяя при сбоях базы."""
+ARENA_PAYOUTS_TABLE = "arena_payouts"
+ARENA_PAYOUT_RPC = "arena_payout_apply"
+PAYOUT_MAX_ATTEMPTS = 60          # ~3 минуты повторов; деньги при этом не теряются
+PAYOUT_RETRY_SECONDS = 3.0
+# Что реально доступно в базе: журнал выплат и атомарная функция. Определяем
+# один раз лениво, чтобы игра работала и до применения миграции.
+_ARENA_BACKEND = {"checked": False, "ledger": False, "rpc": False}
+
+
+def _arena_payout_backend() -> dict:
+    global _ARENA_BACKEND
+    if _ARENA_BACKEND["checked"]:
+        return _ARENA_BACKEND
+    ledger = False
+    rpc_ok = False
+    try:
+        supabase.table(ARENA_PAYOUTS_TABLE).select("arena").limit(1).execute()
+        ledger = True
+    except Exception as exc:  # noqa: BLE001 — таблицы может ещё не быть
+        logger.info("Арена: журнал %s недоступен (%s) — выплаты пойдут прямым путём",
+                    ARENA_PAYOUTS_TABLE, exc)
+    if ledger:
+        try:
+            # amount=0 — безопасная проба: функция сразу возвращает false и
+            # ничего не пишет.
+            supabase.rpc(ARENA_PAYOUT_RPC, {
+                "p_arena": "_probe", "p_round_id": "_probe",
+                "p_user_id": 0, "p_amount": 0}).execute()
+            rpc_ok = True
+        except Exception as exc:  # noqa: BLE001
+            logger.info("Арена: функция %s недоступна (%s) — атомарность через журнал",
+                        ARENA_PAYOUT_RPC, exc)
+    _ARENA_BACKEND = {"checked": True, "ledger": ledger, "rpc": rpc_ok}
+    return _ARENA_BACKEND
+
+
+def _ledger_row_status(arena: str, round_id: str, user_id: int):
+    """Статус строки журнала: 'pending' | 'paid' | None (строки нет) | '?' (нет таблицы)."""
+    try:
+        rows = (supabase.table(ARENA_PAYOUTS_TABLE)
+                .select("status")
+                .eq("arena", arena).eq("round_id", round_id).eq("user_id", user_id)
+                .limit(1).execute().data) or []
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("arena_payouts: чтение не удалось: %s", exc)
+        return "?"
+    return (rows[0].get("status") or "pending") if rows else None
+
+
+def _ledger_add_pending(entry: dict) -> bool:
+    """Записать в журнал «должны столько» ДО начисления денег.
+
+    insert (а не upsert) — существующую строку нельзя сбросить из paid в
+    pending, иначе после рестарта можно было бы заплатить дважды.
+    """
+    payload = {
+        "arena": str(entry["arena"]),
+        "round_id": str(entry["round_id"]),
+        "user_id": int(entry["user_id"]),
+        "amount": int(entry["amount"]),
+        "status": "pending",
+        "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    }
+    try:
+        supabase.table(ARENA_PAYOUTS_TABLE).insert(payload).execute()
+        return True
+    except Exception as exc:  # noqa: BLE001 — дубль ключа тоже сюда попадает
+        logger.debug("arena_payouts: строка %s/%s/%s не создана: %s",
+                     payload["arena"], payload["round_id"], payload["user_id"], exc)
+        return _ledger_row_status(payload["arena"], payload["round_id"],
+                                  payload["user_id"]) is not None
+
+
+def _ledger_mark_paid(entry: dict) -> None:
+    try:
+        (supabase.table(ARENA_PAYOUTS_TABLE)
+         .update({"status": "paid", "paid_at": datetime.datetime.now(datetime.timezone.utc).isoformat()})
+         .eq("arena", str(entry["arena"])).eq("round_id", str(entry["round_id"]))
+         .eq("user_id", int(entry["user_id"])).execute())
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("arena_payouts: статус не обновился: %s", exc)
+
+
+def _credit_arena_payout(entry: dict) -> str:
+    """Начислить один выигрыш. Возвращает 'paid' | 'duplicate' | 'error'.
+
+    'duplicate' — деньги уже начислены этим же раундом (повторная попытка или
+    рестарт), второй раз платить нельзя.
+    """
+    arena = str(entry["arena"])
+    round_id = str(entry["round_id"])
+    uid = int(entry["user_id"])
+    amount = int(entry["amount"])
+    backend = _arena_payout_backend()
+
+    if backend["ledger"]:
+        status = _ledger_row_status(arena, round_id, uid)
+        if status == "paid":
+            return "duplicate"
+        if status is None:
+            if not _ledger_add_pending(entry):
+                raise RuntimeError("не удалось записать выплату в журнал arena_payouts")
+        if backend["rpc"]:
+            # Одна транзакция «отметить paid + начислить монеты».
+            applied = supabase.rpc(ARENA_PAYOUT_RPC, {
+                "p_arena": arena, "p_round_id": round_id,
+                "p_user_id": uid, "p_amount": amount}).execute().data
+            if applied:
+                return "paid"
+            # false: строку уже перевели в paid ранее → задвоения нет.
+            return "duplicate"
+        # Журнал есть, функции нет — начисляем и помечаем вручную.
+        _direct_arena_credit(uid, amount)
+        _ledger_mark_paid(entry)
+        return "paid"
+
+    _direct_arena_credit(uid, amount)
+    return "paid"
+
+
+def _direct_arena_credit(user_id: int, amount: int) -> None:
+    """Старый путь выплаты: прочитать баланс, прибавить, записать."""
+    res = supabase.table("users").select("coins").eq("user_id", user_id).execute()
+    if not res.data:
+        raise RuntimeError(f"Победитель Арены user_id={user_id} не найден в users")
+    new_coins = int(res.data[0].get("coins", 0)) + int(amount)
+    updated = supabase.table("users").update({"coins": new_coins}).eq(
+        "user_id", user_id).select("user_id").execute()
+    if not updated.data:
+        raise RuntimeError(f"Supabase не подтвердил выплату user_id={user_id}")
+
+
+ARENA_ROUNDS_TABLE = "arena_rounds"
+ARENA_SNAPSHOT_SECONDS = 2.0
+_ARENA_SNAPSHOT = {"checked": False, "ok": False, "at": 0.0}
+
+
+def _arena_rounds_available() -> bool:
+    """Есть ли в базе таблица снимков раундов (миграция 20261127000000)."""
+    if _ARENA_SNAPSHOT["checked"]:
+        return _ARENA_SNAPSHOT["ok"]
+    try:
+        supabase.table(ARENA_ROUNDS_TABLE).select("arena").limit(1).execute()
+        ok = True
+    except Exception as exc:  # noqa: BLE001 — без таблицы игра работает как раньше
+        logger.info("Арена: таблица %s недоступна (%s) — раунды только в памяти",
+                    ARENA_ROUNDS_TABLE, exc)
+        ok = False
+    _ARENA_SNAPSHOT.update({"checked": True, "ok": ok})
+    return ok
+
+
+def _arena_snapshot_payload(arena: str) -> dict:
+    state = _arena_state(arena)
+    # Траекторию мяча (сотни точек) в снимок НЕ кладём: для доигрывания нужен
+    # только final_x/final_y, а jsonb на 2 записи в секунду раздувать незачем.
+    roll_data = state.get("roll_data") or None
+    if roll_data:
+        roll_data = {k: v for k, v in roll_data.items() if k != "path"}
+    return {
+        "status": state.get("status"),
+        "round_id": str(state.get("round_id")),
+        "bank": int(state.get("bank") or 0),
+        "winner": state.get("winner"),
+        "winner_team": state.get("winner_team"),
+        "roll_data": roll_data,
+        "rolling_started_at": state.get("rolling_started_at"),
+        "last_update": state.get("last_update"),
+        "is_paid": bool(state.get("is_paid")),
+        "payouts": state.get("payouts") or [],
+        "paid_users": state.get("paid_users") or [],
+        "players": [dict(player) for player in _arena_players(arena)],
+        "saved_at": time.time(),
+    }
+
+
+def _save_arena_snapshot(arena: str) -> None:
+    """Сохранить снимок раунда. Ошибки не мешают игре."""
+    if not _arena_rounds_available():
+        return
+    payload = _arena_snapshot_payload(arena)
+    try:
+        supabase.table(ARENA_ROUNDS_TABLE).upsert({
+            "arena": arena, "round_id": payload["round_id"], "state": payload,
+            "updated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        }, on_conflict="arena").execute()
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("Арена %s: снимок не сохранился: %s", arena, exc)
+
+
+def _save_arena_snapshots(force: bool = False) -> None:
+    now = time.time()
+    if not force and now - float(_ARENA_SNAPSHOT.get("at") or 0) < ARENA_SNAPSHOT_SECONDS:
+        return
+    _ARENA_SNAPSHOT["at"] = now
+    for arena in ARENA_VIEWS:
+        _save_arena_snapshot(arena)
+
+
+def _restore_arena_rounds() -> dict:
+    """Поднять раунды из базы после перезапуска сервиса.
+
+    Возвращает {'resumed': [...], 'refunded': [...]} — что доиграли и где
+    пришлось вернуть ставки (исход неизвестен, деньги игрока не должны сгорать).
+    """
+    result = {"resumed": [], "refunded": []}
+    if not _arena_rounds_available():
+        return result
+    try:
+        rows = supabase.table(ARENA_ROUNDS_TABLE).select("*").execute().data or []
+    except Exception as exc:  # noqa: BLE001
+        logger.info("Арена: снимки раундов не прочитались: %s", exc)
+        return result
+
+    for row in rows:
+        arena = str(row.get("arena") or "")
+        if arena not in ARENA_VIEWS:
+            continue
+        saved = row.get("state") or {}
+        if not isinstance(saved, dict):
+            continue
+        restored = _new_arena_state(arena=arena)
+        restored.update({key: value for key, value in saved.items()
+                         if key in restored and key not in {"status"}})
+        restored["status"] = "waiting"
+        restored["timer"] = 0
+        restored["payout_status"] = "none"
+        restored["payout_running"] = False
+        restored["payout_attempts"] = 0
+        restored["payout_attempt_at"] = 0
+        restored["last_update"] = time.time()
+        restored["last_bot_added"] = time.time()
+        ARENAS[arena] = restored
+
+        players = restored.get("players") or []
+        humans = [p for p in players if not p.get("is_bot")]
+        if not humans:
+            continue                       # ставок людей не было — нечего спасать
+        if saved.get("is_paid"):
+            continue                       # раунд уже был закрыт по деньгам
+        if saved.get("status") == "rolling" and saved.get("roll_data"):
+            # Исход уже определён сервером: доигрываем и платим по-настоящему.
+            restored["status"] = "rolling"
+            restored["last_update"] = float(saved.get("last_update") or (time.time() - 60))
+            restored["rolling_started_at"] = saved.get("rolling_started_at")
+            result["resumed"].append({"arena": arena, "round_id": saved.get("round_id"),
+                                      "players": len(humans)})
+            logger.info("Арена %s: раунд %s доигрывается после рестарта (%s игроков)",
+                        arena, saved.get("round_id"), len(humans))
+        else:
+            # Ставки собраны, но победитель не определён (рестарт во время
+            # набора или финиша). Возвращаем ставки: деньги игрока не сгорают.
+            for player in humans:
+                try:
+                    amount = int(player.get("bet") or 0)
+                    uid = int(player.get("id"))
+                except (TypeError, ValueError):
+                    continue
+                if amount <= 0:
+                    continue
+                refund = {"arena": arena, "round_id": str(saved.get("round_id") or ""),
+                          "user_id": uid, "amount": amount, "kind": "refund",
+                          "status": "pending"}
+                try:
+                    _credit_arena_payout(refund)
+                    result["refunded"].append({"arena": arena, "user_id": uid, "amount": amount})
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("Арена %s: возврат ставки %s не прошёл: %s", arena, uid, exc)
+            restored["players"] = []
+            restored["bank"] = 0
+            restored["payouts"] = []
+            restored["paid_users"] = []
+            restored["is_paid"] = True
+            restored["payout_status"] = "refunded"
+            if result["refunded"]:
+                logger.info("Арена %s: после рестарта возвращены ставки (%s)",
+                            arena, len(result["refunded"]))
+    _save_arena_snapshots(force=True)
+    return result
+
+
+# Очередь выплат: долг, который ещё не подтверждён базой. Живёт в памяти, но
+# каждая строка ДО начисления попадает в журнал arena_payouts, поэтому даже
+# рестарт сервиса не теряет деньги (см. _resume_pending_payouts).
+PENDING_PAYOUTS: dict = {}
+PENDING_PAYOUTS_LOCK = threading.Lock()
+_DRAIN_LOCK = threading.Lock()
+_LAST_PAYOUT_DRAIN = {"at": 0.0}
+PENDING_PAYOUTS_MAX_ATTEMPTS = 1000     # ~50 минут повторов; журнал в базе остаётся
+
+
+def _pending_key(arena: str, round_id: str, user_id) -> str:
+    return f"{arena}:{round_id}:{user_id}"
+
+
+def _queue_payout_entries(arena: str, round_id: str, plan, paid_keys) -> None:
+    """Положить неподтверждённые выплаты раунда в очередь на повтор."""
+    with PENDING_PAYOUTS_LOCK:
+        for entry in plan:
+            key = _pending_key(arena, round_id, entry["user_id"])
+            if key in paid_keys or key in PENDING_PAYOUTS:
+                continue
+            PENDING_PAYOUTS[key] = {
+                "arena": arena, "round_id": round_id,
+                "user_id": int(entry["user_id"]), "amount": int(entry["amount"]),
+                "attempts": 0, "last_error": "",
+            }
+
+
+def _sync_arena_paid_flag(arena: str) -> None:
+    """Раунд закрыт только когда в очереди не осталось ни одной его выплаты."""
+    state = _arena_state(arena)
+    round_id = str(state.get("round_id"))
+    with PENDING_PAYOUTS_LOCK:
+        left = [key for key in PENDING_PAYOUTS
+                if key.startswith(f"{arena}:{round_id}:")]
+    if left:
+        state["payout_status"] = "pending"
+        return
+    if not state.get("is_paid"):
+        state["is_paid"] = True
+        state["payout_status"] = "paid"
+        state["payout_error"] = ""
+        # Задача 47: закрытый раунд фиксируем в базе — после рестарта он уже
+        # не будет ни доигран, ни возвращён повторно.
+        _save_arena_snapshot(arena)
+        return
+    _save_arena_snapshot(arena)
+
+
+def _drain_pending_payouts() -> int:
+    """Повторить все долги по аренам. Возвращает число закрытых выплат.
+
+    Дренаж всегда один за раз (_DRAIN_LOCK): иначе две параллельные попытки
+    могли бы начислить одно и то же дважды на «прямом» пути без журнала.
+    """
+    if not _DRAIN_LOCK.acquire(blocking=False):
+        return 0
+    try:
+        return _drain_pending_payouts_locked()
+    finally:
+        _DRAIN_LOCK.release()
+
+
+def _drain_pending_payouts_locked() -> int:
+    with PENDING_PAYOUTS_LOCK:
+        entries = list(PENDING_PAYOUTS.items())
+    closed = 0
+    for key, entry in entries:
+        try:
+            result = _credit_arena_payout(entry)
+        except Exception as exc:  # noqa: BLE001 — долг остаётся в очереди
+            with PENDING_PAYOUTS_LOCK:
+                live = PENDING_PAYOUTS.get(key)
+                if live is None:
+                    continue
+                live["attempts"] += 1
+                live["last_error"] = f"{type(exc).__name__}: {exc}"[:200]
+                if live["attempts"] >= PENDING_PAYOUTS_MAX_ATTEMPTS:
+                    PENDING_PAYOUTS.pop(key, None)
+                    logger.error("Арена: выплата %s не прошла после %s попыток: %s",
+                                 key, live["attempts"], exc)
+            continue
+        if result in ("paid", "duplicate"):
+            with PENDING_PAYOUTS_LOCK:
+                PENDING_PAYOUTS.pop(key, None)
+            closed += 1
+            _sync_arena_paid_flag(entry["arena"])
+    return closed
+
+
+def _payout_arena_winner(arena: str) -> bool:
+    """Выплатить банк конкретного котла. True — выплата закрыта (или платить некому).
+
+    Задача 47: раньше выплата была ОДНОЙ попыткой прямо в запросе, и любая
+    осечка базы («сбрасывается и баланс не отдаёт») означала потерянные деньги.
+    Теперь:
+      * каждая строка плана пишется в журнал arena_payouts ДО начисления;
+      * начисление атомарно (функция arena_payout_apply) и идемпотентно —
+        повтор не может задвоить выигрыш;
+      * неподтверждённые строки лежат в очереди PENDING_PAYOUTS и повторяются
+        каждые 3 с, в том числе после рестарта сервиса;
+      * новый раунд не начинается, пока старый не закрыт по деньгам.
+    """
     state = _arena_state(arena)
     if state["is_paid"]:
-        return
+        _sync_arena_paid_flag(arena)   # очередь могла ещё не опустеть
+        return state["is_paid"]
     plan = _arena_payout_plan(arena)
+    round_id = str(state.get("round_id"))
     if not plan:
         # Победили боты или банка нет — платить некому, раунд считаем закрытым.
         state["is_paid"] = True
-        return
+        state["payout_status"] = "empty"
+        state["payout_error"] = ""
+        return True
 
-    now = time.time()
-    if now - state.get("payout_attempt_at", 0) < 2:
-        return
-    state["payout_attempt_at"] = now
+    paid_keys = set(state.get("paid_users") or [])
+    _queue_payout_entries(arena, round_id, plan, paid_keys)
+    state["payout_status"] = "pending"
+    _drain_pending_payouts()
+    if not state["is_paid"]:
+        with PENDING_PAYOUTS_LOCK:
+            left = [e for key, e in PENDING_PAYOUTS.items()
+                    if key.startswith(f"{arena}:{round_id}:")]
+        if left:
+            state["payout_error"] = left[0].get("last_error") or state.get("payout_error", "")
+    return bool(state["is_paid"])
 
+
+def _resume_pending_payouts() -> int:
+    """Подобрать долги из журнала arena_payouts (после рестарта и на всякий случай).
+
+    В памяти раундов уже может не быть, а журнал знает, кому и сколько остались
+    должны. Строки попадают в общую очередь и выплачиваются идемпотентно:
+    arena_payout_apply переводит строку в paid и начисляет ровно один раз.
+    """
+    backend = _arena_payout_backend()
+    if not backend["ledger"]:
+        return 0
     try:
-        for entry in plan:
-            uid = entry["user_id"]
-            key = f"{entry.get('arena', arena)}:{uid}:{state.get('round_id')}"
-            if key in (state.get("paid_users") or []):
+        rows = (supabase.table(ARENA_PAYOUTS_TABLE).select("*")
+                .eq("status", "pending").order("created_at").limit(200).execute().data) or []
+    except Exception as exc:  # noqa: BLE001
+        logger.info("arena_payouts недоступна, доплат нет: %s", exc)
+        return 0
+    with PENDING_PAYOUTS_LOCK:
+        for row in rows:
+            try:
+                uid = int(row.get("user_id"))
+                amount = int(row.get("amount") or 0)
+            except (TypeError, ValueError):
                 continue
-            res = supabase.table("users").select("coins").eq("user_id", uid).execute()
-            if not res.data:
-                raise RuntimeError(f"Победитель Арены user_id={uid} не найден в users")
-            new_coins = int(res.data[0].get("coins", 0)) + int(entry["amount"])
-            updated = supabase.table("users").update({"coins": new_coins}).eq(
-                "user_id", uid).select("user_id").execute()
-            if not updated.data:
-                raise RuntimeError(f"Supabase не подтвердил выплату user_id={uid}")
-            state.setdefault("paid_users", []).append(key)
-        state["is_paid"] = True
-    except Exception as e:
-        # Keep the round unsettled so the background worker can retry instead of losing the payout.
-        print(f"❌ Ошибка выплаты Арены ({arena}): {e}")
+            if amount <= 0:
+                continue
+            key = _pending_key(str(row.get("arena") or ""), str(row.get("round_id") or ""), uid)
+            PENDING_PAYOUTS.setdefault(key, {
+                "arena": str(row.get("arena") or ""),
+                "round_id": str(row.get("round_id") or ""),
+                "user_id": uid, "amount": amount,
+                "attempts": 0, "last_error": "",
+            })
+    if rows:
+        logger.info("Арена: из журнала подобрано %s незакрытых выплат", len(rows))
+    return _drain_pending_payouts()
 
 
 def _payout_hockey_winner():
@@ -2064,12 +2479,34 @@ def _finish_hockey_round(arena: str = "normal"):
 
     state["status"] = "finished"
     state["last_update"] = time.time()
+    # Задача 47: выплату пытаемся сразу здесь же. Если база не ответит, раунд
+    # останется «finished + payout pending», и следующий /api/hockey_state
+    # повторит попытку — деньги не теряются.
+    state["payout_status"] = "pending"
+    state["payout_error"] = ""
+    # Задача 47: результат раунда сразу в базу — после рестарта доиграем и заплатим.
+    _save_arena_snapshot(arena)
     return True
 
 
 @app.on_event("startup")
 async def start_hockey_settlement_worker():
     async def settle_expired_rounds():
+        # Задача 47: перезапуск Render стирал раунд вместе со ставками. Сначала
+        # поднимаем снимки раундов из базы (доиграть или вернуть ставки), затем
+        # доплачиваем всё, что осталось должны по журналу выплат.
+        try:
+            restored = await asyncio.to_thread(_restore_arena_rounds)
+            if restored.get("resumed") or restored.get("refunded"):
+                logger.info("Арена после рестарта: доигрываем %s, возвратов %s",
+                            restored.get("resumed"), len(restored.get("refunded") or []))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Арена: восстановление раундов не удалось: %s", exc)
+        try:
+            await asyncio.to_thread(_resume_pending_payouts)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Арена: доплаты после рестарта не удались: %s", exc)
+
         while True:
             await asyncio.sleep(0.2)
             # Задача 42: каждый котёл живёт своим раундом и закрывается сам.
@@ -2083,13 +2520,41 @@ async def start_hockey_settlement_worker():
                                      else HOCKEY_WAIT_DURATION)
                     if now - state["last_update"] >= wait_duration:
                         _begin_arena_roll(arena, now)
-                elif (state["status"] == "rolling"
-                        and time.time() - state["last_update"] >= _round_roll_duration(arena)):
-                    _finish_hockey_round(arena)
-                elif state["status"] == "finished" and not state["is_paid"]:
+                    continue
+                if state["status"] == "rolling":
+                    # Задача 47: закрываем раунд строго по своим часам, даже
+                    # если /api/hockey_state никто не опрашивает (из аппки
+                    # вышли) — иначе раунд «сбрасывался» вместе со ставками.
+                    if now - state["last_update"] >= _round_roll_duration(arena):
+                        _finish_hockey_round(arena)
+                        state = _arena_state(arena)
+                    else:
+                        continue
+                if state["status"] == "finished" and not state["is_paid"]:
                     # Победитель может быть ботом или его может не быть — план
                     # всё равно проверяем: платим ровно тем, кто выиграл.
-                    _payout_arena_winner(arena)
+                    # Задача 47: выплата идёт в отдельном потоке (Supabase —
+                    # блокирующие вызовы) и повторяется до подтверждения.
+                    if state.get("payout_running"):
+                        continue
+                    state["payout_running"] = True
+                    try:
+                        await asyncio.to_thread(_payout_arena_winner, arena)
+                    except Exception as exc:  # noqa: BLE001
+                        logger.error("Арена %s: поток выплаты упал: %s", arena, exc)
+                    finally:
+                        _arena_state(arena)["payout_running"] = False
+            # Снимок раундов: если процесс умрёт, раунд восстановится и
+            # выплатится (или ставки вернутся), а не «сбросится».
+            _save_arena_snapshots()
+            # Долги прошлых раундов (и подобранные из журнала после рестарта):
+            # раунда в памяти уже нет, но деньги всё ещё должны.
+            if PENDING_PAYOUTS and time.time() - _LAST_PAYOUT_DRAIN["at"] >= 1.0:
+                _LAST_PAYOUT_DRAIN["at"] = time.time()
+                try:
+                    await asyncio.to_thread(_drain_pending_payouts)
+                except Exception as exc:  # noqa: BLE001
+                    logger.error("Арена: повтор выплат упал: %s", exc)
 
     asyncio.create_task(settle_expired_rounds())
 
@@ -2325,16 +2790,33 @@ def _arena_block(arena: str) -> dict:
         "sectors": _hockey_sectors(arena),
         "bank": _arena_bank(arena),
         "winner": winner,
-        "winner_team": (winner or {}).get("team") if arena == "team" else None,
+        # Задача 47: у командной арены победитель — КОМАНДА. Раньше winner
+        # оставался None (id команды лежал только в winner_team), а клиент
+        # рисует плашку по winner — поэтому «Победитель: команда Красные»
+        # не появлялся вообще. Теперь winner — объект команды, а не игрок.
+        "winner_team": ((winner or {}).get("team") or state.get("winner_team")) if arena == "team" else None,
         "players_count": len(players),
         "rolling_started_at": state.get("rolling_started_at"),
-        # Своя длительность броска: 9 с мяч / 8 с стрелка (3 с разгон + 5 с торможение).
+        # Своя длительность броска: 9 с мяч / 5.5 с стрелка (2 с разгон + 3.5 с торможение).
         "roll_duration": _round_roll_duration(arena),
         "finish_hold": _round_finish_hold(arena),
         "paid": bool(state.get("is_paid")),
+        # Задача 47: чем закончился payoff этого раунда. Клиент по этому полю
+        # говорит «выигрыш зачислен» или «не удалось выплатить, пробуем снова».
+        "payout_status": state.get("payout_status") or ("pending" if not state.get("is_paid") else "paid"),
+        "payout_error": state.get("payout_error") or "",
     }
     if arena == "team":
         block["teams"] = _hockey_teams()
+        team_id = block["winner_team"]
+        block["winner"] = ({"id": team_id, "team": team_id, "is_team": True,
+                            "name": ARENA_TEAMS[team_id]["name"], "color": ARENA_TEAMS[team_id]["color"]}
+                           if team_id in ARENA_TEAMS else None)
+        block["winner_name"] = None
+    else:
+        # Задача 47: у одиночной арены победитель — ИГРОК. Своё имя раунда,
+        # чтобы клиент никогда не подставлял победителя другого режима.
+        block["winner_name"] = (winner or {}).get("name") if winner else None
     if roll_data:
         # Траекторию мяча не отдаём целиком: она большая, клиент берёт её
         # отдельным запросом /api/hockey_roll/{round_id}.
@@ -2352,7 +2834,15 @@ def _hockey_state_response():
 
     # Совместимость со старым клиентом: «верхние» поля описывают одиночную
     # арену, а полные данные обеих лежат в arenas[...].
-    response = dict(normal_state)
+    # Задача 47: копируем ТОЛЬКО скалярные поля. Раньше dict(normal_state) тащил
+    # наверх живые списки/словари раунда (players, winner, roll_data) — клиент
+    # и старый код могли их же и мутировать, и «победитель» переезжал между
+    # режимами. Теперь наверх уходят только копии простых значений.
+    response = {key: value for key, value in normal_state.items()
+                if isinstance(value, (str, int, float, bool, type(None)))}
+    response["winner"] = dict(normal_state["winner"]) if normal_state.get("winner") else None
+    response["players"] = [dict(player) for player in normal_players]
+    response["payouts"] = [dict(entry) for entry in (normal_state.get("payouts") or [])]
     response["status"] = normal_state["status"]
     response["round_id"] = normal_state["round_id"]
     response["timer"] = normal_state.get("timer", 0)
@@ -2371,8 +2861,14 @@ def _hockey_state_response():
     response["sectors"] = _hockey_sectors("normal")
     response["teams"] = _hockey_teams()
     response["team_sectors"] = _hockey_sectors("team")
+    # Задача 47: в «верхних» полях — ТОЛЬКО одиночная арена. Раньше сюда
+    # попадал весь state одиночного котла, включая winner, и клиент мог
+    # показать победителя другого режима.
     response["arena_winners"] = {"normal": normal_state.get("winner"),
-                                 "team": team_state.get("winner")}
+                                 "team": (team_state.get("winner") or
+                                          ({"id": team_state.get("winner_team"),
+                                            "team": team_state.get("winner_team")}
+                                           if team_state.get("winner_team") else None))}
     response["arenas"] = arenas
     response["mode"] = "both"
     response["payouts"] = (normal_state.get("payouts") or []) + (team_state.get("payouts") or [])
@@ -2424,8 +2920,10 @@ def _tick_arena(arena: str, now: float):
             state = _arena_state(arena)
 
     elif state["status"] == "finished":
-        if not state["is_paid"]:
-            _payout_arena_winner(arena)
+        # Задача 47: выплатой занимается ТОЛЬКО фоновый воркер (в отдельном
+        # потоке). Раньше выплата шла прямо из запроса — и медленный/зависший
+        # Supabase блокировал событийный цикл, из-за чего экран арены
+        # «сбрасывался», а баланс не приходил.
         if now - state["last_update"] > finish_hold and state["is_paid"]:
             # Новый раунд именно этого котла. Другой котёл продолжает свой.
             fresh = _new_arena_state(arena=arena)
@@ -2434,6 +2932,16 @@ def _tick_arena(arena: str, now: float):
             # Тот же слот-код, что и в _prepare_hockey_roll: раунды арен не
             # могут совпасть между собой даже в одну секунду.
             fresh["round_id"] = str(int(now) * 10 + (0 if arena == "normal" else 7))
+            # Задача 47: новый раунд перезаписывает снимок только теперь, когда
+            # прошлый закрыт по деньгам — незакрытый раунд в базе не теряется.
+            _save_arena_snapshot(arena)
+            # Задача 47: очередь выплат раунда своя — долги прошлого раунда
+            # этого же котла новый раунд не сбрасывает, они уже в журнале.
+            with PENDING_PAYOUTS_LOCK:
+                fresh_round_id = str(fresh["round_id"])
+                fresh["payout_status"] = "pending" if any(
+                    key.startswith(f"{arena}:{fresh_round_id}:") for key in PENDING_PAYOUTS
+                ) else "none"
             ARENAS[arena] = fresh
             state = fresh
 
@@ -5248,9 +5756,21 @@ async def admin_ban(data: AdminBanRequest):
 @app.post("/api/admin/stats")
 async def admin_stats(data: UserAuth):
     """Сколько поставлено и сколько выплачено — по логам, которые уже есть."""
-    _require_admin_api(data.initData)
+    # Задача 47: даже проверка базы — блокирующий вызов. Уводим в поток, чтобы
+    # не подвешивать event loop (из-за этого «сбрасывалась» и арена).
+    return await asyncio.to_thread(_admin_stats_sync, data.initData)
+
+
+def _admin_stats_sync(init_data: str):
+    _require_admin_api(init_data)
     stats = {"users": 0, "coins_in_system": 0, "upgrade_bets": 0, "upgrade_paid": 0,
              "upgrade_spins": 0, "crash_rounds": 0, "settings": _load_game_settings(force=True)}
+    # Задача 47: видно, применима ли миграция арены (журнал выплат и снимки
+    # раундов). Без них игра работает, но выплата не переживёт перезапуск.
+    stats["arena_payouts"] = bool(_arena_payout_backend()["ledger"])
+    stats["arena_payout_rpc"] = bool(_arena_payout_backend()["rpc"])
+    stats["arena_rounds"] = _arena_rounds_available()
+    stats["arena_pending_payouts"] = len(PENDING_PAYOUTS)
     try:
         users = supabase.table("users").select("user_id, coins").execute().data or []
         stats["users"] = len(users)

@@ -1926,6 +1926,33 @@ async def cmd_shop(message: Message):
 
 # ================= ДИАГНОСТИКА СЕРВИСОВ (АДМИНЫ) =================
 @dp.message(F.text.func(lambda t: strip_prefix(t).lower().startswith(("сервис", "service"))))
+def arena_payout_line(data: dict) -> str:
+    """Строка про выплаты арены для «!сервисы» (задача 47).
+
+    Показывает, применена ли миграция: без журнала выплат выигрыш не переживёт
+    перезапуск сервиса — это и была жалоба «арена сбрасывается, баланс не отдаёт».
+    """
+    if not isinstance(data, dict):
+        return ""
+    parts = []
+    if "arena_payouts" in data:
+        parts.append(f"журнал выплат: {'✅' if data.get('arena_payouts') else '❌ нет таблицы arena_payouts'}")
+        if data.get("arena_payouts") and not data.get("arena_payout_rpc"):
+            parts.append("❌ нет функции arena_payout_apply")
+    if "arena_rounds" in data:
+        parts.append(f"сохранение раундов: {'✅' if data.get('arena_rounds') else '❌ нет таблицы arena_rounds'}")
+    pending = data.get("arena_pending_payouts")
+    if isinstance(pending, int) and pending > 0:
+        parts.append(f"⏳ невыплаченных: {pending}")
+    if not parts:
+        return ""
+    line = "\n• арена: " + " · ".join(parts)
+    if not data.get("arena_payouts") or not data.get("arena_rounds"):
+        line += ("\n   • примените supabase/migrations/20261127000000_arena_rounds.sql"
+                 " и выполните NOTIFY pgrst, 'reload schema'")
+    return line
+
+
 async def cmd_services(message: Message):
     """Показывает, что проект действительно живёт на двух сервисах Render."""
     if not is_admin(message.from_user.id):
@@ -1960,7 +1987,8 @@ async def cmd_services(message: Message):
         api_details = (
             f"\n• статика miniapp: {'✅' if static.get('ready') else '❌'} ({static.get('url', '/miniapp/')})"
             f"\n• техработы: {'включены' if data.get('maintenance') else 'выключены'}"
-            f"{uptime_line}"
+            + arena_payout_line(data)
+            + f"{uptime_line}"
         )
     else:
         api_status = f"⚠️ ответил кодом {status}"
