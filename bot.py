@@ -1987,7 +1987,8 @@ async def cmd_services(message: Message):
         )
 
     # Прогрев: включён ли и когда последний раз отвечал aura-api.
-    chest_line = f"{chest_line}\n   • {keepwarm_line()}"
+    # Задача 45: плюс чем закончилась последняя `!апка` (какая кнопка не прошла).
+    chest_line = f"{chest_line}\n   • {keepwarm_line()}\n   • {app_link_line()}"
 
     # Шанс обычной капсулы в сундуках (задача 22) — прямо из /api/health, чтобы
     # админ видел реальные числа сервера, а не догадки.
@@ -3354,6 +3355,9 @@ def start_keyboard() -> InlineKeyboardMarkup:
 
 # ================= !АПКА — ССЫЛКА НА MINI APP =================
 APP_LINK_KEYBOARD_TEXT = "🎮 Открыть AURA GAME"
+# Задача 45: мини-диагностика последней попытки `!апка` — по ней видно, какая
+# именно кнопка не понравилась Telegram (показывается админу командой !апка тест).
+APP_LINK_LAST = {"error": "", "at": 0.0, "sent": ""}
 
 
 def app_link_keyboard(allow_web_app: bool = True) -> InlineKeyboardMarkup:
@@ -3367,13 +3371,16 @@ def app_link_keyboard(allow_web_app: bool = True) -> InlineKeyboardMarkup:
     просил ровно одну кнопку «Открыть AURA GAME».
     """
     url = miniapp_webapp_url()
-    target = url or miniapp_direct_url()
-    if not target:
-        return None
     if url and allow_web_app:
         return InlineKeyboardMarkup(inline_keyboard=[[
             InlineKeyboardButton(text=APP_LINK_KEYBOARD_TEXT, web_app=WebAppInfo(url=url)),
         ]])
+    # Группа: кнопку web_app Telegram запрещает. Ведём прямой ссылкой t.me/<бот>/<short>
+    # — она открывает приложение ВНУТРИ Telegram (с initData). Голый https-адрес
+    # открылся бы в браузере, где initData нет и игра не авторизуется.
+    target = miniapp_direct_url() or url
+    if not target:
+        return None
     return InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(text=APP_LINK_KEYBOARD_TEXT, url=target),
     ]])
@@ -3423,14 +3430,23 @@ async def cmd_app_link(message: Message):
     private = _is_private_chat(message)
     keyboard = app_link_keyboard(allow_web_app=private)
     text = app_link_text()
-    try:
-        await message.answer(text, parse_mode="HTML",
-                             reply_markup=keyboard,
-                             disable_web_page_preview=True)
-    except Exception as exc:  # noqa: BLE001 — разметка не должна ронять команду
-        logger.warning("!апка: не удалось отправить с кнопкой (%s: %s)", type(exc).__name__, exc)
-        await message.answer(text, parse_mode="HTML", reply_markup=None,
-                             disable_web_page_preview=True)
+    attempts = (
+        ("с кнопкой", dict(reply_markup=keyboard, disable_web_page_preview=True)),
+        ("без разметки", dict(reply_markup=None, disable_web_page_preview=True)),
+        ("совсем без параметров", {}),
+    )
+    last_error = None
+    for label, extra in attempts:
+        try:
+            await message.answer(text, parse_mode="HTML", **extra)
+            APP_LINK_LAST.update({"sent": label, "error": "", "at": time.time()})
+            return
+        except Exception as exc:  # noqa: BLE001 — команда не должна падать
+            last_error = exc
+            APP_LINK_LAST.update({"sent": "", "at": time.time(),
+                                  "error": f"{label}: {type(exc).__name__}: {exc}"[:300]})
+            logger.warning("!апка (%s) не отправилась: %s: %s", label, type(exc).__name__, exc)
+    raise last_error or RuntimeError("!апка: сообщение не отправлено")
 
 
 @dp.message(CommandStart())
@@ -3871,6 +3887,19 @@ def keepwarm_modes() -> str:
     if KEEPWARM_SELF:
         modes.append("самопинг бота")
     return ", ".join(modes)
+
+
+def app_link_line() -> str:
+    """Строка для `!сервисы`: чем закончилась последняя `!апка`.
+
+    Задача 45: если у игрока в группе снова «Что-то пошло не так», по этой
+    строке видно, на чём именно споткнулся Telegram (кнопка / разметка / сеть).
+    """
+    error = APP_LINK_LAST.get("error") or ""
+    if not error:
+        sent = APP_LINK_LAST.get("sent") or "ещё не вызывали"
+        return f"🎮 `!апка`: последняя отправка — {sent} (адрес {miniapp_webapp_url() or 'не задан'})"
+    return f"🎮 `!апка` ОШИБКА: {error}"
 
 
 def keepwarm_line() -> str:
