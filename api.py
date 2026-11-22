@@ -85,7 +85,7 @@ async def _http_json(url, method: str = "GET", params=None, payload=None, timeou
 
 # Номер сборки: по нему из /api/health видно, что на сервисе НЕ старый код.
 # Если после деплоя здесь прежнее значение — Render ещё не перезапустился.
-API_BUILD = "2026-10-27-task47-team-arena-payout"
+API_BUILD = "2026-10-27-task48-passive-days-miniapp-link"
 
 # Момент старта процесса. По нему видно, что сервис только что «проснулся»:
 # Render на бесплатном тарифе усыпляет Web Service через 15 минут без входящих
@@ -1255,6 +1255,13 @@ def _user_payload(row, is_admin, user_id=None):
         created_text = None
     uid = user_id if user_id is not None else row.get("user_id")
     allowed = can_play(uid) if uid is not None else bool(is_admin)
+    # Задача 48: «Дней с нами» не должно обнуляться. Считаем от САМОЙ РАННЕЙ
+    # известной даты: первый заход в аппку или регистрация в боте. Раньше
+    # показывали только app_first_seen — без таблицы app_first_seen (или после
+    # перезапуска процесса) отметка каждый раз ставилась «сейчас», и у игрока
+    # с месяцем стажа было «0 дней».
+    created_stamp = _parse_timestamp(created_text) if created_text else None
+    days_start = _earliest_stamp(app_first_seen, created_stamp)
     return {
         "ok": True,
         "coins": _safe_int(row.get("coins"), 0),
@@ -1270,10 +1277,12 @@ def _user_payload(row, is_admin, user_id=None):
         "created_at": created_text,
         # Задача 43: дни считаем от ПЕРВОГО ЗАХОДА В АППКУ (app_first_seen),
         # а не от регистрации в боте. created_at оставлен для совместимости.
-        "days_in_app": _days_since(app_first_seen),
+        "days_in_app": _days_since(days_start),
         "app_first_seen": (_iso_from_timestamp(app_first_seen) if app_first_seen else None),
-        "days_in_game": (_days_since(app_first_seen) if app_first_seen
-                         else _days_in_game(created_at)),
+        # Дни считаются от самой ранней даты (аппка или регистрация), поэтому
+        # «0 дней» больше не появляется у старых профилей.
+        "days_in_game": _days_since(days_start) if days_start else _days_in_game(created_at),
+        "days_since": (_iso_from_timestamp(days_start) if days_start else None),
         # Пассивный доход: клиент считает «в час» по своему инвентарю этими ставками.
         "passive_rates": PASSIVE_INCOME_RATES,
         "passive_max_hours": PASSIVE_INCOME_MAX_HOURS,
@@ -1337,6 +1346,21 @@ def _app_first_seen_get(user_id):
     except Exception:  # noqa: BLE001
         pass
     return _APP_FIRST_SEEN_MEMORY.get(uid)
+
+
+def _earliest_stamp(*stamps):
+    """Самая ранняя отметка времени из переданных (None и мусор пропускаем)."""
+    values = []
+    for stamp in stamps:
+        try:
+            if stamp is None:
+                continue
+            value = float(stamp)
+        except (TypeError, ValueError):
+            continue
+        if value > 0:
+            values.append(value)
+    return min(values) if values else None
 
 
 def _days_since(stamp) -> int:
@@ -5211,13 +5235,35 @@ def _passive_preview(start: float, now: float) -> dict:
             "capped": (now - start) / 3600.0 >= PASSIVE_INCOME_MAX_HOURS}
 
 
+def _passive_start_counter(user_id, rate: float) -> None:
+    """Запустить отсчёт пассивки, если он ещё не запущен (без начисления).
+
+    Задача 48: раньше отметку `last_at` ставило ТОЛЬКО начисление
+    (`POST /api/passive_income`), а кнопка «Забрать» недоступна, пока не
+    накопился целый коин. Получался замкнутый круг: отметки нет → накоплено 0 →
+    кнопка заблокирована → отметка никогда не появится → **пассивка не капала
+    ни минуты** (игрок видел «130.1 в час» и «0 накоплено» через 9 минут).
+
+    Здесь мы просто ставим точку отсчёта: ни один коин не начисляется, «Забрать»
+    по-прежнему только по кнопке. Отметка ставится один раз на профиль.
+    """
+    if rate <= 0:
+        return
+    try:
+        if _passive_last_at(user_id) not in (None, "error"):
+            return
+    except Exception:  # noqa: BLE001 — чтение не должно ломать профиль
+        return
+    _passive_touch(user_id, time.time())
+
+
 def _passive_pending_sync(user_id) -> dict:
     """Сколько пассивного дохода УЖЕ накопилось (для карточки в профиле).
 
     Задача 42: раньше карточка показывала только «130.1 коина в час», и игрок
     не понимал, сколько уже капнуло. Считаем ровно по той же формуле, что и
-    начисление (`/api/passive_income`), но НИЧЕГО не начисляем и не двигаем
-    отметку времени — иначе один показ профиля «съедал» бы накопление.
+    начисление (`/api/passive_income`), но НИЧЕГО не начисляем: отметку времени
+    двигает только кнопка «Забрать».
     """
     result = {"pending": 0.0, "rate": 0.0, "hours": 0.0, "real_hours": 0.0,
               "capped": False, "night": False, "since": None, "max_hours": PASSIVE_INCOME_MAX_HOURS}
@@ -5233,6 +5279,8 @@ def _passive_pending_sync(user_id) -> dict:
     result["rate"] = rate
     if rate <= 0:
         return result
+    # Задача 48: первый заход с капсулами запускает отсчёт (коины не начисляются).
+    _passive_start_counter(user_id, rate)
 
     now = time.time()
     last = _passive_last_at(user_id)

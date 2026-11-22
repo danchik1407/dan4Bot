@@ -1926,6 +1926,34 @@ async def cmd_shop(message: Message):
 
 # ================= ДИАГНОСТИКА СЕРВИСОВ (АДМИНЫ) =================
 @dp.message(F.text.func(lambda t: strip_prefix(t).lower().startswith(("сервис", "service"))))
+def miniapp_link_line(check: dict) -> str:
+    """Строка «!сервисы» про адрес Mini App (задача 48)."""
+    if not isinstance(check, dict):
+        return ""
+    url = check.get("url") or "—"
+    direct = check.get("direct") or ""
+    if check.get("ok"):
+        head = f"🎮 Mini App: ✅ {url}"
+    elif check.get("status") is None:
+        head = f"🎮 Mini App: ⚠️ не проверить ({check.get('error') or 'нет связи'})\n   • {url}"
+    elif check.get("status") == 404:
+        head = (f"🎮 Mini App: ❌ {url} → 404 Not Found\n"
+                "   • этот адрес открывает Telegram по кнопке, значит в BotFather "
+                "записан старый/чужой URL\n"
+                "   • BotFather → /mybots → бот → Bot Settings → Configure Mini App "
+                "→ Edit Mini App URL → вставь адрес выше")
+    else:
+        head = (f"🎮 Mini App: ⚠️ {url} → {check.get('error') or 'не наша страница'}\n"
+                "   • проверь, что в BotFather → Configure Mini App указан именно этот адрес")
+    lines = [head]
+    if direct:
+        lines.append(f"   • кнопка в группе: {direct}")
+    short = check.get("short_name")
+    if short:
+        lines.append(f"   • short name в BotFather должен быть: {short}")
+    return "\n".join(lines)
+
+
 def arena_payout_line(data: dict) -> str:
     """Строка про выплаты арены для «!сервисы» (задача 47).
 
@@ -2016,7 +2044,10 @@ async def cmd_services(message: Message):
 
     # Прогрев: включён ли и когда последний раз отвечал aura-api.
     # Задача 45: плюс чем закончилась последняя `!апка` (какая кнопка не прошла).
-    chest_line = f"{chest_line}\n   • {keepwarm_line()}\n   • {app_link_line()}"
+    # Задача 48: и живой ли адрес, который открывает Telegram по кнопке.
+    miniapp_check = await check_miniapp_url()
+    chest_line = (f"{chest_line}\n   • {keepwarm_line()}\n   • {app_link_line()}\n"
+                  f"{miniapp_link_line(miniapp_check)}")
 
     # Шанс обычной капсулы в сундуках (задача 22) — прямо из /api/health, чтобы
     # админ видел реальные числа сервера, а не догадки.
@@ -3467,7 +3498,12 @@ async def cmd_app_link(message: Message):
     for label, extra in attempts:
         try:
             await message.answer(text, parse_mode="HTML", **extra)
-            APP_LINK_LAST.update({"sent": label, "error": "", "at": time.time()})
+            # Задача 48: запоминаем, КУДА ведёт кнопка — в группе это
+            # t.me/<бот>/<short>, и «Not Found» лечится только в BotFather.
+            APP_LINK_LAST.update({"sent": label, "error": "", "at": time.time(),
+                                  "private": private,
+                                  "target": miniapp_webapp_url() if private
+                                  else (miniapp_direct_url() or miniapp_webapp_url())})
             return
         except Exception as exc:  # noqa: BLE001 — команда не должна падать
             last_error = exc
@@ -3637,6 +3673,51 @@ async def fetch_health(base: str, timeout: float = 8.0) -> dict:
     except Exception as exc:  # noqa: BLE001 — сетевая диагностика не должна падать
         logger.warning("aura-api недоступен по %s: %s: %s", base, type(exc).__name__, exc)
         return {"status": None, "error": f"{type(exc).__name__}", "url": url}
+
+
+def _classify_miniapp_response(status, body: str) -> dict:
+    """Разбор ответа по адресу Mini App: это наша страница игры или «Not Found»."""
+    text = body or ""
+    is_miniapp = ("AURA GAME" in text and "/miniapp/" in text) or (
+        'id="screen-hockey"' in text or "app.js" in text)
+    result = {"status": status, "is_miniapp": is_miniapp,
+              "ok": status == 200 and is_miniapp, "error": ""}
+    if status == 404:
+        result["error"] = "404 Not Found — сервиса/пути нет"
+    elif status != 200:
+        result["error"] = f"HTTP {status}"
+    elif not is_miniapp:
+        result["error"] = "ответил не Mini App (другой сервис или заглушка)"
+    return result
+
+
+async def check_miniapp_url(timeout: float = 8.0) -> dict:
+    """Проверяет адрес, который открывает Telegram по кнопке Mini App.
+
+    Задача 48: в группе inline-кнопка `web_app` запрещена, поэтому `!апка`
+    отправляет url-ссылку `t.me/<бот>/<short_name>`, а Telegram открывает то,
+    что сохранено в BotFather → Configure Mini App. Если там старый/чужой
+    адрес, игрок видит внутри окна приложения голый «Not Found» — и по боту
+    это никак не понять. Здесь проверяем ровно тот URL, который уйдёт в кнопку:
+      * 200 и HTML с игрой → ✅;
+      * 200, но не наша страница → ⚠️ (не тот сервис);
+      * 404/другое → ❌ «Not Found» — править адрес в BotFather.
+    """
+    url = miniapp_webapp_url()
+    result = {"url": url, "direct": miniapp_direct_url(), "short_name": MINIAPP_SHORT_NAME,
+              "status": None, "ok": False, "error": "", "is_miniapp": False}
+    if not url:
+        result["error"] = "адрес Mini App не настроен (AURA_API_URL/AURA_WEBAPP_URL)"
+        return result
+    try:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=timeout)) as session:
+            async with session.get(url, headers={"User-Agent": "aura-app-link/1.0"}) as response:
+                body = await response.text(errors="ignore")
+                result.update(_classify_miniapp_response(response.status, body))
+                result["url"] = url
+    except Exception as exc:  # noqa: BLE001 — диагностика не должна падать
+        result["error"] = f"{type(exc).__name__}: {exc}"[:200]
+    return result
 
 
 async def probe_api(base: str, timeout: float = 8.0) -> bool:
@@ -3926,8 +4007,10 @@ def app_link_line() -> str:
     error = APP_LINK_LAST.get("error") or ""
     if not error:
         sent = APP_LINK_LAST.get("sent") or "ещё не вызывали"
-        return f"🎮 `!апка`: последняя отправка — {sent} (адрес {miniapp_webapp_url() or 'не задан'})"
-    return f"🎮 `!апка` ОШИБКА: {error}"
+        target = APP_LINK_LAST.get("target") or miniapp_webapp_url() or "не задан"
+        where = "в личке" if APP_LINK_LAST.get("private") else "в чате"
+        return f"🎮 !апка: последняя отправка — {sent} {where} (кнопка ведёт на {target})"
+    return f"🎮 !апка ОШИБКА: {error}"
 
 
 def keepwarm_line() -> str:
