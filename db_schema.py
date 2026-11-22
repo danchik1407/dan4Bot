@@ -39,6 +39,12 @@ REQUIRED = {
     "capsule_stock": ["item_id", "stock", "total"],
     "bans": ["user_id"],
     "promocodes": ["code"],
+    # Задача 57: предупреждения в чате. PGRST204 «Could not find the 'warns'
+    # column of 'chat_warns'» ломал !аурапред — теперь аудит видит это сам.
+    "chat_warns": ["chat_id", "user_id", "warns", "muted_until"],
+    # «Мелочь» пассивного дохода (задача 56): без таблицы она теряется после
+    # рестарта сервиса.
+    "passive_carry": ["user_id", "carry"],
 }
 
 # Типы для SQL-подсказки: админ копирует ALTER TABLE целиком.
@@ -64,6 +70,10 @@ COLUMN_TYPES = {
     "user_b": "BIGINT NOT NULL",
     "relationship_id": "BIGINT NOT NULL",
     "stage": "INTEGER NOT NULL DEFAULT 0",
+    "chat_id": "BIGINT NOT NULL",
+    "warns": "INTEGER NOT NULL DEFAULT 0",
+    "muted_until": "TIMESTAMPTZ",
+    "carry": "NUMERIC(10,6) NOT NULL DEFAULT 0",
     "action_at": "TIMESTAMPTZ NOT NULL DEFAULT now()",
     "stars": "INTEGER NOT NULL DEFAULT 0",
     "players": "JSONB NOT NULL DEFAULT '[]'::jsonb",
@@ -81,12 +91,19 @@ MIGRATION_BY_COLUMN = {
     "ice": "20261109000000_economy_social.sql",
     "premium": "20261109000000_economy_social.sql",
     "inventory": "20261027000000_shop_daily_limits.sql",
-    "bank": "20261124000000_love_fix.sql",
-    "love": "20261124000000_love_fix.sql",
-    "status": "20261124000000_love_fix.sql",
-    "action_at": "20261124000000_love_fix.sql",
-    "relationship_id": "20261124000000_love_fix.sql",
+    # Задача 57: эти колонки (и solo_love) закрывает один файл — он же лечит
+    # «Love не записался в базу» из скриншотов.
+    "bank": "20261128000000_chat_warns_and_love_full.sql",
+    "love": "20261128000000_chat_warns_and_love_full.sql",
+    "status": "20261128000000_chat_warns_and_love_full.sql",
+    "action_at": "20261128000000_chat_warns_and_love_full.sql",
+    "relationship_id": "20261128000000_chat_warns_and_love_full.sql",
     "stage": "20261122000000_solo_love.sql",
+    # Задача 57: один файл закрывает и предупреждения, и любовь.
+    "chat_id": "20261128000000_chat_warns_and_love_full.sql",
+    "warns": "20261128000000_chat_warns_and_love_full.sql",
+    "muted_until": "20261128000000_chat_warns_and_love_full.sql",
+    "carry": "20261128000000_chat_warns_and_love_full.sql",
 }
 
 RELOAD_HINT = ("Если миграция уже применена — обновите кэш схемы PostgREST: "
@@ -152,15 +169,36 @@ def audit(client) -> dict:
     }
 
 
+# Задача 57: в базе две известные «дыры» закрывает один готовый файл. Если
+# аудит нашёл в них хоть что-то, подсказываем именно его, а не «примените
+# миграции из папки» — админ должен получить копипастой.
+FULL_MIGRATION_FILE = "supabase/migrations/20261128000000_chat_warns_and_love_full.sql"
+FULL_MIGRATION_TABLES = {"chat_warns", "relationships", "solo_love",
+                         "solo_love_stage_rewards", "love_stage_rewards",
+                         "passive_carry"}
+
+
 def build_sql(missing_tables, missing_columns) -> str:
-    lines = [f"-- Таблицы {table} нет: примените миграции из supabase/migrations"
-             for table in missing_tables]
-    for item in missing_columns:
+    tables = list(missing_tables or [])
+    columns = list(missing_columns or [])
+    needs_full = bool(FULL_MIGRATION_TABLES & set(tables)) or any(
+        item["table"] in FULL_MIGRATION_TABLES for item in columns)
+    lines = []
+    if needs_full:
+        lines.append(f"-- Примените целиком: {FULL_MIGRATION_FILE}")
+        lines.append("-- (там chat_warns.warns, relationships/solo_love, RLS и reload кэша)")
+    for table in tables:
+        if needs_full and table in FULL_MIGRATION_TABLES:
+            continue
+        lines.append(f"-- Таблицы {table} нет: примените миграции из supabase/migrations")
+    for item in columns:
         table, column = item["table"], item["column"]
+        if needs_full and table in FULL_MIGRATION_TABLES:
+            continue
         col_type = COLUMN_TYPES.get(column, "TEXT")
         lines.append(f"ALTER TABLE public.{table} "
                      f"ADD COLUMN IF NOT EXISTS {column} {col_type};")
-    if missing_columns:
+    if columns or needs_full:
         lines.append("")
         lines.append("NOTIFY pgrst, 'reload schema';")
     return "\n".join(lines)

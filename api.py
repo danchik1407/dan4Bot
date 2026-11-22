@@ -85,7 +85,7 @@ async def _http_json(url, method: str = "GET", params=None, payload=None, timeou
 
 # Номер сборки: по нему из /api/health видно, что на сервисе НЕ старый код.
 # Если после деплоя здесь прежнее значение — Render ещё не перезапустился.
-API_BUILD = "2026-10-27-task56-arena-share-and-upgrade-clean"
+API_BUILD = "2026-10-27-task57-admins-only-and-sql-migrations"
 
 # Момент старта процесса. По нему видно, что сервис только что «проснулся»:
 # Render на бесплатном тарифе усыпляет Web Service через 15 минут без входящих
@@ -577,8 +577,8 @@ async def health():
                 "capsule": CHEST_CAPSULE_ITEM,
             },
         },
-        # MAINTENANCE_MODE объявлен ниже по файлу, но к моменту запроса уже существует.
-        "maintenance": MAINTENANCE_MODE,
+        # Оба рубильника объявлены ниже по файлу, но к моменту запроса уже есть.
+        "maintenance": MAINTENANCE_MODE or ADMIN_ONLY_APP,
         # Доступ: пока ADMIN_ONLY_APP включён, Mini App открывают только админы.
         "access": {
             "admin_only_app": ADMIN_ONLY_APP,
@@ -633,10 +633,12 @@ def _env_flag(name: str, default: bool = False) -> bool:
     return default
 
 
-# Задача 44 (п.14): игра ОТКРЫТА ДЛЯ ВСЕХ. Раньше по умолчанию стоял True и
-# Mini App открывался только админам бота — обычный игрок видел «только для
-# админов». Закрыть снова можно переменной Render: ADMIN_ONLY_APP=1.
-ADMIN_ONLY_APP = _env_flag("ADMIN_ONLY_APP", False)
+# Задача 57 (срочно): по умолчанию ЗАКРЫТО — «только админы».
+# Задача 44 открывала игру всем (default False), из-за этого после каждого
+# деплоя без переменной окружения доступ получали посторонние. Теперь дефолт
+# True: свежий сервис/чистый Render сразу пускает ТОЛЬКО ADMIN_IDS, а открыть
+# игру для всех можно осознанно — переменной Render ADMIN_ONLY_APP=0.
+ADMIN_ONLY_APP = _env_flag("ADMIN_ONLY_APP", True)
 ADMIN_ONLY_MESSAGE = ("🛠️ Идут технические работы. Пока доступ к игре есть "
                       "только у администраторов — скоро откроем всем.")
 
@@ -725,17 +727,17 @@ IDEMPOTENCY_TABLE = "idempotency_keys"
 IDEMPOTENCY_TTL = 86400
 
 # ==================== ТЕХРАБОТЫ ====================
-# Техработы ЗАКОНЧИЛИСЬ: играть может любой игрок (раньше — только ADMIN_IDS).
-# Флаг оставлен на случай срочного закрытия: поставь в Render MAINTENANCE_MODE=1,
-# и приложение снова будет пускать только админов (экран «Технические работы» +
-# 403 на любые игровые действия — обойти запросом к API нельзя).
+# Задача 57: техработы ВКЛЮЧЕНЫ по умолчанию — играют только ADMIN_IDS
+# (экран «Технические работы» + 403 на любые игровые действия, обойти запросом
+# к API нельзя). Открыть игру = MAINTENANCE_MODE=0 и ADMIN_ONLY_APP=0 в Render.
 # Апгрейд от этого флага НЕ зависит: он отдельно закрыт списком ADMIN_IDS
 # (см. UPGRADE_ADMIN_ONLY ниже).
 def _maintenance_enabled() -> bool:
-    raw = (os.getenv("MAINTENANCE_MODE") or "").strip().lower()
-    if raw in ("1", "true", "yes", "on"):
-        return True
-    return False  # "0"/"false"/пусто — техработы выключены, играют все
+    """Аварийные техработы. По умолчанию ВКЛЮЧЕНЫ (задача 57): «кроме админов
+    зайти никто не может» должно работать сразу после деплоя, без правок в
+    Render. Выключить техработы = MAINTENANCE_MODE=0 (и только вместе с
+    ADMIN_ONLY_APP=0 игра откроется всем)."""
+    return _env_flag("MAINTENANCE_MODE", True)
 
 
 MAINTENANCE_MODE = _maintenance_enabled()
@@ -767,6 +769,39 @@ def require_play_access(user) -> int:
     if not can_play(user_id):
         raise HTTPException(status_code=403, detail=_access_denied_message(user_id))
     return user_id
+
+
+def _gate_view(init_data: str = "") -> None:
+    """Гейт для GET-ручек состояния игры (арена/краш/траектория).
+
+    Задача 57: эти ручки вызывались без параметров и отдавали состояние всем
+    подряд. Теперь нужен initData, и смотреть может только тот, кому можно
+    играть. Пустой initData — это не Mini App, а прямой запрос из браузера:
+    отказываем.
+    """
+    raw = (init_data or "").strip()
+    if not raw:
+        raise HTTPException(status_code=403, detail=MAINTENANCE_MESSAGE)
+    user = verify_telegram_data(raw)
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid auth data")
+    require_play_access(user)
+
+
+def require_play_access_uid(user_id) -> int:
+    """То же, что require_play_access, но для ручек, где user_id уже получен.
+
+    Задача 57: раньше часть эндпоинтов (арена/краш GET, апгрейд, пассивка,
+    звёзды, рефералы, лав) проверяла только initData — во время техработ
+    не-админ мог запросить состояние игры и начисления напрямую. Теперь у
+    каждой такой ручки есть этот вызов.
+    """
+    uid = _safe_int(user_id, None)
+    if uid is None:
+        raise HTTPException(status_code=400, detail="Некорректный id пользователя")
+    if not can_play(uid):
+        raise HTTPException(status_code=403, detail=_access_denied_message(uid))
+    return uid
 
 
 def _access_denied_message(user_id) -> str:
@@ -819,14 +854,18 @@ def _chest_claims_detail(exc: Exception) -> str:
 
 
 @app.get("/api/chest_ready")
-async def chest_ready():
+async def chest_ready(initData: str = ""):
     """Готова ли таблица сундуков (диагностика для бота и админа).
 
     Клиент получает «Сундуки обновляются, попробуйте чуть позже», когда
     chest_claims недоступна: не применена миграция или в PostgREST устарел кэш
     схемы. Эта ручка отвечает одной строкой, что именно не так, чтобы не гадать
     по логам Render.
+
+    Задача 57: ручка беспарольная, поэтому открыта только админам (initData).
+    Бот вызывает её, подписывая данные сам (bot.py → admin_probe_init_data).
     """
+    _gate_view(initData)
     def _probe():
         response = (
             supabase.table(CHEST_CLAIMS_TABLE)
@@ -2754,7 +2793,17 @@ def verify_telegram_data(init_data: str):
 
 
 def check_ban(user_id: str):
-    res = supabase.table("bans").select("*").eq("user_id", user_id).execute()
+    """Забанен ли игрок. Недоступность таблицы bans не должна давать 500.
+
+    Задача 57: проверка идёт ДО гейта «только админы», и если Supabase в этот
+    момент не отвечает, игрок получал 500 вместо понятного 403/503. Теперь
+    сбой базы логируется, а решение о доступе принимает гейт.
+    """
+    try:
+        res = supabase.table("bans").select("*").eq("user_id", user_id).execute()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("bans недоступна (проверка бана пропущена): %s", exc)
+        return
     if res.data: raise HTTPException(status_code=403, detail="Вы забанены за нарушение правил.")
 
 
@@ -3036,8 +3085,13 @@ def _tick_arena(arena: str, now: float):
 
 
 @app.get("/api/hockey_state")
-async def get_hockey_state():
-    """Состояние обеих арен за один запрос — каждая живёт своим раундом."""
+async def get_hockey_state(initData: str = ""):
+    """Состояние обеих арен за один запрос — каждая живёт своим раундом.
+
+    Задача 57: во время техработ состояние отдаём только админам, иначе игру
+    можно «смотреть» и считать ботов в обход закрытого Mini App.
+    """
+    _gate_view(initData)
     now = time.time()
     for arena in ARENA_VIEWS:
         _tick_arena(arena, now)
@@ -3045,8 +3099,9 @@ async def get_hockey_state():
 
 
 @app.get("/api/hockey_roll/{round_id}")
-async def get_hockey_roll_path(round_id: str):
+async def get_hockey_roll_path(round_id: str, initData: str = ""):
     """Траектория мяча одиночной арены. У командной её нет — она крутит стрелку."""
+    _gate_view(initData)
     for arena in ARENA_VIEWS:
         state = _arena_state(arena)
         roll_data = state.get("roll_data")
@@ -3163,6 +3218,11 @@ async def finish_hockey(data: FinishHockey):
     Задача 42: закрываем только ту арену, о которой просит клиент (по умолчанию —
     обе), и только если её бросок уже закончился по серверному времени.
     """
+    # Задача 57: закрыть истёкший раунд может только тот, кому можно играть.
+    user = verify_telegram_data(data.initData)
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid auth data")
+    require_play_access_uid(_safe_int(user.get("id"), None))
     finished = []
     for arena in ARENA_VIEWS:
         state = _arena_state(arena)
@@ -3225,6 +3285,7 @@ def get_crash_point_by_chance():
 @app.get("/api/crash_state")
 async def get_crash_state(initData: str = ""):
     global crash_state
+    _gate_view(initData)
     now = time.time()
 
     if crash_state["status"] == "waiting":
@@ -3593,6 +3654,21 @@ async def get_user(auth: UserAuth):
 
     is_admin = is_admin_id(user_id, ADMIN_IDS)
 
+    # Задача 57: во время техработ профиль (и запись новых игроков) — только
+    # админам. Исключение для забаненных выше: им нужен внятный текст про бан.
+    # Ответ структурный (а не просто detail), иначе клиент принимал 403 за бан:
+    # Mini App показывал «Вы забанены» и закрывался вместо экрана техработ.
+    if not can_play(user_id):
+        return JSONResponse(status_code=403, content={
+            "ok": False,
+            "detail": _access_denied_message(user_id),
+            "maintenance": True,
+            "admin_only": bool(ADMIN_ONLY_APP),
+            "can_play": False,
+            "is_admin": bool(is_admin),
+            "maintenance_message": _access_denied_message(user_id),
+        })
+
     try:
         rows = _find_user_rows(user_id)
     except Exception as exc:  # noqa: BLE001 — детали нужны и игроку, и админу
@@ -3656,6 +3732,8 @@ async def self_check(auth: UserAuth):
         "supabase_host": _supabase_host(),
         "is_admin": is_admin_id(user_id, ADMIN_IDS) if user_id is not None else False,
         "maintenance": MAINTENANCE_MODE,
+        "admin_only_app": ADMIN_ONLY_APP,
+        "can_play": can_play(user_id) if user_id is not None else False,
         "rows_found": 0, "row": None, "created_at_present": None, "error": None,
     }
     if user_id is None:
@@ -4360,6 +4438,8 @@ async def get_shop_items(data: ShopCatalogRequest):
     if not user: raise HTTPException(status_code=401, detail="Invalid auth data")
     user_id = int(user["id"])
     check_ban(str(user_id))
+    # Задача 57: во время техработ витрина закрыта всем, кроме админов.
+    require_play_access(user)
     is_admin = is_admin_id(user_id, ADMIN_IDS)
     # Лимиты отключены — в базу за тиражом не ходим вовсе.
     stock = await asyncio.to_thread(shop_stock_snapshot, supabase) if STOCK_LIMITS_ENABLED else None
@@ -4375,13 +4455,15 @@ async def get_shop_items(data: ShopCatalogRequest):
 
 
 @app.get("/api/stock_debug")
-async def stock_debug():
+async def stock_debug(initData: str = ""):
     """Диагностика тиража капсул: доходит ли покупка до RPC и что отвечает база.
 
     Ничего не списывает (пробный вызов с несуществующим item_id). Открывается
     в браузере: https://<сервис>/api/stock_debug — сразу видно, применена ли
     SQL-функция, какая у неё сигнатура и какой остаток в таблице.
+    Задача 57: открывается только с initData администратора.
     """
+    _gate_view(initData)
     try:
         report = await asyncio.to_thread(stock_diagnostics, supabase)
     except Exception as exc:  # noqa: BLE001
@@ -4714,6 +4796,8 @@ async def upgrade_action(data: UpgradeAction):
         raise HTTPException(status_code=401, detail="Invalid auth data")
 
     user_id = int(user["id"])
+    # Задача 57: техработы закрывают апгрейд для всех, кроме админов.
+    require_play_access_uid(user_id)
     admin = is_admin_id(user_id, ADMIN_IDS)
     if UPGRADE_ADMIN_ONLY and not admin:
         # Техработы закончились — играют все, НО апгрейд пока только админам.
@@ -4867,6 +4951,8 @@ async def upgrade_pending(data: UpgradeLogRequest):
     user_id = _safe_int(user.get("id"), None)
     if user_id is None:
         raise HTTPException(status_code=400, detail="Некорректный id пользователя")
+    # Задача 57: апгрейд — часть игры, значит во время техработ только админам.
+    require_play_access_uid(user_id)
 
     limit = max(1, min(50, _safe_int(getattr(data, "limit", None), 10) or 10))
     rows = None
@@ -4916,6 +5002,7 @@ async def upgrade_history(data: UpgradeLogRequest):
     if user_id is None:
         raise HTTPException(status_code=400, detail="Некорректный id пользователя")
     check_ban(str(user_id))
+    require_play_access_uid(user_id)  # задача 57: техработы → только админы
     if UPGRADE_ADMIN_ONLY and not is_admin_id(user_id, ADMIN_IDS):
         raise HTTPException(status_code=403, detail=UPGRADE_ADMIN_ONLY_MESSAGE)
 
@@ -4942,6 +5029,7 @@ async def upgrade_ack(data: UpgradeAck):
     if user_id is None:
         raise HTTPException(status_code=400, detail="Некорректный id пользователя")
     check_ban(str(user_id))
+    require_play_access_uid(user_id)  # задача 57: техработы → только админы
     if UPGRADE_ADMIN_ONLY and not is_admin_id(user_id, ADMIN_IDS):
         raise HTTPException(status_code=403, detail=UPGRADE_ADMIN_ONLY_MESSAGE)
 
@@ -5216,6 +5304,7 @@ async def channel_status(data: ChannelCheckRequest):
     Mini App по ней скрывает плашку задания. Сам бонус тут НЕ выдаётся.
     """
     uid = _auth_user_id(data.initData)
+    require_play_access_uid(uid)  # задача 57: техработы → только админы
     return _channel_status_payload(uid)
 
 
@@ -5230,6 +5319,7 @@ async def channel_task(data: ChannelCheckRequest):
     пишется в subscriptions_history.
     """
     uid = _auth_user_id(data.initData)
+    require_play_access_uid(uid)  # задача 57: задание не выдаём во время техработ
     status = _channel_status_payload(uid)
     if status["claimed"]:
         return {**status, "dm_sent": False, "sent": False}
@@ -5260,6 +5350,7 @@ async def channel_check(data: ChannelCheckRequest):
     в личке бота (см. /api/channel_task и bot.py → cb_sub_check).
     """
     uid = _auth_user_id(data.initData)
+    require_play_access_uid(uid)  # задача 57: техработы → только админы
     return _channel_status_payload(uid)
 
 
@@ -5511,6 +5602,7 @@ async def passive_preview(auth: UserAuth):
     навсегда оставалась выключенной — пассивка выглядела сломанной.
     """
     uid = _auth_user_id(auth.initData)
+    require_play_access_uid(uid)  # задача 57: техработы → только админы
     pending = await _passive_pending(uid)
     return {"ok": True, **pending,
             "amount": round(float(pending.get("pending") or 0.0), 3),
@@ -5579,6 +5671,7 @@ async def passive_income(data: PassiveIncomeRequest):
     Задача 56: параллельные запросы выполняются по очереди (см. _passive_lock).
     """
     uid = _auth_user_id(data.initData)
+    require_play_access_uid(uid)  # задача 57: без начислений во время техработ
     async with _passive_lock(uid):
         # Работа с Supabase синхронная — уводим в поток, чтобы полторы-две
         # секунды запросов не замораживали весь API для остальных игроков.
@@ -5741,6 +5834,7 @@ def _referral_stats(user_id) -> dict:
 async def referral_bind(data: ReferralBindRequest):
     """Привязать пригласившего. Работает один раз: у referred_id уникальный ключ."""
     uid = _auth_user_id(data.initData)
+    require_play_access_uid(uid)  # задача 57: техработы → только админы
     referrer_id = _referral_parse_code(data.ref_code)
     if referrer_id is None:
         return {"ok": False, "detail": "Некорректный код приглашения"}
@@ -5776,6 +5870,7 @@ async def referral_check(data: UserAuth):
     переводится из pending в paid, повторный вызов ничего не платит.
     """
     uid = _auth_user_id(data.initData)
+    require_play_access_uid(uid)  # задача 57: бонусы не начисляем во время техработ
     try:
         res = (supabase.table(REFERRALS_TABLE).select("*")
                .eq("referred_id", uid).limit(1).execute())
@@ -5859,6 +5954,7 @@ def _referral_link(bot_username: str, user_id) -> str:
 @app.post("/api/referrals")
 async def referrals_info(data: UserAuth):
     uid = _auth_user_id(data.initData)
+    require_play_access_uid(uid)  # задача 57: техработы → только админы
     stats = _referral_stats(uid)
     bot_username = await _resolve_bot_username()
     stats.update({"ok": True, "code": f"ref_{uid}", "bot_username": bot_username,
@@ -5877,6 +5973,7 @@ async def stars_invoice(data: StarsInvoiceRequest):
     показать витрину без ошибок.
     """
     uid = _auth_user_id(data.initData)
+    require_play_access_uid(uid)  # задача 57: покупки закрыты во время техработ
     package = next((p for p in STARS_PACKAGES if p["id"] == data.package_id), None)
     if not STARS_ENABLED:
         return {"ok": False, "enabled": False, "packages": STARS_PACKAGES,
@@ -6191,6 +6288,7 @@ def love_state_for(user_id) -> dict:
 async def love_state(data: UserAuth):
     """Плашка «В отношениях» и прогресс этапа для профиля Mini App."""
     uid = _auth_user_id(data.initData)
+    require_play_access_uid(uid)  # задача 57: награды этапов — во время техработ никому
     state = love_state_for(uid)
     if not state.get("in_relationship"):
         # Одиночка: страховка как у пар — если этап перешагнули, а бот не успел
