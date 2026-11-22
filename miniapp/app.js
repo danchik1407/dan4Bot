@@ -3934,8 +3934,11 @@ function renderTeamBoards() {
             // 50 / 100 против 200 → банк 350 → 117 и 233 (ставка + выигрыш).
             const payout = (team === winnerTeam && teamHumanTotal > 0)
                 ? Math.round(totalBank * bet / teamHumanTotal) : 0;
+            // Задача 48: подписи «бот» больше нет. Игрок не должен видеть, кто
+            // из участников бот, — у таких строк просто прочерк (они не делят
+            // банк, но и не подсвечиваются).
             const payoutHtml = p.is_bot
-                ? `<span class="row-payout muted" title="Бот не участвует в дележе банка">бот</span>`
+                ? `<span class="row-payout muted" title="Не участвует в дележе банка">—</span>`
                 : `<span class="row-payout${payout > bet ? '' : ' muted'}" `
                   + `title="Выплата, если команда победит (ставка + доля банка)">`
                   + `${payout > 0 ? coinAmount(payout) : '—'}</span>`;
