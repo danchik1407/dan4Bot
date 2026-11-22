@@ -233,11 +233,12 @@ async function apiPost(path, payload, options) {
 // ================= ТЕХРАБОТЫ =================
 // Играть могут только ADMIN_IDS. Остальные после приветственной заставки видят
 // экран «Технические работы»: ни игры, ни магазин, ни сундуки им не открываются.
-// Сервер при этом отвечает им 403 (см. MAINTENANCE_MODE в api.py) — обойти нельзя.
-let maintenanceActive = false;       // показывать ли экран
-let serverMaintenance = false;       // включены ли техработы на сервере
-let accessKnown = false;             // знаем ли мы, можно ли играть
-let canPlay = false;                 // итоговое решение
+// Задача 67: игра открыта всем. Заглушка осталась только под «сервер не
+// ответил» — «Технических работ» для игроков больше нет.
+let maintenanceActive = false;       // показывать ли экран-заглушку
+let serverMaintenance = false;       // совместимость: сервер больше не закрывает
+let accessKnown = false;             // знаем ли мы, что профиль пришёл
+let canPlay = false;                 // итоговое решение (после resolveAccess — true)
 let maintenanceMessage = '';         // текст с сервера (если он его прислал)
 
 // ================= НОВАЯ ЭКОНОМИКА (задача 25) =================
@@ -257,12 +258,11 @@ const PASSIVE_INTERVAL = 15 * 60 * 1000;      // раз в 15 минут, пок
 const PASSIVE_PENDING_REFRESH = 60 * 1000;    // «накоплено» в профиле — раз в минуту
 let passivePendingTimer = null;
 
-// Задача 65: экран-заглушка больше не появляется из-за сетевой ошибки.
-// Раньше он показывался при любом неответившем профиле (Render спит, нет связи),
-// причём с текстом «Пока доступ к игре есть только у администраторов — скоро
-// откроем всем» — на скриншоте заказчика это выглядело как «апку так и не
-// открыли». Теперь так: сервер сказал «техработы» → экран техработ; не смогли
-// получить профиль → баннер «Баланс не загрузился» + автоповтор.
+// Задача 67: экрана «Технические работы» для игроков больше НЕТ.
+// Осталась одна заглушка — «Нет связи с сервером» (Render спит / нет интернета):
+// она показывается только когда профиль вообще не пришёл, и снимается сама,
+// как только сервер ответил. Доступ по-прежнему решает сервер, но он теперь
+// пускает всех.
 function showMaintenance(options) {
     if (maintenanceActive) return;
     maintenanceActive = true;
@@ -273,7 +273,8 @@ function showMaintenance(options) {
     try { document.querySelectorAll('.game-screen').forEach(screen => screen.classList.remove('active')); } catch (e) {}
     document.body.classList.add('maintenance');
     const screen = document.getElementById('maintenance-screen');
-    const offline = Boolean(options && options.offline);
+    // Всегда «нет связи»: режима «техработы» в игре больше не существует.
+    const offline = true;
     if (screen) {
         screen.classList.add('active');
         screen.classList.toggle('offline', offline);
@@ -281,18 +282,12 @@ function showMaintenance(options) {
         // «не дозвонились» (Render спит / нет связи). Игрок не должен читать
         // «идёт обновление», когда проблема на его стороне.
         const title = document.getElementById('maint-title');
-        if (title) title.innerHTML = offline
-            ? 'Нет связи<br>с сервером'
-            : 'Технические<br>работы';
+        if (title) title.innerHTML = 'Нет связи<br>с сервером';
         const sub = document.getElementById('maint-sub');
-        if (sub) sub.innerHTML = offline
-            ? 'Сервер не ответил — возможно, он просыпается.<br>Нажми «Проверить снова» через пару секунд.'
-            : 'Мы обновляем AURA GAME и скоро вернёмся.<br>Игры, магазин и сундуки временно недоступны.';
-        // Текст с сервера (если пришёл) кладём в нижнюю строку, не ломая вёрстку.
+        if (sub) sub.innerHTML = 'Сервер не ответил — возможно, он просыпается.'
+            + '<br>Нажми «Проверить снова» через пару секунд.';
         const note = document.getElementById('maint-note');
-        if (note) note.textContent = offline
-            ? 'Спасибо за терпение 💙'
-            : (maintenanceMessage || 'Спасибо за терпение 💙');
+        if (note) note.textContent = 'Спасибо за терпение 💙';
         const btn = screen.querySelector('.maint-btn');
         if (btn) btn.onclick = () => { retryAccessFromMaintenance(); };
     }
@@ -308,7 +303,7 @@ async function retryAccessFromMaintenance() {
     accessKnown = false;
     const ok = await loadUserData({ attempts: 2, retryDelay: 800 });
     if (ok && canPlay) { hideMaintenance(); try { updateUI(); } catch (e) {} return; }
-    if (accessKnown && !canPlay) { showMaintenance(); return; }
+    // Задача 67: отказ сервера по доступу больше не превращается в заглушку.
     // Не дозвонились: остаёмся на экране-заглушке, но с честным текстом.
     showMaintenance({ offline: true });
 }
@@ -320,27 +315,16 @@ function hideMaintenance() {
     if (screen) screen.classList.remove('active');
 }
 
-// Решение «пускать или нет»: админ по списку ID или по флагу сервера.
+// Решение «пускать или нет». Задача 67: «открой апку, чтобы все могли входить» —
+// пускаем ВСЕГДА, когда профиль реально пришёл. Список админов и поле
+// maintenance с сервера больше не влияют на вход: раньше достаточно было
+// старого флага в окружении Render, чтобы обычный игрок упёрся в заглушку.
 function resolveAccess(data) {
-    const byId = isAdminId(user && user.id);
-    const byServer = Boolean(data && data.is_admin);
-    const isAdminUser = byId || byServer;
-    serverMaintenance = data && data.maintenance !== undefined ? Boolean(data.maintenance) : serverMaintenance;
-    if (data && typeof data.maintenance_message === 'string' && data.maintenance_message.trim()) {
-        maintenanceMessage = data.maintenance_message.trim();
-    } else if (data && !data.can_play && typeof data.detail === 'string' && data.detail.trim()) {
-        // Сервер закрыл доступ (403): причину он присылает в detail — показываем
-        // её в заглушке, чтобы игрок понимал, что происходит.
-        maintenanceMessage = data.detail.trim();
-    }
-    if (data && typeof data.can_play === 'boolean') {
-        canPlay = data.can_play;
-    } else {
-        // Старый сервер без поля can_play: решаем по списку админов.
-        canPlay = !serverMaintenance || isAdminUser;
-    }
+    serverMaintenance = false;
+    maintenanceMessage = '';
+    canPlay = true;
     accessKnown = true;
-    return canPlay;
+    return true;
 }
 
 function coinAmount(value) { return `${formatCoins(value)} ${COIN_IMG}`; }
@@ -636,13 +620,8 @@ function applyProfile(data) {
     profileFailure = '';
     profileRetryCount = 0;
     setSyncBanner('');
-    // Техработы: как только узнали, что игрок не админ — показываем экран и
-    // дальше интерфейс не трогаем (иначе он мигнёт под заглушкой).
-    if (!resolveAccess(data)) {
-        updateUpgradeAccess();
-        showMaintenance();
-        return;
-    }
+    // Задача 67: профиль пришёл → пускаем сразу, без проверок «а админ ли».
+    resolveAccess(data);
     hideMaintenance();
     updateUpgradeAccess();
     updateUI();
@@ -676,7 +655,7 @@ function scheduleProfileRetry(delay = 5000) {
         // Задача 65: профиль доехал после «Нет связи с сервером» — снимаем
         // заглушку сами, игроку не нужно жать «Проверить снова».
         if (ok) {
-            if (accessKnown && !canPlay) { showMaintenance(); return; }
+            // Задача 67: профиль пришёл → заглушка снимается всегда.
             hideMaintenance();
             try { updateUI(); } catch (e) {}
             try { checkChestCooldown(); } catch (e) {}
@@ -705,15 +684,14 @@ async function loadUserData(options) {
                     });
                     const data = await response.json().catch(() => ({}));
                     if (response.status === 403) {
-                        // Задача 57: 403 бывает не только «бан». Во время
-                        // техработ сервер закрывает профиль всем, кроме
-                        // админов — тогда показываем экран техработ, а не
-                        // «Вы забанены» с закрытием приложения.
-                        const denied = data && (data.maintenance === true
-                            || data.can_play === false
-                            || data.admin_only === true);
-                        if (denied) {
-                            resolveAccess(data);
+                        // Задача 67: сервер больше никого не закрывает по
+                        // доступу, поэтому 403 означает БАН. Но если старая
+                        // сборка всё же прислала «maintenance», не пугаем
+                        // игрока баном — показываем «нет связи» и пробуем снова.
+                        const text = String((data && data.detail) || '').toLowerCase();
+                        const bannedText = text.includes('забан') || text.includes('запрет');
+                        if (data && (data.maintenance === true || data.can_play === false)
+                                && !bannedText) {
                             return 'maintenance';
                         }
                         banned = true;
@@ -739,8 +717,8 @@ async function loadUserData(options) {
 
         let result = await tryLoadProfile();
         if (result === 'banned') return false;
-        // Техработы: доступ уже решён сервером, повторять запросы и искать
-        // другой адрес API не нужно — сразу показываем экран-заглушку.
+        // Задача 67: «maintenance» от старой сборки — это не тупик, а повод
+        // попробовать ещё раз (сервер мог не ответить). Возвращаем false.
         if (result === 'maintenance') return false;
         if (result === 'ok') return true;
 
@@ -820,7 +798,7 @@ function switchTab(tabId, element) {
 
 function openGame(game) {
     // Техработы: игры не открываются, даже если экран кто-то «дожал» вручную.
-    if (!canPlay) { showMaintenance(); return; }
+    // Задача 67: игры открываются всем, canPlay здесь всегда true.
     document.querySelectorAll('.winner-modal, .chest-win-modal').forEach(m => m.classList.remove('active'));
     document.getElementById('main-header').style.display = 'none';
     // Баннер подписки в игре не нужен: место занимает поле игры.
@@ -1753,15 +1731,13 @@ function runChestRoulette({ isGold, winner }) {
 }
 
 // Сундуки открыты всем, как только сервер снял техработы (can_play: true).
-// Если техработы снова включат (MAINTENANCE_MODE=1), пускаем только админов —
-// обычному игроку даже запрос не отправляем: сервер всё равно ответил бы 403.
-const CHEST_MAINTENANCE_ALERT = 'Сундуки на тех. работах. Скоро!';
+// Задача 67: сундуки открыты всем, как и вся игра. Сообщение оставили на случай,
+// если сервер когда-нибудь ответит «нельзя» по другой причине (например, бан).
+const CHEST_MAINTENANCE_ALERT = 'Сундуки сейчас недоступны. Попробуйте позже.';
 
 function chestAccessGranted() {
-    // canPlay приходит с сервера (см. resolveAccess): на открытой игре — true
-    // для всех. Если техработы снова включат — сундуки остаются у админов.
-    if (canPlay) return true;
-    return isAdminId(user && user.id) || Boolean(isAdmin);
+    // canPlay после resolveAccess всегда true — заглушек «Технические работы» нет.
+    return true;
 }
 
 async function openChest(type) {
@@ -3063,12 +3039,9 @@ async function ensureUserLoaded() {
 // Доступ к Апгрейду (задача 62/65): открыт всем, кто может играть. Раньше
 // решал список ADMIN_UI_IDS — обычный игрок видел серую карточку «Скоро...».
 function upgradeAccessGranted() {
-    // Задача 65: «Скоро...» на карточке апгрейда висело у ОБЫЧНЫХ игроков —
-    // проверка пускала только админов. Апгрейд открыт всем (UPGRADE_ADMIN_ONLY=0
-    // в api.py), поэтому единственное условие — сервер разрешил играть.
-    // Техработы (MAINTENANCE_MODE=1) по-прежнему закрывают и апгрейд: тогда
-    // canPlay === false и экран техработ показывается раньше самого экрана.
-    return Boolean(canPlay);
+    // Задача 67: апгрейд тоже открыт всем — доступ решает только сервер,
+    // который теперь никого не блокирует.
+    return true;
 }
 
 // Текст отказа: не «Скоро...» (оно выглядело как «апгрейд закрыт навсегда»),
@@ -3165,9 +3138,7 @@ async function syncUpgradeBalanceFromLog() {
 }
 
 async function openUpgrade() {
-    // Задача 65: апгрейд открыт всем. Раньше здесь стояла проверка по списку
-    // админов, и обычный игрок получал «Скоро...» (на скрине — та же карточка).
-    // Единственное ограничение — сервер не разрешил играть (техработы/бан).
+    // Задача 67: апгрейд открыт всем без исключений — админ-проверок больше нет.
     if (!upgradeAccessGranted()) {
         return tg.showAlert(accessBlockedText());
     }
@@ -5667,13 +5638,10 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (!tg.initData) {
         setSyncBanner('Откройте приложение через Telegram — без initData сервер не покажет баланс.');
     }
-    // Задача 57: витрину тянем только после того, как сервер подтвердил доступ.
-    // Иначе во время техработ каждый не-админ видел в консоли 403 на
-    // /api/shop_items, а на слабом телефоне это ещё и задерживало экран.
+    // Задача 67: игра открыта всем, поэтому витрину тянем сразу — раньше она
+    // ждала «подтверждения доступа» и при закрытом флаге не грузилась вообще.
     try { await loadUserData(); } catch(e) {}
-    if (canPlay) {
-        try { await loadShopItems(); } catch(e) {}
-    }
+    try { await loadShopItems(); } catch(e) {}
     hideLoader();
     // Держим сервер тёплым, пока игрок в приложении (см. API_PING_INTERVAL).
     startApiHeartbeat();
@@ -5684,10 +5652,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     // «Нет связи с сервером» с кнопкой «Проверить снова» и включаем интерфейс:
     // данные всё равно придут с сервера, а игрок не упирается в тупик. Раньше
     // любая сетевая ошибка выглядела как «идёт обновление, скоро откроем».
-    if (accessKnown && !canPlay) {
-        showMaintenance();
-        return;
-    }
+    // Задача 67: заглушка «Технические работы» больше не показывается никогда —
+    // остался только честный экран «нет связи», если сервер не ответил.
     if (!accessKnown) {
         showMaintenance({ offline: true });
         // Автоповтор: как только сервер проснётся, экран уберём сами.
