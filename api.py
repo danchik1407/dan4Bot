@@ -85,7 +85,7 @@ async def _http_json(url, method: str = "GET", params=None, payload=None, timeou
 
 # Номер сборки: по нему из /api/health видно, что на сервисе НЕ старый код.
 # Если после деплоя здесь прежнее значение — Render ещё не перезапустился.
-API_BUILD = "2026-10-27-task53-partner-names"
+API_BUILD = "2026-10-27-task54-upgrade-balance-lock"
 
 # Момент старта процесса. По нему видно, что сервис только что «проснулся»:
 # Render на бесплатном тарифе усыпляет Web Service через 15 минут без входящих
@@ -2819,7 +2819,9 @@ class ClaimChestRequest(BaseModel):
     claim_id: Optional[Union[int, str]] = None
 
 
-class UpgradeLogRequest(BaseModel): initData: str
+class UpgradeLogRequest(BaseModel):
+    initData: str
+    limit: Optional[int] = None       # /api/upgrade_pending: сколько последних раундов отдать
 
 
 class UpgradeAck(BaseModel):
@@ -4522,22 +4524,33 @@ def _upgrade_target_value(source: str, amount: int, target: str,
 
 
 def _upgrade_read_user(user_id: int):
-    """Читаем только нужные поля — никаких обращений к несуществующим колонкам (PGRST204)."""
+    """Читаем только нужные поля — никаких обращений к несуществующим колонкам (PGRST204).
+
+    Задача 54: строк может быть несколько (старые дубли user_id). Апгрейд раньше
+    брал ПЕРВУЮ попавшуюся, а профиль — строку с максимальным балансом. Если
+    первой оказывалась «мёртвая» строка с 0, апгрейд списывал не с того баланса,
+    который видит игрок, — и получалось «списали не сразу / не тот баланс».
+    Теперь правило выбора то же, что в /api/user: строка с максимумом коинов.
+    """
     response = (
         supabase.table("users")
-        .select("coins, inventory")
+        .select("coins, inventory, id")
         .eq("user_id", user_id)
         .execute()
     )
     if not response.data:
         raise HTTPException(status_code=404, detail="Пользователь не найден")
-    row = response.data[0]
+    rows = response.data
+    row = max(rows, key=lambda item: _safe_int(item.get("coins"), 0))
+    if len(rows) > 1:
+        logger.warning("Апгрейд: у user_id=%s %s строк профиля, беру строку с балансом %s",
+                       user_id, len(rows), _safe_int(row.get("coins"), 0))
     raw_coins = row.get("coins") or 0
     try:
         coins = int(raw_coins)
     except (TypeError, ValueError):
         coins = 0
-    return coins, row.get("inventory")
+    return coins, row.get("inventory"), row.get("id")
 
 
 def _pg_filter_safe(value) -> bool:
@@ -4552,12 +4565,20 @@ def _pg_filter_safe(value) -> bool:
     return not any(char in value for char in ',:()"')
 
 
-def _upgrade_write_user(user_id: int, raw_coins: int, raw_inventory, coins: int, inventory: list) -> bool:
+def _upgrade_write_user(user_id: int, raw_coins: int, raw_inventory, coins: int, inventory: list,
+                        row_id=None) -> bool:
     """Оптимистичная запись: применяется, только если баланс (и по возможности
     инвентарь) не изменились с момента чтения. Ошибка сети/PostgREST — это
-    False, а не 500: выше стоит повторное чтение и ещё одна попытка."""
+    False, а не 500: выше стоит повторное чтение и ещё одна попытка.
+
+    Задача 54: если известен id строки, пишем ИМЕННО в неё. Раньше update шёл по
+    всем строкам с этим user_id, и при старых дублях можно было перезаписать не
+    ту запись (игрок видел баланс одной строки, а менялась другая).
+    """
     update_values = {"coins": coins, "inventory": json.dumps(inventory, ensure_ascii=False)}
     query = supabase.table("users").update(update_values).eq("user_id", user_id).eq("coins", raw_coins)
+    if row_id is not None:
+        query = query.eq("id", row_id)
     if raw_inventory is not None and _pg_filter_safe(raw_inventory):
         query = query.eq("inventory", raw_inventory)
     try:
@@ -4626,6 +4647,9 @@ def _upgrade_log_public(row) -> dict:
         "win_item": row.get("win_item"),
         "win_amount": _safe_int(row.get("win_amount"), 0),
         "coins_after": _safe_int(row.get("coins_after"), 0),
+        # Задача 54: «до» и «после» вместе нужны клиенту, чтобы показать ровно
+        # то, что списал сервер (и не дать проигрышу «потеряться»).
+        "coins_before": _safe_int(row.get("coins_before"), 0),
         "created_at": created.isoformat() if hasattr(created, "isoformat") else created,
         "seen": bool(row.get("seen")),
     }
@@ -4701,7 +4725,7 @@ async def upgrade_action(data: UpgradeAction):
     )
 
     for _attempt in range(5):
-        raw_coins, raw_inventory = _upgrade_read_user(user_id)
+        raw_coins, raw_inventory, row_id = _upgrade_read_user(user_id)
         inventory = parse_inventory(raw_inventory)
 
         # Списание сразу — до броска, чтобы ставку нельзя было абузить.
@@ -4723,7 +4747,15 @@ async def upgrade_action(data: UpgradeAction):
         # число и на сервере, и в круге.
         real_chance = visual_chance
         if not admin:
-            real_chance /= UPGRADE_NON_ADMIN_DIVIDER
+            divider = float(UPGRADE_NON_ADMIN_DIVIDER) if UPGRADE_NON_ADMIN_DIVIDER else 1.0
+            # Задача 54: защита от опечатки в переменной окружения. Делитель 0
+            # раньше давал ZeroDivisionError → 500, и игрок видел «ставка не
+            # списалась», хотя запрос уже ушёл.
+            if not (0.01 <= divider <= 100):
+                logger.warning("UPGRADE_NON_ADMIN_DIVIDER=%r вне диапазона — играю как 1.0",
+                               UPGRADE_NON_ADMIN_DIVIDER)
+                divider = 1.0
+            real_chance /= divider
 
         # ВАЖНО: и вердикт, и стрелка считаются по ОДНОМУ числу — по тому, которое
         # уходит клиенту в поле "real_chance". Клиент рисует зелёную зону 0..chance
@@ -4761,7 +4793,7 @@ async def upgrade_action(data: UpgradeAction):
         else:
             new_inventory = list(inventory)
 
-        if _upgrade_write_user(user_id, raw_coins, raw_inventory, new_coins, new_inventory):
+        if _upgrade_write_user(user_id, raw_coins, raw_inventory, new_coins, new_inventory, row_id):
             # Лог пишем ПОСЛЕ успешной записи баланса: если она не прошла, розыгрыша не было.
             log_id = _upgrade_log_write(
                 user_id, item_from=source, amount_from=amount, item_to=target,
@@ -4797,6 +4829,56 @@ async def upgrade_action(data: UpgradeAction):
             return payload
 
     raise HTTPException(status_code=409, detail="Апгрейд уже обрабатывается. Попробуйте ещё раз.")
+
+
+@app.post("/api/upgrade_pending")
+async def upgrade_pending(data: UpgradeLogRequest):
+    """Последние раунды апгрейда — клиент сверяет по ним баланс (задача 54).
+
+    Зачем: игрок нажимает АПГРЕЙД, закрывает аппку/выходит в меню и заходит
+    снова. В памяти приложения баланс «до ставки», и он видит старую сумму.
+    Здесь отдаются раунды за последние минуты (по умолчанию 10): по ним клиент
+    подтягивает реальный баланс и, если раунд уже сыгран, показывает результат.
+    """
+    user = verify_telegram_data(data.initData)
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid auth data")
+    user_id = _safe_int(user.get("id"), None)
+    if user_id is None:
+        raise HTTPException(status_code=400, detail="Некорректный id пользователя")
+
+    limit = max(1, min(50, _safe_int(getattr(data, "limit", None), 10) or 10))
+    rows = None
+    try:
+        res = (supabase.table("upgrade_log")
+               .select("*")
+               .eq("user_id", user_id)
+               .order("id", desc=True)
+               .limit(limit)
+               .execute())
+        rows = res.data or []
+    except Exception:  # noqa: BLE001
+        rows = None
+
+    if rows is None:
+        # Таблицы нет — отдаём хотя бы баланс, чтобы клиент мог его сверить.
+        coins = None
+        try:
+            row = _db_user(user_id)
+            if row:
+                coins = _safe_int(row.get("coins"), 0)
+        except Exception:  # noqa: BLE001
+            coins = None
+        return {"ok": False, "available": False, "coins": coins, "rounds": []}
+
+    latest = rows[0] if rows else None
+    return {
+        "ok": True,
+        "available": True,
+        "coins": _safe_int(latest.get("coins_after"), 0) if latest else None,
+        "server_time": int(time.time()),
+        "rounds": [_upgrade_log_public(row) for row in rows],
+    }
 
 
 @app.post("/api/upgrade_history")
