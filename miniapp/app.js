@@ -515,6 +515,16 @@ function setSyncBanner(message) {
 
 function applyProfile(data) {
     balance = Number(data.coins) || 0;
+    // Задача 54: ставка уже ушла на сервер, но профиль мог прийти с балансом «до
+    // списания»: показываем не больше, чем баланс до ставки минус сама ставка.
+    // Раньше на экране до конца анимации висела старая сумма — это и выглядело
+    // как «баланс списывается только после прокрута».
+    if (upgradeRoundActive) {
+        const stake = Math.max(0, Number(upgradePendingStake) || 0);
+        let limit = Number.isFinite(upgradeBalanceFloor) ? upgradeBalanceFloor - stake : null;
+        if (limit !== null && balance > limit) balance = limit;
+        if (limit !== null && balance < 0) balance = 0;
+    }
     keys = Number(data.keys) || 0;
     inventory = Array.isArray(data.inventory) ? data.inventory : [];
     lastChestTime = Number(data.last_chest) || 0;
@@ -2026,7 +2036,11 @@ function upgradeCanStart() {
     } else if (countItem(upgradeFrom) < upgradeFromAmount) {
         return false;
     }
-    return upgradeChanceIsValid(upgradeChance());
+    // Задача 54: шанс и «ХОЧУ» не могут быть «невалидными» — кнопка всегда живая.
+    // Раньше при выбранном множителе, для которого UPGRADE_MULT_CHANCES не
+    // содержит ключа (например свой X), кнопка молча гасла и выглядела как
+    // «нажал — ничего не произошло, ставка не списалась».
+    return true;
 }
 
 // Если капсул выбранного типа не осталось (например, после апгрейда) — уходим на коины.
@@ -2700,6 +2714,57 @@ function updateUpgradeStatsUI() {
     setText('upg-stat-best', upgradeStats.best > 0 ? formatCoins(upgradeStats.best) : '—');
 }
 
+// Задача 54: сверка баланса по журналу апгрейдов. Профиль (/api/user) мог
+// прийти до того, как сервер записал последний раунд; логи же пишутся вместе с
+// балансом, поэтому именно по ним видно, что ставка уже списана/выплачена.
+async function syncUpgradeBalanceFromLog() {
+    if (!tg.initData) return false;
+    let data = null;
+    try {
+        const res = await fetch(`${API_URL}/api/upgrade_pending`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ initData: tg.initData, limit: 10 })
+        });
+        if (!res.ok) return false;
+        data = await res.json().catch(() => ({}));
+    } catch (e) {
+        return false;
+    }
+    if (!data || data.available === false) {
+        // Таблицы логов нет — но баланс сервер всё равно прислал.
+        const coins = Number(data && data.coins);
+        if (Number.isFinite(coins)) { balance = coins; balanceKnown = true; updateUI(); return true; }
+        return false;
+    }
+    const rounds = Array.isArray(data.rounds) ? data.rounds : [];
+    const coins = Number(data.coins);
+    const fresh = rounds.length > 0 && rounds[0];
+    const seenFresh = fresh && upgradeShownLogIds.has(Number(fresh.id));
+
+    if (upgradeBusy) {
+        // Раунд ещё идёт: серверное число — это либо «до ставки», либо уже
+        // новый баланс. Ничего не меняем, финальный ответ всё поправит.
+        return false;
+    }
+    if (Number.isFinite(coins) && (!upgradeRoundActive || coins <= balance)) {
+        balance = coins;
+        balanceKnown = true;
+        updateUI();
+    }
+    // Раунд сыгран, но игрок его не видел именно СЕЙЧАС (закрыл аппку на
+    // прокруте) — показываем результат. Старые раунды не всплывают: их
+    // показом занимается checkPendingUpgradeResult().
+    const recentMs = 10 * 60 * 1000;
+    const age = fresh && fresh.created_at ? Date.now() - Date.parse(fresh.created_at) : 0;
+    const justFinished = fresh && !seenFresh && fresh.won !== undefined
+        && Number.isFinite(age) && age >= 0 && age < recentMs;
+    if (justFinished) {
+        showMissedUpgradeResult(fresh);
+    }
+    return false;
+}
+
 async function openUpgrade() {
     // Проверяем ДО любых сетевых запросов: обычный игрок не должен даже на миг
     // увидеть экран Апгрейда. Список админов — ADMIN_IDS в app.js.
@@ -2723,6 +2788,10 @@ async function openUpgrade() {
     openGame('upgrade');
     renderUpgrade();
     await checkPendingUpgradeResult();   // показать то, что игрок не увидел в прошлый раз
+    // Задача 54: даже если лог недоступен, баланс сверяем с сервером при входе —
+    // иначе после выхода в меню игрок видел сумму «до ставки».
+    await loadUserData().catch(() => {});
+    await syncUpgradeBalanceFromLog().catch(() => {});
 }
 
 // ================= БЕЛАЯ СТРЕЛКА =================
@@ -2888,9 +2957,24 @@ function landUpgradeArrow(won, chance, duration, token, onDone, rollValue) {
 // всё равно приходит с сервера в applyUpgradeServerState.
 let upgradeStakePreview = null;
 
+// Задача 54: «потолок» баланса на время раунда. Фоновый refresh профиля
+// (/api/user) приходит с балансом «до ставки» — без этого ограничения игрок на
+// миг видит старую сумму и решает, что списание не произошло.
+let upgradeBalanceFloor = null;
+let upgradeRoundActive = false;
+// Задача 54: ставка, которая уже ушла на сервер. Если профиль пришёл с
+// балансом «до списания» (или пришёл позже ответа), эту сумму вычитаем сами,
+// иначе игрок видит старый баланс и думает, что ставка не списалась.
+let upgradePendingStake = 0;
+
+function lockUpgradeBalance(baseBalance) {
+    if (Number.isFinite(Number(baseBalance))) upgradeBalanceFloor = Number(baseBalance);
+}
+
 function applyUpgradeStakePreview() {
     const amount = Math.max(0, Math.round(Number(upgradeFromAmount) || 0));
     if (!amount || upgradeStakePreview) return null;
+    upgradePendingStake = amount;      // сумма, которую сервер списал (или спишет)
     const preview = { source: upgradeFrom, amount, inventory: null };
     if (upgradeFrom === 'coin') {
         // Без известного баланса «минусовать» нечего — ждём сервер.
@@ -2916,6 +3000,9 @@ function applyUpgradeStakePreview() {
 function restoreUpgradeStakePreview() {
     const preview = upgradeStakePreview;
     upgradeStakePreview = null;
+    upgradePendingStake = 0;
+    upgradeRoundActive = false;      // раунд не состоялся — баланс снова обычный
+    upgradeBalanceFloor = null;
     if (!preview) return;
     if (preview.source === 'coin' && Number.isFinite(preview.balanceBefore)) {
         balance = preview.balanceBefore;
@@ -2952,10 +3039,12 @@ async function startUpgrade() {
         if (!upgradeCanStart()) {
             upgradeFetchPending = false;
             releaseUpgradeBusy();
+            // Задача 54: шанс вне диапазона больше не блокирует кнопку —
+            // показываем подсказку, но игру не отменяем молча.
             if (!upgradeChanceIsValid(upgradeChance())) {
-                return tg.showAlert(upgradeChance() > UPGRADE_MAX_CHANCE
-                    ? 'Шанс выше 95% — выбери цель подороже'
-                    : 'Шанс слишком низкий — выбери цель подешевле');
+                tg.showAlert(upgradeChance() > UPGRADE_MAX_CHANCE
+                    ? 'Шанс выше 95% — цель слишком дешёвая, выбери подороже'
+                    : 'Шанс ниже 0.5% — цель слишком дорогая, выбери подешевле');
             }
             if (upgradeFrom === 'coin' && balance < upgradeFromAmount) return tg.showAlert('Недостаточно коинов!');
             if (upgradeFrom !== 'coin' && countItem(upgradeFrom) < upgradeFromAmount) return tg.showAlert('Недостаточно капсул!');
@@ -2980,6 +3069,9 @@ async function startUpgrade() {
     if (upgradeTarget.kind === 'chance') payload.target_chance = Number(upgradeTarget.value);
 
     // Ставка уходит с баланса сразу — до анимации и до ответа сервера.
+    // База фиксируется ДО списания: столько уже точно не должно вернуться.
+    lockUpgradeBalance(balance);
+    upgradeRoundActive = true;
     applyUpgradeStakePreview();
 
     const chance = upgradeChance();
@@ -3086,6 +3178,10 @@ async function startUpgrade() {
 // чтобы любая ветка (успех, отмена раунда, восстановление из лога) давала одно и то же.
 function applyUpgradeServerState(data) {
     if (!data) return false;
+    // Серверное состояние — единственная правда: раунд закрыт, ограничение снято.
+    upgradeRoundActive = false;
+    upgradeBalanceFloor = null;
+    upgradePendingStake = 0;
     upgradeStakePreview = null;      // пришло серверное состояние — превью не нужно
     const nextBalance = Number(data.new_balance);
     if (Number.isFinite(nextBalance)) {
