@@ -1100,3 +1100,132 @@ body.maintenance { overflow: hidden; }
     filter: drop-shadow(0 2px 6px rgba(0, 0, 0, 0.45));
     pointer-events: none;
 }
+
+/* ============================================================================
+   ЗАДАЧА 44. Рефералы: карточка должна «продавать» себя.
+   Золотая рамка + мягкий блеск по краю + крупная кнопка приглашения.
+   ========================================================================== */
+.ref-reward-card {
+    position: relative;
+    border: 1px solid rgba(255, 196, 84, 0.55) !important;
+    background: linear-gradient(160deg, rgba(255, 186, 61, 0.16), rgba(20, 14, 4, 0.35) 55%, rgba(255, 138, 61, 0.12)) !important;
+    box-shadow: 0 0 0 1px rgba(255, 214, 128, 0.16) inset, 0 8px 24px rgba(255, 168, 40, 0.16);
+    overflow: hidden;
+}
+.ref-reward-card::after {
+    content: '';
+    position: absolute;
+    top: -60%;
+    left: -30%;
+    width: 45%;
+    height: 220%;
+    background: linear-gradient(100deg, transparent, rgba(255, 255, 255, 0.16), transparent);
+    transform: rotate(12deg);
+    animation: refShine 4.5s ease-in-out infinite;
+    pointer-events: none;
+}
+@keyframes refShine {
+    0%, 55% { left: -40%; opacity: 0; }
+    70% { opacity: 1; }
+    100% { left: 130%; opacity: 0; }
+}
+.ref-reward-card .extra-title { color: #ffd98a; }
+.ref-invite-btn {
+    width: 100%;
+    margin-top: 8px;
+    padding: 11px 12px;
+    border: none;
+    border-radius: 12px;
+    cursor: pointer;
+    font-size: 13px;
+    font-weight: 900;
+    letter-spacing: 0.2px;
+    color: #2a1a03;
+    background: linear-gradient(180deg, #ffd469, #ffab2e);
+    box-shadow: 0 6px 16px rgba(255, 168, 40, 0.35), inset 0 0 0 1px rgba(255, 255, 255, 0.5);
+    transition: transform 0.12s ease, box-shadow 0.12s ease;
+}
+.ref-invite-btn:active { transform: scale(0.985); box-shadow: 0 3px 10px rgba(255, 168, 40, 0.3); }
+
+/* ЗАДАЧА 44. Командная арена: детализация плиток (банк команды, выплата). */
+.arena-team-head .arena-team-sum {
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 0;
+    line-height: 1.15;
+}
+.arena-team-sum .team-board-meta {
+    display: block;
+    font-size: 9px;
+    font-weight: 700;
+    color: #7f8794;
+    letter-spacing: 0.2px;
+}
+.arena-team-row .row-payout {
+    margin-left: auto;
+    font-size: 10px;
+    font-weight: 800;
+    color: #ffd166;
+    white-space: nowrap;
+    flex: 0 0 auto;
+}
+.arena-team-row .row-bet { margin-left: 4px; }
+
+/* ЗАДАЧА 45. Апгрейд: заголовок инвентаря вернулся, правой панели нет. */
+.up-from-title {
+    font-size: 10px;
+    font-weight: 900;
+    letter-spacing: 0.6px;
+    text-transform: uppercase;
+    color: #6f8bb5;
+    margin: 2px 0 4px;
+}
+/* Панель цели была третьей колонкой — без неё «Ваш предмет» и круг делят экран. */
+.up-layout { grid-template-columns: minmax(0, 1fr) minmax(0, 1.15fr) !important; }
+.up-panel-center .up-custom-mult { margin: 6px 0 8px; }
+@media (min-width: 720px) {
+    .up-layout { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) !important; }
+}
+
+/* ЗАДАЧА 45. Командная арена: честная выплата по ставке. */
+.arena-team-row .row-payout { color: #7ee787; }
+.arena-team-row .row-payout.muted { color: #7f8794; }
+
+/* ЗАДАЧА 45. Плашка победителя командной арены: только команда. */
+.winner-name { white-space: normal; }
+.winner-name small, .winner-amount small {
+    display: inline-block;
+    font-size: 11px;
+    font-weight: 700;
+    color: #8e8e93;
+    margin-left: 6px;
+}
+
+/* Плашка результата в командной арене — отдельно от ника. */
+.winner-team-badge {
+    display: none;
+    margin: 4px auto 8px;
+    padding: 5px 14px;
+    border-radius: 999px;
+    font-size: 15px;
+    font-weight: 900;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+}
+.winner-team-badge.blue { display: inline-block; background: rgba(59, 130, 246, 0.22); color: #8fc0ff; border: 1px solid rgba(88, 166, 255, 0.6); }
+.winner-team-badge.red { display: inline-block; background: rgba(239, 68, 68, 0.22); color: #ffb0b0; border: 1px solid rgba(255, 110, 110, 0.6); }
+
+/* ЗАДАЧА 45. Сетка целей в центре: 3 колонки, компактные плитки. */
+.up-to-grid-center {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 6px;
+    width: 100%;
+    margin: 6px 0 4px;
+}
+.up-to-grid-center .up-to-tile { padding: 7px 4px; border-radius: 11px; }
+.up-to-grid-center .up-to-tile-icon { font-size: 16px; }
+.up-to-grid-center .up-to-tile-icon .coin-img { width: 18px; height: 18px; }
+.up-to-grid-center .up-to-tile-name { font-size: 11px; }
+.up-to-grid-center .up-to-tile-value { font-size: 9px; }
+.up-to-grid-center .up-to-tile-chance { font-size: 10px; }
