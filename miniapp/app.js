@@ -1258,7 +1258,14 @@ function renderLoveBadge() {
         const score = Number(loveState.love) || 0;
         const title = loveState.stage && loveState.stage.title ? ` · ${loveState.stage.title}` : '';
         const days = Number(loveState.days) > 0 ? ` · ${loveState.days} дн.` : '';
-        stage.textContent = `${title}${days} · ${score} Love`;
+        // Задача 55: «до следующего уровня» прямо в плашке — иначе Love 0 при
+        // уровне 1 выглядит как «счёт не растёт» и непонятно, что его двигает.
+        const nextLevel = Number(loveState.stage && loveState.stage.next_level);
+        const toNext = Number(loveState.stage && loveState.stage.to_next);
+        const left = Number.isFinite(nextLevel) && nextLevel > 0 && Number.isFinite(toNext)
+            ? ` · до ур. ${nextLevel}: ${formatCoins(toNext)}`
+            : '';
+        stage.textContent = `${title}${days} · ${score} Love${left}`;
     }
 }
 

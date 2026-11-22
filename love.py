@@ -157,14 +157,29 @@ def stages_reached(previous_score, new_score) -> list:
 # текущий уровень пары и Love коины, без сумм наград и без «следующего этапа»:
 # интерес должен быть в самом процессе, а не в таблице выплат.
 def public_stage(score) -> dict:
-    """Уровень пары без наград: index, title, love, progress."""
+    """Уровень пары без наград: index, title, love, progress.
+
+    Задача 55: добавляем «сколько до следующего уровня». Без этого игрок видел
+    «Уровень 1 · Случайное знакомство · Love 0» и не понимал, что вообще
+    двигает уровень: казалось, что счёт не растёт и наград нет.
+    """
     info = stage_info(score)
+    index = info["index"]
+    current = LOVE_STAGES[index]
+    nxt = LOVE_STAGES[index + 1] if index + 1 < len(LOVE_STAGES) else None
     return {
-        "level": info["index"] + 1,
-        "index": info["index"],
+        "level": index + 1,
+        "index": index,
         "title": info["title"],
         "love": info["score"],
         "progress": info["progress"],
+        # Границы этапа: от «стало» до «нужно».
+        "stage_min": current["min"],
+        "stage_max": current["max"],
+        "next_level": (index + 2) if nxt else None,
+        "next_title": nxt["title"] if nxt else None,
+        # Сколько Love осталось до следующего уровня (None — максимальный).
+        "to_next": max(0, nxt["min"] - info["score"]) if nxt else None,
     }
 
 
@@ -172,6 +187,18 @@ def public_stages() -> list:
     """Список уровней для клиента — тоже без наград."""
     return [{"level": stage["index"] + 1, "index": stage["index"], "title": stage["title"]}
             for stage in LOVE_STAGES]
+
+
+def next_level_text(score, currency: str = "Love") -> str:
+    """«До уровня 2 — 40 Love» / «Максимальный уровень» — для бота и API.
+
+    Задача 55: `currency` нужен одиночной ветке — там счёт называется Unlove,
+    и «До уровня 2 — 40 Love» у одинокого игрока только путало.
+    """
+    info = public_stage(score)
+    if info["next_level"] is None:
+        return "Максимальный уровень"
+    return f"До уровня {info['next_level']} — {info['to_next']} {currency}"
 
 
 def rp_action_for(text) -> tuple:
@@ -282,7 +309,12 @@ def solo_state(supabase, user_id) -> dict:
 
 
 def add_solo_love(supabase, user_id, amount: int) -> tuple:
-    """+Unlove одиночке. Возвращает (новый счёт, выданные награды)."""
+    """+Unlove одиночке. Возвращает (новый счёт, выданные награды).
+
+    Задача 55: если запись не прошла, счёт возвращается ПРЕЖНИМ, а не
+    «нарисованным». Раньше бот писал «+10 Unlove (всего 20)», хотя в базе
+    оставалось 10: игрок видел рост, а после рестарта счёт откатывался.
+    """
     uid = _safe_int(user_id, 0)
     if uid <= 0:
         return 0, []
@@ -292,9 +324,18 @@ def add_solo_love(supabase, user_id, amount: int) -> tuple:
         supabase.table(SOLO_LOVE_TABLE).upsert(
             {"user_id": uid, "love": new_score}, on_conflict="user_id").execute()
     except Exception:
-        # Таблицы нет (миграция не применена) — считаем, что начислять некуда.
-        return new_score, []
-    return new_score, claim_solo_stage_rewards(supabase, uid, new_score)
+        # Таблицы нет (миграция не применена) — начислять некуда, врём про рост.
+        return current, []
+    # Обратное чтение: upsert может «пройти» и ничего не изменить (RLS).
+    saved = solo_state(supabase, uid)["love"]
+    if saved < new_score:
+        return saved, []
+    return saved, claim_solo_stage_rewards(supabase, uid, saved)
+
+
+def solo_saved(supabase, user_id, expected: int) -> bool:
+    """Реально ли +Unlove лежит в базе (для честного ответа игроку)."""
+    return _safe_int(solo_state(supabase, user_id)["love"], 0) >= int(expected)
 
 
 def reset_solo_love(supabase, user_id) -> bool:

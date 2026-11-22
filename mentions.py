@@ -79,6 +79,27 @@ def mention_html(user_id, name=None) -> str:
             f'{html.escape(fallback_name(user_id, name))}</a>')
 
 
+def merge_names(*maps) -> dict[int, str]:
+    """Объединяет источники имён: последний непустой выигрывает.
+
+    Задача 55: у @username и у отображаемого имени разная судьба — username
+    может быть занят человеком, который сменил ник (тогда в базе остаётся
+    «Contact_blocked» от прежнего владельца), а Telegram-имя приходит живым.
+    Поэтому база и Telegram-имена складываются вместе, а не заменяют друг друга.
+    """
+    result: dict[int, str] = {}
+    for source in maps:
+        for key, value in (source or {}).items():
+            try:
+                uid = int(key)
+            except (TypeError, ValueError):
+                continue
+            name = clean_name(value)
+            if name:
+                result[uid] = name
+    return result
+
+
 def parse_names(rows: Iterable[Mapping]) -> dict[int, str]:
     """``[{user_id, username}] → {user_id: ник}`` для подстановки в текст."""
     result: dict[int, str] = {}
