@@ -1379,10 +1379,15 @@ body.maintenance { overflow: hidden; }
 .up-layout-v2 .up-to-grid-center .up-to-tile-value { font-size: 10px; }
 .up-layout-v2 .up-to-grid-center .up-to-tile-chance { font-size: 11px; font-weight: 900; }
 
-/* --- свой множитель: компактная плашка --- */
-.up-layout-v2 .up-custom-mult { margin: 0; padding: 8px 11px; border-radius: 14px; }
+/* --- свой множитель: карточка под сеткой, а не отдельный «режим» --- */
+.up-layout-v2 .up-custom-mult { margin: 0; padding: 9px 11px; border-radius: 14px; }
 .up-layout-v2 .up-custom-head { font-size: 10px; }
-.up-layout-v2 .up-custom-head b { font-size: 14px; }
+.up-layout-v2 .up-custom-row { display: flex; align-items: center; gap: 8px; }
+.up-layout-v2 .up-custom-row .up-custom-range { flex: 1 1 auto; }
+.up-layout-v2 .up-custom-row b {
+    flex: 0 0 auto; min-width: 54px; text-align: right;
+    font-size: 15px; font-weight: 900; color: #eaf3ff; font-variant-numeric: tabular-nums;
+}
 .up-layout-v2 .up-custom-range { height: 20px; margin: 2px 0 0; }
 
 /* --- кнопка: последний штрих, всегда внизу панели --- */
@@ -1394,3 +1399,26 @@ body.maintenance { overflow: hidden; }
     .up-layout-v2 .up-panel { padding: 10px; }
     .up-brand { font-size: 16px; }
 }
+
+/* ============================================================================
+   ЗАДАЧА 52. Апгрейд: убираем дубль выбора и неоднозначность.
+   Игрок обвёл ту же сетку множителей второй раз: после задачи 51 плитки цели
+   жили под кругом, а ползунок «Свой множитель» их перебивал — любое движение
+   снимало подсветку с выбранной плитки. Теперь цель одна: сетка в нижней
+   панели + плитка «СВОЙ X», а ползунок только показывает шанс.
+   ========================================================================== */
+/* Кнопка «применить свой X»: маленькая, справа в заголовке карточки. */
+.up-custom-apply {
+    border: 1px solid rgba(88, 166, 255, 0.45); border-radius: 999px;
+    background: rgba(59, 130, 246, 0.16); color: #bcd8ff;
+    font-size: 9px; font-weight: 900; letter-spacing: 0.8px;
+    padding: 5px 10px; cursor: pointer; transition: 0.15s;
+}
+.up-custom-apply:active { transform: scale(0.96); background: rgba(59, 130, 246, 0.3); }
+.up-custom-apply:disabled { opacity: 0.4; cursor: not-allowed; }
+
+/* Плитка своей цели — тот же размер, что у готовых множителей. */
+.up-layout-v2 .up-to-tile[data-target="custom"] .up-to-tile-name { color: #a5e8c0; }
+
+/* В нижней панели цель — заголовок, отступ не нужен. */
+.up-layout-v2 .up-panel-to .up-target-head { margin: 0 0 2px; }

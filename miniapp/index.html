@@ -12,7 +12,7 @@
     <meta http-equiv="Pragma" content="no-cache">
     <meta http-equiv="Expires" content="0">
     <title>AURA GAME</title>
-    <link rel="stylesheet" href="style.css?v=aura-51">
+    <link rel="stylesheet" href="style.css?v=aura-52">
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
 </head>
 <body>
@@ -441,47 +441,46 @@
                     <div class="up-net" id="up-net" aria-live="polite"></div>
                     <div class="up-outcome" id="up-outcome">Выигрыш: 1 000 <img class="coin-img" src="coin.png" alt="монета"></div>
 
-                    <!-- Задача 51: выбор цели переехал сюда, под круг. Раньше
-                         игрок видел ОДНИ И ТЕ ЖЕ шесть множителей дважды: чипами
-                         над кнопкой и плитками в панели «Ваша цель» ниже, из-за
-                         чего приходилось скроллить, чтобы дойти до кнопки. -->
+                    <!-- Задача 52: сетку множителей убрали из-под круга. Между
+                         кругом и целью была простыня пустоты, а кнопка уезжала
+                         вниз. Цель теперь в отдельной панели ниже. -->
+                    <button class="up-upgrade-btn" id="upgrade-btn" onclick="onUpgradeButtonClick()">АПГРЕЙД</button>
+                    <div class="up-result" id="upgrade-result">Выбери цель и жми АПГРЕЙД</div>
+                </section>
+
+                <!-- НИЗ: цель, свой множитель. Раньше плитки множителей были
+                     выбором цели, а свой X молча перебивал этот выбор. -->
+                <section class="up-panel up-panel-to">
                     <header class="up-panel-head up-target-head">Ваша цель</header>
                     <div class="up-to-grid up-to-grid-center" id="up-to-grid"></div>
 
-                    <!-- Свой множитель: одна компактная плашка с ползунком.
-                         Задача 51 — здесь же, а не отдельной панелью внизу. -->
+                    <!-- Задача 52: свой множитель — ОТДЕЛЬНАЯ плитка в конце сетки.
+                         Ползунок только показывает X и шанс, а применяется тапом
+                         по плитке «СВОЙ X»: выбор цели всегда однозначен. -->
                     <div class="up-custom-mult" id="up-custom-mult">
                         <div class="up-custom-head">
                             <span>Свой множитель</span>
+                            <button class="up-custom-apply" onclick="applyCustomMult()">ПРИМЕНИТЬ</button>
+                        </div>
+                        <div class="up-custom-row">
+                            <input type="range" id="up-custom-range" class="up-custom-range"
+                                   min="0" max="1000" step="1" value="117"
+                                   oninput="onCustomMultInput(this.value)"
+                                   onchange="onCustomMultCommit(this.value)">
                             <b id="up-custom-value">x1.75</b>
                         </div>
-                        <input type="range" id="up-custom-range" class="up-custom-range"
-                               min="0" max="1000" step="1" value="117"
-                               oninput="onCustomMultInput(this.value)"
-                               onchange="onCustomMultCommit(this.value)">
                         <div class="up-custom-meta">
                             <span>x1.12</span>
                             <span class="up-custom-chance" id="up-custom-chance">51.43%</span>
                             <span>x50</span>
                         </div>
                     </div>
-
-                    <button class="up-upgrade-btn" id="upgrade-btn" onclick="onUpgradeButtonClick()">АПГРЕЙД</button>
-                    <div class="up-result" id="upgrade-result">Выбери цель и жми АПГРЕЙД</div>
                 </section>
 
-                <!-- Скрытые контейнеры для старого app.js из кэша: там ещё
-                     вызываются selectUpgradeQuick и подсветка .up-chip. -->
+                <!-- Контейнеры для подписи формулы: app.js пишет в них текст,
+                     но на экране их нет (задача 52 убрала лишние чипы и табы). -->
                 <div class="up-to-tabs" id="up-to-tabs" hidden></div>
                 <div class="up-to-hint" id="up-to-hint" hidden></div>
-                <div class="up-quick-chances" id="up-quick-chances" hidden>
-                    <button class="up-chip" data-target="mult:1.12" onclick="selectUpgradeQuick('mult', 1.12, this)">x1.12</button>
-                    <button class="up-chip" data-target="mult:1.35" onclick="selectUpgradeQuick('mult', 1.35, this)">x1.35</button>
-                    <button class="up-chip" data-target="mult:1.55" onclick="selectUpgradeQuick('mult', 1.55, this)">x1.55</button>
-                    <button class="up-chip" data-target="mult:1.75" onclick="selectUpgradeQuick('mult', 1.75, this)">x1.75</button>
-                    <button class="up-chip" data-target="mult:20" onclick="selectUpgradeQuick('mult', 20, this)">x20</button>
-                    <button class="up-chip" data-target="mult:50" onclick="selectUpgradeQuick('mult', 50, this)">x50</button>
-                </div>
             </div>
 
             <div class="up-stats-inline" id="upgrade-stats-inline">
@@ -572,6 +571,6 @@
         <div class="nav-item" onclick="switchTab('profile', this)"><span class="nav-icon">👤</span> Профиль</div>
     </nav>
 
-    <script src="app.js?v=aura-51" defer></script>
+    <script src="app.js?v=aura-52" defer></script>
 </body>
 </html>

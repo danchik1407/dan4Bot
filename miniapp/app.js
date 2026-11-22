@@ -301,7 +301,8 @@ function nameHtml(name) { return `<span class="lb-name" title="${escapeHtml(name
 let upgradeFrom = 'coin';                                   // 'coin' | 'capsule' | 'uniq_capsule'
 let upgradeFromAmount = 100;                                // коины или количество капсул
 let upgradeToTab = 'coin';                                  // вкладка правой панели
-let upgradeTarget = { kind: 'mult', value: 1.35 };          // mult | chance | item
+const UPGRADE_DEFAULT_MULT = 1.35;                          // цель по умолчанию
+let upgradeTarget = { kind: 'mult', value: UPGRADE_DEFAULT_MULT };  // mult | chance | item
 let upgradeBusy = false, upgradeStartedAt = 0;
 // Белая стрелка: угол в градусах (0 = вверх), rAF-цикл и «поколение» прогона,
 // чтобы запоздавшие колбэки от прошлого спина не перетирали новый результат.
@@ -2293,17 +2294,20 @@ function upgradeSliderFromMult(mult) {
     return Math.round((Math.log(value) - min) / (max - min) * 1000);
 }
 
+// Задача 52: ползунок «Свой множитель» больше НЕ переписывает цель сам.
+// Раньше любое движение ползунка молча меняло upgradeTarget, из-за чего плитка
+// в сетке переставала быть выбранной и подсветка «прыгала» на любое значение.
+// Теперь ползунок только показывает X и его шанс, а применяется он тапом по
+// плитке (applyCustomMult) — выбор цели всегда виден однозначно.
 function syncUpgradeCustomMult() {
     const slider = document.getElementById('up-custom-range');
     const label = document.getElementById('up-custom-value');
     const chanceEl = document.getElementById('up-custom-chance');
     const isMult = upgradeTarget.kind === 'mult';
-    const mult = isMult ? Number(upgradeTarget.value) : UPGRADE_MULT_MIN;
-    if (slider) slider.value = String(upgradeSliderFromMult(mult));
-    if (label) label.textContent = isMult ? `x${mult.toFixed(2)}` : '—';
-    if (chanceEl) chanceEl.textContent = isMult
-        ? `${upgradeDisplayChance(upgradeMultChance(mult)).toFixed(2)}%`
-        : 'выбери X';
+    const mult = isMult ? Number(upgradeTarget.value) : upgradeMultFromSlider(slider ? slider.value : 0);
+    if (slider && isMult) slider.value = String(upgradeSliderFromMult(mult));
+    if (label) label.textContent = `x${Number(mult).toFixed(2)}`;
+    if (chanceEl) chanceEl.textContent = `${upgradeDisplayChance(upgradeMultChance(mult)).toFixed(2)}%`;
 }
 
 // Ползунок двигают — обновляем цифры сразу (без полной перерисовки, чтобы
@@ -2311,23 +2315,30 @@ function syncUpgradeCustomMult() {
 function onCustomMultInput(raw) {
     if (upgradeBusy) return;
     const mult = upgradeMultFromSlider(raw);
-    upgradeToTab = 'coin';
-    upgradeTarget = { kind: 'mult', value: mult };
-    syncUpgradeCustomMult();
-    document.querySelectorAll('.up-chip').forEach(chip => chip.classList.remove('active'));
-    const chance = upgradeDisplayChance(upgradeMultChance(mult));
-    setUpgradeRingPercent(chance);
-    const chanceEl = document.getElementById('up-chance');
-    if (chanceEl && !upgradeBusy) chanceEl.textContent = chance.toFixed(2) + '%';
-    const outcome = document.getElementById('up-outcome');
-    if (outcome) outcome.innerHTML = `Выигрыш: <b>${upgradeRewardText()}</b>`;
+    const valueLabel = document.getElementById('up-custom-value');
+    if (valueLabel) valueLabel.textContent = `x${mult.toFixed(2)}`;
+    const chanceEl = document.getElementById('up-custom-chance');
+    if (chanceEl) chanceEl.textContent = `${upgradeDisplayChance(upgradeMultChance(mult)).toFixed(2)}%`;
+    // Круг показывает, каким будет шанс с этим X. Сама цель не меняется —
+    // в сетке остаётся выбрана прежняя плитка, пока игрок не тапнет по этой.
 }
 
-function onCustomMultCommit() {
+// Применить свой X: тап по плитке-подсказке или конец движения ползунка.
+function applyCustomMult(raw) {
     if (upgradeBusy) return;
+    const slider = document.getElementById('up-custom-range');
+    const mult = upgradeMultFromSlider(raw === undefined && slider ? slider.value : raw);
+    upgradeToTab = 'coin';
+    upgradeTarget = { kind: 'mult', value: mult };
     clearUpgradeResult();
     playSound('click');
     renderUpgrade();
+}
+
+// Конец движения ползунка цель НЕ меняет: игрок только смотрит шанс.
+function onCustomMultCommit() {
+    if (upgradeBusy) return;
+    playSound('click');
 }
 
 function renderUpgradeFromTabs() {
@@ -2437,13 +2448,10 @@ function renderUpgrade() {
     // item, и в «Своём множителе» навсегда оставалось «выбери X» (баг со скрина).
     syncUpgradeCustomMult();
 
-    // --- быстрые кнопки ---
-    document.querySelectorAll('.up-chip').forEach(chip => {
-        const target = chip.dataset.target || '';
-        const active = (upgradeTarget.kind === 'mult' && target === `mult:${upgradeTarget.value}`)
-            || (upgradeTarget.kind === 'chance' && target === `chance:${upgradeTarget.value}`);
-        chip.classList.toggle('active', active);
-    });
+    // Задача 52: кнопка «ПРИМЕНИТЬ» в карточке своего множителя неактивна,
+    // когда капсулы (цель — предмет, множитель тут не применим).
+    const applyBtn = document.querySelector('.up-custom-apply');
+    if (applyBtn) applyBtn.disabled = upgradeFrom !== 'coin';
 
     // --- кнопка ---
     // После результата кнопка снова синяя и активная: следующий раунд
@@ -2480,7 +2488,14 @@ function renderUpgradeTargets() {
         upgradeTarget = { kind: 'item', value: 'capsule' };
     }
     if (upgradeFrom === 'coin' && upgradeTarget.kind === 'item') {
-        upgradeTarget = { kind: 'mult', value: 2 };
+        // Задача 52: возвращаемся к цели из сетки, а не к «x2», которой там нет.
+        upgradeTarget = { kind: 'mult', value: UPGRADE_DEFAULT_MULT };
+    }
+    // Ползунок всегда стоит на выбранном множителе: плитка «СВОЙ X» и плашка
+    // под сеткой показывают одно и то же число (задача 52).
+    const customSlider = document.getElementById('up-custom-range');
+    if (customSlider && upgradeTarget.kind === 'mult') {
+        customSlider.value = String(upgradeSliderFromMult(Number(upgradeTarget.value)));
     }
     const fromValue = upgradeSourceValue();
     const tiles = [];
@@ -2508,6 +2523,27 @@ function renderUpgradeTargets() {
                        <div class="up-to-tile-chance">${shownChance.toFixed(2)}%</div>`
             });
         });
+        // --- своя цель: тот же вид плитки, что у x1.12…x50 ---
+        // Показываем актуальный X ползунка, его выигрыш и шанс. Нажатие
+        // применяет X как цель (applyCustomMult), а не «прыгает» само.
+        {
+            const customMult = Math.max(UPGRADE_MULT_MIN,
+                Math.min(UPGRADE_MULT_MAX, upgradeMultFromSlider(
+                    Number((document.getElementById('up-custom-range') || {}).value) || 0)));
+            const customChance = upgradeDisplayChance(upgradeMultChance(customMult));
+            const customTo = fromValue * customMult;
+            const customActive = upgradeTarget.kind === 'mult'
+                && Math.abs(Number(upgradeTarget.value) - customMult) < 0.005;
+            tiles.push({
+                key: 'custom',
+                active: customActive,
+                disabled: !upgradeChanceIsValid(customChance),
+                html: `<div class="up-to-tile-icon">✏️</div>
+                       <div class="up-to-tile-name">x${customMult.toFixed(2)}</div>
+                       <div class="up-to-tile-value">${coinAmount(customTo)}</div>
+                       <div class="up-to-tile-chance">${customChance.toFixed(2)}%</div>`
+            });
+        }
         if (upgradeTarget.kind === 'chance') {
             const toValue = upgradeTargetValue(fromValue);
             const ratio = fromValue > 0 && toValue > 0 ? (fromValue / toValue) * 100 : 0;
@@ -2553,6 +2589,9 @@ function renderUpgradeTargets() {
         button.addEventListener('click', () => {
             const raw = button.dataset.target || '';
             const [kind, value] = raw.split(':');
+            // Задача 52: кастомный X живёт прямо в сетке цели. Раньше он был
+            // ползунком, который сам менял цель, и выбранная плитка «прыгала».
+            if (kind === 'custom') { applyCustomMult(); return; }
             if (kind === 'item') selectUpgradeTarget('item', value);
             else selectUpgradeTarget(kind, Number(value));
         });
@@ -2583,7 +2622,7 @@ function selectUpgradeToTab(tab, element) {
     upgradeToTab = tab === 'capsule' ? 'capsule' : 'coin';
     document.querySelectorAll('.up-to-tab').forEach(btn => btn.classList.remove('active'));
     if (element) element.classList.add('active');
-    if (upgradeToTab === 'coin' && upgradeTarget.kind === 'item') upgradeTarget = { kind: 'mult', value: 2 };
+    if (upgradeToTab === 'coin' && upgradeTarget.kind === 'item') upgradeTarget = { kind: 'mult', value: UPGRADE_DEFAULT_MULT };
     if (upgradeToTab === 'capsule' && upgradeTarget.kind !== 'item') upgradeTarget = { kind: 'item', value: 'capsule' };
     clearUpgradeResult();
     playSound('click');
@@ -2595,20 +2634,6 @@ function selectUpgradeTarget(kind, value) {
     upgradeToTab = kind === 'item' ? 'capsule' : 'coin';
     document.querySelectorAll('.up-to-tab').forEach(btn => btn.classList.toggle('active', btn.id === 'up-to-tab-' + upgradeToTab));
     upgradeTarget = { kind, value };
-    clearUpgradeResult();
-    playSound('click');
-    renderUpgrade();
-}
-
-function selectUpgradeQuick(kind, value, element) {
-    if (upgradeBusy) return;
-    upgradeToTab = 'coin';
-    document.querySelectorAll('.up-to-tab').forEach(btn => btn.classList.toggle('active', btn.id === 'up-to-tab-coin'));
-    upgradeTarget = { kind, value: Number(value) };
-    if (element) {
-        document.querySelectorAll('.up-chip').forEach(chip => chip.classList.remove('active'));
-        element.classList.add('active');
-    }
     clearUpgradeResult();
     playSound('click');
     renderUpgrade();
