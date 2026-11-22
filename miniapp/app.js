@@ -2379,6 +2379,7 @@ function renderUpgrade() {
     setText('up-from-value', upgradeFrom === 'coin'
         ? coinAmount(upgradeFromAmount)
         : `${upgradeFromAmount} шт. · ${coinAmount(fromValue)}`);
+    setText('up-from-tag', upgradeFrom === 'coin' ? 'ставка' : 'кол-во');
 
     renderUpgradeFromTabs();
 
@@ -2415,8 +2416,7 @@ function renderUpgrade() {
         outcome.innerHTML = `Выигрыш: <b>${upgradeRewardText()}</b>`;
     }
 
-    // --- правая панель ---
-    syncUpgradeCustomMult();
+    // --- отладочная подпись формулы (контейнер скрыт в разметке) ---
     const hint = document.getElementById('up-to-hint');
     if (hint) {
         if (upgradeToTab === 'coin') {
@@ -2432,6 +2432,10 @@ function renderUpgrade() {
         }
     }
     renderUpgradeTargets();
+    // Задача 51: ползунок синхронизируем ПОСЛЕ нормализации цели. Раньше
+    // syncUpgradeCustomMult() вызывался выше, когда upgradeTarget ещё мог быть
+    // item, и в «Своём множителе» навсегда оставалось «выбери X» (баг со скрина).
+    syncUpgradeCustomMult();
 
     // --- быстрые кнопки ---
     document.querySelectorAll('.up-chip').forEach(chip => {

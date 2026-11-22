@@ -12,7 +12,7 @@
     <meta http-equiv="Pragma" content="no-cache">
     <meta http-equiv="Expires" content="0">
     <title>AURA GAME</title>
-    <link rel="stylesheet" href="style.css?v=aura-50">
+    <link rel="stylesheet" href="style.css?v=aura-51">
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
 </head>
 <body>
@@ -376,11 +376,12 @@
 
         <section id="screen-upgrade" class="game-screen upgrade-screen">
             <button class="back-btn" onclick="closeGame()">← Назад</button>
-            <div class="game-balance-badge"><img class="coin-img" src="coin.png" alt="монета"> <span class="game-balance-val">…</span></div>
-
+            <!-- Задача 51: баланс из fixed-бейджа переехал в шапку экрана. Раньше он
+                 висел в правом верхнем углу, налезал на плашку «ADMIN» и на
+                 кнопку Telegram «…», а сама плашка игроку ничего не говорила. -->
             <div class="up-header">
                 <h2 class="up-brand">🛠️ АПГРЕЙД</h2>
-                <span class="up-badge">ADMIN</span>
+                <div class="up-balance"><img class="coin-img" src="coin.png" alt="монета"> <span class="game-balance-val">…</span></div>
             </div>
 
             <!-- Задача 50: новый дизайн по наброску игрока — вертикальный экран.
@@ -391,10 +392,15 @@
                 <!-- ВЕРХ: ваш предмет -->
                 <section class="up-panel up-panel-from">
                     <header class="up-panel-head">Ваш предмет</header>
+                    <!-- Задача 51: карточка стала горизонтальной и компактной. Было
+                         180 px пустоты вокруг иконки — игрок обвёл её на скрине. -->
                     <div class="up-slot">
                         <div class="up-slot-icon" id="up-from-icon"><img class="coin-img" src="coin.png" alt="AG"></div>
-                        <div class="up-slot-name" id="up-from-name">Коины</div>
-                        <div class="up-slot-value" id="up-from-value">100 <img class="coin-img" src="coin.png" alt="монета"></div>
+                        <div class="up-slot-text">
+                            <div class="up-slot-name" id="up-from-name">Коины</div>
+                            <div class="up-slot-value" id="up-from-value">100 <img class="coin-img" src="coin.png" alt="монета"></div>
+                        </div>
+                        <div class="up-slot-tag" id="up-from-tag">ставка</div>
                     </div>
 
                     <!-- Задача 45: без инвентаря апгрейд капсул невозможен — нечего
@@ -407,13 +413,16 @@
                         <input type="number" id="upgrade-amount" class="up-amount-input" value="100" min="50" max="10000" inputmode="numeric">
                         <input type="range" id="upgrade-slider" class="up-slider" min="50" max="10000" step="50" value="100">
                         <div class="up-amount-meta"><span id="up-amount-min">50</span><span id="up-amount-max">10 000</span></div>
+                        <!-- Задача 51: шесть кнопок в один ряд. Раньше их было
+                             пять в сетке repeat(5, 1fr), и MAX падал на вторую
+                             строку одиноким огрызком. -->
                         <div class="up-quick-amounts">
                             <button onclick="setUpgradeAmount(50)">50</button>
                             <button onclick="setUpgradeAmount(500)">500</button>
-                            <button onclick="setUpgradeAmount(1000)">1 000</button>
-                            <button onclick="setUpgradeAmount(5000)">5 000</button>
-                            <button onclick="setUpgradeAmount(10000)">10 000</button>
-                            <button onclick="setUpgradeAmount('max')">MAX</button>
+                            <button onclick="setUpgradeAmount(1000)">1К</button>
+                            <button onclick="setUpgradeAmount(5000)">5К</button>
+                            <button onclick="setUpgradeAmount(10000)">10К</button>
+                            <button class="max" onclick="setUpgradeAmount('max')">MAX</button>
                         </div>
                     </div>
                 </section>
@@ -432,25 +441,15 @@
                     <div class="up-net" id="up-net" aria-live="polite"></div>
                     <div class="up-outcome" id="up-outcome">Выигрыш: 1 000 <img class="coin-img" src="coin.png" alt="монета"></div>
 
-                    <div class="up-quick-chances">
-                        <button class="up-chip" data-target="mult:1.12" onclick="selectUpgradeQuick('mult', 1.12, this)">x1.12</button>
-                        <button class="up-chip" data-target="mult:1.35" onclick="selectUpgradeQuick('mult', 1.35, this)">x1.35</button>
-                        <button class="up-chip" data-target="mult:1.55" onclick="selectUpgradeQuick('mult', 1.55, this)">x1.55</button>
-                        <button class="up-chip" data-target="mult:1.75" onclick="selectUpgradeQuick('mult', 1.75, this)">x1.75</button>
-                        <button class="up-chip" data-target="mult:20" onclick="selectUpgradeQuick('mult', 20, this)">x20</button>
-                        <button class="up-chip" data-target="mult:50" onclick="selectUpgradeQuick('mult', 50, this)">x50</button>
-                    </div>
-
-                    <button class="up-upgrade-btn" id="upgrade-btn" onclick="onUpgradeButtonClick()">АПГРЕЙД</button>
-                    <div class="up-result" id="upgrade-result">Выбери множитель и жми АПГРЕЙД</div>
-                </section>
-
-                <!-- НИЗ: цель и свой множитель. Цель выбирается здесь (задача 45):
-                     никакой правой панели «ВЫБОР ПРЕДМЕТА» нет. -->
-                <section class="up-panel up-panel-to">
-                    <header class="up-panel-head">Ваша цель</header>
+                    <!-- Задача 51: выбор цели переехал сюда, под круг. Раньше
+                         игрок видел ОДНИ И ТЕ ЖЕ шесть множителей дважды: чипами
+                         над кнопкой и плитками в панели «Ваша цель» ниже, из-за
+                         чего приходилось скроллить, чтобы дойти до кнопки. -->
+                    <header class="up-panel-head up-target-head">Ваша цель</header>
                     <div class="up-to-grid up-to-grid-center" id="up-to-grid"></div>
 
+                    <!-- Свой множитель: одна компактная плашка с ползунком.
+                         Задача 51 — здесь же, а не отдельной панелью внизу. -->
                     <div class="up-custom-mult" id="up-custom-mult">
                         <div class="up-custom-head">
                             <span>Свой множитель</span>
@@ -466,11 +465,23 @@
                             <span>x50</span>
                         </div>
                     </div>
+
+                    <button class="up-upgrade-btn" id="upgrade-btn" onclick="onUpgradeButtonClick()">АПГРЕЙД</button>
+                    <div class="up-result" id="upgrade-result">Выбери цель и жми АПГРЕЙД</div>
                 </section>
 
-                <!-- Скрытые контейнеры для старого app.js из кэша. -->
+                <!-- Скрытые контейнеры для старого app.js из кэша: там ещё
+                     вызываются selectUpgradeQuick и подсветка .up-chip. -->
                 <div class="up-to-tabs" id="up-to-tabs" hidden></div>
                 <div class="up-to-hint" id="up-to-hint" hidden></div>
+                <div class="up-quick-chances" id="up-quick-chances" hidden>
+                    <button class="up-chip" data-target="mult:1.12" onclick="selectUpgradeQuick('mult', 1.12, this)">x1.12</button>
+                    <button class="up-chip" data-target="mult:1.35" onclick="selectUpgradeQuick('mult', 1.35, this)">x1.35</button>
+                    <button class="up-chip" data-target="mult:1.55" onclick="selectUpgradeQuick('mult', 1.55, this)">x1.55</button>
+                    <button class="up-chip" data-target="mult:1.75" onclick="selectUpgradeQuick('mult', 1.75, this)">x1.75</button>
+                    <button class="up-chip" data-target="mult:20" onclick="selectUpgradeQuick('mult', 20, this)">x20</button>
+                    <button class="up-chip" data-target="mult:50" onclick="selectUpgradeQuick('mult', 50, this)">x50</button>
+                </div>
             </div>
 
             <div class="up-stats-inline" id="upgrade-stats-inline">
@@ -561,6 +572,6 @@
         <div class="nav-item" onclick="switchTab('profile', this)"><span class="nav-icon">👤</span> Профиль</div>
     </nav>
 
-    <script src="app.js?v=aura-50" defer></script>
+    <script src="app.js?v=aura-51" defer></script>
 </body>
 </html>

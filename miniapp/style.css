@@ -480,10 +480,16 @@ main { padding: 0 16px; }
 .up-panel-center { align-items: center; justify-content: flex-start; }
 
 /* --- левая панель --- */
-.up-slot { border-radius: 16px; border: 1px solid rgba(59, 130, 246, 0.22); background: radial-gradient(circle at 50% 20%, rgba(59, 130, 246, 0.16), rgba(10, 15, 23, 0.75) 72%); padding: 18px 10px; text-align: center; }
-.up-slot-icon { font-size: 42px; line-height: 1; filter: drop-shadow(0 0 16px rgba(59, 130, 246, 0.55)); }
-.up-slot-name { margin-top: 8px; font-size: 13px; font-weight: 800; color: #dbe7f7; }
-.up-slot-value { margin-top: 3px; font-size: 12px; font-weight: 900; color: #58a6ff; font-variant-numeric: tabular-nums; }
+/* Задача 51: карточка предмета горизонтальная. На скрине игрока вокруг иконки
+   было полэкрана пустоты — теперь одна строка: иконка, название, сумма. */
+.up-slot { border-radius: 16px; border: 1px solid rgba(59, 130, 246, 0.22); background: radial-gradient(120% 160% at 0% 0%, rgba(59, 130, 246, 0.18), rgba(10, 15, 23, 0.75) 62%); padding: 10px 12px; display: flex; align-items: center; gap: 12px; text-align: left; }
+.up-slot-icon { width: 44px; height: 44px; flex: 0 0 44px; display: grid; place-items: center; border-radius: 50%; font-size: 24px; line-height: 1; background: radial-gradient(circle at 35% 30%, rgba(88, 166, 255, 0.35), rgba(10, 15, 23, 0.2) 70%); border: 1px solid rgba(88, 166, 255, 0.35); box-shadow: 0 0 18px rgba(59, 130, 246, 0.35); }
+.up-slot-icon .coin-img { width: 26px; height: 26px; }
+.up-slot-text { flex: 1 1 auto; min-width: 0; }
+.up-slot-name { font-size: 14px; font-weight: 800; color: #dbe7f7; }
+.up-slot-value { margin-top: 2px; font-size: 12px; font-weight: 900; color: #58a6ff; font-variant-numeric: tabular-nums; }
+/* Плашка-пояснение справа: это ставка, а не баланс. */
+.up-slot-tag { flex: 0 0 auto; font-size: 9px; font-weight: 900; letter-spacing: 1px; text-transform: uppercase; color: #7e96b5; border: 1px solid rgba(88, 166, 255, 0.28); border-radius: 999px; padding: 4px 9px; }
 
 /* Вкладок «Инвентарь» стало больше (все капсулы): 3 фиксированные колонки
    сжимали подписи до нечитаемого — теперь переносим по ширине. */
@@ -503,8 +509,10 @@ main { padding: 0 16px; }
 .up-slider::-webkit-slider-thumb { -webkit-appearance: none; appearance: none; width: 18px; height: 18px; border-radius: 50%; background: #eaf3ff; border: 3px solid #3b82f6; box-shadow: 0 0 12px rgba(59, 130, 246, 0.8); cursor: pointer; }
 .up-slider::-moz-range-thumb { width: 14px; height: 14px; border-radius: 50%; background: #eaf3ff; border: 3px solid #3b82f6; box-shadow: 0 0 12px rgba(59, 130, 246, 0.8); cursor: pointer; }
 .up-amount-meta { display: flex; justify-content: space-between; font-size: 10px; font-weight: 700; color: #5d7899; }
-.up-quick-amounts { display: grid; grid-template-columns: repeat(5, 1fr); gap: 5px; }
-.up-quick-amounts button { background: #0b111a; border: 1px solid rgba(59, 130, 246, 0.18); color: #8fb4e0; border-radius: 9px; padding: 7px 0; font-size: 11px; font-weight: 800; cursor: pointer; }
+/* Задача 51: 6 кнопок в один ряд (было 5 колонок — MAX висел отдельно). */
+.up-quick-amounts { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 4px; }
+.up-quick-amounts button { background: #0b111a; border: 1px solid rgba(59, 130, 246, 0.18); color: #8fb4e0; border-radius: 9px; padding: 8px 0; font-size: 11px; font-weight: 800; cursor: pointer; transition: background 0.15s, color 0.15s; }
+.up-quick-amounts button.max { color: #7ee2a8; border-color: rgba(126, 226, 168, 0.35); }
 .up-quick-amounts button:active { background: rgba(59, 130, 246, 0.2); color: #eaf3ff; }
 
 /* --- центр: круг --- */
@@ -1307,4 +1315,82 @@ body.maintenance { overflow: hidden; }
     .up-layout-v2 { gap: 8px; }
     .up-layout-v2 .up-panel { padding: 10px 12px; }
     .up-layout-v2 .up-circle, .up-layout-v2 #up-circle { width: min(70vw, 230px); height: min(70vw, 230px); }
+}
+
+/* ============================================================================
+   ЗАДАЧА 51. Апгрейд: чистим компоновку после скрина игрока.
+   Что не устраивало: баланс налезал на «ADMIN» и кнопку Telegram; в карточке
+   предмета полэкрана пустоты; MAX падал на вторую строку; одни и те же шесть
+   множителей показывались дважды (чипы + плитки), поэтому кнопка уезжала за
+   сгиб. Теперь экран компактный: всё нужное в один-два экрана.
+   ========================================================================== */
+
+/* --- шапка: заголовок слева, баланс справа, без наложений --- */
+.upgrade-screen .game-balance-badge { display: none; }
+.up-header { align-items: center; gap: 10px; margin-bottom: 8px; }
+.up-brand { display: inline-flex; align-items: center; gap: 8px; }
+.up-balance {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 8px 14px; border-radius: 999px;
+    background: linear-gradient(180deg, rgba(28, 40, 58, 0.95), rgba(14, 21, 32, 0.95));
+    border: 1px solid rgba(88, 166, 255, 0.35);
+    color: #eaf3ff; font-size: 15px; font-weight: 900;
+    font-variant-numeric: tabular-nums;
+    box-shadow: 0 6px 18px rgba(0, 0, 0, 0.45), inset 0 1px 0 rgba(255, 255, 255, 0.06);
+}
+.up-balance .coin-img { width: 18px; height: 18px; margin: 0; }
+
+/* --- панели: меньше «воздуха», больше контента --- */
+.up-layout-v2 { max-width: 430px; gap: 9px; }
+.up-layout-v2 .up-panel { gap: 9px; padding: 12px; }
+.up-layout-v2 .up-panel-head { font-size: 10px; letter-spacing: 1.3px; color: #6f8bb5; }
+.up-target-head { width: 100%; text-align: left; margin-top: 2px; }
+
+/* --- круг: главный акцент, но без лишней высоты --- */
+.up-layout-v2 .up-circle, .up-layout-v2 #up-circle {
+    width: min(58vw, 216px); height: min(58vw, 216px); margin: 2px auto 0;
+}
+.up-layout-v2 .up-net { min-height: 26px; font-size: 19px; }
+.up-layout-v2 .up-outcome { font-size: 13px; }
+.up-outcome { padding: 3px 10px; border-radius: 999px; background: rgba(88, 166, 255, 0.1); }
+.up-outcome b { color: #8ec5ff; }
+
+/* --- сетка целей: 3 плитки в ряд, шанс крупно, выбранная подсвечена --- */
+.up-layout-v2 .up-to-grid-center {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 7px; margin: 0;
+}
+.up-layout-v2 .up-to-grid-center .up-to-tile {
+    position: relative; gap: 1px; padding: 9px 5px 8px; border-radius: 14px;
+    background: linear-gradient(180deg, #131b28, #0b111a);
+    border: 1px solid rgba(59, 130, 246, 0.2);
+}
+.up-layout-v2 .up-to-grid-center .up-to-tile.active {
+    border-color: #58a6ff;
+    background: linear-gradient(180deg, rgba(59, 130, 246, 0.34), rgba(29, 78, 216, 0.2));
+    box-shadow: 0 0 0 1px rgba(88, 166, 255, 0.5), 0 0 20px rgba(59, 130, 246, 0.35);
+}
+/* Галочка у выбранной цели: видно, за что играем, без вглядывания в свечение. */
+.up-layout-v2 .up-to-tile.active::after {
+    content: '✓'; position: absolute; top: 4px; right: 6px;
+    font-size: 10px; font-weight: 900; color: #9ee6b8;
+}
+.up-layout-v2 .up-to-grid-center .up-to-tile-name { font-size: 13px; font-weight: 900; }
+.up-layout-v2 .up-to-grid-center .up-to-tile-value { font-size: 10px; }
+.up-layout-v2 .up-to-grid-center .up-to-tile-chance { font-size: 11px; font-weight: 900; }
+
+/* --- свой множитель: компактная плашка --- */
+.up-layout-v2 .up-custom-mult { margin: 0; padding: 8px 11px; border-radius: 14px; }
+.up-layout-v2 .up-custom-head { font-size: 10px; }
+.up-layout-v2 .up-custom-head b { font-size: 14px; }
+.up-layout-v2 .up-custom-range { height: 20px; margin: 2px 0 0; }
+
+/* --- кнопка: последний штрих, всегда внизу панели --- */
+.up-layout-v2 .up-upgrade-btn { margin-top: 2px; padding: 15px 18px; font-size: 17px; }
+.up-layout-v2 .up-result { min-height: 15px; font-size: 11px; }
+
+@media (max-width: 420px) {
+    .up-layout-v2 .up-circle, .up-layout-v2 #up-circle { width: min(64vw, 200px); height: min(64vw, 200px); }
+    .up-layout-v2 .up-panel { padding: 10px; }
+    .up-brand { font-size: 16px; }
 }
