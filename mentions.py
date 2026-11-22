@@ -30,6 +30,35 @@ PLACEHOLDER_NAMES = {
     "кто-то", "кто то", "пользователь", "none", "null",
 }
 
+# Задача 66: в `users.username` иногда лежит не ник, а служебный код Telegram —
+# на скрине заказчика бот писал «Dan4ik обнимает Contact_blocked». Это не
+# человек, а маркер из ответа API, и показывать его как имя нельзя.
+#
+# Важно не перестараться: обычный ник «Botan», «User» или «Robotik» обязан
+# остаться. Поэтому составные маркеры ищем внутри строки, а простые слова
+# сравниваем целиком.
+SERVICE_NAME_PARTS = (
+    "contact_blocked", "contactblocked",
+    "deleted_account", "deletedaccount", "account_deleted",
+    "channel_bot", "channelbot", "telegram_bot",
+)
+SERVICE_NAME_EXACT = {
+    "telegram", "anonymous", "hidden", "unknown", "deleted", "deletedaccount",
+}
+
+
+def is_service_name(raw) -> bool:
+    """Похоже ли значение на служебный код, а не на ник живого человека."""
+    text = str(raw or "").strip().strip("@")
+    if not text:
+        return True
+    # camelCase («ContactBlocked») разбираем в нижний регистр без разделителей —
+    # так ловятся оба написания, а обычные ники не страдают.
+    compact = text.lower().replace("_", "").replace(" ", "")
+    if compact in SERVICE_NAME_EXACT:
+        return True
+    return any(part.replace("_", "") in compact for part in SERVICE_NAME_PARTS)
+
 
 def clean_name(raw) -> str:
     """Ник для текста: без «@», без лишних пробелов, без HTML-мусора.
@@ -47,6 +76,10 @@ def clean_name(raw) -> str:
     text = re.sub(r"\s+", " ", text).strip()
     text = text.lstrip("@").strip()
     if text.lower() in PLACEHOLDER_NAMES:
+        return ""
+    # Задача 66: «Contact_blocked» и подобные коды Telegram — это не ник.
+    # Пустая строка → вызывающая сторона возьмёт живое имя или id<число>.
+    if is_service_name(text):
         return ""
     return text[:64]
 

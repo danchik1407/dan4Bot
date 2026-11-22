@@ -16,10 +16,12 @@ from shop_catalog import SHOP_ITEMS, ShopPurchaseError, is_admin_id, parse_inven
     serialize_shop_items, missing_stock_rows, shop_stock_snapshot, stock_diagnostics, \
     sold_out_items, STOCK_LIMITS_ENABLED
 from love import (LOVE_ACTION_BONUS, LOVE_ICE_COST,
+                  cooldown_from_setting,
                   love_cooldown_seconds,
                   RP_ACTIONS, SOLO_CURRENCY, claim_solo_stage_rewards,
                   claim_stage_rewards, public_stage as love_public_stage,
-                  public_stages as love_public_stages, solo_state as love_solo_state)
+                  public_stages as love_public_stages, stage_reached_text,
+                  solo_state as love_solo_state)
 
 load_dotenv()
 
@@ -85,7 +87,7 @@ async def _http_json(url, method: str = "GET", params=None, payload=None, timeou
 
 # Номер сборки: по нему из /api/health видно, что на сервисе НЕ старый код.
 # Если после деплоя здесь прежнее значение — Render ещё не перезапустился.
-API_BUILD = "2026-10-27-task60-balance-love-referrals"
+API_BUILD = "2026-10-27-task66-cooldown-really-on"
 
 # Момент старта процесса. По нему видно, что сервис только что «проснулся»:
 # Render на бесплатном тарифе усыпляет Web Service через 15 минут без входящих
@@ -95,6 +97,7 @@ APP_STARTED_AT = time.time()
 logger = logging.getLogger("aura-api")
 if not logger.handlers:
     logging.basicConfig(level=logging.INFO)
+
 
 # Схему и документацию уводим под /api: корневые /docs и /openapi.json заняты
 # статикой Mini App, а «Not Found» на них только путал при настройке.
@@ -578,12 +581,12 @@ async def health():
             },
         },
         # Оба рубильника объявлены ниже по файлу, но к моменту запроса уже есть.
-        "maintenance": MAINTENANCE_MODE or ADMIN_ONLY_APP,
-        # Доступ: пока ADMIN_ONLY_APP включён, Mini App открывают только админы.
+        "maintenance": MAINTENANCE_MODE or app_closed_now(),
+        # Доступ: пока игра закрыта (app_closed), Mini App открывают только админы.
         "access": {
-            "admin_only_app": ADMIN_ONLY_APP,
+            "admin_only_app": app_closed_now(),
             "admins": len(ADMIN_IDS),
-            "message": ADMIN_ONLY_MESSAGE if ADMIN_ONLY_APP else "",
+            "message": ADMIN_ONLY_MESSAGE if app_closed_now() else "",
         },
         # Экономика задачи 25: по этим числам видно нужную сборку на сервисе.
         "economy": {
@@ -633,14 +636,37 @@ def _env_flag(name: str, default: bool = False) -> bool:
     return default
 
 
-# Задача 57 (срочно): по умолчанию ЗАКРЫТО — «только админы».
-# Задача 44 открывала игру всем (default False), из-за этого после каждого
-# деплоя без переменной окружения доступ получали посторонние. Теперь дефолт
-# True: свежий сервис/чистый Render сразу пускает ТОЛЬКО ADMIN_IDS, а открыть
-# игру для всех можно осознанно — переменной Render ADMIN_ONLY_APP=0.
-ADMIN_ONLY_APP = _env_flag("ADMIN_ONLY_APP", True)
-ADMIN_ONLY_MESSAGE = ("🛠️ Идут технические работы. Пока доступ к игре есть "
-                      "только у администраторов — скоро откроем всем.")
+# Задача 62: Mini App ОТКРЫТА ВСЕМ.
+#
+# История: задача 44 пускала всех, задача 57 срочно закрыла доступ «до админов»
+# (ADMIN_ONLY_APP по умолчанию 1) — и после каждого деплоя без переменной
+# окружения обычные игроки видели экран «Технические работы». Задача 61 добавила
+# рубильник из бота, задача 62 его убрала вместе с закрытым дефолтом.
+#
+# Теперь: доступ открыт всегда, никаких флагов в базе и env на пути игрока нет.
+# Остался только `require_play_access` — единая точка входа, которая сейчас
+# никого не блокирует (кроме бана, который проверяется отдельно).
+ADMIN_ONLY_APP = False
+ADMIN_ONLY_MESSAGE = ""
+# Оставлено для совместимости со старыми сборками Mini App и админ-API:
+# «приложение закрыто» теперь всегда False.
+APP_CLOSED_SETTING_KEY = "app_closed"
+
+
+def app_closed_now() -> bool:
+    """Закрыта ли игра для всех, кроме админов. Задача 62: никогда.
+
+    Функция оставлена, потому что её вызывают ответы API (`admin_only_app`,
+    `maintenance`) и старые клиенты читают эти поля. Любое значение
+    game_settings.app_closed игнорируется: игра открыта всем.
+    """
+    return False
+
+
+def set_app_closed(closed: bool) -> bool:
+    """Совместимость: переключателя доступа больше нет. Всегда True."""
+    return True
+
 
 # ==================== ПОДПИСКА НА КАНАЛ ====================
 # Бонус начисляется РОВНО ОДИН РАЗ за всё время: факт начисления хранится в
@@ -732,15 +758,40 @@ IDEMPOTENCY_TTL = 86400
 # к API нельзя). Открыть игру = MAINTENANCE_MODE=0 и ADMIN_ONLY_APP=0 в Render.
 # Апгрейд от этого флага НЕ зависит: он отдельно закрыт списком ADMIN_IDS
 # (см. UPGRADE_ADMIN_ONLY ниже).
+# Задача 65: старые переменные больше НЕ закрывают игру.
+#
+# Почему пришлось менять имена: в render.yaml на ветке main (по ней развёрнут
+# сервис) жёстко прописаны MAINTENANCE_MODE=1, ADMIN_ONLY_APP=1 и
+# ADMINS_ONLY_BOT=1 — значения от задачи 57. Blueprint при обновлении кода их не
+# переписывает, поэтому новый код всё равно видел «1» и показывал экран
+# «Технические работы» всем, кроме админов — на скрине заказчика это был старый
+# текст «пока доступ есть лишь у админов, скоро откроем всем».
+#
+# Теперь аварийный стоп живёт только под НОВЫМ именем, которого на Render нет,
+# поэтому игра открыта всем сразу после деплоя — без правок в дашборде.
+# Включить осознанно при аварии: AURA_EMERGENCY_MAINTENANCE=1.
+LEGACY_ACCESS_FLAGS = ("MAINTENANCE_MODE", "ADMIN_ONLY_APP")
+
+
+def _legacy_access_flags_enabled() -> list:
+    """Какие старые «закрывающие» переменные всё ещё стоят в единице."""
+    return [name for name in LEGACY_ACCESS_FLAGS if _env_flag(name, False)]
+
+
 def _maintenance_enabled() -> bool:
-    """Аварийные техработы. По умолчанию ВКЛЮЧЕНЫ (задача 57): «кроме админов
-    зайти никто не может» должно работать сразу после деплоя, без правок в
-    Render. Выключить техработы = MAINTENANCE_MODE=0 (и только вместе с
-    ADMIN_ONLY_APP=0 игра откроется всем)."""
-    return _env_flag("MAINTENANCE_MODE", True)
+    """Аварийный стоп. По умолчанию выключен, старое имя игнорируется."""
+    return _env_flag("AURA_EMERGENCY_MAINTENANCE", False)
 
 
 MAINTENANCE_MODE = _maintenance_enabled()
+# Задача 65: видно в логах Render, почему игра всё-таки открыта, хотя в
+# окружении остались «закрывающие» переменные от задачи 57.
+if _legacy_access_flags_enabled():
+    logger.warning(
+        "MAINTENANCE_MODE/ADMIN_ONLY_APP больше не закрывают игру (задача 65): "
+        "%s остались в окружении, но игнорируются. Аварийный стоп теперь — "
+        "только AURA_EMERGENCY_MAINTENANCE=1.",
+        ", ".join(_legacy_access_flags_enabled()))
 MAINTENANCE_MESSAGE = "🛠️ Технические работы: скоро вернёмся"
 
 
@@ -753,12 +804,9 @@ def can_play(user_id) -> bool:
     Проверка серверная: даже если клиент нарисует себе кнопки, игровые
     эндпоинты ответят 403.
     """
-    admin = is_admin_id(user_id, ADMIN_IDS)
-    if ADMIN_ONLY_APP and not admin:
-        return False
     if not MAINTENANCE_MODE:
-        return True
-    return admin
+        return True                     # обычный режим: играют все
+    return is_admin_id(user_id, ADMIN_IDS)
 
 
 def require_play_access(user) -> int:
@@ -806,7 +854,7 @@ def require_play_access_uid(user_id) -> int:
 
 def _access_denied_message(user_id) -> str:
     """Почему не пускаем: админ-онли понятнее, чем «техработы»."""
-    if ADMIN_ONLY_APP and not is_admin_id(user_id, ADMIN_IDS):
+    if app_closed_now() and not is_admin_id(user_id, ADMIN_IDS):
         return ADMIN_ONLY_MESSAGE
     return MAINTENANCE_MESSAGE
 
@@ -953,6 +1001,11 @@ UPGRADE_QUICK_CHANCES = [35, 55, 75]
 UPGRADE_ITEM_PRICES = {"capsule": 100, "uniq_capsule": 500, "ruby": 1000,
                        "diamond": 5000, "galactic": 10000,
                        "malachite": 3000, "emerald": 5000}
+# Названия для подсказок в отказах: игрок читает «Рубиновая капсула», а не «ruby».
+UPGRADE_ITEM_TITLES = {"capsule": "Обычная капсула", "uniq_capsule": "Уникальная капсула",
+                       "ruby": "Рубиновая капсула", "diamond": "Алмазная капсула",
+                       "galactic": "Галактическая капсула", "malachite": "Малахитовая капсула",
+                       "emerald": "Изумрудная капсула"}
 UPGRADE_SOURCES = ("coin",) + tuple(UPGRADE_ITEM_PRICES)
 UPGRADE_TARGETS = ("coin",) + tuple(UPGRADE_ITEM_PRICES)
 # В апгрейде пока играют только админы — шанс честный. Когда откроем для всех,
@@ -962,7 +1015,10 @@ UPGRADE_NON_ADMIN_DIVIDER = 1
 # игра открыта ДЛЯ ВСЕХ, апгрейд больше не спрятан. Шанс при этом честный для
 # всех — делитель ниже выключен, иначе новичок играл бы вдвое хуже админа.
 # Закрыть снова: UPGRADE_ADMIN_ONLY=1 в Render.
-UPGRADE_ADMIN_ONLY = _env_flag("UPGRADE_ADMIN_ONLY", False)
+# Задача 65: то же самое, что с техработами — старое имя UPGRADE_ADMIN_ONLY
+# осталось в render.yaml со значением 1 и перекрывало открытый апгрейд.
+# Отдельный стоп живёт под новым именем: AURA_UPGRADE_ADMIN_ONLY=1.
+UPGRADE_ADMIN_ONLY = _env_flag("AURA_UPGRADE_ADMIN_ONLY", False)
 UPGRADE_ADMIN_ONLY_MESSAGE = "Апгрейд доступен только администраторам"
 
 # ДОМ-ЭДЖ ПО БАЛАНСУ (задача 18): с баланса 1000 коинов и выше играем чаще
@@ -1307,9 +1363,9 @@ def _user_payload(row, is_admin, user_id=None):
         "last_chest": _safe_int(row.get("last_chest"), 0),
         "is_admin": is_admin,
         # Техработы: приложение показывает экран-заглушку всем, у кого нет доступа.
-        "maintenance": MAINTENANCE_MODE or ADMIN_ONLY_APP,
+        "maintenance": MAINTENANCE_MODE or app_closed_now(),
         "maintenance_message": ("" if allowed else _access_denied_message(uid or 0)),
-        "admin_only": ADMIN_ONLY_APP,
+        "admin_only": app_closed_now(),
         "can_play": bool(allowed),
         "created_at": created_text,
         # Задача 43: дни считаем от ПЕРВОГО ЗАХОДА В АППКУ (app_first_seen),
@@ -1333,9 +1389,9 @@ def _user_payload(row, is_admin, user_id=None):
         # Доступ и экономика: клиенту нужны те же числа, что играет сервер
         # (шансы апгрейда, лимиты, режим «только админы»).
         "access": {
-            "admin_only_app": ADMIN_ONLY_APP,
+            "admin_only_app": app_closed_now(),
             "admins": len(ADMIN_IDS),
-            "message": ADMIN_ONLY_MESSAGE if ADMIN_ONLY_APP else "",
+            "message": ADMIN_ONLY_MESSAGE if app_closed_now() else "",
         },
         "economy": {"upgrade": _upgrade_economy_config()},
     }
@@ -3663,7 +3719,7 @@ async def get_user(auth: UserAuth):
             "ok": False,
             "detail": _access_denied_message(user_id),
             "maintenance": True,
-            "admin_only": bool(ADMIN_ONLY_APP),
+            "admin_only": bool(app_closed_now()),
             "can_play": False,
             "is_admin": bool(is_admin),
             "maintenance_message": _access_denied_message(user_id),
@@ -3732,7 +3788,7 @@ async def self_check(auth: UserAuth):
         "supabase_host": _supabase_host(),
         "is_admin": is_admin_id(user_id, ADMIN_IDS) if user_id is not None else False,
         "maintenance": MAINTENANCE_MODE,
-        "admin_only_app": ADMIN_ONLY_APP,
+        "admin_only_app": app_closed_now(),
         "can_play": can_play(user_id) if user_id is not None else False,
         "rows_found": 0, "row": None, "created_at_present": None, "error": None,
     }
@@ -4617,9 +4673,23 @@ def _upgrade_target_value(source: str, amount: int, target: str,
 
     visual_chance = (priced_chance if priced_chance is not None
                      else from_value / to_value * 100.0)
+    # Задача 65: в тексте отказа сразу говорим, что выбрать. Раньше игрок
+    # получал «выбери цель подороже» на экране, где цели выбрать было негде
+    # (при ставке капсулой сетка целей была спрятана) — и апгрейд выглядел
+    # сломанным: 100.00% на круге и отказ на кнопку.
     if visual_chance > UPGRADE_MAX_CHANCE:
+        hint = ""
+        if target in UPGRADE_ITEM_PRICES:
+            dearer = sorted((price, name) for name, price in UPGRADE_ITEM_PRICES.items()
+                            if price > from_value)
+            if dearer:
+                cheapest = dearer[0][1]
+                hint = (f" — ближайшая дороже: «{UPGRADE_ITEM_TITLES.get(cheapest, cheapest)}»"
+                        f" ({dearer[0][0]} коинов)")
+            else:
+                hint = " — эта капсула самая дорогая, поставь цель «Коины»"
         raise HTTPException(status_code=400,
-                            detail=f"Шанс {visual_chance:.2f}% слишком высокий — выбери цель подороже")
+                            detail=f"Шанс {visual_chance:.2f}% слишком высокий{hint}")
     if visual_chance < UPGRADE_MIN_CHANCE:
         raise HTTPException(status_code=400,
                             detail=f"Шанс {visual_chance:.2f}% слишком низкий — выбери цель подешевле")
@@ -6162,17 +6232,26 @@ async def admin_settings(data: UserAuth):
             "upgrade_house_edge": 1.0,
             "crash_house_edge": game_setting_float("crash_house_edge", 1.0),
         },
-        "admin_only_app": ADMIN_ONLY_APP,
+        "admin_only_app": app_closed_now(),
     }
 
 
 @app.post("/api/admin/set_setting")
 async def admin_set_setting(data: AdminSettingRequest):
     _require_admin_api(data.initData)
-    ok = game_setting_set(data.key, data.value)
+    key = str(data.key or "").strip()
+    ok = game_setting_set(key, data.value)
     if not ok:
         raise HTTPException(status_code=503, detail="Не удалось сохранить настройку")
-    return {"ok": True, "key": data.key, "value": data.value}
+    # Настройки кулдаунов читаются с кэшем в минуту — после записи сбрасываем
+    # его, иначе админ видит старое значение и думает, что не сохранилось.
+    touched = {}
+    if key in ("love_cooldown_seconds", "love_cooldown_actions"):
+        _LOVE_COOLDOWN_CACHE.update({"value": {}, "at": 0.0})
+    if key == "maintenance":
+        touched = {"maintenance": MAINTENANCE_MODE,
+                   "admin_only_app": app_closed_now()}
+    return {"ok": True, "key": key, "value": data.value, **touched}
 
 
 @app.post("/api/admin/give_coins")
@@ -6385,26 +6464,63 @@ def _love_solo_for(user_id) -> dict:
 # Кулдаун награды за РП живёт в game_settings (его меняет админ-команда «кд» в
 # боте). Читаем с кешем на минуту: значение меняется редко, а любовь открывают
 # часто. Если база недоступна — берём значение из модуля love (там же дефолт).
-_LOVE_COOLDOWN_CACHE = {"value": None, "at": 0.0}
+#
+# Задача 61: кулдаун у КАЖДОЙ команды свой. В базе два ключа:
+#   love_cooldown_seconds   — общее значение (его ставит `кд 5ч`);
+#   love_cooldown_actions   — JSON вида {"обнять": 18000, ...} (`кд обнять 5ч`).
+# Кеш поэтому словарный: action → секунды, плюс "*all" — общее значение.
+_LOVE_COOLDOWN_CACHE = {"value": {}, "at": 0.0}
 
 
-def _love_cooldown_seconds() -> int:
-    cached = _LOVE_COOLDOWN_CACHE.get("value")
+def _love_cooldowns() -> dict:
+    """Все кулдауны: {"*all": секунды, "<команда>": секунды}. Кеш 60 секунд."""
     now = time.time()
-    if cached is not None and now - float(_LOVE_COOLDOWN_CACHE.get("at") or 0) < 60:
-        return int(cached)
-    seconds = None
+    cached = _LOVE_COOLDOWN_CACHE.get("value")
+    if isinstance(cached, dict) and cached and \
+            now - float(_LOVE_COOLDOWN_CACHE.get("at") or 0) < 60:
+        return cached
+    values = {}
     try:
-        res = (supabase.table("game_settings").select("value")
-               .eq("key", "love_cooldown_seconds").limit(1).execute())
-        if res.data:
-            seconds = max(0, int(float(res.data[0].get("value"))))
+        res = (supabase.table("game_settings")
+               .select("key, value")
+               .in_("key", ["love_cooldown_seconds", "love_cooldown_actions"])
+               .execute())
+        for row in res.data or []:
+            key = str(row.get("key") or "")
+            raw = row.get("value")
+            if key == "love_cooldown_seconds":
+                # Задача 66: ноль в базе — остаток старых сборок, а не
+                # «кулдаун выключен». Осознанное выключение пишется словом "off".
+                seconds, explicit = cooldown_from_setting(raw, love_cooldown_seconds())
+                if explicit or seconds > 0:
+                    values["*all"] = seconds
+            elif key == "love_cooldown_actions":
+                try:
+                    data = json.loads(raw) if isinstance(raw, str) else (raw or {})
+                except Exception:  # noqa: BLE001 — битый JSON не должен ломать игру
+                    data = {}
+                if isinstance(data, dict):
+                    for name, seconds in data.items():
+                        try:
+                            values[str(name).strip().lower()] = max(0, int(seconds))
+                        except (TypeError, ValueError):
+                            continue
     except Exception as exc:  # noqa: BLE001
         logger.debug("game_settings недоступна для кулдауна РП: %s", exc)
-    if seconds is None:
-        seconds = love_cooldown_seconds()
-    _LOVE_COOLDOWN_CACHE.update({"value": seconds, "at": now})
-    return seconds
+    # Общее значение по умолчанию — из модуля love (там же 5 часов из задачи 61).
+    values.setdefault("*all", love_cooldown_seconds())
+    _LOVE_COOLDOWN_CACHE.update({"value": values, "at": now})
+    return values
+
+
+def _love_cooldown_seconds(action=None) -> int:
+    """Кулдаун конкретной команды (или общий, если action не задан)."""
+    values = _love_cooldowns()
+    if action:
+        key = str(action).strip().lower()
+        if key in values:
+            return int(values[key])
+    return int(values.get("*all", 0))
 
 
 def love_state_for(user_id) -> dict:
@@ -6421,9 +6537,12 @@ def love_state_for(user_id) -> dict:
     if not row:
         return {"ok": True, "in_relationship": False, "available": True,
                 "stages": love_public_stages(), "action_bonus": LOVE_ACTION_BONUS,
-                # 0 — кулдаун выключен (сейчас так и есть, см. love.py).
+                # Задача 61: кулдаун у каждой команды свой, поэтому отдаём и
+                # общее значение, и карту по действиям (0 — без ограничения).
                 "cooldown_hours": round(_love_cooldown_seconds() / 3600, 1),
                 "cooldown_seconds": _love_cooldown_seconds(),
+                "cooldowns": {key: int(val) for key, val in _love_cooldowns().items()
+                              if key != "*all"},
                 "ice_cost": LOVE_ICE_COST, "rpc_actions": list(RP_ACTIONS),
                 **_love_solo_for(user_id)}
     score = _safe_int(row.get("love"), 0)
@@ -6444,8 +6563,11 @@ def love_state_for(user_id) -> dict:
         "stage_title": level["title"],
         "progress": level["progress"],
         "action_bonus": LOVE_ACTION_BONUS,
+        # Задача 61: своё значение у каждой команды + общее (cooldown_*).
         "cooldown_hours": round(_love_cooldown_seconds() / 3600, 1),
         "cooldown_seconds": _love_cooldown_seconds(),
+        "cooldowns": {key: int(val) for key, val in _love_cooldowns().items()
+                      if key != "*all"},
         "ice_cost": LOVE_ICE_COST,
         "rpc_actions": list(RP_ACTIONS),
     }
@@ -6469,16 +6591,43 @@ async def love_state(data: UserAuth):
                 granted = []
             if granted:
                 state["stage_up"] = True
+                await _love_stage_dm({"user_a": uid}, granted)
         return state
     # Пара: та же страховка через общую таблицу наград.
     row = _love_relationship_for(uid)
     if row:
         granted = claim_stage_rewards(supabase, row)
-        # Награда начислена, но её размер и название этапа клиенту не уходят:
-        # этапы — секретная механика. Только флаг «стало теплее».
+        # Задача 61: клиенту по-прежнему уходят только название уровня и флаг
+        # «стало теплее» — таблицу призов заранее не показываем. А вот КАЖДОМУ
+        # участнику пары о новом уровне сообщаем в личку: награда начислена,
+        # и он должен знать, за что пришли коины.
         if granted:
             state["stage_up"] = True
+            await _love_stage_dm(row, granted)
     return state
+
+
+async def _love_stage_dm(row, granted) -> None:
+    """Личное сообщение каждому партнёру: «вы достигли N уровня, получаете X».
+
+    Вызывается и из Mini App (`/api/love_state`), и из бота — но в базе
+    love_stage_rewards этап отмечается до начисления, поэтому «granted»
+    приходит только один раз, и дублей сообщений не будет.
+    """
+    if not row or not granted:
+        return
+    partners = []
+    for key in ("user_a", "user_b"):
+        uid = _safe_int(row.get(key), 0)
+        if uid > 0 and uid not in partners:
+            partners.append(uid)
+    for uid in partners:
+        lines = ["💗 <b>Новый этап отношений!</b>", ""]
+        for stage in granted:
+            lines.append(stage_reached_text(stage, stage.get("reward")))
+        lines += ["", "Коины уже начислены на баланс — забирать ничего не нужно.",
+                  "Прогресс: «любовь инфа» в боте."]
+        await _send_user_dm(uid, "\n".join(lines))
 
 @app.get("/api/global_top")
 async def get_global_top():

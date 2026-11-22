@@ -575,8 +575,13 @@ main { padding: 0 16px; }
    и «стрелка в красной зоне» выглядело как расхождение с вердиктом. */
 .up-circle.lose .up-circle-ring { background: conic-gradient(from 0deg, rgba(34, 197, 94, 0.45) 0 var(--p, 0deg), #ef4444 var(--p, 0deg) 360deg); filter: drop-shadow(0 0 16px rgba(239, 68, 68, 0.55)); }
 .up-circle-inner { position: relative; z-index: 3; width: 68%; height: 68%; border-radius: 50%; background: radial-gradient(circle, #0c1520 62%, rgba(10, 17, 25, 0.9) 100%); border: 1px solid rgba(59, 130, 246, 0.18); display: grid; place-content: center; text-align: center; box-shadow: inset 0 0 18px rgba(0, 0, 0, 0.55); }
-.up-chance { font-size: 23px; font-weight: 900; color: #eaf3ff; font-variant-numeric: tabular-nums; letter-spacing: 0.5px; text-shadow: 0 0 18px rgba(59, 130, 246, 0.55); }
-.up-chance-label { font-size: 9px; font-weight: 800; letter-spacing: 1.2px; text-transform: uppercase; color: #6f8bb5; margin-top: 2px; }
+/* Задача 64: текст внутри кольца не должен налезать сам на себя и на дугу.
+   В WebView узкого телефона крупная цифра «100.00%» с подписью вылезала за
+   пределы внутреннего круга — теперь содержимое ограничено по ширине, переносы
+   запрещены, а размер шрифта подстраивается под ширину экрана. */
+.up-circle-inner { overflow: hidden; padding: 4%; box-sizing: border-box; }
+.up-chance { font-size: clamp(17px, 6vw, 23px); line-height: 1.05; max-width: 100%; white-space: nowrap; font-weight: 900; color: #eaf3ff; font-variant-numeric: tabular-nums; letter-spacing: 0.5px; text-shadow: 0 0 18px rgba(59, 130, 246, 0.55); }
+.up-chance-label { font-size: clamp(7px, 2.4vw, 9px); line-height: 1.1; white-space: nowrap; font-weight: 800; letter-spacing: 1.2px; text-transform: uppercase; color: #6f8bb5; margin-top: 2px; }
 .up-circle.invalid .up-chance { color: #fbbf24; text-shadow: 0 0 18px rgba(251, 191, 36, 0.5); }
 .up-circle.win .up-chance { color: #6ee7a0; text-shadow: 0 0 18px rgba(34, 197, 94, 0.6); }
 .up-circle.lose .up-chance { color: #fca5a5; text-shadow: 0 0 18px rgba(239, 68, 68, 0.6); }
@@ -611,7 +616,11 @@ main { padding: 0 16px; }
 .up-upgrade-btn.win { background: linear-gradient(180deg, #22c55e, #15803d); box-shadow: 0 10px 26px rgba(34, 197, 94, 0.4); }
 .up-upgrade-btn.lose { background: linear-gradient(180deg, #ef4444, #b91c1c); box-shadow: 0 10px 26px rgba(239, 68, 68, 0.35); }
 
-.up-result { min-height: 18px; text-align: center; font-size: 12px; font-weight: 800; color: #6f8bb5; padding: 0 6px; }
+/* Задача 64: место под две строки резервируем сразу — иначе при появлении
+   текста ошибки экран прыгал и подпись подлезала под кнопку «Закрыть» у
+   подсказки. Перенос по словам, без вылезания за панель. */
+.up-result { display: block; width: 100%; box-sizing: border-box; min-height: 32px; text-align: center; font-size: 12px; font-weight: 800; color: #6f8bb5; padding: 0 6px; line-height: 1.25; overflow-wrap: anywhere; }
+.up-result.error { color: #fbbf24; text-shadow: 0 0 14px rgba(251, 191, 36, 0.35); }
 .up-result.win { color: #34d399; }
 .up-result.lose { color: #ff5b5b; font-size: 13px; font-weight: 900; text-shadow: 0 0 14px rgba(239, 68, 68, 0.45); }
 .up-result.spinning { color: #58a6ff; animation: upPulse 0.9s infinite alternate; }
@@ -630,6 +639,11 @@ main { padding: 0 16px; }
 .up-to-tile-value { font-size: 10px; font-weight: 700; color: #8aa7cc; font-variant-numeric: tabular-nums; }
 .up-to-tile-chance { font-size: 11px; font-weight: 900; color: #58a6ff; font-variant-numeric: tabular-nums; }
 .up-to-tile.disabled { opacity: 0.4; cursor: not-allowed; }
+/* Задача 65: цель дешевле ставки даёт шанс выше 95% — сервер такой апгрейд
+   отклонит. Плитка гасится сильнее и подписана «дешевле», чтобы игрок не
+   выбирал заведомо невозможную цель. */
+.up-to-tile.hard-disabled { opacity: 0.32; cursor: not-allowed; }
+.up-to-tile.hard-disabled .up-to-tile-chance { color: #f59e0b; }
 .up-to-hint { font-size: 10px; color: #5d7899; text-align: center; line-height: 1.35; }
 
 .up-stats-inline { display: flex; justify-content: center; gap: 14px; flex-wrap: wrap; margin-top: 12px; font-size: 10px; font-weight: 700; color: #5d7899; }
@@ -1305,7 +1319,9 @@ body.maintenance { overflow: hidden; }
     height: min(64vw, 260px);
     margin: 4px auto 6px;
 }
-.up-layout-v2 .up-chance { font-size: clamp(26px, 8vw, 34px); }
+/* Задача 64: в v2 шрифт тоже адаптивный — на узком экране крупная цифра
+   вылезала за внутренний круг и накладывалась на подпись. */
+.up-layout-v2 .up-chance { font-size: clamp(20px, 7vw, 34px); }
 /* Кнопка — во всю ширину панели, крупная и «нажимабельная». */
 .up-layout-v2 .up-upgrade-btn {
     width: 100%;
@@ -1413,7 +1429,9 @@ body.maintenance { overflow: hidden; }
 
 /* --- кнопка: последний штрих, всегда внизу панели --- */
 .up-layout-v2 .up-upgrade-btn { margin-top: 2px; padding: 15px 18px; font-size: 17px; }
-.up-layout-v2 .up-result { min-height: 15px; font-size: 11px; }
+/* Задача 64/65: высота под две строки и здесь — текст ошибки не должен
+   уезжать под круг/кнопку в узком layout v2. */
+.up-layout-v2 .up-result { min-height: 30px; font-size: 11.5px; }
 
 @media (max-width: 420px) {
     .up-layout-v2 .up-circle, .up-layout-v2 #up-circle { width: min(64vw, 200px); height: min(64vw, 200px); }

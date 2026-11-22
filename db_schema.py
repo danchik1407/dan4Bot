@@ -28,7 +28,9 @@ REQUIRED = {
     # bank нужен выплатам/RPC пары: без него бот писал «примените миграцию».
     "relationships": ["id", "user_a", "user_b", "love", "bank", "status", "created_at"],
     "love_stage_rewards": ["relationship_id", "stage"],
-    "love_cooldowns": ["user_id", "action_at"],
+    # Задача 61: кулдаун стал «на команду» — без колонки action он общий на
+    # игрока (так было до миграции), поэтому аудит должен её видеть.
+    "love_cooldowns": ["user_id", "action", "action_at"],
     "solo_love": ["user_id", "love"],
     "solo_love_stage_rewards": ["user_id", "stage"],
     "crash_history": ["id", "round_id", "crash_point", "players", "created_at"],
@@ -48,6 +50,10 @@ REQUIRED = {
 }
 
 # Типы для SQL-подсказки: админ копирует ALTER TABLE целиком.
+# Задача 61: колонка action и новые ключи настроек появились в отдельной
+# миграции — аудит подсказывает именно её.
+LOVE_PER_ACTION_MIGRATION = "supabase/migrations/20261201000000_love_cooldown_per_action.sql"
+
 COLUMN_TYPES = {
     "created_at": "TIMESTAMPTZ NOT NULL DEFAULT now()",
     "updated_at": "TIMESTAMPTZ NOT NULL DEFAULT now()",
@@ -194,10 +200,16 @@ def build_sql(missing_tables, missing_columns) -> str:
     for table in tables:
         if needs_full and table in FULL_MIGRATION_TABLES:
             continue
+        if table == "love_cooldowns":
+            lines.append(f"-- Таблицы love_cooldowns нет: примените {LOVE_PER_ACTION_MIGRATION}")
+            continue
         lines.append(f"-- Таблицы {table} нет: примените миграции из supabase/migrations")
     for item in columns:
         table, column = item["table"], item["column"]
         if needs_full and table in FULL_MIGRATION_TABLES:
+            continue
+        if table == "love_cooldowns":
+            lines.append(f"-- Кулдаун по каждой команде: примените целиком {LOVE_PER_ACTION_MIGRATION}")
             continue
         col_type = COLUMN_TYPES.get(column, "TEXT")
         lines.append(f"ALTER TABLE public.{table} "

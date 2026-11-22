@@ -15,7 +15,7 @@ from dotenv import load_dotenv
 from aiogram import BaseMiddleware, Bot, Dispatcher, F, Router
 from aiogram.types import (Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton,
                            FSInputFile, WebAppInfo, Update, MenuButtonWebApp,
-                           BotCommand, BotCommandScopeDefault, BotCommandScopeChat)
+                           BotCommand, BotCommandScopeDefault)
 from aiogram.enums import ChatMemberStatus
 from aiogram.filters import Command, CommandStart, StateFilter
 from aiogram.fsm.context import FSMContext
@@ -27,8 +27,9 @@ from supabase import create_client, Client
 from mentions import clean_name, merge_names, parse_names
 from love import (
     LOVE_ACTION_BONUS,
-    LOVE_ACTION_COOLDOWN,
+    COOLDOWN_OFF_MARKER,
     LOVE_ACTION_COOLDOWN_DEFAULT,
+    cooldown_from_setting,
     LOVE_ICE_COST,
     RP_ACTIONS,
     SOLO_CURRENCY,
@@ -36,13 +37,18 @@ from love import (
     claim_stage_rewards,
     solo_saved,
     format_love_cooldown,
+    load_love_cooldown_overrides,
+    love_cooldown_overrides,
     love_cooldown_seconds,
     next_level_text,
     public_stage,
+    reset_love_cooldown_override,
     reset_solo_love,
     rp_action_for,
+    rp_action_key,
     set_love_cooldown_seconds,
     solo_state,
+    stage_reached_text,
 )
 from db_schema import audit as db_schema_audit, format_report as db_schema_report
 from shop_catalog import (
@@ -398,10 +404,12 @@ class AnonymousSenderMiddleware(BaseMiddleware):
         return await handler(event, data)
 
 
-# ================= ДОСТУП К БОТУ (задача 57) =================
-# «Чтобы кроме админов зайти никто не мог»: во время техработ играют только
-# ADMIN_IDS. Рубильник общий с Mini App и по умолчанию ВКЛЮЧЁН; открыть игру
-# для всех = ADMINS_ONLY_BOT=0 в Render (вместе с ADMIN_ONLY_APP=0 у aura-api).
+# ================= ДОСТУП К БОТУ (задачи 57 и 62) =================
+# Задача 57 закрывала игру «до админов» (ADMINS_ONLY_BOT=1), и это работало
+# даже по умолчанию — сразу после деплоя обычный игрок получал «Технические
+# работы». Задача 62 это отменила: игра ОТКРЫТА всем, флаг по умолчанию
+# выключен, а команды `техработы` в боте больше нет. Если когда-нибудь
+# понадобится снова закрыть чат — ADMINS_ONLY_BOT=1 в Render у сервиса dan4Bot.
 def _env_flag(name: str, default: bool = False) -> bool:
     raw = (os.getenv(name) or "").strip().lower()
     if raw in ("1", "true", "yes", "on"):
@@ -411,7 +419,12 @@ def _env_flag(name: str, default: bool = False) -> bool:
     return default
 
 
-ADMINS_ONLY_BOT = _env_flag("ADMINS_ONLY_BOT", True)
+# Задача 62: игра ОТКРЫТА всем. Задача 65: закрывающий флаг переехал на новое
+# имя. В render.yaml на ветке main остался ADMINS_ONLY_BOT=1 (значение задачи
+# 57), blueprint его не перезаписывает — и обычные игроки в чате получали
+# «Технические работы», хотя код уже всё открыл. Старое имя теперь игнорируется,
+# закрыть чат при аварии можно осознанно: AURA_ADMINS_ONLY_BOT=1.
+ADMINS_ONLY_BOT = _env_flag("AURA_ADMINS_ONLY_BOT", False)
 
 # Что остаётся доступным не-админам, пока идёт закрытие: вход в бот и
 # модерация чата. Это не игра — денег эти команды не начисляют.
@@ -419,7 +432,7 @@ PUBLIC_PREFIXES = (
     "/start", "start", "апка", "аура", "помощь", "help", "меню",
     "аурапред", "аурапредлист", "аурапред лист", "аураварн", "аураварны",
     "снять игнор", "снятьигнор", "размут", "снять мут", "снять наказание",
-    "разбан", "апбан", "список банов",
+    "разбан", "апбан", "список банов", "адм помощь", "адмпомощь",
 )
 
 ADMINS_ONLY_BOT_MESSAGE = ("🛠️ <b>Технические работы</b>\n\n"
@@ -629,10 +642,14 @@ async def cmd_admin_help(message: Message):
         "• <code>all Текст</code> — пингануть всех в чате\n"
         "• <code>админы</code> — пингануть админов чата\n"
         "• <code>стоп</code> — остановить созыв\n\n"
-        "💗 <b>Отношения:</b>\n"
-        "• <code>кд</code> — показать текущий кулдаун награды за РП\n"
-        "• <code>кд 5ч</code> / <code>кд 30м</code> / <code>кд 3600</code> — поставить кулдаун\n"
-        "• <code>кд 0</code> — выключить кулдаун совсем\n\n"
+        "💗 <b>Отношения (кулдаун — у каждой команды свой):</b>\n"
+        "• <code>кд</code> — показать общий кулдаун и свои значения команд\n"
+        "• <code>кд 5ч</code> / <code>кд 30м</code> / <code>кд 3600</code> — общий кулдаун\n"
+        "• <code>кд 0</code> — выключить общий кулдаун\n"
+        "• <code>кд обнять 1ч</code> — только для «обнять»\n"
+        "• <code>кд поцеловать 0</code> — выключить у «поцеловать»\n"
+        "• <code>кд обнять сброс</code> — вернуть команде общий кулдаун\n"
+        "• <code>кд проверка</code> — диагностика: применяется ли КД и пишется ли отметка\n\n"
         "📊 <b>Статистика:</b>\n"
         "• <code>стата бота</code> — общая статистика (работает только в ЛС)\n"
         "• <code>бд</code> — проверка схемы базы: каких миграций не хватает\n\n"
@@ -932,36 +949,82 @@ async def cb_sub_check(callback: CallbackQuery):
 
 
 # ================= КУЛДАУН НАГРАДЫ ЗА РП (секретная админ-команда) =================
-# Задача 34: кулдаун награды за РП временно выключен, чтобы можно было за один
-# вечер поднять уровень и проверить награды. Команда в общую справку не входит.
-#   кд            — показать текущее значение
-#   кд 0          — выключить (награда за каждое действие)
-#   кд 5ч / 30м / 3600 / 2д — поставить кулдаун
+# Задача 61: у КАЖДОЙ РП-команды свой кулдаун (по умолчанию 5 часов). Здесь же
+# хранятся значения из game_settings, поэтому настройка переживает рестарт.
+# Команда в общую справку не входит — только в `адм помощь`.
+#   кд                 — показать общее значение и команды со своим
+#   кд 5ч / 30м / 0     — общий кулдаун (для команд без своего значения)
+#   кд обнять 1ч       — только для «обнять»
+#   кд обнять 0        — выключить кулдаун у «обнять»
+#   кд обнять сброс    — вернуть «обнять» к общему значению
+#   кд обнять          — показать кулдаун команды
+#   кд проверка        — диагностика: что реально лежит в базе и почему КД
+#                        может не срабатывать (задача 63)
 LOVE_COOLDOWN_SETTING_KEY = "love_cooldown_seconds"
+# Задача 61: персональные кулдауны команд — одной JSON-строкой в game_settings,
+# чтобы `кд обнять 1ч` не создавал по строке на каждую команду.
+LOVE_COOLDOWN_ACTIONS_KEY = "love_cooldown_actions"
 _COOLDOWN_LOADED = {"done": False}
 
 
 def _cooldown_load_sync():
-    """Прочитать сохранённый кулдаун из game_settings (None — не задан)."""
+    """Прочитать сохранённые кулдауны: (общий|None, {команда: секунды})."""
+    general, actions = None, {}
     try:
-        res = (supabase.table("game_settings").select("value")
-               .eq("key", LOVE_COOLDOWN_SETTING_KEY).limit(1).execute())
+        res = (supabase.table("game_settings").select("key, value")
+               .in_("key", [LOVE_COOLDOWN_SETTING_KEY, LOVE_COOLDOWN_ACTIONS_KEY])
+               .execute())
     except Exception as e:  # noqa: BLE001
         logger.debug(f"game_settings недоступна для кулдауна: {e}")
-        return None
-    if not res.data:
-        return None
-    try:
-        return max(0, int(float(res.data[0].get("value"))))
-    except (TypeError, ValueError):
-        return None
+        return None, {}
+    for row in res.data or []:
+        key = str(row.get("key") or "")
+        if key == LOVE_COOLDOWN_SETTING_KEY:
+            # Задача 66: ноль в базе — это НЕ «выключено», а остаток старых
+            # сборок (задача 34 временно обнуляла кулдаун, чтобы прогнать
+            # уровень). Если считать его настройкой, после деплоя кулдаун снова
+            # не работает — вместе с жалобой «кд не работает». Выключить можно
+            # только осознанно: `кд 0` пишет строку "off".
+            seconds, explicit = cooldown_from_setting(
+                row.get("value"), LOVE_ACTION_COOLDOWN_DEFAULT)
+            if explicit or seconds > 0:
+                general = seconds
+            else:
+                general = None
+        elif key == LOVE_COOLDOWN_ACTIONS_KEY:
+            raw = row.get("value")
+            try:
+                data = json.loads(raw) if isinstance(raw, str) else (raw or {})
+            except Exception:  # noqa: BLE001
+                data = {}
+            if isinstance(data, dict):
+                for name, seconds in data.items():
+                    try:
+                        actions[str(name).strip().lower()] = max(0, int(seconds))
+                    except (TypeError, ValueError):
+                        continue
+    return general, actions
 
 
-def _cooldown_save_sync(seconds: int):
+def _cooldown_save_sync(seconds=None, action=None):
+    """Сохранить кулдаун в game_settings: общий или для одной команды."""
     try:
+        if action:
+            data = love_cooldown_overrides()
+            name = str(action).strip().lower()
+            if seconds is None:
+                data.pop(name, None)          # «сброс»: команда снова на общем
+            else:
+                data[name] = max(0, int(seconds))
+            payload = json.dumps(data, ensure_ascii=False, sort_keys=True)
+            key, value = LOVE_COOLDOWN_ACTIONS_KEY, payload
+        else:
+            # Задача 66: «выключено» пишем словом, чтобы отличить осознанный
+            # выбор админа от нуля старых сборок (см. _cooldown_load_sync).
+            key = LOVE_COOLDOWN_SETTING_KEY
+            value = COOLDOWN_OFF_MARKER if int(seconds) <= 0 else str(int(seconds))
         supabase.table("game_settings").upsert(
-            {"key": LOVE_COOLDOWN_SETTING_KEY, "value": str(int(seconds))},
-            on_conflict="key").execute()
+            {"key": key, "value": value}, on_conflict="key").execute()
         return True
     except Exception as e:  # noqa: BLE001
         logger.warning(f"Не удалось сохранить кулдаун в game_settings: {e}")
@@ -969,13 +1032,24 @@ def _cooldown_save_sync(seconds: int):
 
 
 async def ensure_love_cooldown_loaded():
-    """Один раз за запуск подтягиваем значение из базы (после рестарта)."""
+    """Подтягиваем значения из базы (после рестарта) — с повтором при сбое.
+
+    Задача 63: раньше флаг «загружено» ставился ДО чтения, поэтому единственный
+    сбой Supabase при старте оставлял бота с дефолтными 5 часами до следующего
+    рестарта — админ менял `кд`, а значение «не применялось».
+    """
     if _COOLDOWN_LOADED["done"]:
         return love_cooldown_seconds()
+    try:
+        general, actions = await asyncio.to_thread(_cooldown_load_sync)
+    except Exception as exc:  # noqa: BLE001 — попробуем позже
+        logger.warning("Кулдаун РП не прочитался, попробую при следующей команде: %s", exc)
+        return love_cooldown_seconds()
+    if general is not None:
+        set_love_cooldown_seconds(general)
+    if actions:
+        load_love_cooldown_overrides(actions)
     _COOLDOWN_LOADED["done"] = True
-    stored = await asyncio.to_thread(_cooldown_load_sync)
-    if stored is not None:
-        set_love_cooldown_seconds(stored)
     return love_cooldown_seconds()
 
 
@@ -1008,39 +1082,173 @@ def parse_cooldown_text(raw: str):
         return None
 
 
+def love_cooldown_diagnostics_sync(user_id=None) -> str:
+    """Что реально мешает/не мешает кулдауну — для админа (команда `бд`).
+
+    Задача 63: игрок пишет «кд не работает», а по логам не видно, в чём дело.
+    Проверяем три вещи: применяется ли значение (общее + по командам), пишется
+    ли отметка в love_cooldowns (и с колонкой action или без неё) и что
+    возвращает чтение.
+    """
+    # Задача 66: сразу показываем, ВКЛЮЧЁН ли кулдаун и откуда взято значение.
+    # Главная причина «кд не работает» — общий кулдаун 0 секунд: в старых
+    # сборках он стоял по умолчанию, а ноль в game_settings означал не
+    # «выключено админом», а просто остаток задачи 34.
+    common = love_cooldown_seconds()
+    state = ("❌ ВЫКЛЮЧЕН (0 сек) — награда за каждое действие" if common <= 0
+             else f"✅ включён: {format_love_cooldown(common)}")
+    lines = [f"⏳ Кулдаун: {state}",
+             f"• свои значения: {love_cooldown_overrides() or 'нет'}"]
+    try:
+        probe = (supabase.table("game_settings").select("key, value")
+                 .in_("key", [LOVE_COOLDOWN_SETTING_KEY, LOVE_COOLDOWN_ACTIONS_KEY]).execute())
+        settings_text = (", ".join(
+            f"{row.get('key')}={row.get('value')}" for row in (probe.data or [])) or "пусто")
+        lines.append("• game_settings: " + settings_text)
+        # Ноль здесь — не настройка админа, а остаток старых сборок: код такое
+        # значение игнорирует и держит «как задумано» (5 ч). Выключить можно
+        # только командой `кд 0` — она пишет "off".
+        raw_common = next((str(row.get("value")) for row in (probe.data or [])
+                           if str(row.get("key")) == LOVE_COOLDOWN_SETTING_KEY), None)
+        if raw_common is not None and raw_common.strip().lower() in ("0", "0.0", ""):
+            lines.append(f"   ⚠️ в базе ноль — это остаток старых сборок, "
+                         f"игнорирую (действует {format_love_cooldown(common)}). "
+                         f"Выключить осознанно: <code>кд 0</code>.")
+    except Exception as exc:  # noqa: BLE001
+        lines.append(f"• game_settings: ❌ {type(exc).__name__}: {exc}")
+    uid = int(user_id or 0)
+    if uid <= 0:
+        try:
+            rows = (supabase.table(LOVE_COOLDOWNS_TABLE).select("user_id")
+                    .limit(1).execute()).data or []
+            uid = int(rows[0].get("user_id") or 0) if rows else 0
+        except Exception as exc:  # noqa: BLE001
+            lines.append(f"• {LOVE_COOLDOWNS_TABLE}: ❌ {type(exc).__name__}: {exc}")
+            return "\n".join(lines)
+    if uid <= 0:
+        lines.append(f"• {LOVE_COOLDOWNS_TABLE}: записей нет")
+        return "\n".join(lines)
+    try:
+        rows = (supabase.table(LOVE_COOLDOWNS_TABLE).select("*")
+                .eq("user_id", uid).limit(5).execute()).data or []
+        if rows:
+            sample = rows[0]
+            has_action = "action" in sample
+            lines.append(f"• {LOVE_COOLDOWNS_TABLE}: записей {len(rows)}, "
+                         f"колонка action: {'есть' if has_action else 'НЕТ (миграция не применена)'}")
+            for row in rows[:3]:
+                lines.append(f"   — {row.get('action') or '*all'}: {row.get('action_at')}")
+        else:
+            lines.append(f"• {LOVE_COOLDOWNS_TABLE}: у игрока {uid} записей нет")
+    except Exception as exc:  # noqa: BLE001
+        lines.append(f"• {LOVE_COOLDOWNS_TABLE}: ❌ {type(exc).__name__}: {exc}")
+    return "\n".join(lines)
+
+
+def _cooldown_overview() -> str:
+    """Сводка: общий кулдаун + у каких команд своё значение."""
+    lines = ["⏳ <b>Кулдаун награды за РП</b>",
+             f"• по умолчанию для всех команд: <b>{format_love_cooldown()}</b>"]
+    overrides = love_cooldown_overrides()
+    if overrides:
+        lines.append("• свои значения:")
+        for action in sorted(overrides):
+            lines.append(f"   — <code>{action}</code>: {format_love_cooldown(action=action)}")
+    else:
+        lines.append("• свои значения: ни у одной команды (все — по умолчанию)")
+    lines.append("")
+    lines.append("Поставить всем: <code>кд 5ч</code>, <code>кд 30м</code>, <code>кд 0</code>.")
+    lines.append("Одной команде: <code>кд обнять 1ч</code>, <code>кд поцеловать 30м</code>, "
+                 "<code>кд обнять 0</code>.")
+    lines.append("Вернуть команду к общему значению: <code>кд обнять сброс</code>.")
+    lines.append(f"Все команды: <code>все рп</code>. Задумано было "
+                 f"{format_love_cooldown(LOVE_ACTION_COOLDOWN_DEFAULT)}.")
+    return "\n".join(lines)
+
+
 @dp.message(F.text.func(lambda t: strip_prefix(t).lower().replace("ё", "е").split(" ")[0] in
                         ("кд", "кулдаун", "cooldown")))
 async def cmd_love_cooldown(message: Message):
-    """Секретная админ-команда: посмотреть/поменять кулдаун награды за РП."""
+    """Секретная админ-команда: кулдаун награды за РП — общий или на команду.
+
+    Задача 61: у каждого РП-действия СВОЙ кулдаун.
+        кд                  — показать всё
+        кд 5ч               — общий кулдаун для всех команд без своего значения
+        кд обнять 30м       — только «обнять»
+        кд обнять 0         — выключить кулдаун у «обнять»
+        кд обнять сброс     — вернуть «обнять» к общему значению
+    """
     if not message.from_user or not is_admin(message.from_user.id):
         return      # не админ — молчим, команда скрытая
+    await ensure_love_cooldown_loaded()
     parts = strip_prefix(message_text(message)).split()
     if len(parts) < 2:
-        current = await ensure_love_cooldown_loaded()
-        default_text = format_love_cooldown(LOVE_ACTION_COOLDOWN_DEFAULT)
-        return await message.answer(
-            f"⏳ <b>Кулдаун награды за РП:</b> {format_love_cooldown(current)}\n\n"
-            f"Поставить: <code>кд 5ч</code>, <code>кд 30м</code>, <code>кд 3600</code>, "
-            f"<code>кд 2д</code>.\nВыключить: <code>кд 0</code> "
-            f"(задумано было {default_text}).",
-            parse_mode="HTML")
+        return await message.answer(_cooldown_overview(), parse_mode="HTML")
+    if parts[1].lower().replace("ё", "е") in ("проверка", "тест", "диагностика", "статус"):
+        # Задача 63: «кд не работает» → показываем, что реально в базе.
+        diag = await asyncio.to_thread(love_cooldown_diagnostics_sync, message.from_user.id)
+        return await message.answer(diag, parse_mode="HTML")
 
+    # Вариант 1: «кд <команда> <значение>» — кулдаун отдельной РП-команды.
+    action = rp_action_key(parts[1])
+    if action and len(parts) < 3:
+        # «кд обнять» без значения: раньше эта строка падала во второй вариант
+        # и админ получал «Не понял значение», хотя команда распознана.
+        return await message.answer(
+            f"⏳ Кулдаун команды «{action}»: "
+            f"<b>{format_love_cooldown(action=action)}</b>.\n\n"
+            f"Изменить: <code>кд {action} 1ч</code>, выключить: "
+            f"<code>кд {action} 0</code>, вернуть общий: "
+            f"<code>кд {action} сброс</code>.\n"
+            f"Общий кулдаун: <b>{format_love_cooldown()}</b>.",
+            parse_mode="HTML")
+    if action and len(parts) >= 3:
+        raw = " ".join(parts[2:])
+        if str(raw).strip().lower().replace("ё", "е") in ("сброс", "reset", "общий",
+                                                         "по умолчанию", "default"):
+            reset_love_cooldown_override(action)
+            saved = await asyncio.to_thread(_cooldown_save_sync, None, action)
+            note = "" if saved else "\n<i>⚠️ В базу не сохранилось — после рестарта сбросится.</i>"
+            return await message.answer(
+                f"✅ «{action}» снова с общим кулдауном: "
+                f"<b>{format_love_cooldown(action=action)}</b>.{note}", parse_mode="HTML")
+        seconds = parse_cooldown_text(raw)
+        if seconds is None:
+            return await message.answer(
+                f"❌ Не понял значение для «{action}». Примеры: <code>кд {action} 0</code>, "
+                f"<code>кд {action} 30м</code>, <code>кд {action} 5ч</code>.",
+                parse_mode="HTML")
+        applied = set_love_cooldown_seconds(seconds, action)
+        saved = await asyncio.to_thread(_cooldown_save_sync, applied, action)
+        note = "" if saved else "\n<i>⚠️ В базу не сохранилось — после рестарта сбросится.</i>"
+        if applied <= 0:
+            text = (f"✅ У команды «{action}» кулдаун выключен: награда за каждое действие.\n"
+                    f"Вернуть: <code>кд {action} 5ч</code>.")
+        else:
+            text = (f"✅ Кулдаун команды «{action}»: <b>{format_love_cooldown(applied)}</b>.\n"
+                    f"Другие команды не меняются. Выключить: <code>кд {action} 0</code>.")
+        return await message.answer(text + note, parse_mode="HTML")
+
+    # Вариант 2: «кд <значение>» — общий кулдаун (он же значение по умолчанию).
     raw = " ".join(parts[1:])
     seconds = parse_cooldown_text(raw)
     if seconds is None:
         return await message.answer(
             "❌ Не понял значение. Примеры: <code>кд 0</code>, <code>кд 30м</code>, "
-            "<code>кд 5ч</code>, <code>кд 3600</code>.", parse_mode="HTML")
+            "<code>кд 5ч</code>, <code>кд 3600</code> или "
+            "<code>кд обнять 1ч</code>.", parse_mode="HTML")
 
     applied = set_love_cooldown_seconds(seconds)
     saved = await asyncio.to_thread(_cooldown_save_sync, applied)
     note = "" if saved else "\n<i>⚠️ В базу не сохранилось — после рестарта сбросится.</i>"
     if applied <= 0:
-        text = ("✅ Кулдаун выключен: награда за РП начисляется за каждое действие.\n"
+        text = ("✅ Общий кулдаун выключен: награда за РП начисляется за каждое действие "
+                "(у команд со своим значением ничего не изменилось).\n"
                 "Вернуть: <code>кд 5ч</code>.")
     else:
-        text = (f"✅ Кулдаун награды за РП: <b>{format_love_cooldown(applied)}</b> "
-                f"({applied} сек).\nВыключить: <code>кд 0</code>.")
+        text = (f"✅ Общий кулдаун награды за РП: <b>{format_love_cooldown(applied)}</b> "
+                f"({applied} сек) — для всех команд без своего значения.\n"
+                f"Выключить: <code>кд 0</code>.")
     await message.answer(text + note, parse_mode="HTML")
 
 
@@ -2572,6 +2780,8 @@ RELATIONSHIPS_TABLE = "relationships"
 LOVE_COOLDOWNS_TABLE = "love_cooldowns"
 # Задача 44: запасная отметка кулдауна РП в памяти процесса — чтобы награда
 # не «размножалась» за каждое действие, если таблицы love_cooldowns нет.
+# Задача 61: ключ — (user_id, команда), поэтому «обнять» и «поцеловать»
+# считаются отдельно; старый ключ user_id оставлен для совместимости.
 _LOVE_COOLDOWN_MEMORY = {}
 
 # Предложения отношений ждут ответа не дольше 15 минут. Храним в памяти:
@@ -3285,6 +3495,8 @@ async def cmd_rp_list(message: Message):
         meta = RP_ACTIONS[key]
         lines.append(f"{meta['emoji']} <code>{key}</code> — {meta['text']}")
     lines.append("")
+    # Задача 61: кулдаун у КАЖДОЙ команды свой — показываем общее правило и
+    # отдельно те команды, у которых админ выставил своё значение.
     cooldown_text = format_love_cooldown()
     if cooldown_text == "без ограничения":
         lines.append(f"💗 За РП-действие пара получает +{LOVE_ACTION_BONUS} Love "
@@ -3292,54 +3504,173 @@ async def cmd_rp_list(message: Message):
     else:
         lines.append(f"💗 За РП-действие пара получает +{LOVE_ACTION_BONUS} Love "
                      f"(бонус не чаще, чем раз в {cooldown_text}).")
+    own = love_cooldown_overrides()
+    if own:
+        lines.append("⏳ Своё время у команд: " + ", ".join(
+            f"<code>{name}</code> — {format_love_cooldown(action=name)}"
+            for name in sorted(own)) + ".")
+    lines.append("У каждой команды отдельный кулдаун: «обнять» не мешает «поцеловать».")
     lines.append(f"💔 Без пары то же действие даёт +{LOVE_ACTION_BONUS} {SOLO_CURRENCY} "
                  f"— и только тому, кто пишет: передать Love другому нельзя.")
     lines.append("💞 Своя пара: <code>любовь инфа</code> · все пары: <code>топ отношений</code>")
     await message.answer("\n".join(lines), parse_mode="HTML")
 
 
-async def love_cooldown_left(user_id) -> int:
-    """Сколько секунд осталось до следующего +10 Love (0 — можно получать).
+async def love_cooldown_left(user_id, action=None) -> int:
+    """Сколько секунд осталось до награды за КОНКРЕТНУЮ команду (0 — можно).
 
-    Задача 44: если таблицы love_cooldowns нет, берём отметку из памяти
-    процесса. Раньше при ошибке возвращался 0, и кулдаун просто переставал
-    работать (награда капала за каждое действие без сохранения).
+    Задача 61: кулдаун считается на каждое РП-действие отдельно — «обнять» можно
+    раз в 5 часов, и это не мешает «поцеловать». Раньше отметка была одна на
+    игрока, поэтому после объятия «на кулдауне» оказывались все команды сразу.
+
+    Учитываем три источника (по приоритету):
+      1) отметка команды в love_cooldowns (после миграции 20261201000000);
+      2) общая отметка '*all' — строка, оставшаяся от старой схемы: она значит
+         «игрок получал награду недавно», иначе сразу после миграции можно было
+         бы собрать награду второй раз;
+      3) память процесса, если таблицы нет вовсе.
+
+    Задача 44: ошибка базы не должна «обнулять» кулдаун — иначе награда капает
+    за каждое действие. Поэтому при сбое читаем память, а не возвращаем 0.
     """
+    key = str(action or "").strip().lower() or None
     def _read():
-        res = supabase.table(LOVE_COOLDOWNS_TABLE).select("action_at").eq("user_id", user_id).execute()
-        return res.data[0].get("action_at") if res.data else None
+        """Отметка команды из базы + признак «база вообще не читается»."""
+        try:
+            res = (supabase.table(LOVE_COOLDOWNS_TABLE)
+                   .select("action, action_at").eq("user_id", user_id).execute())
+        except Exception:
+            # Старая схема без колонки action (миграция не применена): читаем
+            # единственную отметку игрока. Без этого кулдаун после рестарта бота
+            # «забывался» и награду можно было собирать подряд.
+            res = (supabase.table(LOVE_COOLDOWNS_TABLE)
+                   .select("action_at").eq("user_id", user_id).execute())
+        rows = res.data or []
+        exact, shared = None, None
+        for row in rows:
+            row_action = str(row.get("action") or "*all").strip().lower()
+            if key and row_action == key:
+                exact = row.get("action_at")
+            elif row_action == "*all":
+                shared = row.get("action_at")
+        return exact or shared, False
 
     try:
-        raw = await asyncio.to_thread(_read)
-    except Exception:
-        raw = _LOVE_COOLDOWN_MEMORY.get(int(user_id))
-    if not raw:
-        return 0
+        raw, db_broken = await asyncio.to_thread(_read)
+    except Exception as exc:  # noqa: BLE001 — таблицы нет / нет прав на чтение
+        logger.debug("Кулдаун не прочитался из базы (%s) — считаю по памяти", exc)
+        raw, db_broken = None, True
+    # Задача 63: КД = МАКСИМУМ из отметки в базе и в памяти процесса.
+    # Раньше при недоступной базе (нет таблицы, RLS, не применена миграция)
+    # чтение молча возвращало 0 — кулдаун «не работал», и награда начислялась
+    # за каждое действие подряд. Теперь отметка в памяти держит кулдаун даже
+    # тогда, когда запись в love_cooldowns не удалась, а после рестарта
+    # значение снова берётся из базы.
+    candidates = [raw, _LOVE_COOLDOWN_MEMORY.get((int(user_id), key or "*all"))]
+    if db_broken:
+        # Старый «общий» ключ памяти (одна отметка на игрока) остался от ранних
+        # сборок. Учитываем его ТОЛЬКО если по командам в памяти ничего нет —
+        # иначе после «обнять» блокировались бы все остальные команды.
+        has_per_action = any(isinstance(memory_key, tuple) and memory_key[0] == int(user_id)
+                             for memory_key in _LOVE_COOLDOWN_MEMORY)
+        if not has_per_action:
+            candidates.append(_LOVE_COOLDOWN_MEMORY.get(int(user_id)))
+    # Задача 61: берём кулдаун ИМЕННО этой команды (или общий, если для неё
+    # персонального значения нет).
+    cooldown = love_cooldown_seconds(key)
+    if cooldown <= 0:
+        return 0                # кулдаун для этой команды выключен
+    best = 0
+    for value in candidates:
+        if not value:
+            continue
+        try:
+            from datetime import datetime, timezone
+            stamp = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+            if stamp.tzinfo is None:
+                stamp = stamp.replace(tzinfo=timezone.utc)
+            best = max(best, int(cooldown - (time.time() - stamp.timestamp())))
+        except Exception:  # noqa: BLE001 — битая отметка не должна ломать КД
+            continue
+    return max(0, best)
+
+
+async def love_cooldown_clear(user_id, action=None) -> None:
+    """Снять отметку кулдауна (награда не выдалась — ждать нечего)."""
+    key = str(action or "*all").strip().lower()
+    _LOVE_COOLDOWN_MEMORY.pop((int(user_id), key), None)
+
+    def _delete():
+        try:
+            supabase.table(LOVE_COOLDOWNS_TABLE).delete().eq(
+                "user_id", int(user_id)).eq("action", key).execute()
+        except Exception as exc:  # noqa: BLE001 — старая схема без action
+            logger.debug("Отметку кулдауна снять не удалось: %s", exc)
+
     try:
-        from datetime import datetime, timezone
-        stamp = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
-        if stamp.tzinfo is None:
-            stamp = stamp.replace(tzinfo=timezone.utc)
-        cooldown = love_cooldown_seconds()
-        if cooldown <= 0:
-            return 0            # кулдаун временно выключен (задача 34)
-        left = cooldown - (time.time() - stamp.timestamp())
-        return max(0, int(left))
-    except Exception:
-        return 0
+        await asyncio.to_thread(_delete)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("Отметку кулдауна снять не удалось: %s", exc)
 
 
-async def love_cooldown_touch(user_id):
+# Задача 64: гонка двух одинаковых команд. Два сообщения «обнять» подряд (или
+# команда + кнопка) успевали пройти проверку КД до того, как первый запишет
+# отметку, — награда приходила дважды. Блокируем только пару (игрок, команда),
+# чтобы разные действия по-прежнему шли параллельно.
+_COOLDOWN_LOCKS = {}
+
+
+def love_action_lock(user_id, action=None):
+    """asyncio-блокировка на пару (игрок, команда) для проверки и начисления."""
+    key = (int(user_id), str(action or "*all").strip().lower())
+    lock = _COOLDOWN_LOCKS.get(key)
+    if lock is None:
+        lock = asyncio.Lock()
+        _COOLDOWN_LOCKS[key] = lock
+    # Словарь не должен расти бесконечно: держим только активные блокировки.
+    if len(_COOLDOWN_LOCKS) > 2000:
+        for stale_key, stale_lock in list(_COOLDOWN_LOCKS.items()):
+            if not stale_lock.locked() and stale_key != key:
+                _COOLDOWN_LOCKS.pop(stale_key, None)
+    return lock
+
+
+async def love_cooldown_touch(user_id, action=None):
+    """Отметить «награда за эту команду получена сейчас».
+
+    Задача 64: отметку в памяти ставим ПЕРВОЙ строкой — даже если запись в базу
+    упадёт (нет таблицы, RLS, не применена миграция), кулдаун продолжит
+    работать до рестарта. Раньше при сбое записи КД фактически исчезал, и игрок
+    получал «+10» за каждое действие подряд.
+    """
     stamp = datetime_now_iso()
-    # Память — запасной источник, если миграции love_cooldowns нет.
-    _LOVE_COOLDOWN_MEMORY[int(user_id)] = stamp
+    key = str(action or "*all").strip().lower()
+    # Память — полноценный источник: ключ (игрок, команда), поэтому «обнять»
+    # не блокирует «поцеловать».
+    _LOVE_COOLDOWN_MEMORY[(int(user_id), key)] = stamp
+
     def _write():
+        # upsert по паре (user_id, action) — так требует новый первичный ключ
+        # из миграции 20261201000000_love_cooldown_per_action.sql.
+        try:
+            supabase.table(LOVE_COOLDOWNS_TABLE).upsert(
+                {"user_id": int(user_id), "action": key, "action_at": stamp},
+                on_conflict="user_id,action").execute()
+            return
+        except Exception as exc:  # noqa: BLE001 — старая схема без колонки action
+            logger.debug("upsert кулдауна по действию не удался (%s): %s", key, exc)
+        # Старая схема: одна строка на игрока. Пишем её, чтобы кулдаун работал
+        # до миграции (тогда он общий для всех команд — это лучше, чем ничего).
         supabase.table(LOVE_COOLDOWNS_TABLE).upsert(
             {"user_id": int(user_id), "action_at": stamp}, on_conflict="user_id").execute()
+
     try:
         await asyncio.to_thread(_write)
     except Exception as e:
-        logger.warning(f"Не удалось сохранить кулдаун любви: {e}")
+        # Запись не прошла (нет таблицы/прав). В памяти отметка уже стоит, и
+        # love_cooldown_left её учитывает — кулдаун продолжает работать до
+        # рестарта, а админ видит причину в логе и в `кд проверка`.
+        logger.warning("Не удалось сохранить кулдаун любви (работаю по памяти): %s", e)
 
 
 def datetime_now_iso() -> str:
@@ -3389,6 +3720,9 @@ async def add_love_points(row, amount: int):
     except Exception as exc:  # noqa: BLE001
         logger.warning("Награды за этап Love не выданы: %s", exc)
         granted = []
+    # Пустые этапы не считаем: если награду уже выплатили раньше (или её закрыла
+    # страховка API), игроку не нужно второе «вы достигли уровня».
+    granted = [item for item in granted if int(item.get("reward") or 0) > 0]
     return new_score, granted, True
 
 
@@ -3432,11 +3766,67 @@ async def drop_solo_status(user_id):
         logger.warning(f"Не удалось сбросить Unlove: {e}")
 
 
-def _cooldown_keyboard(user_id) -> InlineKeyboardMarkup:
+def _cooldown_keyboard(user_id, action=None) -> InlineKeyboardMarkup:
+    """Кнопка «ускорить за i¢» — помнит, какую команду игрок хотел выполнить."""
+    data = f"love_ice|{user_id}"
+    if action:
+        data += f"|{action}"
     return InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text=f"⚡ За {LOVE_ICE_COST} i¢",
-                             callback_data=f"love_ice|{user_id}")
+        InlineKeyboardButton(text=f"⚡ За {LOVE_ICE_COST} i¢", callback_data=data[:64])
     ]])
+
+
+def _human_left(seconds) -> str:
+    """«5 ч 0 мин» / «12 мин» / «40 сек» — сколько ждать до следующей награды."""
+    left = max(0, int(seconds or 0))
+    hours, minutes = left // 3600, (left % 3600) // 60
+    if hours > 0:
+        return f"{hours} ч {minutes} мин"
+    if minutes > 0:
+        return f"{minutes} мин"
+    return f"{left} сек"
+
+
+def _cooldown_wait_text(action, left, currency="Love") -> str:
+    """«обнять» уже было — награду за него получишь через 4 ч 12 мин.
+
+    Задача 61: игрок должен видеть, что у КАЖДОЙ команды свой кулдаун и что
+    другие действия сейчас доступны.
+    """
+    name = f"«{action}»" if action else "Это действие"
+    return (f"{name} уже было — {currency}-бонус через {_human_left(left)}. "
+            f"У каждой команды свой кулдаун: другое действие можно сделать сейчас.")
+
+
+async def _notify_stage_rewards(row, actor_id, granted) -> None:
+    """Личное сообщение КАЖДОМУ участнику пары о достигнутом этапе.
+
+    Задача 61: «награды игрокам не видны, только когда достигают уровня — им в
+    личку пишут: вы достигли N уровня отношений, получаете столько коинов
+    (каждому участнику столько)». Начисление делает love.claim_stage_rewards,
+    здесь только уведомление — и второму партнёру тоже, даже если он сейчас
+    ничего не писал.
+    """
+    if not row or not granted:
+        return
+    partners = []
+    for key in ("user_a", "user_b"):
+        try:
+            uid = int(row.get(key))
+        except (TypeError, ValueError):
+            continue
+        if uid > 0 and uid not in partners:
+            partners.append(uid)
+    for uid in partners:
+        lines = ["💗 <b>Новый этап отношений!</b>", ""]
+        for stage in granted:
+            lines.append(stage_reached_text(stage, stage.get("reward")))
+        lines += ["", "Коины уже начислены на баланс — забирать ничего не нужно.",
+                  "Прогресс: <code>любовь инфа</code>"]
+        try:
+            await bot.send_message(uid, "\n".join(lines), parse_mode="HTML")
+        except Exception as exc:  # noqa: BLE001 — игрок мог не писать боту
+            logger.info("Не удалось написать о награде за этап игроку %s: %s", uid, exc)
 
 
 @dp.message(F.text.func(lambda t: rp_action_for(strip_prefix(t))[0] is not None))
@@ -3465,30 +3855,42 @@ async def cmd_rp_action(message: Message):
             f"{safe_text(message.from_user.full_name)}</a> {meta['text']} "
             f"{_player_mention(partner_id, partner_name)}")
 
-    left = await love_cooldown_left(actor_id)
-    if left > 0:
-        # Кулдаун: +10 Love уже получены недавно. Можно «докупить» действие за i¢.
-        hours = left // 3600
-        minutes = (left % 3600) // 60
-        return await message.answer(
-            f"{text}\n\n⏳ Love-бонус через {hours}ч {minutes}м. "
-            f"Можно не ждать — выполнить действие за {LOVE_ICE_COST} i¢ (донат-валюта).",
-            parse_mode="HTML", reply_markup=_cooldown_keyboard(actor_id))
+    # Задача 61: кулдаун — свой для каждой команды («обнять» не блокирует
+    # «поцеловать») и настраивается админ-командой «кд <команда> <время>».
+    # Задача 64: проверка и начисление идут под блокировкой (игрок + команда).
+    # Без неё два сообщения «обнять» подряд проходили проверку одновременно, и
+    # награда начислялась дважды — на скрине видно 10 → 20 → 30 → 40 → 50
+    # в одну минуту.
+    async with love_action_lock(actor_id, action):
+        left = await love_cooldown_left(actor_id, action)
+        if left > 0:
+            # Кулдаун: награда за эту команду уже получена недавно. Можно «докупить».
+            return await message.answer(
+                f"{text}\n\n⏳ {_cooldown_wait_text(action, left)}\n"
+                f"Можно не ждать — выполнить действие за {LOVE_ICE_COST} i¢ (донат-валюта).",
+                parse_mode="HTML", reply_markup=_cooldown_keyboard(actor_id, action))
 
-    new_score, granted, saved = await add_love_points(row, LOVE_ACTION_BONUS)
-    if not saved:
-        # Задача 55: не рисуем «+10», если база не приняла запись — иначе игрок
-        # видит рост в ответе и ноль в «любовь инфа».
-        return await message.answer(
-            f"{text}\n\n⚠️ Love не записался в базу — бонус не начислен.\n"
-            f"{love_write_hint()}", parse_mode="HTML")
-    await love_cooldown_touch(actor_id)
+        # Отметку ставим ДО начисления: пока идёт запись в базу, второй заход
+        # уже увидит кулдаун и не выдаст награду повторно.
+        await love_cooldown_touch(actor_id, action)
+        new_score, granted, saved = await add_love_points(row, LOVE_ACTION_BONUS)
+        if not saved:
+            # Задача 55: не рисуем «+10», если база не приняла запись — иначе
+            # игрок видит рост в ответе и ноль в «любовь инфа». Отметку КД
+            # снимаем: награды не было, значит и ждать нечего.
+            await love_cooldown_clear(actor_id, action)
+            return await message.answer(
+                f"{text}\n\n⚠️ Love не записался в базу — бонус не начислен.\n"
+                f"{love_write_hint()}", parse_mode="HTML")
     reply = (f"{text}\n\n💗 +{LOVE_ACTION_BONUS} Love (всего {new_score})\n"
              f"➡️ {safe_text(next_level_text(new_score))}")
-    # Этапы и награды — секрет. Бот не объявляет «новый этап» и не показывает
-    # суммы: награда начисляется тихо, игроки узнают о ней по балансу.
+    # Задача 61: награда за этап выдаётся ВСЕГДА и сразу, но игрок должен видеть,
+    # за что пришли коины — и в чате, и личным сообщением каждому участнику.
+    for stage in granted:
+        reply += "\n" + safe_text(stage_reached_text(stage, stage.get("reward")))
     if granted:
-        reply += "\n💞 Ваша пара стала ещё ближе."
+        reply += "\n<i>Награда уже зачислена каждому участнику.</i>"
+        await _notify_stage_rewards(row, actor_id, granted)
     await message.answer(reply, parse_mode="HTML")
 
 
@@ -3508,31 +3910,45 @@ async def solo_rp_action(message: Message, meta: dict, target_id, target_name):
     # оно занимало пол-сообщения и повторялось на каждое действие. Счёт и так
     # виден в ответе («+10 Unlove (всего N)»).
 
-    left = await love_cooldown_left(actor_id)
-    if left > 0:
-        hours = left // 3600
-        minutes = (left % 3600) // 60
-        return await message.answer(
-            f"{text}\n\n⏳ Unlove-бонус через {hours}ч {minutes}м. "
-            f"Можно не ждать — выполнить действие за {LOVE_ICE_COST} i¢ (донат-валюта).",
-            parse_mode="HTML", reply_markup=_cooldown_keyboard(actor_id))
+    action_key = rp_action_for(strip_prefix(message_text(message)))[0]
+    # Задача 64: та же блокировка, что и в парной ветке, — без неё два «обнять»
+    # подряд без пары начисляли награду дважды (скрин заказчика: 10 → 20 → 30…).
+    async with love_action_lock(actor_id, action_key):
+        left = await love_cooldown_left(actor_id, action_key)
+        if left > 0:
+            return await message.answer(
+                f"{text}\n\n⏳ {_cooldown_wait_text(action_key, left, SOLO_CURRENCY)}\n"
+                f"Можно не ждать — выполнить действие за {LOVE_ICE_COST} i¢ (донат-валюта).",
+                parse_mode="HTML", reply_markup=_cooldown_keyboard(actor_id, action_key))
 
-    score, granted, saved = await add_solo_points(actor_id, LOVE_ACTION_BONUS)
-    if not saved:
-        return await message.answer(
-            f"{text}\n\n⚠️ {SOLO_CURRENCY} не записался в базу — бонус не начислен.\n"
-            f"{love_write_hint()}", parse_mode="HTML")
-    await love_cooldown_touch(actor_id)
+        await love_cooldown_touch(actor_id, action_key)
+        score, granted, saved = await add_solo_points(actor_id, LOVE_ACTION_BONUS)
+        if not saved:
+            await love_cooldown_clear(actor_id, action_key)
+            return await message.answer(
+                f"{text}\n\n⚠️ {SOLO_CURRENCY} не записался в базу — бонус не начислен.\n"
+                f"{love_write_hint()}", parse_mode="HTML")
     reply = (f"{text}\n\n💔 +{LOVE_ACTION_BONUS} {SOLO_CURRENCY} (всего {score})\n"
-             f"➡️ {safe_text(next_level_text(score))}")
+             f"➡️ {safe_text(next_level_text(score, SOLO_CURRENCY))}")
+    # Одиночке награда тоже выдаётся всегда — говорим об этом прямо.
+    for stage in granted:
+        reply += "\n" + safe_text(stage_reached_text(stage, stage.get("reward")))
     if granted:
-        reply += "\n💗 Стало теплее — загляни в <code>любовь инфа</code>."
+        reply += "\n<i>Награда уже зачислена.</i>"
     await message.answer(reply, parse_mode="HTML")
 
 
 @dp.callback_query(F.data.startswith("love_ice|"))
 async def cb_love_ice(callback: CallbackQuery):
-    owner_id = int((callback.data or "").split("|", 1)[1] or 0)
+    # callback_data: love_ice|<owner_id>|<команда?>. Раньше id брался как всё
+    # после первого «|», поэтому с задачей 61 («…|111|обнять») получался
+    # ValueError и кнопка молча не работала.
+    _parts = (callback.data or "").split("|")
+    try:
+        owner_id = int(_parts[1] if len(_parts) > 1 else 0)
+    except (TypeError, ValueError):
+        return await callback.answer("Кнопка устарела — напиши команду заново",
+                                     show_alert=True)
     if callback.from_user.id != owner_id:
         return await callback.answer("Это не твоя кнопка", show_alert=True)
 
@@ -3552,6 +3968,11 @@ async def cb_love_ice(callback: CallbackQuery):
     if not ok:
         return await callback.answer(f"Недостаточно i¢ (нужно {LOVE_ICE_COST}, есть {balance_left})", show_alert=True)
 
+    # Действие, которое «докупаем»: кулдаун у каждой команды свой, поэтому
+    # кнопка помнит, какую именно команду хотел выполнить игрок.
+    action_key = None
+    if (callback.data or "").count("|") >= 2:
+        action_key = (callback.data or "").split("|", 2)[2].strip() or None
     row = await get_relationship(owner_id)
     if not row:
         # Одиночка: ускорение работает так же, только в свою копилку Unlove.
@@ -3560,11 +3981,11 @@ async def cb_love_ice(callback: CallbackQuery):
             return await callback.answer(
                 "⚠️ База не приняла начисление — i¢ не списаны, попробуй позже",
                 show_alert=True)
-        await love_cooldown_touch(owner_id)
+        await love_cooldown_touch(owner_id, action_key)
         text = (f"⚡ Готово за {LOVE_ICE_COST} i¢. 💔 +{LOVE_ACTION_BONUS} "
                 f"{SOLO_CURRENCY} (всего {score})")
-        if granted:
-            text += "\n💗 Стало теплее."
+        for stage in granted:
+            text += "\n" + stage_reached_text(stage, stage.get("reward"))
         return await callback.answer(text[:190], show_alert=True)
 
     new_score, granted, saved = await add_love_points(row, LOVE_ACTION_BONUS)
@@ -3572,10 +3993,12 @@ async def cb_love_ice(callback: CallbackQuery):
         return await callback.answer(
             "⚠️ База не приняла начисление — i¢ не списаны, попробуй позже",
             show_alert=True)
-    await love_cooldown_touch(owner_id)
+    await love_cooldown_touch(owner_id, action_key)
     text = f"⚡ Действие выполнено за {LOVE_ICE_COST} i¢. 💗 +{LOVE_ACTION_BONUS} Love (всего {new_score})"
+    for stage in granted:
+        text += "\n" + stage_reached_text(stage, stage.get("reward"))
     if granted:
-        text += "\n💞 Ваша пара стала ещё ближе."
+        await _notify_stage_rewards(row, owner_id, granted)
     await callback.answer(text[:190], show_alert=True)
 
 
@@ -3826,7 +4249,13 @@ async def cmd_db_schema(message: Message):
     except Exception as e:  # noqa: BLE001 — админ должен увидеть причину
         logger.error(f"Аудит схемы базы не удался: {e}")
         return await message.answer(f"❌ Не удалось проверить базу: {e}")
-    await message.answer(db_schema_report(report), parse_mode="HTML")
+    report_text = db_schema_report(report)
+    try:
+        report_text += "\n\n" + await asyncio.to_thread(love_cooldown_diagnostics_sync,
+                                                          message.from_user.id)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("Диагностика кулдауна не удалась: %s", exc)
+    await message.answer(report_text, parse_mode="HTML")
 
 
 # ================= СТАРТ И КНОПКА MINI APP =================
@@ -4144,7 +4573,7 @@ async def cmd_help_command(message: Message):
     F.text.func(lambda t: strip_prefix(t).lower().startswith("помощь") or strip_prefix(t).lower().startswith("help")))
 async def cmd_help(message: Message):
     text = (
-        "📖 <b>СПИСОК КОМАНД БОТА</b>\n━━━━━━━━━━━━━━━━━━━━\n\n🎟️ <b>Промокоды:</b>\n• <code>промо код</code> — активировать промокод\n\n💰 <b>Экономика:</b>\n• <code>карман</code> — твой баланс\n• <code>карман @user</code> — баланс другого\n• <code>перевод @user сумма</code> — перевести\n• <code>перевод сумма</code> (ответом) — быстрый перевод\n• <code>топ</code> — топ-10 богачей\n• <code>магазин</code> — магазин\n\n🎲 <b>Игры:</b>\n• <code>кубы @user ставка</code> — дуэль в кости\n• <code>кубы ставка</code> (ответом) — быстрый вызов\n\n💗 <b>Отношения:</b>\n• <code>+любовь</code> (ответом на сообщение) — предложить отношения\n• <code>все рп</code> — список всех РП-команд\n• <code>поцеловать</code>, <code>обнять</code>, <code>погладить</code>… — РП-команды (+10 Love паре)\n• <code>любовь инфа</code> — с кем, сколько дней, уровень и Love (только своё)\n• <code>топ отношений</code> — все пары и их Love (одиночки не показываются)\n• <code>-любовь</code> — разорвать отношения (у обоих сгорает статус и Love)\n• одному РП-команда даёт +10 Unlove — награды только тебе\n\n🛡️ <b>Модерация чата:</b>\n• <code>!аурапред</code> (ответом или @ник) — предупреждение: 3 из 3 → игнор 5 ч в этом чате\n• <code>!аурапредлист</code> — предупреждения в этом чате\n• <code>!снять игнор</code> (ответом, @ник или id) — досрочно снять наказание\n\n• <code>апка</code> — ссылка и кнопка на приложение AURA GAME\n• <code>тег</code> — проверка бота\n• <code>помощь</code> — эта справка")
+        "📖 <b>СПИСОК КОМАНД БОТА</b>\n━━━━━━━━━━━━━━━━━━━━\n\n🎟️ <b>Промокоды:</b>\n• <code>промо код</code> — активировать промокод\n\n💰 <b>Экономика:</b>\n• <code>карман</code> — твой баланс\n• <code>карман @user</code> — баланс другого\n• <code>перевод @user сумма</code> — перевести\n• <code>перевод сумма</code> (ответом) — быстрый перевод\n• <code>топ</code> — топ-10 богачей\n• <code>магазин</code> — магазин\n\n🎲 <b>Игры:</b>\n• <code>кубы @user ставка</code> — дуэль в кости\n• <code>кубы ставка</code> (ответом) — быстрый вызов\n\n💗 <b>Отношения:</b>\n• <code>+любовь</code> (ответом на сообщение) — предложить отношения\n• <code>все рп</code> — список всех РП-команд\n• <code>поцеловать</code>, <code>обнять</code>, <code>погладить</code>… — РП-команды (+10 Love паре; у каждой команды свой кулдаун, обычно 5 ч — награда не чаще)\n• <code>любовь инфа</code> — с кем, сколько дней, уровень и Love (только своё)\n• уровень растёт по Love пары, награду за новый уровень обоим присылают в личку\n• <code>топ отношений</code> — все пары и их Love (одиночки не показываются)\n• <code>-любовь</code> — разорвать отношения (у обоих сгорает статус и Love)\n• одному РП-команда даёт +10 Unlove — награды только тебе\n\n🛡️ <b>Модерация чата:</b>\n• <code>!аурапред</code> (ответом или @ник) — предупреждение: 3 из 3 → игнор 5 ч в этом чате\n• <code>!аурапредлист</code> — предупреждения в этом чате\n• <code>!снять игнор</code> (ответом, @ник или id) — досрочно снять наказание\n\n• <code>апка</code> — ссылка и кнопка на приложение AURA GAME\n• <code>тег</code> — проверка бота\n• <code>помощь</code> — эта справка")
     await message.answer(text, parse_mode="HTML")
 
 
@@ -4166,7 +4595,7 @@ async def cmd_misc(message: Message):
         if active_summons.get(message.chat.id): return await message.answer("⚠️ Созыв уже идёт!")
         parts = strip_prefix(message_text(message)).split(maxsplit=1)
         call_text = parts[1] if len(parts) > 1 else "📢 Общий сбор!"
-        await message.answer(f"🔄 Начинаю созыв...", parse_mode="HTML")
+        await message.answer("🔄 Начинаю созыв...", parse_mode="HTML")
         asyncio.create_task(summon_all_members(message.chat.id, call_text, message.from_user.id))
     elif clean_text.startswith("стоп"):
         if message.chat.type in ("group", "supergroup"):
@@ -4754,7 +5183,8 @@ async def main():
     # 2) по таймеру — только если включили KEEPWARM=1 (тратит часы Render).
     try:
         await ensure_love_cooldown_loaded()
-        logger.info(f"⏳ Кулдаун награды за РП: {format_love_cooldown()}")
+        logger.info(f"⏳ Кулдаун награды за РП: {format_love_cooldown()} "
+                    f"(свои значения: {love_cooldown_overrides() or 'нет'})")
     except Exception as exc:  # noqa: BLE001
         logger.warning(f"Кулдаун РП не загрузился: {exc}")
     # Задача 44: игнор наказанных в чате — до всех хендлеров сообщений.
