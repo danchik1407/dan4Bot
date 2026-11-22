@@ -3451,59 +3451,80 @@ def _is_private_chat(message) -> bool:
     return str(getattr(chat, "type", "")) in ("private", "ChatType.PRIVATE")
 
 
-def app_link_text() -> str:
+# Задача 49: прямая ссылка на приложение. Telegram открывает её всегда и
+# внутри Telegram (с initData), а не через адрес из BotFather — поэтому она
+# работает одинаково в личке и в группе и не зависит от настроек Mini App.
+APP_LINK_STARTAPP = (os.getenv("AURA_STARTAPP_URL")
+                     or "https://t.me/Auragameplay_bot?startapp").strip()
+
+
+def app_link_text(plain: bool = False) -> str:
     """Текст сообщения `!апка` — ОДИН и тот же в личке и в группе.
 
     Задача 44: строку «Адрес: https://…/miniapp/» убрали (игрок просил дважды —
     она осталась в старой сборке на сервисе). Задача 45: в группе текст больше
-    не дополняется ссылкой — он совпадает с личкой символ в символ, адрес отдаёт
-    кнопка.
+    не дополняется ссылкой — он совпадал с личкой символ в символ, адрес отдавала
+    кнопка. Задача 49: кнопку убрали совсем — в сообщении ровно одна красивая
+    ссылка `t.me/<бот>?startapp`, по которой Telegram открывает игру сам.
     """
-    url = miniapp_webapp_url()
-    if not url:
+    if plain:
+        # Запасной вариант без parse_mode: Telegram сам сделает ссылку
+        # кликабельной, а теги не должны быть видны как текст.
         return (
-            "🎮 <b>AURA GAME</b>\n\n"
-            "Адрес приложения не настроен на сервере. Напишите администратору: "
-            "нужно добавить в Render переменную <code>AURA_API_URL</code> с "
-            "адресом сервиса <b>aura-api</b> (только домен, без порта и без "
-            "«/miniapp»).\n\n"
-            "Пока приложение можно открыть кнопкой меню в этом чате "
-            "(🎮 AURA GAME под полем ввода)."
+            "🎮 AURA GAME\n"
+            "━━━━━━━━━━━━━━━━━━━━\n\n"
+            "🕹 Здесь всё в одном месте:\n"
+            "• 🏒 Арена — одиночная и командная\n"
+            "• 🎰 Апгрейд, сундуки, магазин\n"
+            "• 💗 Отношения и Love-коины\n"
+            "• 💤 Пассивный доход с капсул\n\n"
+            f"👉 Открыть AURA GAME: {APP_LINK_STARTAPP}\n\n"
+            "Открывай с телефона — Telegram запустит игру прямо внутри себя.\n"
+            "Если ссылка не открывается — обнови Telegram до последней версии."
         )
     return (
-        "🎮 <b>AURA GAME</b>\n\n"
-        "Жми кнопку ниже — приложение откроется прямо в Telegram, со всеми "
-        "играми, коинами и ареной.\n\n"
-        "Если кнопка не открывается — обнови Telegram до последней версии."
+        "🎮 <b>AURA GAME</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n\n"
+        "🕹 Здесь всё в одном месте:\n"
+        "• 🏒 Арена — одиночная и командная\n"
+        "• 🎰 Апгрейд, сундуки, магазин\n"
+        "• 💗 Отношения и Love-коины\n"
+        "• 💤 Пассивный доход с капсул\n\n"
+        f'👉 <a href="{APP_LINK_STARTAPP}">Открыть AURA GAME</a>\n'
+        f"<code>{APP_LINK_STARTAPP}</code>\n\n"
+        "Открывай с телефона — Telegram запустит игру прямо внутри себя.\n"
+        "Если ссылка не открывается — обнови Telegram до последней версии."
     )
 
 
 @dp.message(F.text.func(lambda t: strip_prefix(t).lower().startswith("апка")))
 async def cmd_app_link(message: Message):
-    """`!апка` — показать кнопку на Mini App.
+    """`!апка` — красивое сообщение с прямой ссылкой на приложение.
 
-    Задача 44: в группе кнопка web_app запрещена Telegram'ом — отправляем
-    обычную url-кнопку. Если Telegram всё равно отклонит разметку, сообщение
-    уходит без кнопок и со ссылкой в тексте (а не «Что-то пошло не так»).
+    Задача 49: НИКАКИХ кнопок. Раньше в личке уходила web_app-кнопка, а в группе
+    url-кнопка на `t.me/<бот>/<short>`, и Telegram открывал адрес из BotFather —
+    если он устарел, игрок видел «Not Found». Теперь в тексте одна ссылка
+    `t.me/<бот>?startapp`: её открывает сам Telegram, и Mini App стартует с
+    initData в обоих чатах.
+
+    Если Telegram отклонит разметку (HTML), сообщение всё равно уходит — без
+    разметки, но с целой ссылкой (Telegram сам сделает её кликабельной).
     """
-    private = _is_private_chat(message)
-    keyboard = app_link_keyboard(allow_web_app=private)
-    text = app_link_text()
+    # Задача 48: в `!сервисы` видно, куда вела последняя отправка.
     attempts = (
-        ("с кнопкой", dict(reply_markup=keyboard, disable_web_page_preview=True)),
-        ("без разметки", dict(reply_markup=None, disable_web_page_preview=True)),
-        ("совсем без параметров", {}),
+        ("со ссылкой", app_link_text(), "HTML", dict(disable_web_page_preview=False)),
+        ("без разметки", app_link_text(plain=True), None,
+         dict(disable_web_page_preview=False)),
+        ("совсем без параметров", app_link_text(plain=True), None, {}),
     )
     last_error = None
-    for label, extra in attempts:
+    for label, text, parse_mode, extra in attempts:
+        params = dict(extra)
         try:
-            await message.answer(text, parse_mode="HTML", **extra)
-            # Задача 48: запоминаем, КУДА ведёт кнопка — в группе это
-            # t.me/<бот>/<short>, и «Not Found» лечится только в BotFather.
+            await message.answer(text, parse_mode=parse_mode, **params)
             APP_LINK_LAST.update({"sent": label, "error": "", "at": time.time(),
-                                  "private": private,
-                                  "target": miniapp_webapp_url() if private
-                                  else (miniapp_direct_url() or miniapp_webapp_url())})
+                                  "private": _is_private_chat(message),
+                                  "target": APP_LINK_STARTAPP, "buttons": False})
             return
         except Exception as exc:  # noqa: BLE001 — команда не должна падать
             last_error = exc
@@ -4009,7 +4030,7 @@ def app_link_line() -> str:
         sent = APP_LINK_LAST.get("sent") or "ещё не вызывали"
         target = APP_LINK_LAST.get("target") or miniapp_webapp_url() or "не задан"
         where = "в личке" if APP_LINK_LAST.get("private") else "в чате"
-        return f"🎮 !апка: последняя отправка — {sent} {where} (кнопка ведёт на {target})"
+        return f"🎮 !апка: последняя отправка — {sent} {where} (ссылка: {target})"
     return f"🎮 !апка ОШИБКА: {error}"
 
 

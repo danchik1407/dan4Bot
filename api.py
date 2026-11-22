@@ -85,7 +85,7 @@ async def _http_json(url, method: str = "GET", params=None, payload=None, timeou
 
 # Номер сборки: по нему из /api/health видно, что на сервисе НЕ старый код.
 # Если после деплоя здесь прежнее значение — Render ещё не перезапустился.
-API_BUILD = "2026-10-27-task48-passive-days-miniapp-link"
+API_BUILD = "2026-10-27-task49-appka-link-days"
 
 # Момент старта процесса. По нему видно, что сервис только что «проснулся»:
 # Render на бесплатном тарифе усыпляет Web Service через 15 минут без входящих
@@ -1255,13 +1255,11 @@ def _user_payload(row, is_admin, user_id=None):
         created_text = None
     uid = user_id if user_id is not None else row.get("user_id")
     allowed = can_play(uid) if uid is not None else bool(is_admin)
-    # Задача 48: «Дней с нами» не должно обнуляться. Считаем от САМОЙ РАННЕЙ
-    # известной даты: первый заход в аппку или регистрация в боте. Раньше
-    # показывали только app_first_seen — без таблицы app_first_seen (или после
-    # перезапуска процесса) отметка каждый раз ставилась «сейчас», и у игрока
-    # с месяцем стажа было «0 дней».
-    created_stamp = _parse_timestamp(created_text) if created_text else None
-    days_start = _earliest_stamp(app_first_seen, created_stamp)
+    # Задача 49 (уточнение игрока): «Дней с нами» — ТОЛЬКО от первого захода в
+    # аппку, дата регистрации в боте не считается. Задача 48 (обнуление 0)
+    # остаётся: если отметки нет — ставим её сейчас и больше не двигаем
+    # (см. _app_first_seen_mark), поэтому счётчик растёт, а не сбрасывается.
+    days_start = app_first_seen
     return {
         "ok": True,
         "coins": _safe_int(row.get("coins"), 0),
@@ -1279,8 +1277,7 @@ def _user_payload(row, is_admin, user_id=None):
         # а не от регистрации в боте. created_at оставлен для совместимости.
         "days_in_app": _days_since(days_start),
         "app_first_seen": (_iso_from_timestamp(app_first_seen) if app_first_seen else None),
-        # Дни считаются от самой ранней даты (аппка или регистрация), поэтому
-        # «0 дней» больше не появляется у старых профилей.
+        # Дни — от первого захода в аппку (created_at оставлен для совместимости).
         "days_in_game": _days_since(days_start) if days_start else _days_in_game(created_at),
         "days_since": (_iso_from_timestamp(days_start) if days_start else None),
         # Пассивный доход: клиент считает «в час» по своему инвентарю этими ставками.
@@ -1310,23 +1307,70 @@ def _user_payload(row, is_admin, user_id=None):
 # из-за чего плашка показывала неверное число.
 APP_FIRST_SEEN_TABLE = "app_first_seen"
 _APP_FIRST_SEEN_MEMORY: dict = {}
+# Задача 49: какие даты реально лежат в базе. Если таблицы нет (миграция не
+# применена), повторяем запись не чаще раза в минуту, а не на каждом запросе.
+_APP_FIRST_SEEN_SAVED: set = set()
+_APP_FIRST_SEEN_RETRY: dict = {}
+_APP_FIRST_SEEN_WARNED = {"once": False}
+APP_FIRST_SEEN_RETRY_SECONDS = 60.0
 
 
-def _app_first_seen_mark(user_id) -> None:
-    """Отмечает первый заход в Mini App (идемпотентно, тихо при ошибке БД)."""
+def _app_first_seen_mark(user_id, stamp: float = None) -> bool:
+    """Отмечает первый заход в Mini App. True — дата сохранена в базе.
+
+    Задача 49: «Дней с нами» считается ТОЛЬКО от этой даты, поэтому она обязана
+    уцелеть после перезапуска сервиса. upsert НЕ перезаписывает существующую
+    строку (иначе каждый заход обнулял бы стаж), а если база ответила ошибкой —
+    дата остаётся в памяти и попытка повторится на следующем запросе профиля.
+    """
     try:
         uid = int(user_id)
     except (TypeError, ValueError):
-        return
-    if uid in _APP_FIRST_SEEN_MEMORY:
-        return
-    _APP_FIRST_SEEN_MEMORY[uid] = time.time()
+        return False
+    if uid in _APP_FIRST_SEEN_MEMORY and uid in _APP_FIRST_SEEN_SAVED:
+        return True
+    if uid in _APP_FIRST_SEEN_MEMORY and uid not in _APP_FIRST_SEEN_SAVED:
+        # Дата уже есть в памяти, но в базе её нет — пробуем дописать, но не
+        # чаще раза в минуту (без миграции иначе это запрос на каждый заход).
+        if time.time() - float(_APP_FIRST_SEEN_RETRY.get(uid) or 0) < APP_FIRST_SEEN_RETRY_SECONDS:
+            return False
+        stamp = float(_APP_FIRST_SEEN_MEMORY[uid])
+        _APP_FIRST_SEEN_RETRY[uid] = time.time()
+        try:
+            _insert_tolerant(APP_FIRST_SEEN_TABLE,
+                             {"user_id": uid, "first_seen": _iso_from_timestamp(stamp)})
+            _APP_FIRST_SEEN_SAVED.add(uid)
+            return True
+        except Exception:  # noqa: BLE001
+            return False
+    stamp = float(stamp if stamp is not None else time.time())
     try:
-        supabase.table(APP_FIRST_SEEN_TABLE).upsert(
-            {"user_id": uid, "first_seen": _iso_from_timestamp(time.time())},
-            on_conflict="user_id").execute()
+        res = (supabase.table(APP_FIRST_SEEN_TABLE).select("first_seen")
+               .eq("user_id", uid).limit(1).execute())
+        if res.data:
+            parsed = _parse_timestamp(res.data[0].get("first_seen"))
+            _APP_FIRST_SEEN_MEMORY[uid] = float(parsed or stamp)
+            _APP_FIRST_SEEN_SAVED.add(uid)
+            return True
+    except Exception:  # noqa: BLE001 — читаем память, ниже попробуем записать
+        pass
+    _APP_FIRST_SEEN_MEMORY[uid] = stamp
+    try:
+        # Именно insert: на существующей строке upsert перезаписал бы дату
+        # первого захода, и стаж обнулился бы на каждом заходе.
+        _insert_tolerant(APP_FIRST_SEEN_TABLE,
+                         {"user_id": uid, "first_seen": _iso_from_timestamp(stamp)})
+        _APP_FIRST_SEEN_SAVED.add(uid)
+        _APP_FIRST_SEEN_RETRY.pop(uid, None)
+        return True
     except Exception as exc:  # noqa: BLE001 — нет миграции? профиль не падает
-        logger.debug("app_first_seen недоступна (%s) — работаю на памяти", exc)
+        _APP_FIRST_SEEN_RETRY[uid] = time.time()
+        if not _APP_FIRST_SEEN_WARNED["once"]:
+            _APP_FIRST_SEEN_WARNED["once"] = True
+            logger.warning("app_first_seen недоступна (%s): %s — дата держится в памяти, "
+                           "примените supabase/migrations/20261027000000_app_first_seen.sql",
+                           APP_FIRST_SEEN_TABLE, exc)
+        return False
 
 
 def _app_first_seen_get(user_id):
