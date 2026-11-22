@@ -272,6 +272,10 @@ function resolveAccess(data) {
     serverMaintenance = data && data.maintenance !== undefined ? Boolean(data.maintenance) : serverMaintenance;
     if (data && typeof data.maintenance_message === 'string' && data.maintenance_message.trim()) {
         maintenanceMessage = data.maintenance_message.trim();
+    } else if (data && !data.can_play && typeof data.detail === 'string' && data.detail.trim()) {
+        // Сервер закрыл доступ (403): причину он присылает в detail — показываем
+        // её в заглушке, чтобы игрок понимал, что происходит.
+        maintenanceMessage = data.detail.trim();
     }
     if (data && typeof data.can_play === 'boolean') {
         canPlay = data.can_play;
@@ -625,6 +629,17 @@ async function loadUserData(options) {
                     });
                     const data = await response.json().catch(() => ({}));
                     if (response.status === 403) {
+                        // Задача 57: 403 бывает не только «бан». Во время
+                        // техработ сервер закрывает профиль всем, кроме
+                        // админов — тогда показываем экран техработ, а не
+                        // «Вы забанены» с закрытием приложения.
+                        const denied = data && (data.maintenance === true
+                            || data.can_play === false
+                            || data.admin_only === true);
+                        if (denied) {
+                            resolveAccess(data);
+                            return 'maintenance';
+                        }
                         banned = true;
                         tg.showAlert(data.detail || "Вы забанены");
                         try { tg.close(); } catch (e) {}
@@ -648,6 +663,9 @@ async function loadUserData(options) {
 
         let result = await tryLoadProfile();
         if (result === 'banned') return false;
+        // Техработы: доступ уже решён сервером, повторять запросы и искать
+        // другой адрес API не нужно — сразу показываем экран-заглушку.
+        if (result === 'maintenance') return false;
         if (result === 'ok') return true;
 
         // Не получилось — возможно, в коде устаревший домен сервиса (Render на
@@ -656,6 +674,7 @@ async function loadUserData(options) {
         if (await recoverApiUrl()) {
             result = await tryLoadProfile();
             if (result === 'banned') return false;
+            if (result === 'maintenance') return false;
             if (result === 'ok') return true;
         }
 
@@ -4692,7 +4711,7 @@ async function loadArenaRollPath(roundId) {
     arenaPathCache.roundId = roundId;
     arenaPathCache.path = null;
     const pending = (async () => {
-        const res = await fetch(`${API_URL}/api/hockey_roll/${encodeURIComponent(roundId)}`);
+        const res = await fetch(`${API_URL}/api/hockey_roll/${encodeURIComponent(roundId)}?initData=${encodeURIComponent(tg.initData || '')}`);
         if (!res.ok) throw new Error('Не удалось получить траекторию мяча');
         const data = await res.json();
         if (!data || !Array.isArray(data.path) || data.path.length < 2) throw new Error('Нет траектории');
@@ -4802,7 +4821,9 @@ async function pollHockeyState() {
     if (!document.getElementById('screen-hockey').classList.contains('active')) return;
     try {
         const requestStartedAt = performance.now();
-        const res = await fetch(`${API_URL}/api/hockey_state`);
+        // Задача 57: состояние арены закрыто админами, поэтому передаём initData —
+        // на сервере техработы отдают его только тем, кому можно играть.
+        const res = await fetch(`${API_URL}/api/hockey_state?initData=${encodeURIComponent(tg.initData || '')}`);
         const requestFinishedAt = performance.now();
         // 5xx/429 от Render — не повод падать: держим последнее известное
         // состояние. Раньше разбор ответа с ошибкой бросал TypeError каждые
@@ -5300,7 +5321,13 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (!tg.initData) {
         setSyncBanner('Откройте приложение через Telegram — без initData сервер не покажет баланс.');
     }
-    try { await Promise.all([loadUserData(), loadShopItems()]); } catch(e) {}
+    // Задача 57: витрину тянем только после того, как сервер подтвердил доступ.
+    // Иначе во время техработ каждый не-админ видел в консоли 403 на
+    // /api/shop_items, а на слабом телефоне это ещё и задерживало экран.
+    try { await loadUserData(); } catch(e) {}
+    if (canPlay) {
+        try { await loadShopItems(); } catch(e) {}
+    }
     hideLoader();
     // Держим сервер тёплым, пока игрок в приложении (см. API_PING_INTERVAL).
     startApiHeartbeat();

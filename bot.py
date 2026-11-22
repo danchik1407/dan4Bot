@@ -6,6 +6,9 @@ import asyncio
 import logging
 import json
 import re
+import hashlib
+import hmac
+from urllib.parse import quote, urlencode
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from dotenv import load_dotenv
@@ -395,6 +398,123 @@ class AnonymousSenderMiddleware(BaseMiddleware):
         return await handler(event, data)
 
 
+# ================= ДОСТУП К БОТУ (задача 57) =================
+# «Чтобы кроме админов зайти никто не мог»: во время техработ играют только
+# ADMIN_IDS. Рубильник общий с Mini App и по умолчанию ВКЛЮЧЁН; открыть игру
+# для всех = ADMINS_ONLY_BOT=0 в Render (вместе с ADMIN_ONLY_APP=0 у aura-api).
+def _env_flag(name: str, default: bool = False) -> bool:
+    raw = (os.getenv(name) or "").strip().lower()
+    if raw in ("1", "true", "yes", "on"):
+        return True
+    if raw in ("0", "false", "no", "off"):
+        return False
+    return default
+
+
+ADMINS_ONLY_BOT = _env_flag("ADMINS_ONLY_BOT", True)
+
+# Что остаётся доступным не-админам, пока идёт закрытие: вход в бот и
+# модерация чата. Это не игра — денег эти команды не начисляют.
+PUBLIC_PREFIXES = (
+    "/start", "start", "апка", "аура", "помощь", "help", "меню",
+    "аурапред", "аурапредлист", "аурапред лист", "аураварн", "аураварны",
+    "снять игнор", "снятьигнор", "размут", "снять мут", "снять наказание",
+    "разбан", "апбан", "список банов",
+)
+
+ADMINS_ONLY_BOT_MESSAGE = ("🛠️ <b>Технические работы</b>\n\n"
+                           "Игра временно доступна только администраторам. "
+                           "Скоро откроем для всех — спасибо за терпение 💙")
+
+
+class AdminOnlyMiddleware(BaseMiddleware):
+    """Задача 57: гейт «только админы» для всех команд и кнопок игры.
+
+    До этого закрыт был только Mini App (403 в API), а в чате обычный игрок
+    мог написать «кубы», «Love», «обнять» или нажать inline-кнопку и получить
+    настоящую награду из базы; !аурапред вообще писал в базу. Теперь любое
+    игровое действие не-админа отсекается ДО фильтров (outer-слой), поэтому
+    ни один хендлер не успевает ничего записать.
+
+    Пропускаем: ADMIN_IDS, /start и подсказки (PUBLIC_PREFIXES), модерацию
+    чата. Всё остальное — вежливый отказ одним сообщением.
+    """
+
+    async def __call__(self, handler, event, data):
+        try:
+            allowed = self._allow(event)
+        except Exception:  # noqa: BLE001 — гейт не должен ронять бота
+            logger.exception("Проверка доступа к командам не сработала")
+            return None
+        if allowed:
+            return await handler(event, data)
+        await _answer_admins_only(event)
+        return None
+
+    def _allow(self, event) -> bool:
+        if not ADMINS_ONLY_BOT:
+            return True
+        actor = getattr(event, "from_user", None)
+        if actor is None:
+            # Пост в канале или служебный апдейт: команд там нет, а сообщения
+            # без отправителя отбросит AnonymousSenderMiddleware.
+            return True
+        if is_admin(int(actor.id)):
+            return True
+        if isinstance(event, CallbackQuery):
+            return False                      # все кнопки игры — только админам
+        message = event if isinstance(event, Message) else getattr(event, "message", None)
+        return _is_public_text(message)
+
+
+def _is_public_text(message) -> bool:
+    """Текст доступен без админских прав: /start, подсказки и модерация чата.
+
+    Сравниваем по НАЧАЛУ текста (префиксы короче 4 букв — только целым словом):
+    иначе «start» пропускал бы «start_game», а «меню» — «меню игры».
+    """
+    low = strip_prefix(message_text(message)).lower().replace("ё", "е").strip()
+    if not low:
+        return False
+    for prefix in PUBLIC_PREFIXES:
+        if low.startswith(prefix):
+            if len(prefix) >= 4:
+                return True
+            if low == prefix or low[len(prefix):len(prefix) + 1] in (" ", "\n", "\t", "", "?", "!"):
+                return True
+    return False
+
+
+def _looks_like_command(message) -> bool:
+    """Явная команда (!кубы, /start) — на неё можно ответить отказом.
+
+    В групповом чате бот видит ВСЕ сообщения. Отвечать «техработы» на каждое
+    «привет» — это спам, поэтому в чатах отвечаем только на явные команды
+    (начинаются с «!» или «/»), а обычную болтовню просто игнорируем: игра
+    всё равно отключена, случайные дропы коинов не начисляются.
+    В личке с ботом отвечаем на любое сообщение — это точно попытка играть.
+    """
+    chat = getattr(message, "chat", None)
+    if chat is None or str(getattr(chat, "type", "")) == "private":
+        return True
+    raw = (getattr(message, "text", None) or getattr(message, "caption", None) or "").strip()
+    return raw.startswith(("!", "/"))
+
+
+async def _answer_admins_only(event) -> None:
+    """Один короткий ответ на попытку играть во время техработ."""
+    try:
+        if isinstance(event, CallbackQuery):
+            await event.answer("🛠️ Технические работы: игра временно недоступна",
+                               show_alert=True)
+            return
+        if not _looks_like_command(event):
+            return                      # болтовня в чате — молча игнорируем
+        await event.answer(ADMINS_ONLY_BOT_MESSAGE, parse_mode="HTML")
+    except Exception:  # noqa: BLE001 — ответ не должен ронять апдейт
+        logger.warning("Не удалось ответить отказом на команду во время техработ")
+
+
 class CrashGuardMiddleware(BaseMiddleware):
     """Ловит ЛЮБОЕ исключение обработки апдейта, включая падения фильтров.
 
@@ -451,6 +571,11 @@ async def _apologize(event):
 # CrashGuard снаружи: он ловит и падения фильтров, которые `dp.errors`
 # в aiogram 3.19 не перехватывает (HandlerObject.check вызывается вне try).
 dp.update.outer_middleware(CrashGuardMiddleware())
+# Задача 57: команды игры — только админам; ставится outer-слоем, то есть
+# ДО магических фильтров: посторонний игрок не доходит ни до одного хендлера.
+dp.message.outer_middleware(AdminOnlyMiddleware())
+dp.callback_query.outer_middleware(AdminOnlyMiddleware())
+dp.edited_message.outer_middleware(AdminOnlyMiddleware())
 dp.message.outer_middleware(AnonymousSenderMiddleware())
 # Плюс штатный обработчик ошибок aiogram — для ошибок внутри самих хендлеров.
 dp.errors.register(on_error)
@@ -987,7 +1112,7 @@ def _warn_error_hint(exc) -> str:
     low = text.lower()
     if "does not exist" in low or "42p01" in low or "could not find the table" in low:
         return ("таблицы <code>chat_warns</code> нет — примените миграцию "
-                "<code>20261125000000_chat_warns.sql</code> и сделайте "
+                "<code>20261128000000_chat_warns_and_love_full.sql</code> и сделайте "
                 "<code>NOTIFY pgrst, 'reload schema'</code>")
     if "on_conflict" in low or "no unique or exclusion constraint" in low:
         return ("у таблицы <code>chat_warns</code> нет составного ключа "
@@ -2139,7 +2264,10 @@ async def cmd_services(message: Message):
     # Сундуки живут в таблице chest_claims. Если её нет (не применена миграция)
     # или в PostgREST устарел кэш схемы, клиент получает «Сундуки обновляются,
     # попробуйте чуть позже» и рулетка не запускается вообще. Проверяем явно.
-    chest = await probe_chest_claims(API_URL)
+    # Диагностика /api/chest_ready с задачи 57 закрыта админами: команду
+    # «сервис» вызывает админ, поэтому передаём его initData (Telegram-подпись
+    # строится на BOT_TOKEN, который есть только у бота).
+    chest = await probe_chest_claims(API_URL, init_data=admin_probe_init_data(message.from_user.id))
     api_status = "не ответил"
     api_details = ""
     if status is None:
@@ -2211,12 +2339,19 @@ async def cmd_services(message: Message):
             chest_line += (f"\n   • 💊 капсула: обычный {normal_pct:g}%, золотой {gold_pct:g}%")
 
     # Тираж капсул: если в health нет данных о стоке — значит магазин не знает остаток.
+    # Задача 57: /api/stock_debug теперь требует initData, поэтому в тексте —
+    # ссылка с подписью этого админа (открывается прямо в браузере).
+    stock_debug_url = f"{API_URL}/api/stock_debug"
+    probe_data = admin_probe_init_data(message.from_user.id)
+    if probe_data:
+        stock_debug_url = f"{stock_debug_url}?initData={quote(probe_data, safe='')}"
     stock = data.get("shop_stock") if isinstance(data, dict) else None
     build = (data.get("build") if isinstance(data, dict) else None) or "?"
     if not isinstance(stock, dict):
         stock_line = (
             "🎟️ Тираж: ❌ сервер НЕ умеет читать сток (старый код)\n"
-            "   • задеплойте aura-api из ветки main и проверьте /api/stock_debug"
+            "   • задеплойте aura-api из ветки main и проверьте /api/stock_debug\n"
+            f"     (открывать с initData: {stock_debug_url})"
         )
     elif stock.get("ready"):
         left = stock.get("left") or {}
@@ -2229,13 +2364,13 @@ async def cmd_services(message: Message):
                 f"🎟️ Тираж: ⚠️ нет строк для: {', '.join(missing)}\n"
                 "   • магазин честно пишет «Остаток уточняется», покупка не блокируется\n"
                 "   • лечение: примените supabase/migrations/20261106000000_stock_limits_on.sql\n"
-                f"   • проверка: {API_URL}/api/stock_debug"
+                f"   • проверка: {stock_debug_url}"
             )
         else:
             stock_line = (
                 f"🎟️ Тираж: ✅ {preview or 'пусто'}\n"
                 f"   • RPC shop_take_stock: {stock.get('rpc', 'shop_take_stock')}"
-                f" · проверка: {API_URL}/api/stock_debug"
+                f" · проверка: {stock_debug_url}"
             )
     elif stock.get("limits_enabled") is False:
         stock_line = (
@@ -2247,7 +2382,7 @@ async def cmd_services(message: Message):
             "🎟️ Тираж: ❌ сервер не читает capsule_stock\n"
             f"   • {str(stock.get('error') or 'таблица недоступна')[:160]}\n"
             "   • примените supabase/migrations/20261106000000_stock_limits_on.sql\n"
-            f"   • диагностика: {API_URL}/api/stock_debug"
+            f"   • диагностика: {stock_debug_url}"
         )
 
     text = (
@@ -2538,17 +2673,17 @@ def _relationship_failure_message(exc) -> str:
     low = text.lower()
     if "row-level security" in low or "42501" in low or "permission denied" in low:
         return ("⚠️ База не даёт записать пару (RLS). Примените миграцию "
-                "20261124000000_love_fix.sql в Supabase SQL Editor.")
+                "20261128000000_chat_warns_and_love_full.sql в Supabase SQL Editor.")
     if ("could not find the table" in low or "does not exist" in low and "relationship" in low
             or "pgrst205" in low or "42p01" in low):
         return ("⚠️ Таблицы relationships нет. Примените миграцию "
-                "20261124000000_love_fix.sql в Supabase SQL Editor.")
+                "20261128000000_chat_warns_and_love_full.sql в Supabase SQL Editor.")
     if "уже состоит в активных отношениях" in low or "single active" in low:
         return "💔 Кто-то из вас уже в паре — сначала <code>-отны</code>."
     column = _missing_column_from_error(text)
     if column:
         return ("⚠️ В таблице relationships нет колонки «%s». Примените миграцию "
-                "20261124000000_love_fix.sql." % column)
+                "20261128000000_chat_warns_and_love_full.sql." % column)
     return "❌ Не удалось создать пару. Попробуйте позже."
 
 
@@ -3216,7 +3351,7 @@ def love_write_hint() -> str:
     """Человеческая причина, почему Love/Unlove не записались (для игрока)."""
     return ("Скорее всего в базе нет таблицы отношений или политики записи — "
             "передай админу: <code>relationships</code> / <code>solo_love</code>, "
-            "миграция <code>20261124000000_love_fix.sql</code>.")
+            "миграция <code>20261128000000_chat_warns_and_love_full.sql</code>.")
 
 
 async def add_love_points(row, amount: int):
@@ -4092,7 +4227,32 @@ async def probe_api(base: str, timeout: float = 8.0) -> bool:
     return result.get("status") == 200 and isinstance(data, dict) and data.get("service") == "aura-api"
 
 
-async def probe_chest_claims(base: str, timeout: int = 10) -> dict:
+def admin_probe_init_data(user_id) -> str:
+    """initData администратора для собственных диагностических запросов бота.
+
+    Задача 57: служебные ручки aura-api (/api/chest_ready, /api/db_audit,
+    /api/admin/*) открыты только по подписи initData — обычной ссылкой их уже
+    не вызвать. Бот знает BOT_TOKEN и может подписать данные сам: получается
+    тот же формат, что присылает Telegram WebApp, и сервер принимает его без
+    дополнительных «секретных» параметров. Подпись живёт минуту и никуда не
+    сохраняется.
+    """
+    uid = int(user_id or 0)
+    if not uid or not BOT_TOKEN:
+        return ""
+    fields = {
+        "auth_date": str(int(time.time())),
+        "query_id": f"AA{uid}{int(time.time())}",
+        "user": json.dumps({"id": uid, "first_name": "admin"}, ensure_ascii=False,
+                           separators=(",", ":")),
+    }
+    check_string = "\n".join(f"{key}={fields[key]}" for key in sorted(fields))
+    secret = hmac.new(b"WebAppData", BOT_TOKEN.encode(), hashlib.sha256).digest()
+    fields["hash"] = hmac.new(secret, check_string.encode(), hashlib.sha256).hexdigest()
+    return urlencode(fields)
+
+
+async def probe_chest_claims(base: str, timeout: int = 10, init_data: str = "") -> dict:
     """Проверяет, доступна ли таблица сундуков на сервере aura-api.
 
     Возвращает {"ok": bool, "status": int|None, "detail": str, "error": str}.
@@ -4105,7 +4265,13 @@ async def probe_chest_claims(base: str, timeout: int = 10) -> dict:
     try:
         client_timeout = aiohttp.ClientTimeout(total=timeout)
         async with aiohttp.ClientSession(timeout=client_timeout) as session:
-            async with session.get(f"{base}/api/chest_ready") as response:
+            # Задача 57: диагностика /api/chest_ready закрыта админами, поэтому
+            # бот передаёт initData администратора. Без него сервис отвечает 403,
+            # и плашка «сундуки обновляются» появлялась бы на ровном месте.
+            url = f"{base}/api/chest_ready"
+            if init_data:
+                url = f"{url}?initData={quote(init_data, safe='')}"
+            async with session.get(url) as response:
                 status = response.status
                 try:
                     data = await response.json(content_type=None)
