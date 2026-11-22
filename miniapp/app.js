@@ -3405,8 +3405,13 @@ async function clickMineCell(cell) {
     if (Number.isNaN(index) || cell.classList.contains('flipped')) return;
 
     isProcessing = true;
+    // Задача 50: клетка НЕ «висит» на анимации. Раньше ответ ждали до 0.4 с
+    // анимации переворота, а при медленном сервере — ещё дольше, и игра
+    // казалась тормозной. Теперь запрос уходит сразу, ответ рисуется, как
+    // только пришёл, а спиннер появляется лишь если сервер молчит >180 мс.
     cell.classList.add('flipped');
     playSound('click');
+    const slowTimer = setTimeout(() => cell.classList.add('loading'), 180);
     try {
         const res = await fetch(`${API_URL}/api/mines_open`, {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -3414,10 +3419,11 @@ async function clickMineCell(cell) {
         });
         const data = await res.json().catch(() => ({}));
         if (!res.ok) {
-            cell.classList.remove('flipped');
+            cell.classList.remove('flipped', 'loading');
             tg.showAlert(data.detail || "Не удалось открыть клетку");
             return;
         }
+        cell.classList.remove('loading');
         if (data.hit) {
             cell.classList.add('bad');
             revealMines(data.positions, index);
@@ -3436,9 +3442,10 @@ async function clickMineCell(cell) {
         updateMinesInfo(minesCoef, cashout);
         setMinesButton(`Забрать (${coinAmount(cashout)})`, '#34c759', false);
     } catch (e) {
-        cell.classList.remove('flipped');
+        cell.classList.remove('flipped', 'loading');
         tg.showAlert("Ошибка соединения. Клетка не открыта.");
     } finally {
+        clearTimeout(slowTimer);
         isProcessing = false;
     }
 }
