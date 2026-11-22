@@ -85,7 +85,7 @@ async def _http_json(url, method: str = "GET", params=None, payload=None, timeou
 
 # Номер сборки: по нему из /api/health видно, что на сервисе НЕ старый код.
 # Если после деплоя здесь прежнее значение — Render ещё не перезапустился.
-API_BUILD = "2026-10-27-task55-love-score-and-unmute"
+API_BUILD = "2026-10-27-task56-arena-share-and-upgrade-clean"
 
 # Момент старта процесса. По нему видно, что сервис только что «проснулся»:
 # Render на бесплатном тарифе усыпляет Web Service через 15 минут без входящих
@@ -1633,6 +1633,9 @@ ARENA_TEAMS = {
 # что рисовать: он работает в любой момент и ничего не блокирует.
 ARENA_VIEWS = ("normal", "team")
 ARENA_MAX_PLAYERS = 20          # на каждый котёл отдельно
+# Задача 56: минимальная ставка. Ставка в 1 коин за фаворита забирала долю
+# банка, накопленного ботами, — это выглядело как «весь банк за 1 коин».
+ARENA_MIN_BET = 100
 # Задача 43: командная арена — маленький котёл. Максимум 2–3 бота на раунд,
 # ставки 250…500, без «китов»: там играют командами, а не гоняют ботов.
 TEAM_BOT_COUNT_MIN = 2
@@ -2000,11 +2003,19 @@ def _arena_payout_plan(arena: str) -> list:
         if winner and bank > 0:
             winner_team = winner.get("team") or winner.get("id")
             team_players = [p for p in _arena_players("team") if p.get("team") == winner_team]
-            # Задача 45: делим ВЕСЬ банк между реальными игроками победившей
-            # команды пропорционально их ставкам. Ставки ботов в знаменатель не
-            # идут: бот — не претендент, его доля достаётся живым игрокам.
-            # Игрок со ставкой 50 из 150 получает bank * 50/150 — это и есть
-            # «ставка + выигрыш», ровно как ожидает игрок.
+            # Задача 56: командный котёл — честный пари-мютюэль.
+            #
+            # Раньше ставки ботов выкидывались из знаменателя: игрок ставил
+            # 1 коин за синих, где бот поставил 868, получал ВЕСЬ банк (1169)
+            # при шансе 74% — мат.ожидание 869 коинов за ставку в 1 коин.
+            # Это была дыра в экономике, а не «процент».
+            #
+            # Теперь банк делится на ВСЕ ставки победившей команды — вместе с
+            # ботами: доля = bank * bet / team_total. Ставка 1 из 869 даёт
+            # 1169 * 1/869 ≈ 1.35 коина (это и есть «ставка + процент»).
+            # Мат.ожидание при этом ровно равно ставке — как в пари-мютюэле:
+            #   шанс команды = team_total / bank, выплата = bank / team_total.
+            team_total = sum(max(0, int(player.get("bet", 0))) for player in team_players)
             humans = []
             for player in team_players:
                 if player.get("is_bot"):
@@ -2014,15 +2025,19 @@ def _arena_payout_plan(arena: str) -> list:
                 except (TypeError, ValueError):
                     continue
                 humans.append((numeric_id, max(0, int(player.get("bet", 0))), player.get("name")))
-            team_total = sum(bet for _, bet, _ in humans)
-            if team_total > 0:
+            if team_total > 0 and humans:
                 # Остаток от округления (1-2 коина) раздаём по крупнейшей
                 # дробной части — иначе сумма выплат была бы меньше банка.
                 raw = [(uid, bank * bet / team_total, bet, name)
                        for uid, bet, name in humans]
                 amounts = {uid: int(value) for uid, value, _, _ in raw}
                 leftover = bank - sum(amounts.values())
-                for uid, value, _bet, _name in sorted(raw, key=lambda item: -(item[1] - int(item[1]))):
+                # Задача 56: остаток округления достаётся только тем, у кого
+                # выплата уже есть. Иначе игрок со ставкой 0 или «0 из банка»
+                # получал 1 коин из воздуха.
+                eligible = sorted((item for item in raw if amounts.get(item[0], 0) > 0),
+                                  key=lambda item: -(item[1] - int(item[1])))
+                for uid, value, _bet, _name in eligible:
                     if leftover <= 0:
                         break
                     amounts[uid] += 1
@@ -3053,6 +3068,12 @@ async def place_bet(data: PlaceBet):
 
     if data.amount <= 0:
         raise HTTPException(status_code=400, detail="Ставка должна быть больше нуля")
+    # Задача 56: минимальная ставка в арене. Раньше можно было поставить 1 коин
+    # и забрать долю банка с ботов — на скрине так и было. Теперь у арены свой
+    # минимум: игра про доли банка, а не про «бесплатный лотерейный билет».
+    if int(data.amount) < ARENA_MIN_BET:
+        raise HTTPException(status_code=400,
+                            detail=f"Минимальная ставка в арене {ARENA_MIN_BET} коинов")
     # Какая арена: если команда указана без arena — значит командная (старый клиент).
     team = (data.team or "").strip().lower() or None
     if team not in (None, "red", "blue"):
@@ -5403,7 +5424,18 @@ def _passive_pending_sync(user_id) -> dict:
         return result
     rate, _ = _passive_rate_for(inventory)
     result["rate"] = rate
+    # Задача 56: мелочь с прошлого забора участвует в выплате.
+    # Задача 56 (повторная проверка): в `/api/passive_income` мелочь
+    # прибавляется ВСЕГДА (`entitled = rate * hours + carry`), поэтому и здесь
+    # считаем её даже без капсул. Раньше при `rate <= 0` выходили с нулём, и
+    # накопленная мелочь пропадала из карточки (а кнопка «Забрать» не работала
+    # вовсе, если вывести последнюю капсулу).
+    try:
+        carry_ahead = float(_passive_carry_get(user_id) or 0.0)
+    except Exception:  # noqa: BLE001
+        carry_ahead = 0.0
     if rate <= 0:
+        result["pending"] = round(carry_ahead, 3)
         return result
     # Задача 48: первый заход с капсулами запускает отсчёт (коины не начисляются).
     _passive_start_counter(user_id, rate)
@@ -5414,13 +5446,15 @@ def _passive_pending_sync(user_id) -> dict:
         last = _PASSIVE_MEMORY.get(int(user_id))
     if last is None:
         # Отметки ещё нет: начисление только начнётся, копить пока нечего.
+        # Но мелочь с прошлого раза уже можно забрать — её показываем.
+        result["pending"] = round(carry_ahead, 3)
         result["since"] = now
         return result
 
     window_end = min(now, float(last) + PASSIVE_INCOME_MAX_HOURS * 3600.0)
     real_hours, hours = _passive_split_hours(float(last), window_end)
     result.update({
-        "pending": round(rate * hours, 3),
+        "pending": round(rate * hours + carry_ahead, 3),
         "hours": round(hours, 3),
         "real_hours": round(real_hours, 3),
         "capped": (now - float(last)) / 3600.0 >= PASSIVE_INCOME_MAX_HOURS,
@@ -5469,9 +5503,18 @@ def _passive_pending_public(user_id) -> dict:
 
 @app.post("/api/passive_preview")
 async def passive_preview(auth: UserAuth):
-    """Сколько накопил пассивный доход прямо сейчас (без начисления)."""
+    """Сколько накопил пассивный доход прямо сейчас (без начисления).
+
+    Задача 56: клиент читает `amount`/`whole` (так же, как в /api/user →
+    passive_pending), а этот ответ отдавал только `pending`. Из-за этого
+    карточка в профиле всегда показывала «0 накоплено», а кнопка «Забрать»
+    навсегда оставалась выключенной — пассивка выглядела сломанной.
+    """
     uid = _auth_user_id(auth.initData)
-    return {"ok": True, **(await _passive_pending(uid))}
+    pending = await _passive_pending(uid)
+    return {"ok": True, **pending,
+            "amount": round(float(pending.get("pending") or 0.0), 3),
+            "whole": int(float(pending.get("pending") or 0.0))}
 
 
 PASSIVE_CARRY_TABLE = "passive_carry"
@@ -5511,6 +5554,21 @@ def _passive_carry_set(user_id, value: float) -> None:
         pass
 
 
+# Задача 56: один забор пассивки на игрока за раз. Раньше два быстрых нажатия
+# «Забрать» (или повтор запроса при плохой сети) читали одну и ту же отметку
+# last_at и начисляли коины ДВА раза — баланс рос из воздуха. Блокировка живёт
+# в процессе (API — один инстанс), а внутри неё отметка перечитывается.
+_PASSIVE_LOCKS: dict = {}
+
+
+def _passive_lock(uid):
+    lock = _PASSIVE_LOCKS.get(int(uid))
+    if lock is None:
+        lock = asyncio.Lock()
+        _PASSIVE_LOCKS[int(uid)] = lock
+    return lock
+
+
 @app.post("/api/passive_income")
 async def passive_income(data: PassiveIncomeRequest):
     """Пассивный доход с капсул: начисляется сервером по фактическому инвентарю.
@@ -5518,8 +5576,17 @@ async def passive_income(data: PassiveIncomeRequest):
     Формула: сумма(кол-во капсул * ставка в час) * прошедшие часы, но не больше
     24 часов за один заход. Начисление идемпотентно по времени: как только
     коины выданы, отметка last_at сдвигается ровно на «оплаченные» часы.
+    Задача 56: параллельные запросы выполняются по очереди (см. _passive_lock).
     """
     uid = _auth_user_id(data.initData)
+    async with _passive_lock(uid):
+        # Работа с Supabase синхронная — уводим в поток, чтобы полторы-две
+        # секунды запросов не замораживали весь API для остальных игроков.
+        return await asyncio.to_thread(_passive_income_locked, data, uid)
+
+
+def _passive_income_locked(data: PassiveIncomeRequest, uid):
+    """Тело /api/passive_income под блокировкой: считает и выдаёт один раз."""
     row = _db_user(uid)
     if row is None:
         raise HTTPException(status_code=404, detail="Профиль не найден")

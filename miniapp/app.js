@@ -758,8 +758,27 @@ function closeGame() {
     switchTab('play', document.querySelectorAll('.nav-item')[0]);
 }
 
-function addBet(game, amount) { const input = document.getElementById(game + '-bet'); if (!input) return; let current = parseInt(input.value) || 10; current += amount; if (current > 100000) current = 100000; input.value = current; }
-function getBet(game) { const input = document.getElementById(game + '-bet'); if (!input) return 10; let val = parseInt(input.value) || 10; if (val < 1) val = 1; if (val > 100000) val = 100000; return val; }
+function addBet(game, amount) {
+    const input = document.getElementById(game + '-bet');
+    if (!input) return;
+    // Задача 56: у арены минимум 100. Раньше «+10» при пустом поле подставляло
+    // 10 коинов и уходило на сервер (теперь он бы отказал).
+    const floor = game === 'hockey' ? ARENA_MIN_BET_CLIENT : 1;
+    let current = parseInt(input.value) || floor;
+    current += amount;
+    if (current > 100000) current = 100000;
+    if (current < floor) current = floor;
+    input.value = current;
+}
+function getBet(game) {
+    const input = document.getElementById(game + '-bet');
+    const floor = game === 'hockey' ? ARENA_MIN_BET_CLIENT : 1;
+    if (!input) return floor;
+    let val = parseInt(input.value) || floor;
+    if (val < floor) val = floor;
+    if (val > 100000) val = 100000;
+    return val;
+}
 
 // ================= ЛИДЕРБОРД =================
 // Вкладка «Топ» — это только список: место | имя | баланс (💎).
@@ -967,7 +986,12 @@ function renderPassiveCard() {
     const hintEl = document.getElementById('passive-hint');
     const button = document.getElementById('passive-btn');
     if (!rateEl) return;
-    const rate = passiveRateFor();
+    // Задача 56: ставку присылает сервер (и она учитывает ровно тот инвентарь,
+    // по которому начисляет). Локальный расчёт оставляем запасным: раньше
+    // карточка считала по своему списку и могла показать «0.0 / час», хотя
+    // сервер капал коины.
+    const localRate = passiveRateFor();
+    const rate = Number(passivePending.rate) > 0 ? Number(passivePending.rate) : localRate;
     // Монета — наша картинка AG (coin.png), эмодзи больше не используем.
     rateEl.innerHTML = `${rate.toFixed(1)} ${COIN_IMG} / час`;
     renderPassivePending();
@@ -1018,14 +1042,24 @@ async function claimPassiveIncome(options) {
                 rate: Number(data.rate || 0),
                 hours: Number(data.hours || 0),
                 night: Boolean(data.night),
+                capped: Boolean(data.capped),
             });
             updateUI();
         } else if (!silent) {
             const pending = Number(data.pending || data.entitled || 0);
-            const hint = data.detail
-                ? `${data.detail}\n\nНакоплено: ${formatPassiveAmount(pending)} коинов. `
-                  + 'Целый коин можно забрать, как только он набежит.'
-                : 'Пока нечего забирать — капсулы копят коины.';
+            // Задача 56: объясняем ПРИЧИНУ понятным языком. Раньше игрок видел
+            // «Накопление идёт» / «Нет капсул — копи коины» и не понимал, почему
+            // кнопка ничего не выдала.
+            let hint;
+            if (Number(data.rate || 0) <= 0) {
+                hint = 'Купи капсулы в магазине — они приносят коины каждый час, '
+                    + 'даже когда приложение закрыто.';
+            } else {
+                const need = Math.max(0, 1 - pending);
+                hint = `💤 Копится: ${formatPassiveAmount(pending)} коинов. `
+                    + `До выплаты ещё ${formatPassiveAmount(need)} — забираются только целые коины, `
+                    + 'дробная часть не сгорает.';
+            }
             tg.showAlert(hint);
         }
         if (data && data.pending !== undefined) {
@@ -2315,11 +2349,12 @@ function upgradeSliderFromMult(mult) {
     return Math.round((Math.log(value) - min) / (max - min) * 1000);
 }
 
-// Задача 52: ползунок «Свой множитель» больше НЕ переписывает цель сам.
-// Раньше любое движение ползунка молча меняло upgradeTarget, из-за чего плитка
-// в сетке переставала быть выбранной и подсветка «прыгала» на любое значение.
-// Теперь ползунок только показывает X и его шанс, а применяется он тапом по
-// плитке (applyCustomMult) — выбор цели всегда виден однозначно.
+// Задача 52: ползунок больше не переписывает цель «на каждый пиксель» — иначе
+// подсветка прыгала на любое значение.
+// Задача 56: сетку целей убрали, поэтому ползунок — это И ЕСТЬ выбор X.
+// Двигаешь — применяется сразу (через паузу), отпускаешь — применяется точно.
+// Раньше после удаления сетки кнопка АПГРЕЙД играла бы старую цель: игрок
+// видел x2.5 на экране, а ставка уходила на x1.35.
 function syncUpgradeCustomMult() {
     const slider = document.getElementById('up-custom-range');
     const label = document.getElementById('up-custom-value');
@@ -2333,6 +2368,8 @@ function syncUpgradeCustomMult() {
 
 // Ползунок двигают — обновляем цифры сразу (без полной перерисовки, чтобы
 // палец не «дёргался»). Полная перерисовка — по окончании движения.
+let upgradeCustomApplyTimer = null;
+
 function onCustomMultInput(raw) {
     if (upgradeBusy) return;
     const mult = upgradeMultFromSlider(raw);
@@ -2340,26 +2377,36 @@ function onCustomMultInput(raw) {
     if (valueLabel) valueLabel.textContent = `x${mult.toFixed(2)}`;
     const chanceEl = document.getElementById('up-custom-chance');
     if (chanceEl) chanceEl.textContent = `${upgradeDisplayChance(upgradeMultChance(mult)).toFixed(2)}%`;
-    // Круг показывает, каким будет шанс с этим X. Сама цель не меняется —
-    // в сетке остаётся выбрана прежняя плитка, пока игрок не тапнет по этой.
+    // Задача 56: применяем X с небольшой задержкой, чтобы цифры на экране и
+    // реальная цель совпадали. Палец ведёт ползунок — цель не дёргаем.
+    if (upgradeCustomApplyTimer) clearTimeout(upgradeCustomApplyTimer);
+    upgradeCustomApplyTimer = setTimeout(() => {
+        upgradeCustomApplyTimer = null;
+        applyCustomMult();
+    }, 220);
 }
 
-// Применить свой X: тап по плитке-подсказке или конец движения ползунка.
+// Применить свой X: ползунок (после паузы/отпускания) или пресет.
 function applyCustomMult(raw) {
     if (upgradeBusy) return;
     const slider = document.getElementById('up-custom-range');
     const mult = upgradeMultFromSlider(raw === undefined && slider ? slider.value : raw);
+    const same = upgradeTarget.kind === 'mult'
+        && Math.abs(Number(upgradeTarget.value) - mult) < 0.005;
     upgradeToTab = 'coin';
     upgradeTarget = { kind: 'mult', value: mult };
+    if (same) return;                     // ничего не изменилось — не мигаем
     clearUpgradeResult();
     playSound('click');
     renderUpgrade();
 }
 
-// Конец движения ползунка цель НЕ меняет: игрок только смотрит шанс.
+// Отпустили ползунок — применяем сразу, без ожидания таймера.
 function onCustomMultCommit() {
     if (upgradeBusy) return;
+    if (upgradeCustomApplyTimer) { clearTimeout(upgradeCustomApplyTimer); upgradeCustomApplyTimer = null; }
     playSound('click');
+    applyCustomMult();
 }
 
 function renderUpgradeFromTabs() {
@@ -2500,9 +2547,12 @@ function renderUpgrade() {
 
 function renderUpgradeTargets() {
     const grid = document.getElementById('up-to-grid');
+    // Задача 56: «ВАША ЦЕЛЬ» убрана со скрина — цель выбирается ползунком и
+    // пресетами ниже. Сетку оставляем скрытой, но её состояние поддерживаем:
+    // по нему видно, какая цель активна (applyCustomMult/selectUpgradeTarget).
+    if (grid) { grid.hidden = true; grid.style.display = 'none'; }
+    renderUpgradePresets();
     if (!grid) return;
-    // Задача 45: сетка цели теперь в центральной панели и видна всегда.
-    if (grid.hidden) { grid.hidden = false; grid.style.display = ''; }
     // Источник-капсула требует цели-предмета: молча переводим множитель в предмет
     // (иначе плитки-множители не дадут выбрать капсулу и апгрейд станет невозможен).
     if (upgradeFrom !== 'coin' && upgradeTarget.kind !== 'item') {
@@ -2617,6 +2667,41 @@ function renderUpgradeTargets() {
             else selectUpgradeTarget(kind, Number(value));
         });
     });
+}
+
+// Быстрые пресеты множителя (задача 56). Раньше это были шесть плиток с ценой
+// и шансом — они занимали пол-экрана и дублировали ползунок. Теперь компактные
+// чипы: тап выбирает ровно тот же X, что и ползунок.
+function renderUpgradePresets() {
+    const box = document.getElementById('up-presets');
+    if (!box) return;
+    if (upgradeFrom !== 'coin') {
+        box.innerHTML = '';
+        box.hidden = true;
+        return;
+    }
+    box.hidden = false;
+    box.innerHTML = UPGRADE_MULTS.map(mult => {
+        const active = upgradeTarget.kind === 'mult'
+            && Math.abs(Number(upgradeTarget.value) - mult) < 0.005;
+        const chance = upgradeDisplayChance(upgradeMultChance(mult));
+        return `<button type="button" class="up-preset${active ? ' active' : ''}" `
+            + `data-mult="${mult}" onclick="selectUpgradePreset(${mult})" `
+            + `title="x${mult} · ${chance.toFixed(2)}%">`
+            + `x${mult}<span>${chance.toFixed(0)}%</span></button>`;
+    }).join('');
+}
+
+function selectUpgradePreset(mult) {
+    if (upgradeBusy) return;
+    const value = Math.max(UPGRADE_MULT_MIN, Math.min(UPGRADE_MULT_MAX, Number(mult) || UPGRADE_MULT_MIN));
+    upgradeToTab = 'coin';
+    upgradeTarget = { kind: 'mult', value };
+    const slider = document.getElementById('up-custom-range');
+    if (slider) slider.value = String(upgradeSliderFromMult(value));
+    clearUpgradeResult();
+    playSound('click');
+    renderUpgrade();
 }
 
 function selectUpgradeFrom(type, element) {
@@ -3583,10 +3668,16 @@ async function clickMineCell(cell) {
 }
 
 // ================= АРЕНА (ХОККЕЙ) =================
+// Минимальная ставка арены: то же число, что ARENA_MIN_BET в api.py.
+const ARENA_MIN_BET_CLIENT = 100;
+
 async function placeHockeyBet(team) {
     if (isProcessing) return;
     const input = document.getElementById('hockey-bet');
-    const bet = parseInt(input && input.value) || 10;
+    // Задача 56: минимум арены — 100 (было «|| 10», и пустое поле отправляло
+    // ставку в 10 коинов). Сервер проверяет то же число.
+    const bet = Math.max(ARENA_MIN_BET_CLIENT, parseInt(input && input.value) || ARENA_MIN_BET_CLIENT);
+    if (bet < ARENA_MIN_BET_CLIENT) return tg.showAlert(`Минимальная ставка ${ARENA_MIN_BET_CLIENT} коинов`);
     if (balance < bet) return tg.showAlert("Недостаточно коинов!");
     if (!isAdminId(user && user.id) && bet > 10000) return tg.showAlert("Максимальная ставка 10 000 коинов");
 
@@ -4021,15 +4112,11 @@ function renderTeamBoards() {
         if (p.team === 'red' || p.team === 'blue') banks[p.team] += Math.max(0, Number(p.bet) || 0);
     });
     const winnerTeam = pool.winner_team || (pool.winner && pool.winner.id) || null;
-    // Задача 45: бот — не претендент на банк. Доля считается только по живым
-    // игрокам победившей команды (та же формула, что в api.py).
-    const humansBank = { red: 0, blue: 0 };
-    players.forEach(p => {
-        if ((p.team === 'red' || p.team === 'blue') && !p.is_bot) {
-            humansBank[p.team] += Math.max(0, Number(p.bet) || 0);
-        }
-    });
-    const teamHumanTotal = (winnerTeam && humansBank[winnerTeam]) || 0;
+    // Задача 56: банк делится на ВСЕ ставки победившей команды — вместе с
+    // ботами (та же формула, что в api.py). Раньше знаменатель считался только
+    // по живым игрокам, и ставка 1 коин при боте на 868 забирала весь банк.
+    // Доля = банк * моя_ставка / ставки_команды — «ставка + процент».
+    const teamTotal = (winnerTeam && banks[winnerTeam]) || 0;
     ['blue', 'red'].forEach(team => {
         const listEl = document.getElementById(`team-board-${team}-list`);
         const sumEl = document.getElementById(`team-board-${team}-sum`);
@@ -4042,14 +4129,16 @@ function renderTeamBoards() {
         // Задача 44: в командной арене детализируем плитку — сколько игроков,
         // какой общий банк и сколько получит каждый при победе команды.
         const totalBank = (Number(pool.bank) || 0) || (banks.red + banks.blue);
-        const signature = `${team}:${winnerTeam || ''}:${totalBank}:${teamHumanTotal}:`
+        const signature = `${team}:${winnerTeam || ''}:${totalBank}:${teamTotal}:`
             + members.map(p => `${p.id}:${p.bet}:${p.is_bot ? 1 : 0}`).join(',');
         // coinAmount() отдаёт готовый HTML (внутри картинка монеты), поэтому
         // только innerHTML — иначе на плитке видно "<img class=coin-img ...>".
         if (sumEl) {
-            const humans = members.filter(p => !p.is_bot).length;
+            // Задача 56: вместо «ставок N» (игроки читали как «N игроков»)
+            // показываем шанс команды забрать банк — это то, что видно на круге.
+            const teamChance = (banks[team] && totalBank) ? Math.round(banks[team] / totalBank * 100) : 0;
             sumEl.innerHTML = `${coinAmount(total)}<span class="team-board-meta">`
-                + `${humans} игр. · ставок ${members.length}</span>`;
+                + (totalBank ? `шанс ${teamChance}%` : 'ждём ставок') + `</span>`;
         }
         if (board) board.classList.toggle('win', Boolean(winnerTeam) && winnerTeam === team);
         if (listEl.dataset.signature === signature) return;
@@ -4065,25 +4154,27 @@ function renderTeamBoards() {
         members.forEach(p => {
             const row = document.createElement('div');
             row.className = 'arena-team-row' + (String(p.id) === String(user && user.id) ? ' mine' : '');
-            const name = escapeHtml(shortName(String(p.name || '?'), 10));
+            // Задача 56: ник больше не обрезается до 10 символов «в никуда» —
+            // он занимает всю ширину строки, а лишнее прячет CSS-троеточие.
+            const name = escapeHtml(String(p.name || '?'));
             const bet = Math.max(0, Number(p.bet) || 0);
             const percent = total ? (bet / total * 100).toFixed(0) : '0';
-            // Задача 45: выигрыш делится ЧЕСТНО — весь банк между живыми
-            // игроками победившей команды пропорционально ставкам:
-            // 50 / 100 против 200 → банк 350 → 117 и 233 (ставка + выигрыш).
-            const payout = (team === winnerTeam && teamHumanTotal > 0)
-                ? Math.round(totalBank * bet / teamHumanTotal) : 0;
-            // Задача 48: подписи «бот» больше нет. Игрок не должен видеть, кто
-            // из участников бот, — у таких строк просто прочерк (они не делят
-            // банк, но и не подсвечиваются).
+            const payout = (team === winnerTeam && teamTotal > 0)
+                ? Math.round(totalBank * bet / teamTotal) : 0;
+            // Задача 48: подписи «бот» больше нет — просто прочерк.
             const payoutHtml = p.is_bot
-                ? `<span class="row-payout muted" title="Не участвует в дележе банка">—</span>`
+                ? `<span class="row-payout muted" title="Боты тоже делят банк — но их выплата не выводится">—</span>`
                 : `<span class="row-payout${payout > bet ? '' : ' muted'}" `
                   + `title="Выплата, если команда победит (ставка + доля банка)">`
                   + `${payout > 0 ? coinAmount(payout) : '—'}</span>`;
+            // Задача 56: две строки вместо одной. Раньше ставка, процент и
+            // выплата стояли в той же строке, что ник, и на узкой плитке
+            // цифра налезала на имя («ставка прямо на нике» со скрина).
             row.innerHTML = `<span class="row-name" title="${escapeHtml(String(p.name || ''))}">${name}</span>`
-                + `<span class="row-bet">${coinAmount(bet)} · ${percent}%</span>`
-                + payoutHtml;
+                + `<span class="row-meta">`
+                + `<span class="row-bet" title="Ставка · доля в команде">${coinAmount(bet)} · ${percent}%</span>`
+                + payoutHtml
+                + `</span>`;
             listEl.appendChild(row);
         });
     });

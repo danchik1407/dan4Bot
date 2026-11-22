@@ -351,7 +351,10 @@ main { padding: 0 16px; }
 
 /* ===== Командная арена: две плитки участников (слева синие, справа красные) ===== */
 .arena-team-boards {
-    width: 100%; max-width: 350px; display: flex; gap: 8px; margin-bottom: 15px;
+    /* Задача 56: плитки шире (было 350px на две колонки — по 170px). На такой
+       ширине ник, ставка, процент и выплата не влезали в одну строку, и цифра
+       налезала на имя. */
+    width: 100%; max-width: 460px; display: flex; gap: 8px; margin-bottom: 15px;
     align-items: stretch;
 }
 .arena-team-board {
@@ -371,14 +374,26 @@ main { padding: 0 16px; }
 .arena-team-head .arena-team-sum .coin-img { width: 12px; height: 12px; vertical-align: middle; }
 .arena-team-list { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
 .arena-team-row {
-    display: flex; align-items: center; justify-content: space-between; gap: 6px;
-    background: #101010; border-radius: 8px; padding: 5px 7px; font-size: 12px;
+    /* Задача 56: ник сверху, ставка и выплата — отдельной строкой снизу.
+       Раньше всё лежало в одну линию, и на узкой плитке цифры налезали на
+       ник (это и было «цифровая ставка написана прямо на нике»). */
+    display: flex; flex-direction: column; align-items: stretch; gap: 2px;
+    background: #101010; border-radius: 8px; padding: 6px 8px; font-size: 12px;
     min-width: 0; overflow: hidden;
 }
 .arena-team-row.mine { outline: 1px solid rgba(0, 122, 255, 0.55); }
-.arena-team-row .row-name { display: flex; align-items: center; gap: 5px; min-width: 0; }
-.arena-team-row .row-name span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.arena-team-row .row-name {
+    display: block; min-width: 0; font-weight: 800; line-height: 1.2;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.arena-team-row .row-meta {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 6px; min-width: 0;
+}
 .arena-team-row .row-bet { color: #8a8f98; font-size: 11px; white-space: nowrap; flex: 0 0 auto; }
+/* Монета в плитке — не крупнее текста: иначе она «съедает» половину строки. */
+.arena-team-row .row-bet .coin-img,
+.arena-team-row .row-payout .coin-img { width: 1em; height: 1em; vertical-align: -0.14em; margin: 0 1px; }
 .arena-team-empty { color: #6b7076; font-size: 11px; padding: 4px 2px; text-align: center; }
 
 /* ===== «Скоро…»: покупки за звёзды пока выключены ===== */
@@ -1177,6 +1192,13 @@ body.maintenance { overflow: hidden; }
     align-items: flex-end;
     gap: 0;
     line-height: 1.15;
+    min-width: 0;
+}
+@media (max-width: 360px) {
+    /* Очень узкие телефоны: две плитки рядом всё равно, но с меньшими полями. */
+    .arena-team-boards { gap: 6px; }
+    .arena-team-board { padding: 6px; }
+    .arena-team-row { padding: 5px 6px; font-size: 11px; }
 }
 .arena-team-sum .team-board-meta {
     display: block;
@@ -1187,13 +1209,12 @@ body.maintenance { overflow: hidden; }
 }
 .arena-team-row .row-payout {
     margin-left: auto;
-    font-size: 10px;
+    font-size: 11px;
     font-weight: 800;
     color: #ffd166;
     white-space: nowrap;
     flex: 0 0 auto;
 }
-.arena-team-row .row-bet { margin-left: 4px; }
 
 /* ЗАДАЧА 45. Апгрейд: заголовок инвентаря вернулся, правой панели нет. */
 .up-from-title {
@@ -1422,3 +1443,35 @@ body.maintenance { overflow: hidden; }
 
 /* В нижней панели цель — заголовок, отступ не нужен. */
 .up-layout-v2 .up-panel-to .up-target-head { margin: 0 0 2px; }
+
+/* ============================================================================
+   ЗАДАЧА 56. Апгрейд: «ВАША ЦЕЛЬ» убрана — остался свой множитель.
+   Игрок обвёл на скрине две одинаковые плитки x1.35 (одна в сетке, вторая —
+   «свой множитель» внизу) и попросил убрать сетку. Теперь цель одна:
+   ползунок + компактные пресеты x1.12…x50.
+   ========================================================================== */
+.up-presets {
+    display: grid;
+    grid-template-columns: repeat(6, minmax(0, 1fr));
+    gap: 5px;
+    margin-top: 8px;
+}
+.up-preset {
+    display: flex; flex-direction: column; align-items: center; gap: 1px;
+    padding: 6px 2px; border-radius: 10px; cursor: pointer;
+    background: linear-gradient(180deg, #131b28, #0b111a);
+    border: 1px solid rgba(59, 130, 246, 0.22);
+    color: #dbe8ff; font-size: 11px; font-weight: 900;
+    font-variant-numeric: tabular-nums;
+    transition: transform 0.12s ease, border-color 0.12s ease;
+}
+.up-preset span { font-size: 9px; font-weight: 700; color: #7f9dc4; }
+.up-preset.active {
+    border-color: #58a6ff;
+    background: linear-gradient(180deg, rgba(59, 130, 246, 0.34), rgba(29, 78, 216, 0.2));
+    box-shadow: 0 0 0 1px rgba(88, 166, 255, 0.45), 0 0 14px rgba(59, 130, 246, 0.3);
+}
+.up-preset:active { transform: scale(0.96); }
+@media (max-width: 360px) {
+    .up-presets { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
