@@ -85,7 +85,7 @@ async def _http_json(url, method: str = "GET", params=None, payload=None, timeou
 
 # Номер сборки: по нему из /api/health видно, что на сервисе НЕ старый код.
 # Если после деплоя здесь прежнее значение — Render ещё не перезапустился.
-API_BUILD = "2026-10-27-task59-users-id-and-old-schema"
+API_BUILD = "2026-10-27-task60-balance-love-referrals"
 
 # Момент старта процесса. По нему видно, что сервис только что «проснулся»:
 # Render на бесплатном тарифе усыпляет Web Service через 15 минут без входящих
@@ -5036,22 +5036,32 @@ async def upgrade_pending(data: UpgradeLogRequest):
     except Exception:  # noqa: BLE001
         rows = None
 
+    # Задача 60: баланс берём из users, а НЕ из coins_after последнего раунда.
+    # Раньше клиент на входе в Апгрейд подтягивал «coins» = coins_after старой
+    # записи журнала. Если последний записанный раунд был проигран «в ноль»
+    # (или coins_after не записался и превратился в 0), игрок видел 0 при
+    # настоящем балансе — и лечилось это только перезагрузкой страницы.
+    coins = None
+    try:
+        row = _db_user(user_id)
+        if row:
+            coins = _safe_int(row.get("coins"), 0)
+    except Exception:  # noqa: BLE001
+        coins = None
+
     if rows is None:
         # Таблицы нет — отдаём хотя бы баланс, чтобы клиент мог его сверить.
-        coins = None
-        try:
-            row = _db_user(user_id)
-            if row:
-                coins = _safe_int(row.get("coins"), 0)
-        except Exception:  # noqa: BLE001
-            coins = None
         return {"ok": False, "available": False, "coins": coins, "rounds": []}
 
     latest = rows[0] if rows else None
+    if coins is None:
+        # users недоступен — тогда единственное, что у нас есть, это журнал.
+        coins = _safe_int(latest.get("coins_after"), 0) if latest else None
     return {
         "ok": True,
         "available": True,
-        "coins": _safe_int(latest.get("coins_after"), 0) if latest else None,
+        "coins": coins,
+        "coins_from": "users",
         "server_time": int(time.time()),
         "rounds": [_upgrade_log_public(row) for row in rows],
     }
@@ -5075,13 +5085,26 @@ async def upgrade_history(data: UpgradeLogRequest):
     if UPGRADE_ADMIN_ONLY and not is_admin_id(user_id, ADMIN_IDS):
         raise HTTPException(status_code=403, detail=UPGRADE_ADMIN_ONLY_MESSAGE)
 
+    # Задача 60: живой баланс из users. Клиент показывает «пропущенный» раунд
+    # и берёт из него coins_after — а журнал мог не записаться (тогда там 0) или
+    # устареть после других игр. Без этого игрок видел 0 после показа результата.
+    live_coins = None
+    try:
+        user_row = _db_user(user_id)
+        if user_row:
+            live_coins = _safe_int(user_row.get("coins"), 0)
+    except Exception:  # noqa: BLE001
+        live_coins = None
+
     rows = _upgrade_log_rows(user_id)
     if rows is None:
         return {"available": False, "stats": None, "last_unseen": None,
+                "coins": live_coins,
                 "detail": "Таблица upgrade_log ещё не создана — примените миграцию"}
     last_unseen = next((row for row in rows if not row.get("seen")), None)
     return {
         "available": True,
+        "coins": live_coins,
         "stats": _upgrade_stats_from_rows(rows),
         "last_unseen": _upgrade_log_public(last_unseen),
         "history": [_upgrade_log_public(row) for row in rows[:10]],
@@ -5912,7 +5935,7 @@ async def referral_bind(data: ReferralBindRequest):
     if _db_user(referrer_id) is None:
         return {"ok": False, "detail": "Пригласивший не найден"}
     try:
-        res = (supabase.table(REFERRALS_TABLE).select("referred_id")
+        res = (supabase.table(REFERRALS_TABLE).select("referred_id, referrer_id")
                .eq("referred_id", uid).limit(1).execute())
         if res.data:
             return {"ok": True, "already": True, "detail": "Приглашение уже учтено"}
@@ -5920,14 +5943,36 @@ async def referral_bind(data: ReferralBindRequest):
         raise HTTPException(status_code=503, detail=(
             "Таблица referrals не создана. Примените миграцию "
             "supabase/migrations/20261109000000_economy_social.sql")) from exc
+    # Задача 60: не привязываем «по кругу» — если пригласивший сам пришёл по
+    # ссылке этого игрока, получается вечный обмен наградами. Проверяем один
+    # запрос в обе стороны.
     try:
-        _insert_tolerant(REFERRALS_TABLE, {
+        back = (supabase.table(REFERRALS_TABLE).select("referred_id")
+                .eq("referred_id", referrer_id).eq("referrer_id", uid).limit(1).execute())
+        if back.data:
+            return {"ok": False, "detail": "Такое приглашение уже было — второй раз не считаем"}
+    except Exception:  # noqa: BLE001
+        pass
+
+    # Задача 60: строку пишем «upsert-ом» по первичному ключу referred_id.
+    # Раньше insert падал на дубле (23505), когда игрок открывал ссылку дважды
+    # в разных сессиях, и приглашение считалось неудачным — оно уже было, но
+    # клиент это не различал.
+    try:
+        supabase.table(REFERRALS_TABLE).upsert({
             "referred_id": uid, "referrer_id": referrer_id, "reward": 0,
             "status": "pending", "created_at": _now_iso(),
-        }, optional=("created_at", "paid_at"), logger_prefix="РЕФЕРАЛ: ")
+        }, on_conflict="referred_id").execute()
     except Exception as exc:  # noqa: BLE001
-        logger.warning("Не удалось записать реферала %s → %s: %s", referrer_id, uid, exc)
-        return {"ok": False, "detail": "Не удалось сохранить приглашение"}
+        logger.warning("upsert реферала не удался (%s) — пробую insert", exc)
+        try:
+            _insert_tolerant(REFERRALS_TABLE, {
+                "referred_id": uid, "referrer_id": referrer_id, "reward": 0,
+                "status": "pending", "created_at": _now_iso(),
+            }, optional=("created_at", "paid_at"), logger_prefix="РЕФЕРАЛ: ")
+        except Exception as exc2:  # noqa: BLE001
+            logger.warning("Не удалось записать реферала %s → %s: %s", referrer_id, uid, exc2)
+            return {"ok": False, "detail": "Не удалось сохранить приглашение"}
     return {"ok": True, "referrer_id": referrer_id, "status": "pending"}
 
 
@@ -6249,20 +6294,73 @@ def _clean_person_name(value) -> str:
     return str(value or "").strip().lstrip("@").replace("<", "").replace(">", "")[:64]
 
 
-def _love_partner_name(partner_id, row=None):
+def _love_partner_name(partner_id, row=None) -> str:
     """Как назвать партнёра в Mini App — только человеческое имя.
 
     Задача 55: раньше брался `users.username`, и в плашке появлялся чужой/
     протухший ник («Contact_blocked») — игрок не понимал, с кем он в паре.
-    Теперь порядок: имя (`first_name`/`name`) → `id<число>`, а username
+    Теперь имя берём из `first_name`/`name`, а username
     не показываем вовсе (задача 44: @-ников в текстах бота нет).
+
+    Задача 60: `id<число>` в плашке игрока не устраивает («В отношениях с
+    id1615872008»). Поэтому если в базе имени нет — спрашиваем Telegram
+    (`getChat`, только кэш на 10 минут, ошибки глотаем): бот и так знает
+    человека, с которым игрок в паре. И только если Telegram тоже не ответил,
+    остаётся нейтральное «партнёр» — без цифр.
     """
     if not partner_id:
         return "партнёр"
     row = row or _db_user(partner_id)
     name = (_clean_person_name((row or {}).get("first_name"))
             or _clean_person_name((row or {}).get("name")))
-    return name or f"id{partner_id}"
+    if name:
+        return name
+    live = _telegram_person_name(partner_id)
+    if live:
+        return live
+    return "партнёр"
+
+
+# Имя партнёра из Telegram: getChat дешевле, чем хранить имена всех игроков, и
+# одно и то же значение не запрашивается чаще раза в 10 минут на человека.
+_PARTNER_NAME_CACHE: dict = {}
+_PARTNER_NAME_TTL = 600
+
+
+def _telegram_person_name(user_id) -> str:
+    """Синхронный getChat → имя человека ('' если не получилось).
+
+    `love_state_for` синхронный, поэтому ходим в Telegram обычным `urllib` с
+    таймаутом 3 секунды: имя партнёра не должно задерживать вход в профиль.
+    Ошибки сети и «chat not found» гасим — плашка просто останется без имени.
+    """
+    uid = _safe_int(user_id, None)
+    if uid is None or not BOT_TOKEN:
+        return ""
+    now = time.time()
+    cached = _PARTNER_NAME_CACHE.get(uid)
+    if cached and now - cached[0] < _PARTNER_NAME_TTL:
+        return cached[1]
+    name = ""
+    payload = None
+    try:
+        # Обычный urllib, а не httpx-хелпер: функция синхронная и вызывается из
+        # потока, а внутри уже работающего event loop `asyncio.run` упал бы.
+        url = (f"https://api.telegram.org/bot{BOT_TOKEN}/getChat?"
+               + urllib.parse.urlencode({"chat_id": uid}))
+        with urllib.request.urlopen(url, timeout=3) as response:
+            payload = json.loads(response.read().decode("utf-8") or "{}")
+    except Exception as exc:  # noqa: BLE001 — нет сети/бота в чате: не критично
+        logger.warning("getChat для имени партнёра %s не сработал: %s", uid, exc)
+        payload = None
+    person = ((payload or {}).get("result") or {}) if isinstance(payload, dict) else {}
+    if isinstance(person, dict):
+        name = (_clean_person_name(person.get("first_name"))
+                or _clean_person_name(person.get("full_name"))
+                or _clean_person_name(person.get("username"))
+                or _clean_person_name(person.get("title")))
+    _PARTNER_NAME_CACHE[uid] = (now, name)
+    return name
 
 
 def _love_solo_for(user_id) -> dict:
