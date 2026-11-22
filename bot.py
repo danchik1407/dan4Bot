@@ -5,6 +5,7 @@ import time
 import asyncio
 import logging
 import json
+import re
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from dotenv import load_dotenv
@@ -20,7 +21,7 @@ from aiogram.exceptions import TelegramUnauthorizedError
 import aiohttp                     # клиент для проверки сервиса aura-api (/api/health)
 from aiohttp import web            # только для start_fake_website (порт Render)
 from supabase import create_client, Client
-from mentions import clean_name, parse_names
+from mentions import clean_name, merge_names, parse_names
 from love import (
     LOVE_ACTION_BONUS,
     LOVE_ACTION_COOLDOWN,
@@ -30,8 +31,10 @@ from love import (
     SOLO_CURRENCY,
     add_solo_love,
     claim_stage_rewards,
+    solo_saved,
     format_love_cooldown,
     love_cooldown_seconds,
+    next_level_text,
     public_stage,
     reset_solo_love,
     rp_action_for,
@@ -237,8 +240,24 @@ async def get_users_from_chat(chat_id: int):
     return await asyncio.to_thread(_fetch)
 
 
+USERNAME_RE = re.compile(r"@([A-Za-z0-9_]{3,32})")
+
+
+def username_from_text(text) -> str:
+    """Первый @username в тексте — без хвостовой пунктуации.
+
+    Задача 55: раньше ник брался «сырым» (`@Contact_blocked,` с запятой или
+    `@user.` с точкой), и поиск в базе не находил никого. Теперь регулярка
+    берёт только допустимые Telegram-символы: латиница, цифры, подчёркивание.
+    """
+    match = USERNAME_RE.search(str(text or ""))
+    return match.group(1) if match else ""
+
+
 async def get_user_global(arg_username: str):
-    clean_username = arg_username.lstrip("@").lower()
+    clean_username = username_from_text(arg_username) or str(arg_username or "").lstrip("@").lower()
+    if not clean_username:
+        return None
 
     def _fetch(): return supabase.table("users").select("*").ilike("username", clean_username).execute().data
 
@@ -957,20 +976,72 @@ def _parse_iso_stamp(raw) -> float:
         return 0.0
 
 
+# Задача 55: почему «в базу не сохранилось» и что делать. Раньше бот писал
+# только «после рестарта счёт сбросится», и админ не понимал причину.
+_WARN_WRITE_ERRORS = {}
+
+
+def _warn_error_hint(exc) -> str:
+    """Человеческая причина, почему запись в chat_warns не прошла."""
+    text = str(exc or "")
+    low = text.lower()
+    if "does not exist" in low or "42p01" in low or "could not find the table" in low:
+        return ("таблицы <code>chat_warns</code> нет — примените миграцию "
+                "<code>20261125000000_chat_warns.sql</code> и сделайте "
+                "<code>NOTIFY pgrst, 'reload schema'</code>")
+    if "on_conflict" in low or "no unique or exclusion constraint" in low:
+        return ("у таблицы <code>chat_warns</code> нет составного ключа "
+                "(chat_id, user_id) — пересоздайте её скриптом из миграции")
+    if "row-level security" in low or "42501" in low or "permission denied" in low:
+        return ("база закрыта RLS — выдайте политике <code>chat_warns_all</code> "
+                "права из миграции (или используйте service-role ключ)")
+    if "invalid input syntax" in low or "22p02" in low:
+        return ("не совпал тип chat_id/user_id — в таблице должны быть BIGINT")
+    return f"ошибка базы: <code>{safe_text(text[:120])}</code>"
+
+
 def _chat_warn_write(chat_id, user_id, warns: int, muted_until: float) -> bool:
+    """Сохраняем предупреждение. Возвращает True, только если запись реально в базе.
+
+    Задача 55: раньше при сбое мы всё равно писали в память и говорили
+    «сохранилось», а при рестарте счёт обнулялся. Теперь:
+      • пишем в базу и читаем строку обратно (upsert без select может «пройти»,
+        даже когда политика RLS молча отбросила запись);
+      • пишем без «украшающих» колонок, если их нет (updated_at);
+      • причину сбоя сохраняем и показываем админу в ответе на команду.
+    """
     key = _warn_row_key(chat_id, user_id)
     _CHAT_WARN_MEMORY[key] = {"warns": int(warns), "muted_until": float(muted_until or 0.0)}
     payload = {"chat_id": int(chat_id), "user_id": int(user_id),
                "warns": int(warns),
                "muted_until": (_iso_from_stamp(muted_until) if muted_until else None),
                "updated_at": datetime_now_iso()}
-    try:
-        supabase.table(CHAT_WARNS_TABLE).upsert(
-            payload, on_conflict="chat_id,user_id").execute()
-        return True
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("chat_warns: не удалось сохранить (%s): %s", key, exc)
-        return False
+    attempts = [payload,
+                {k: v for k, v in payload.items() if k != "updated_at"},
+                {"chat_id": payload["chat_id"], "user_id": payload["user_id"],
+                 "warns": payload["warns"]}]
+    last_error = None
+    for index, body in enumerate(attempts):
+        try:
+            supabase.table(CHAT_WARNS_TABLE).upsert(
+                body, on_conflict="chat_id,user_id").execute()
+            # Проверка, что строка действительно есть: upsert может «пройти»
+            # и ничего не записать, если сработала RLS-политика только на чтение.
+            res = (supabase.table(CHAT_WARNS_TABLE).select("warns, muted_until")
+                   .eq("chat_id", int(chat_id)).eq("user_id", int(user_id))
+                   .limit(1).execute())
+            if res.data:
+                _WARN_WRITE_ERRORS.pop(key, None)
+                return True
+            last_error = RuntimeError("строка не появилась в chat_warns (RLS?)")
+        except Exception as exc:  # noqa: BLE001
+            last_error = exc
+            # Отсутствие updated_at — не повод сдаваться, пробуем без него.
+            if index == 0 and "updated_at" not in str(exc):
+                continue
+    _WARN_WRITE_ERRORS[key] = last_error
+    logger.warning("chat_warns: не удалось сохранить (%s): %s", key, last_error)
+    return False
 
 
 def _iso_from_stamp(stamp: float) -> str:
@@ -1005,19 +1076,27 @@ async def _warn_is_allowed(message) -> bool:
     return await is_chat_admin(int(user_id), int(chat_id))
 
 
-async def _warn_target_from_parts(message):
-    """Ответ на сообщение или @ник в тексте → (id, имя) или (None, None)."""
+async def _warn_target_from_parts(message, allow_id: bool = False):
+    """Ответ на сообщение, @ник или (для админ-команд) числовой id → (id, имя).
+
+    Задача 55: у игрока может не быть username (в базе лежит «Contact_blocked»
+    или пусто) — тогда снять игнор можно только ответом на его сообщение или
+    по числовому id, поэтому `allow_id=True` для `!снять игнор`.
+    """
     reply = getattr(message, "reply_to_message", None)
     if reply is not None and getattr(reply, "from_user", None):
         who = reply.from_user
         return int(who.id), (getattr(who, "username", None) or getattr(who, "first_name", None))
     parts = strip_prefix(message_text(message)).split()
     for part in parts[1:]:
-        if part.startswith("@"):
-            found = await get_user_global(part)
+        username = username_from_text(part)
+        if username:
+            found = await get_user_global(username)
             if found:
                 return int(found.id), found.username
-            return None, part.lstrip("@")
+            return None, username
+        if allow_id and part.isdigit() and int(part) > 0:
+            return int(part), None
     return None, None
 
 
@@ -1155,9 +1234,75 @@ async def cmd_warn(message: Message):
                 f"На {WARN_LIMIT}-м — игнор {_mute_until_text(WARN_MUTE_SECONDS)} "
                 f"в этом чате.")
     if not saved:
-        text += "\n<i>⚠️ В базу не сохранилось — после рестарта бота счёт сбросится.</i>"
+        # Задача 55: показываем ПРИЧИНУ, а не только «не сохранилось».
+        hint = _warn_error_hint(_WARN_WRITE_ERRORS.get(_warn_row_key(chat_id, target_id)))
+        text += f"\n<i>⚠️ В базу не сохранилось: {hint}.\n" \
+                f"Пока причина не устранена, счёт после рестарта бота сбросится.</i>"
     text += "\nСписок: <code>!аурапредлист</code>"
     await message.answer(text, parse_mode="HTML")
+
+
+# ================= СНЯТИЕ ИГНОРА (задача 55) =================
+# `!снять игнор @ник` — админ в чате снимает наказание досрочно. Это
+# единственный способ вернуть игрока в чат, не дожидаясь 5 часов: раньше
+# команды не было вообще, и «случайный» игнор приходилось терпеть.
+_UNMUTE_PREFIXES = ("снять игнор", "снятьигнор", "размут", "снять мут",
+                    "снять наказание", "снятьигнор чат")
+
+
+def _unmute_usage() -> str:
+    return ("📋 Формат: <code>!снять игнор @ник</code> (или ответом на сообщение "
+            "игрока, или <code>!снять игнор 123456789</code>).\n"
+            "Список наказанных: <code>!аурапредлист</code>")
+
+
+@dp.message(F.text.func(lambda t: strip_prefix(t).lower().replace("ё", "е").startswith(
+    _UNMUTE_PREFIXES)))
+async def cmd_unmute(message: Message):
+    """`!снять игнор` — досрочно снять наказание в этом чате (админ/создатель)."""
+    if not await _warn_is_allowed(message):
+        return await message.answer(
+            "🔒 Команда только для создателей и админов чата.", parse_mode="HTML")
+    chat = getattr(message, "chat", None)
+    chat_type = str(getattr(chat, "type", ""))
+    if chat_type in ("private", "None", ""):
+        return await message.answer(
+            "📋 Игнор снимается только в чатах — в личке наказаний нет.",
+            parse_mode="HTML")
+    target_id, target_name = await _warn_target_from_parts(message, allow_id=True)
+    if target_id is None:
+        return await message.answer(_unmute_usage(), parse_mode="HTML")
+    chat_id = int(chat.id)
+    actor = message_actor(message)
+    if int(target_id) == int(getattr(actor, "id", 0)):
+        return await message.answer("🙃 С себя игнор снимать не нужно.")
+
+    record = await asyncio.to_thread(_chat_warn_read, chat_id, target_id)
+    left = _mute_left(record)
+    warns = int(record.get("warns") or 0)
+    if left <= 0 and warns <= 0:
+        name = await _display_name(message, target_id, target_name)
+        return await message.answer(
+            f"✅ {_warn_mention(target_id, name)} и так не наказан(а) в этом чате.",
+            parse_mode="HTML")
+
+    # Снимаем и игнор, и счётчик: игрок начинает с чистого листа.
+    saved = await asyncio.to_thread(_chat_warn_write, chat_id, target_id, 0, 0.0)
+    _WARN_MUTE_NOTICE_AT.pop(_warn_row_key(chat_id, target_id), None)
+    name = await _display_name(message, target_id, target_name)
+    lines = [f"✅ <b>Игнор снят:</b> {_warn_mention(target_id, name)}"]
+    if left > 0:
+        lines.append(f"⏱ Оставалось: {_mute_until_text(left)} — теперь можно писать.")
+    if warns:
+        lines.append(f"📝 Предупреждения обнулены (было {warns}/{WARN_LIMIT}).")
+    else:
+        lines.append("📝 Предупреждения обнулены.")
+    if not saved:
+        hint = _warn_error_hint(_WARN_WRITE_ERRORS.get(_warn_row_key(chat_id, target_id)))
+        lines.append(f"<i>⚠️ В базу не сохранилось: {hint}. После рестарта бота "
+                     f"игнор может вернуться.</i>")
+    lines.append("Список: <code>!аурапредлист</code>")
+    await message.answer("\n".join(lines), parse_mode="HTML")
 
 
 class ChatWarnMiddleware(BaseMiddleware):
@@ -1187,7 +1332,8 @@ class ChatWarnMiddleware(BaseMiddleware):
             # выдать предупреждение наказанному и не открыть приложение.
             low = strip_prefix(message_text(message)).lower().replace("ё", "е")
             if low.startswith(("апка", "аурапред", "аурапредлист", "аурапред лист",
-                               "аураварн", "аураварны", "разбан")):
+                               "аураварн", "аураварны", "разбан", "снять игнор",
+                               "снятьигнор", "размут", "снять мут", "снять наказание")):
                 return await handler(event, data)
             left = await chat_mute_left(chat_id, actor.id)
             if left <= 0:
@@ -2422,8 +2568,15 @@ def _stage_text(score: int) -> str:
     следующий этап», иначе теряется смысл заводить отношения.
     """
     info = public_stage(score)
+    # Задача 55: без строки «до следующего уровня» игрок видел «Уровень 1 ·
+    # Love 0» и не понимал, что вообще двигает уровень (и растёт ли счёт).
+    # Плюс прямая подсказка, чем его качать: РП-команды в паре.
+    tail = ("➡️ Максимальный уровень — дальше только теплее"
+            if info["next_level"] is None
+            else f"➡️ {safe_text(next_level_text(info['love']))} "
+                 f"(качается РП-командами в паре)")
     return (f"💗 <b>Уровень {info['level']} · {safe_text(info['title'])}</b>\n"
-            f"Love коинов: <b>{coin_amount(info['love'])}</b>")
+            f"Love коинов: <b>{coin_amount(info['love'])}</b>\n{tail}")
 
 
 def _love_days(row) -> int:
@@ -2453,6 +2606,12 @@ def _days_text(days: int) -> str:
         last = tail % 10
         word = "день" if last == 1 else "дня" if last in (2, 3, 4) else "дней"
     return f"{days} {word}"
+
+
+# Живые имена из Telegram (getChatMember). Кэш на час: имена меняются редко,
+# а в списке предупреждений иначе уходил бы запрос на каждого игрока.
+_LIVE_NAME_CACHE = {}
+_LIVE_NAME_TTL = 3600
 
 
 _NAME_CACHE: dict[int, tuple[float, str]] = {}
@@ -2500,8 +2659,16 @@ async def _names_map(user_ids) -> dict:
             logger.warning("Ники игроков не прочитались: %s", exc)
             fetched = {}
         for uid in wanted:
-            _NAME_CACHE[uid] = (now, fetched.get(uid, ""))
-    return {uid: _NAME_CACHE[uid][1] for uid in ids if uid in _NAME_CACHE}
+            cached_live = _LIVE_NAME_CACHE.get(uid)
+            if cached_live and now - cached_live[0] < _LIVE_NAME_TTL and cached_live[1]:
+                # Живое имя из Telegram важнее базы: в users.username бывает
+                # «протухший» ник вроде Contact_blocked (задача 55).
+                _NAME_CACHE[uid] = (now, cached_live[1])
+            else:
+                _NAME_CACHE[uid] = (now, fetched.get(uid, ""))
+    return merge_names({uid: _NAME_CACHE[uid][1] for uid in ids if uid in _NAME_CACHE},
+                       {uid: rec[1] for uid, rec in _LIVE_NAME_CACHE.items()
+                        if uid in ids and rec[1]})
 
 
 async def _player_names(rows, keys=("user_a", "user_b")) -> dict:
@@ -2528,6 +2695,9 @@ async def _player_name(user_id) -> str:
     """
     if not user_id:
         return "игрок"
+    cached = _LIVE_NAME_CACHE.get(int(user_id))
+    if cached and time.time() - cached[0] < _LIVE_NAME_TTL and cached[1]:
+        return cached[1]
     names = await _names_map([user_id])
     name = clean_name(names.get(int(user_id)))
     return name or f"id{int(user_id)}"
@@ -2540,23 +2710,54 @@ async def _display_name(message, user_id, known=None) -> str:
     спрашивает имя у Telegram. Без этого в ответе появлялось «id123456789»,
     и игрок снова не понимал, о ком речь.
     """
+    # 1) Имя, которое точно относится к этому человеку: Telegram-имя из
+    #    сообщения-ответа. Задача 55: именно оно главное, потому что username
+    #    в базе бывает «протухшим» (занят владельцем, который сменил ник).
     name = clean_name(known)
     if name:
         return name
     if not user_id:
         return "игрок"
+    # 2) Живое имя из Telegram — оно главнее базы: в `users.username` бывает
+    #    «протухший» ник (занят другим владельцем), и в чат попадал мусор
+    #    вроде «Contact_blocked» вместо человека (задача 55).
+    live = await _telegram_name(message, user_id)
+    if live:
+        return live
+    # 3) База: username, который игрок сам указывал боту.
     names = await _names_map([user_id])
     name = clean_name(names.get(int(user_id)))
     if name:
         return name
+    return f"id{int(user_id)}"
+
+
+async def _telegram_name(message, user_id) -> str:
+    """Имя игрока из Telegram: full_name, иначе @username.
+
+    Задача 55: раньше здесь бралось только имя, и при пустом `first_name`
+    в ответе появлялся мусорный `id<число>` — а в базе при этом лежал чужой
+    username (например «Contact_blocked»). Теперь порядок такой: живое имя
+    из Telegram, затем @username из Telegram, и только потом id.
+    """
+    if not user_id:
+        return ""
+    uid = int(user_id)
+    cached = _LIVE_NAME_CACHE.get(uid)
+    if cached and time.time() - cached[0] < _LIVE_NAME_TTL:
+        return cached[1]
     try:
-        member = await message.bot.get_chat_member(message.chat.id, int(user_id))
+        member = await message.bot.get_chat_member(message.chat.id, uid)
         person = getattr(member, "user", None)
         name = clean_name(getattr(person, "full_name", None)
                           or getattr(person, "first_name", None))
+        if not name:
+            name = clean_name(getattr(person, "username", None))
+        if name:
+            _LIVE_NAME_CACHE[uid] = (time.time(), name)
+        return name
     except Exception:  # noqa: BLE001 — нет прав/игрока нет в чате
-        name = ""
-    return name or f"id{int(user_id)}"
+        return ""
 
 
 def _player_mention(user_id, name=None) -> str:
@@ -2852,7 +3053,9 @@ async def cmd_love_status(message: Message):
         info = public_stage(solo)
         return await message.answer(
             f"💔 <b>Пока один(а)</b> · {SOLO_CURRENCY}: <b>{coin_amount(solo)}</b>\n"
-            f"🏅 Уровень: <b>{info['level']} · {safe_text(info['title'])}</b>\n\n"
+            f"🏅 Уровень: <b>{info['level']} · {safe_text(info['title'])}</b>\n"
+            f"➡️ {safe_text(next_level_text(solo, SOLO_CURRENCY))} — уровень растёт "
+            f"от {SOLO_CURRENCY}\n\n"
             f"РП-команды работают и без пары — {SOLO_CURRENCY} капает только тебе.\n"
             f"Предложить отношения: <code>+любовь</code> ответом на сообщение\n"
             f"Все РП-команды: <code>все рп</code> · подробно: <code>любовь инфа</code>",
@@ -2904,7 +3107,9 @@ async def cmd_love_info(message: Message):
                 f"━━━━━━━━━━━━━━━━━━━━\n"
                 f"Пока ни с кем — и это нормально.\n"
                 f"🏅 Уровень: <b>{info['level']} · {safe_text(info['title'])}</b>\n"
-                f"💔 {SOLO_CURRENCY}: <b>{coin_amount(solo)}</b>\n\n"
+                f"💔 {SOLO_CURRENCY}: <b>{coin_amount(solo)}</b>\n"
+                f"➡️ {safe_text(next_level_text(solo, SOLO_CURRENCY))} — уровень "
+                f"растёт от {SOLO_CURRENCY}\n\n"
                 f"РП-команды работают и в одиночку: просто напиши <code>обнять</code>, "
                 f"<code>поцеловать</code>, <code>подарить цветы</code>… — "
                 f"+{LOVE_ACTION_BONUS} {SOLO_CURRENCY} только тебе.\n"
@@ -2929,7 +3134,8 @@ async def cmd_love_info(message: Message):
         f"💞 В паре с: <b>{partner_mention}</b>\n"
         f"📅 Вместе: <b>{_days_text(days)}</b>\n"
         f"🏅 Уровень: <b>{info['level']} · {safe_text(info['title'])}</b>\n"
-        f"💗 Love коинов: <b>{coin_amount(score)}</b>",
+        f"💗 Love коинов: <b>{coin_amount(score)}</b>\n"
+        f"➡️ {safe_text(next_level_text(score))}",
         parse_mode="HTML")
 
 
@@ -3006,21 +3212,41 @@ def datetime_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def love_write_hint() -> str:
+    """Человеческая причина, почему Love/Unlove не записались (для игрока)."""
+    return ("Скорее всего в базе нет таблицы отношений или политики записи — "
+            "передай админу: <code>relationships</code> / <code>solo_love</code>, "
+            "миграция <code>20261124000000_love_fix.sql</code>.")
+
+
 async def add_love_points(row, amount: int):
-    """+Love коины паре и награды за перешагнутые этапы. Возвращает (new_love, granted).
+    """+Love коины паре и награды → (new_love, granted, записалось ли).
 
     Задача 44: если `bank` в таблице нет (старая схема), пишем только love —
     раньше update падал целиком и Love не рос, хотя игрок видел успех.
+    Задача 55: третий элемент — «реально записалось». Без него бот писал
+    «+10 Love (всего 10)», а в базе оставался ноль: игрок открывал
+    «любовь инфа» и видел «Love коинов: 0» сразу после РП-действия.
     """
     old_score = int(row.get("love") or 0)
     new_score = old_score + int(amount)
+    saved = False
     for payload in ({"love": new_score, "bank": new_score}, {"love": new_score}):
         try:
-            await asyncio.to_thread(lambda p=payload: supabase.table(RELATIONSHIPS_TABLE)
-                                    .update(p).eq("id", row["id"]).execute())
+            res = await asyncio.to_thread(lambda p=payload: supabase.table(RELATIONSHIPS_TABLE)
+                                          .update(p).eq("id", row["id"]).execute())
+            saved = True
+            # Берём число из ответа базы: если строка в памяти была старой,
+            # игрок увидит именно то, что лежит в таблице.
+            written = (getattr(res, "data", None) or [{}])[0].get("love")
+            if written is not None:
+                new_score = int(written)
             break
         except Exception as exc:  # noqa: BLE001
             logger.warning("Love не записался (%s): %s", list(payload), exc)
+    if not saved:
+        # База отказала: не выдаём награды и не рисуем рост, которого нет.
+        return old_score, [], False
     row = dict(row)
     row["love"] = new_score
     try:
@@ -3028,7 +3254,7 @@ async def add_love_points(row, amount: int):
     except Exception as exc:  # noqa: BLE001
         logger.warning("Награды за этап Love не выданы: %s", exc)
         granted = []
-    return new_score, granted
+    return new_score, granted, True
 
 
 # ================= ОДИНОКИЕ: UNLOVE =================
@@ -3047,12 +3273,20 @@ async def get_solo_love(user_id) -> int:
 
 
 async def add_solo_points(user_id, amount: int):
-    """+Unlove и (тихо) награды за перешагнутые этапы. Возвращает (счёт, награды)."""
+    """+Unlove → (счёт, награды, записалось ли). База отказала — счёт прежний."""
+    before = await get_solo_love(user_id)
     try:
-        return await asyncio.to_thread(add_solo_love, supabase, user_id, amount)
+        score, granted = await asyncio.to_thread(add_solo_love, supabase, user_id, amount)
     except Exception as e:
         logger.warning(f"Не удалось начислить Unlove: {e}")
-        return await get_solo_love(user_id), []
+        return before, [], False
+    if int(score) < int(before) + int(amount):
+        return int(score), [], False        # прибавки нет — значит не записалось
+    try:
+        saved = await asyncio.to_thread(solo_saved, supabase, user_id, score)
+    except Exception:  # noqa: BLE001
+        saved = False
+    return score, granted, saved
 
 
 async def drop_solo_status(user_id):
@@ -3106,9 +3340,16 @@ async def cmd_rp_action(message: Message):
             f"Можно не ждать — выполнить действие за {LOVE_ICE_COST} i¢ (донат-валюта).",
             parse_mode="HTML", reply_markup=_cooldown_keyboard(actor_id))
 
-    new_score, granted = await add_love_points(row, LOVE_ACTION_BONUS)
+    new_score, granted, saved = await add_love_points(row, LOVE_ACTION_BONUS)
+    if not saved:
+        # Задача 55: не рисуем «+10», если база не приняла запись — иначе игрок
+        # видит рост в ответе и ноль в «любовь инфа».
+        return await message.answer(
+            f"{text}\n\n⚠️ Love не записался в базу — бонус не начислен.\n"
+            f"{love_write_hint()}", parse_mode="HTML")
     await love_cooldown_touch(actor_id)
-    reply = f"{text}\n\n💗 +{LOVE_ACTION_BONUS} Love (всего {new_score})"
+    reply = (f"{text}\n\n💗 +{LOVE_ACTION_BONUS} Love (всего {new_score})\n"
+             f"➡️ {safe_text(next_level_text(new_score))}")
     # Этапы и награды — секрет. Бот не объявляет «новый этап» и не показывает
     # суммы: награда начисляется тихо, игроки узнают о ней по балансу.
     if granted:
@@ -3141,9 +3382,14 @@ async def solo_rp_action(message: Message, meta: dict, target_id, target_name):
             f"Можно не ждать — выполнить действие за {LOVE_ICE_COST} i¢ (донат-валюта).",
             parse_mode="HTML", reply_markup=_cooldown_keyboard(actor_id))
 
-    score, granted = await add_solo_points(actor_id, LOVE_ACTION_BONUS)
+    score, granted, saved = await add_solo_points(actor_id, LOVE_ACTION_BONUS)
+    if not saved:
+        return await message.answer(
+            f"{text}\n\n⚠️ {SOLO_CURRENCY} не записался в базу — бонус не начислен.\n"
+            f"{love_write_hint()}", parse_mode="HTML")
     await love_cooldown_touch(actor_id)
-    reply = f"{text}\n\n💔 +{LOVE_ACTION_BONUS} {SOLO_CURRENCY} (всего {score})"
+    reply = (f"{text}\n\n💔 +{LOVE_ACTION_BONUS} {SOLO_CURRENCY} (всего {score})\n"
+             f"➡️ {safe_text(next_level_text(score))}")
     if granted:
         reply += "\n💗 Стало теплее — загляни в <code>любовь инфа</code>."
     await message.answer(reply, parse_mode="HTML")
@@ -3174,7 +3420,11 @@ async def cb_love_ice(callback: CallbackQuery):
     row = await get_relationship(owner_id)
     if not row:
         # Одиночка: ускорение работает так же, только в свою копилку Unlove.
-        score, granted = await add_solo_points(owner_id, LOVE_ACTION_BONUS)
+        score, granted, saved = await add_solo_points(owner_id, LOVE_ACTION_BONUS)
+        if not saved:
+            return await callback.answer(
+                "⚠️ База не приняла начисление — i¢ не списаны, попробуй позже",
+                show_alert=True)
         await love_cooldown_touch(owner_id)
         text = (f"⚡ Готово за {LOVE_ICE_COST} i¢. 💔 +{LOVE_ACTION_BONUS} "
                 f"{SOLO_CURRENCY} (всего {score})")
@@ -3182,7 +3432,11 @@ async def cb_love_ice(callback: CallbackQuery):
             text += "\n💗 Стало теплее."
         return await callback.answer(text[:190], show_alert=True)
 
-    new_score, granted = await add_love_points(row, LOVE_ACTION_BONUS)
+    new_score, granted, saved = await add_love_points(row, LOVE_ACTION_BONUS)
+    if not saved:
+        return await callback.answer(
+            "⚠️ База не приняла начисление — i¢ не списаны, попробуй позже",
+            show_alert=True)
     await love_cooldown_touch(owner_id)
     text = f"⚡ Действие выполнено за {LOVE_ICE_COST} i¢. 💗 +{LOVE_ACTION_BONUS} Love (всего {new_score})"
     if granted:
@@ -3313,7 +3567,10 @@ async def cb_admin_panel(callback: CallbackQuery):
             "🚫 <b>Баны</b>\n\n"
             "Забанить: <code>!апбан @username причина</code>\n"
             "Разбанить: <code>разбан @username</code>\n"
-            "Список: <code>список банов</code>", parse_mode="HTML")
+            "Список: <code>список банов</code>\n\n"
+            "🚫 Игнор в чате (5 ч): <code>!снять игнор @username</code> — "
+            "снять досрочно, <code>!аурапредлист</code> — кто наказан",
+            parse_mode="HTML")
         return await callback.answer()
 
     await callback.answer()
@@ -3652,7 +3909,7 @@ async def cmd_help_command(message: Message):
     F.text.func(lambda t: strip_prefix(t).lower().startswith("помощь") or strip_prefix(t).lower().startswith("help")))
 async def cmd_help(message: Message):
     text = (
-        "📖 <b>СПИСОК КОМАНД БОТА</b>\n━━━━━━━━━━━━━━━━━━━━\n\n🎟️ <b>Промокоды:</b>\n• <code>промо код</code> — активировать промокод\n\n💰 <b>Экономика:</b>\n• <code>карман</code> — твой баланс\n• <code>карман @user</code> — баланс другого\n• <code>перевод @user сумма</code> — перевести\n• <code>перевод сумма</code> (ответом) — быстрый перевод\n• <code>топ</code> — топ-10 богачей\n• <code>магазин</code> — магазин\n\n🎲 <b>Игры:</b>\n• <code>кубы @user ставка</code> — дуэль в кости\n• <code>кубы ставка</code> (ответом) — быстрый вызов\n\n💗 <b>Отношения:</b>\n• <code>+любовь</code> (ответом на сообщение) — предложить отношения\n• <code>все рп</code> — список всех РП-команд\n• <code>поцеловать</code>, <code>обнять</code>, <code>погладить</code>… — РП-команды (+10 Love паре)\n• <code>любовь инфа</code> — с кем, сколько дней, уровень и Love (только своё)\n• <code>топ отношений</code> — все пары и их Love (одиночки не показываются)\n• <code>-любовь</code> — разорвать отношения (у обоих сгорает статус и Love)\n• одному РП-команда даёт +10 Unlove — награды только тебе\n\n🛡️ <b>Модерация чата:</b>\n• <code>!аурапред</code> (ответом или @ник) — предупреждение: 3 из 3 → игнор 5 ч в этом чате\n• <code>!аурапредлист</code> — предупреждения в этом чате\n\n• <code>апка</code> — ссылка и кнопка на приложение AURA GAME\n• <code>тег</code> — проверка бота\n• <code>помощь</code> — эта справка")
+        "📖 <b>СПИСОК КОМАНД БОТА</b>\n━━━━━━━━━━━━━━━━━━━━\n\n🎟️ <b>Промокоды:</b>\n• <code>промо код</code> — активировать промокод\n\n💰 <b>Экономика:</b>\n• <code>карман</code> — твой баланс\n• <code>карман @user</code> — баланс другого\n• <code>перевод @user сумма</code> — перевести\n• <code>перевод сумма</code> (ответом) — быстрый перевод\n• <code>топ</code> — топ-10 богачей\n• <code>магазин</code> — магазин\n\n🎲 <b>Игры:</b>\n• <code>кубы @user ставка</code> — дуэль в кости\n• <code>кубы ставка</code> (ответом) — быстрый вызов\n\n💗 <b>Отношения:</b>\n• <code>+любовь</code> (ответом на сообщение) — предложить отношения\n• <code>все рп</code> — список всех РП-команд\n• <code>поцеловать</code>, <code>обнять</code>, <code>погладить</code>… — РП-команды (+10 Love паре)\n• <code>любовь инфа</code> — с кем, сколько дней, уровень и Love (только своё)\n• <code>топ отношений</code> — все пары и их Love (одиночки не показываются)\n• <code>-любовь</code> — разорвать отношения (у обоих сгорает статус и Love)\n• одному РП-команда даёт +10 Unlove — награды только тебе\n\n🛡️ <b>Модерация чата:</b>\n• <code>!аурапред</code> (ответом или @ник) — предупреждение: 3 из 3 → игнор 5 ч в этом чате\n• <code>!аурапредлист</code> — предупреждения в этом чате\n• <code>!снять игнор</code> (ответом, @ник или id) — досрочно снять наказание\n\n• <code>апка</code> — ссылка и кнопка на приложение AURA GAME\n• <code>тег</code> — проверка бота\n• <code>помощь</code> — эта справка")
     await message.answer(text, parse_mode="HTML")
 
 

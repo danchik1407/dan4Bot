@@ -85,7 +85,7 @@ async def _http_json(url, method: str = "GET", params=None, payload=None, timeou
 
 # Номер сборки: по нему из /api/health видно, что на сервисе НЕ старый код.
 # Если после деплоя здесь прежнее значение — Render ещё не перезапустился.
-API_BUILD = "2026-10-27-task54-upgrade-balance-lock"
+API_BUILD = "2026-10-27-task55-love-score-and-unmute"
 
 # Момент старта процесса. По нему видно, что сервис только что «проснулся»:
 # Render на бесплатном тарифе усыпляет Web Service через 15 минут без входящих
@@ -6011,11 +6011,25 @@ def _love_days(row) -> int:
         return 0
 
 
-def _love_partner_name(partner_id):
-    row = _db_user(partner_id) if partner_id else None
-    if not row:
-        return f"id{partner_id}"
-    return str(row.get("username") or f"id{partner_id}")
+def _clean_person_name(value) -> str:
+    """Имя для плашки: без «@», без HTML-углов и без пустоты."""
+    return str(value or "").strip().lstrip("@").replace("<", "").replace(">", "")[:64]
+
+
+def _love_partner_name(partner_id, row=None):
+    """Как назвать партнёра в Mini App — только человеческое имя.
+
+    Задача 55: раньше брался `users.username`, и в плашке появлялся чужой/
+    протухший ник («Contact_blocked») — игрок не понимал, с кем он в паре.
+    Теперь порядок: имя (`first_name`/`name`) → `id<число>`, а username
+    не показываем вовсе (задача 44: @-ников в текстах бота нет).
+    """
+    if not partner_id:
+        return "партнёр"
+    row = row or _db_user(partner_id)
+    name = (_clean_person_name((row or {}).get("first_name"))
+            or _clean_person_name((row or {}).get("name")))
+    return name or f"id{partner_id}"
 
 
 def _love_solo_for(user_id) -> dict:
@@ -6089,7 +6103,7 @@ def love_state_for(user_id) -> dict:
         "available": True,
         "in_relationship": True,
         "partner_id": partner_id,
-        "partner_name": _love_partner_name(partner_id),
+        "partner_name": _love_partner_name(partner_id, row),
         "love": score,
         "bank": _safe_int(row.get("bank"), 0),
         "days": _love_days(row),
