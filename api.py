@@ -86,7 +86,7 @@ async def _http_json(url, method: str = "GET", params=None, payload=None, timeou
 
 # Номер сборки: по нему из /api/health видно, что на сервисе НЕ старый код.
 # Если после деплоя здесь прежнее значение — Render ещё не перезапустился.
-API_BUILD = "2026-10-27-task61-love-stages-cooldowns-techworks"
+API_BUILD = "2026-10-27-task62-open-app-bugfixes"
 
 # Момент старта процесса. По нему видно, что сервис только что «проснулся»:
 # Render на бесплатном тарифе усыпляет Web Service через 15 минут без входящих
@@ -634,74 +634,37 @@ def _env_flag(name: str, default: bool = False) -> bool:
     return default
 
 
-# Задача 57 (срочно): по умолчанию ЗАКРЫТО — «только админы».
-# Задача 44 открывала игру всем (default False), из-за этого после каждого
-# деплоя без переменной окружения доступ получали посторонние. Теперь дефолт
-# True: свежий сервис/чистый Render сразу пускает ТОЛЬКО ADMIN_IDS, а открыть
-# игру для всех можно осознанно — переменной Render ADMIN_ONLY_APP=0.
+# Задача 62: Mini App ОТКРЫТА ВСЕМ.
 #
-# Задача 61: рубильник стал ЖИВЫМ — его переключает админ прямо в боте командами
-# `!техработы вкл` / `!техработы выкл`. Значение лежит в game_settings
-# (ключ `app_closed`), поэтому переживает перезапуск и деплой, а env остаётся
-# стартовым дефолтом (если в базе ничего не записано).
-ADMIN_ONLY_APP = _env_flag("ADMIN_ONLY_APP", True)
-ADMIN_ONLY_MESSAGE = ("🛠️ Идут технические работы. Пока доступ к игре есть "
-                      "только у администраторов — скоро откроем всем.")
-# Те же рубильники для БОТА (команды в чате): по умолчанию закрыт так же.
-ADMINS_ONLY_BOT_DEFAULT = _env_flag("ADMINS_ONLY_BOT", True)
+# История: задача 44 пускала всех, задача 57 срочно закрыла доступ «до админов»
+# (ADMIN_ONLY_APP по умолчанию 1) — и после каждого деплоя без переменной
+# окружения обычные игроки видели экран «Технические работы». Задача 61 добавила
+# рубильник из бота, задача 62 его убрала вместе с закрытым дефолтом.
+#
+# Теперь: доступ открыт всегда, никаких флагов в базе и env на пути игрока нет.
+# Остался только `require_play_access` — единая точка входа, которая сейчас
+# никого не блокирует (кроме бана, который проверяется отдельно).
+ADMIN_ONLY_APP = False
+ADMIN_ONLY_MESSAGE = ""
+# Оставлено для совместимости со старыми сборками Mini App и админ-API:
+# «приложение закрыто» теперь всегда False.
 APP_CLOSED_SETTING_KEY = "app_closed"
-_APP_CLOSED_CACHE = {"value": None, "at": 0.0}
-_APP_CLOSED_TTL = 15.0
-
-
-def _app_closed_from_db(force: bool = False):
-    """True/False из game_settings, None — настройки ещё нет (берём env).
-
-    Читаем с коротким кэшем (15 с): рубильник дёргают редко, а проверка стоит
-    на каждом игровом запросе. `force=True` — сразу после переключения, чтобы
-    админ видел эффект мгновенно, без «подожди 15 секунд».
-    """
-    now = time.time()
-    if not force and _APP_CLOSED_CACHE["value"] is not None \
-            and now - float(_APP_CLOSED_CACHE["at"] or 0) < _APP_CLOSED_TTL:
-        return _APP_CLOSED_CACHE["value"]
-    value = None
-    try:
-        res = (supabase.table(GAME_SETTINGS_TABLE).select("value")
-               .eq("key", APP_CLOSED_SETTING_KEY).limit(1).execute())
-        if res.data:
-            raw = str(res.data[0].get("value") or "").strip().lower()
-            if raw in ("1", "true", "yes", "on"):
-                value = True
-            elif raw in ("0", "false", "no", "off"):
-                value = False
-    except Exception as exc:  # noqa: BLE001 — таблицы нет: живём на env
-        logger.debug("game_settings недоступна для рубильника доступа: %s", exc)
-    _APP_CLOSED_CACHE.update({"value": value, "at": now})
-    return value
 
 
 def app_closed_now() -> bool:
-    """Закрыта ли игра для всех, кроме админов — прямо сейчас."""
-    value = _app_closed_from_db()
-    if value is None:
-        return bool(ADMIN_ONLY_APP)
-    return value
+    """Закрыта ли игра для всех, кроме админов. Задача 62: никогда.
+
+    Функция оставлена, потому что её вызывают ответы API (`admin_only_app`,
+    `maintenance`) и старые клиенты читают эти поля. Любое значение
+    game_settings.app_closed игнорируется: игра открыта всем.
+    """
+    return False
 
 
 def set_app_closed(closed: bool) -> bool:
-    """Переключить доступ к игре (и к боту) одной записью.
+    """Совместимость: переключателя доступа больше нет. Всегда True."""
+    return True
 
-    Возвращает True, если запись прошла. Кэш сбрасываем сразу, поэтому эффект
-    виден на следующем же запросе — перезапуск Render не нужен.
-    """
-    global ADMIN_ONLY_APP
-    closed = bool(closed)
-    ok = game_setting_set(APP_CLOSED_SETTING_KEY, "1" if closed else "0")
-    if ok:
-        ADMIN_ONLY_APP = closed          # для ответов вида «admin_only_app»
-        _APP_CLOSED_CACHE.update({"value": closed, "at": time.time()})
-    return ok
 
 # ==================== ПОДПИСКА НА КАНАЛ ====================
 # Бонус начисляется РОВНО ОДИН РАЗ за всё время: факт начисления хранится в
@@ -801,7 +764,9 @@ def _maintenance_enabled() -> bool:
     return _env_flag("MAINTENANCE_MODE", True)
 
 
-MAINTENANCE_MODE = _maintenance_enabled()
+# Задача 62: аварийные техработы по умолчанию ВЫКЛЮЧЕНЫ — игра доступна всем.
+# Включить при аварии можно осознанно: MAINTENANCE_MODE=1 в Render у aura-api.
+MAINTENANCE_MODE = _env_flag("MAINTENANCE_MODE", False)
 MAINTENANCE_MESSAGE = "🛠️ Технические работы: скоро вернёмся"
 
 
@@ -814,12 +779,9 @@ def can_play(user_id) -> bool:
     Проверка серверная: даже если клиент нарисует себе кнопки, игровые
     эндпоинты ответят 403.
     """
-    admin = is_admin_id(user_id, ADMIN_IDS)
-    if app_closed_now() and not admin:
-        return False
     if not MAINTENANCE_MODE:
-        return True
-    return admin
+        return True                     # обычный режим: играют все
+    return is_admin_id(user_id, ADMIN_IDS)
 
 
 def require_play_access(user) -> int:
@@ -6234,14 +6196,13 @@ async def admin_set_setting(data: AdminSettingRequest):
     ok = game_setting_set(key, data.value)
     if not ok:
         raise HTTPException(status_code=503, detail="Не удалось сохранить настройку")
-    # Задача 61: рубильник техработ умеет переключать и админка — тогда кэш
-    # сбрасываем сразу, иначе 15 секунд показывалось старое состояние.
+    # Настройки кулдаунов читаются с кэшем в минуту — после записи сбрасываем
+    # его, иначе админ видит старое значение и думает, что не сохранилось.
     touched = {}
-    if key in (APP_CLOSED_SETTING_KEY, "bot_closed", "maintenance",
-               "love_cooldown_seconds", "love_cooldown_actions"):
-        _APP_CLOSED_CACHE.update({"value": None, "at": 0.0})
+    if key in ("love_cooldown_seconds", "love_cooldown_actions"):
         _LOVE_COOLDOWN_CACHE.update({"value": {}, "at": 0.0})
-        touched = {"maintenance": MAINTENANCE_MODE or app_closed_now(),
+    if key == "maintenance":
+        touched = {"maintenance": MAINTENANCE_MODE,
                    "admin_only_app": app_closed_now()}
     return {"ok": True, "key": key, "value": data.value, **touched}
 

@@ -15,7 +15,7 @@ from dotenv import load_dotenv
 from aiogram import BaseMiddleware, Bot, Dispatcher, F, Router
 from aiogram.types import (Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton,
                            FSInputFile, WebAppInfo, Update, MenuButtonWebApp,
-                           BotCommand, BotCommandScopeDefault, BotCommandScopeChat)
+                           BotCommand, BotCommandScopeDefault)
 from aiogram.enums import ChatMemberStatus
 from aiogram.filters import Command, CommandStart, StateFilter
 from aiogram.fsm.context import FSMContext
@@ -27,7 +27,6 @@ from supabase import create_client, Client
 from mentions import clean_name, merge_names, parse_names
 from love import (
     LOVE_ACTION_BONUS,
-    LOVE_ACTION_COOLDOWN,
     LOVE_ACTION_COOLDOWN_DEFAULT,
     LOVE_ICE_COST,
     RP_ACTIONS,
@@ -403,10 +402,12 @@ class AnonymousSenderMiddleware(BaseMiddleware):
         return await handler(event, data)
 
 
-# ================= ДОСТУП К БОТУ (задача 57) =================
-# «Чтобы кроме админов зайти никто не мог»: во время техработ играют только
-# ADMIN_IDS. Рубильник общий с Mini App и по умолчанию ВКЛЮЧЁН; открыть игру
-# для всех = ADMINS_ONLY_BOT=0 в Render (вместе с ADMIN_ONLY_APP=0 у aura-api).
+# ================= ДОСТУП К БОТУ (задачи 57 и 62) =================
+# Задача 57 закрывала игру «до админов» (ADMINS_ONLY_BOT=1), и это работало
+# даже по умолчанию — сразу после деплоя обычный игрок получал «Технические
+# работы». Задача 62 это отменила: игра ОТКРЫТА всем, флаг по умолчанию
+# выключен, а команды `техработы` в боте больше нет. Если когда-нибудь
+# понадобится снова закрыть чат — ADMINS_ONLY_BOT=1 в Render у сервиса dan4Bot.
 def _env_flag(name: str, default: bool = False) -> bool:
     raw = (os.getenv(name) or "").strip().lower()
     if raw in ("1", "true", "yes", "on"):
@@ -416,26 +417,11 @@ def _env_flag(name: str, default: bool = False) -> bool:
     return default
 
 
-ADMINS_ONLY_BOT = _env_flag("ADMINS_ONLY_BOT", True)
-
-# ================= РУБИЛЬНИК ТЕХРАБОТ (задача 61) =================
-# Раньше «открыть/закрыть игру» означало править переменные в Render и ждать
-# редеплой (ADMINS_ONLY_BOT у бота + ADMIN_ONLY_APP/MAINTENANCE_MODE у API).
-# Теперь это ОДНА команда из бота — значение лежит в game_settings, поэтому
-# переживает перезапуск, а API читает те же ключи (см. api.py: app_closed_now).
-#
-#   game_settings.app_closed      '1'/'0' — игра закрыта для всех, кроме админов
-#   game_settings.bot_closed      '1'/'0' — то же для команд в чате
-#   game_settings.maintenance     '1'/'0' — аварийный стоп API (403 всем, кроме админов)
-#
-# Если в базе ключа нет — работает старое поведение из env (по умолчанию
-# закрыто). Значение по умолчанию пишется в базу при первом запуске бота,
-# чтобы админ видел в `техработы` реальное состояние, а не «неизвестно».
-ACCESS_SETTING_KEY = "app_closed"
-BOT_CLOSED_SETTING_KEY = "bot_closed"
-MAINTENANCE_SETTING_KEY = "maintenance"
-_ACCESS_STATE = {"app": bool(ADMINS_ONLY_BOT), "bot": bool(ADMINS_ONLY_BOT),
-                 "maintenance": None, "loaded": False}
+# Задача 62: игра ОТКРЫТА всем. Раньше дефолт был True («только админы»), из-за
+# чего сразу после деплоя без переменной окружения обычные игроки получали
+# «Технические работы». Теперь по умолчанию False: в чате играют все, а закрыть
+# доступ при необходимости можно осознанно — переменной ADMINS_ONLY_BOT=1.
+ADMINS_ONLY_BOT = _env_flag("ADMINS_ONLY_BOT", False)
 
 # Что остаётся доступным не-админам, пока идёт закрытие: вход в бот и
 # модерация чата. Это не игра — денег эти команды не начисляют.
@@ -449,106 +435,6 @@ PUBLIC_PREFIXES = (
 ADMINS_ONLY_BOT_MESSAGE = ("🛠️ <b>Технические работы</b>\n\n"
                            "Игра временно доступна только администраторам. "
                            "Скоро откроем для всех — спасибо за терпение 💙")
-
-
-def _setting_flag_sync(key):
-    """Прочитать 1/0 из game_settings. None — ключа нет или база недоступна."""
-    try:
-        res = (supabase.table("game_settings").select("value")
-               .eq("key", key).limit(1).execute())
-    except Exception as e:  # noqa: BLE001
-        logger.debug(f"game_settings недоступна для рубильника {key}: {e}")
-        return None
-    if not res.data:
-        return None
-    raw = str(res.data[0].get("value") or "").strip().lower()
-    if raw in ("1", "true", "yes", "on"):
-        return True
-    if raw in ("0", "false", "no", "off"):
-        return False
-    return None
-
-
-def _setting_save_sync(key, flag: bool) -> bool:
-    try:
-        supabase.table("game_settings").upsert(
-            {"key": key, "value": "1" if flag else "0"}, on_conflict="key").execute()
-        return True
-    except Exception as e:  # noqa: BLE001
-        logger.warning(f"Не удалось сохранить рубильник {key} в game_settings: {e}")
-        return False
-
-
-def bot_closed_now() -> bool:
-    """Закрыт ли бот для всех, кроме админов, прямо сейчас."""
-    return bool(_ACCESS_STATE.get("bot"))
-
-
-def apply_access_state(app_closed: bool, bot_closed: bool, maintenance=None) -> None:
-    """Применить состояние рубильника к процессу бота."""
-    global ADMINS_ONLY_BOT
-    _ACCESS_STATE["app"] = bool(app_closed)
-    _ACCESS_STATE["bot"] = bool(bot_closed)
-    if maintenance is not None:
-        _ACCESS_STATE["maintenance"] = bool(maintenance)
-    ADMINS_ONLY_BOT = bool(bot_closed)      # middleware читает именно его
-
-
-def access_status_text() -> str:
-    """Короткая строка состояния для `техработы` и `адм помощь`."""
-    bot = "🔴 закрыт (только админы)" if bot_closed_now() else "🟢 открыт всем"
-    app = "🔴 закрыта (только админы)" if _ACCESS_STATE.get("app") else "🟢 открыта всем"
-    maint = _ACCESS_STATE.get("maintenance")
-    if maint is None:
-        mtext = "— (не задано, решает env MAINTENANCE_MODE)"
-    else:
-        mtext = "🔴 включён" if maint else "🟢 выключен"
-    return (f"• бот: {bot}\n"
-            f"• Mini App: {app}\n"
-            f"• аварийный стоп API: {mtext}")
-
-
-async def ensure_access_state_loaded() -> None:
-    """Загрузить рубильник из базы (один раз при старте, затем — фоном)."""
-    app = await asyncio.to_thread(_setting_flag_sync, ACCESS_SETTING_KEY)
-    bot_flag = await asyncio.to_thread(_setting_flag_sync, BOT_CLOSED_SETTING_KEY)
-    maint = await asyncio.to_thread(_setting_flag_sync, MAINTENANCE_SETTING_KEY)
-    # В базе пусто → фиксируем текущее поведение (env), чтобы дальше менять
-    # его командой, а не переменными Render.
-    if app is None:
-        app = bool(ADMINS_ONLY_BOT)
-        await asyncio.to_thread(_setting_save_sync, ACCESS_SETTING_KEY, app)
-    if bot_flag is None:
-        bot_flag = bool(ADMINS_ONLY_BOT)
-        await asyncio.to_thread(_setting_save_sync, BOT_CLOSED_SETTING_KEY, bot_flag)
-    apply_access_state(app, bot_flag, maint)
-    _ACCESS_STATE["loaded"] = True
-    logger.info("🛠️ Доступ: %s", access_status_text().replace("\n", " | "))
-
-
-async def sync_access_state_loop() -> None:
-    """Раз в минуту подтягиваем рубильник из базы.
-
-    Нужно, чтобы команда, отданная в одном чате, сработала во всех процессах:
-    бот может быть запущен в нескольких копиях, а значение живёт в базе.
-    """
-    while True:
-        await asyncio.sleep(60)
-        if not _ACCESS_STATE.get("loaded"):
-            continue
-        try:
-            app = await asyncio.to_thread(_setting_flag_sync, ACCESS_SETTING_KEY)
-            bot_flag = await asyncio.to_thread(_setting_flag_sync, BOT_CLOSED_SETTING_KEY)
-            maint = await asyncio.to_thread(_setting_flag_sync, MAINTENANCE_SETTING_KEY)
-            if bot_flag is not None and bot_flag != _ACCESS_STATE.get("bot"):
-                logger.info("🛠️ Бот переключён из другого процесса: %s", bot_flag)
-                apply_access_state(app if app is not None else _ACCESS_STATE.get("app"),
-                                   bot_flag, maint)
-            else:
-                apply_access_state(app if app is not None else _ACCESS_STATE.get("app"),
-                                   _ACCESS_STATE.get("bot"), maint)
-        except Exception as exc:  # noqa: BLE001 — фон не должен падать
-            logger.debug("Синхронизация рубильника не удалась: %s", exc)
 
 
 class AdminOnlyMiddleware(BaseMiddleware):
@@ -576,7 +462,7 @@ class AdminOnlyMiddleware(BaseMiddleware):
         return None
 
     def _allow(self, event) -> bool:
-        if not bot_closed_now():
+        if not ADMINS_ONLY_BOT:
             return True
         actor = getattr(event, "from_user", None)
         if actor is None:
@@ -753,14 +639,6 @@ async def cmd_admin_help(message: Message):
         "• <code>all Текст</code> — пингануть всех в чате\n"
         "• <code>админы</code> — пингануть админов чата\n"
         "• <code>стоп</code> — остановить созыв\n\n"
-        "🛠️ <b>Техработы (одной командой):</b>\n"
-        "• <code>техработы</code> — показать состояние (бот / Mini App / стоп API)\n"
-        "• <code>техработы выкл</code> — открыть игру всем\n"
-        "• <code>техработы вкл</code> — закрыть: играют только админы\n"
-        "• <code>техработы апка вкл</code> / <code>выкл</code> — только Mini App\n"
-        "• <code>техработы бот вкл</code> / <code>выкл</code> — только команды в чате\n"
-        "• <code>техработы стоп вкл</code> / <code>выкл</code> — аварийный стоп API\n"
-        "<i>Сразу и в боте, и в аппке — без правок в Render.</i>\n\n"
         "💗 <b>Отношения (кулдаун — у каждой команды свой):</b>\n"
         "• <code>кд</code> — показать общий кулдаун и свои значения команд\n"
         "• <code>кд 5ч</code> / <code>кд 30м</code> / <code>кд 3600</code> — общий кулдаун\n"
@@ -776,98 +654,6 @@ async def cmd_admin_help(message: Message):
         "💡 <i>Совет: писать команды лучше в ЛС с ботом, чтобы не спалить промокоды.</i>"
     )
     await message.answer(text, parse_mode="HTML")
-
-
-# ================= ТЕХРАБОТЫ ОДНОЙ КОМАНДОЙ (задача 61) =================
-# Заказчик: «сделать включение/выключение техработ (аппка + бот) одной командой
-# из бота — открыть для всех / только админы». Поэтому всё пишется в
-# game_settings и подхватывается API без редеплоя:
-#   техработы                 — показать состояние
-#   техработы вкл / закрыть   — играют только админы (бот + Mini App)
-#   техработы выкл / открыть  — открыть всем (бот + Mini App)
-#   техработы апка вкл/выкл   — только Mini App
-#   техработы бот вкл/выкл    — только команды в чате
-#   техработы стоп вкл/выкл   — аварийный стоп API (MAINTENANCE_MODE)
-_ACCESS_ON_WORDS = ("вкл", "включить", "закрыть", "закрой", "закрыто", "1",
-                    "on", "true", "да", "стоп")
-_ACCESS_OFF_WORDS = ("выкл", "выключить", "открыть", "открой", "открыто", "0",
-                     "off", "false", "нет", "старт")
-
-
-def _access_flag_from_word(raw):
-    """«вкл/закрыть/1» → True, «выкл/открыть/0» → False, иначе None."""
-    word = str(raw or "").strip().lower().replace("ё", "е")
-    if word in _ACCESS_ON_WORDS:
-        return True
-    if word in _ACCESS_OFF_WORDS:
-        return False
-    return None
-
-
-@dp.message(F.text.func(lambda t: any(
-    strip_prefix(t).lower().replace("ё", "е").startswith(prefix)
-    for prefix in ("техработы", "тех работы", "тех.работы", "техработка"))))
-async def cmd_techworks(message: Message):
-    """Рубильник техработ: закрыть/открыть игру одной командой из бота."""
-    if not message.from_user or not is_admin(message.from_user.id):
-        return await message.answer("❌ Эта команда доступна только администраторам бота.")
-    if not _ACCESS_STATE.get("loaded"):
-        await ensure_access_state_loaded()
-
-    text = strip_prefix(message_text(message)).lower().replace("ё", "е").strip()
-    parts = text.split()
-    # Отбрасываем служебные слова: «техработы вкл», «тех работы выкл».
-    args = [part for part in parts if part not in ("техработы", "тех", "работы",
-                                                   "тех.", "работка", "техработка")]
-    if not args:
-        return await message.answer(
-            "🛠️ <b>Техработы</b>\n\n" + access_status_text() + "\n\n"
-            "Открыть всем: <code>техработы выкл</code>\n"
-            "Закрыть (только админы): <code>техработы вкл</code>\n"
-            "Только Mini App: <code>техработы апка вкл</code> / <code>выкл</code>\n"
-            "Только бот: <code>техработы бот вкл</code> / <code>выкл</code>\n"
-            "Аварийный стоп API: <code>техработы стоп вкл</code> / <code>выкл</code>",
-            parse_mode="HTML")
-
-    scope = args[0]
-    flag = _access_flag_from_word(args[1]) if len(args) > 1 else None
-    if flag is None:
-        flag = _access_flag_from_word(scope)
-        scope = "все"
-
-    if flag is None:
-        return await message.answer(
-            "❌ Не понял. Примеры: <code>техработы выкл</code> (открыть всем), "
-            "<code>техработы вкл</code> (только админы), "
-            "<code>техработы апка выкл</code>.", parse_mode="HTML")
-
-    app = _ACCESS_STATE.get("app")
-    bot_flag = _ACCESS_STATE.get("bot")
-    maint = _ACCESS_STATE.get("maintenance")
-    changed = []
-    tasks = []
-    if scope in ("все", "апка", "аппка", "миниапп", "app", "мини"):
-        app = flag
-        tasks.append((ACCESS_SETTING_KEY, flag))
-        changed.append("Mini App")
-    if scope in ("все", "бот", "bot", "чат"):
-        bot_flag = flag
-        tasks.append((BOT_CLOSED_SETTING_KEY, flag))
-        changed.append("бот")
-    if scope in ("стоп", "авария", "maintenance", "api"):
-        maint = flag
-        tasks.append((MAINTENANCE_SETTING_KEY, flag))
-        changed.append("аварийный стоп API")
-
-    saved = [await asyncio.to_thread(_setting_save_sync, key, value)
-             for key, value in tasks]
-    apply_access_state(app, bot_flag, maint)
-    note = "" if all(saved) else ("\n<i>⚠️ Часть значений не записалась в базу — "
-                                  "после рестарта вернётся к прежнему.</i>")
-    state = "закрыто для всех, кроме админов" if flag else "открыто всем"
-    await message.answer(
-        f"✅ Техработы: {', '.join(changed)} — <b>{state}</b>.\n\n"
-        f"{access_status_text()}{note}", parse_mode="HTML")
 
 
 # ================= ЗАДАНИЕ: ПОДПИСКА НА КАНАЛ =================
@@ -1272,7 +1058,7 @@ def parse_cooldown_text(raw: str):
 
 def _cooldown_overview() -> str:
     """Сводка: общий кулдаун + у каких команд своё значение."""
-    lines = [f"⏳ <b>Кулдаун награды за РП</b>",
+    lines = ["⏳ <b>Кулдаун награды за РП</b>",
              f"• по умолчанию для всех команд: <b>{format_love_cooldown()}</b>"]
     overrides = love_cooldown_overrides()
     if overrides:
@@ -1312,6 +1098,17 @@ async def cmd_love_cooldown(message: Message):
 
     # Вариант 1: «кд <команда> <значение>» — кулдаун отдельной РП-команды.
     action = rp_action_key(parts[1])
+    if action and len(parts) < 3:
+        # «кд обнять» без значения: раньше эта строка падала во второй вариант
+        # и админ получал «Не понял значение», хотя команда распознана.
+        return await message.answer(
+            f"⏳ Кулдаун команды «{action}»: "
+            f"<b>{format_love_cooldown(action=action)}</b>.\n\n"
+            f"Изменить: <code>кд {action} 1ч</code>, выключить: "
+            f"<code>кд {action} 0</code>, вернуть общий: "
+            f"<code>кд {action} сброс</code>.\n"
+            f"Общий кулдаун: <b>{format_love_cooldown()}</b>.",
+            parse_mode="HTML")
     if action and len(parts) >= 3:
         raw = " ".join(parts[2:])
         if str(raw).strip().lower().replace("ё", "е") in ("сброс", "reset", "общий",
@@ -3645,8 +3442,15 @@ async def love_cooldown_left(user_id, action=None) -> int:
     """
     key = str(action or "").strip().lower() or None
     def _read():
-        res = (supabase.table(LOVE_COOLDOWNS_TABLE)
-               .select("action, action_at").eq("user_id", user_id).execute())
+        try:
+            res = (supabase.table(LOVE_COOLDOWNS_TABLE)
+                   .select("action, action_at").eq("user_id", user_id).execute())
+        except Exception:
+            # Старая схема без колонки action (миграция не применена): читаем
+            # единственную отметку игрока. Без этого кулдаун после рестарта бота
+            # «забывался» и награду можно было собирать подряд.
+            res = (supabase.table(LOVE_COOLDOWNS_TABLE)
+                   .select("action_at").eq("user_id", user_id).execute())
         rows = res.data or []
         exact, shared = None, None
         for row in rows:
@@ -3756,6 +3560,9 @@ async def add_love_points(row, amount: int):
     except Exception as exc:  # noqa: BLE001
         logger.warning("Награды за этап Love не выданы: %s", exc)
         granted = []
+    # Пустые этапы не считаем: если награду уже выплатили раньше (или её закрыла
+    # страховка API), игроку не нужно второе «вы достигли уровня».
+    granted = [item for item in granted if int(item.get("reward") or 0) > 0]
     return new_score, granted, True
 
 
@@ -3910,9 +3717,9 @@ async def cmd_rp_action(message: Message):
              f"➡️ {safe_text(next_level_text(new_score))}")
     # Задача 61: награда за этап выдаётся ВСЕГДА и сразу, но игрок должен видеть,
     # за что пришли коины — и в чате, и личным сообщением каждому участнику.
+    for stage in granted:
+        reply += "\n" + safe_text(stage_reached_text(stage, stage.get("reward")))
     if granted:
-        for stage in granted:
-            reply += "\n" + safe_text(stage_reached_text(stage, stage.get("reward")))
         reply += "\n<i>Награда уже зачислена каждому участнику.</i>"
         await _notify_stage_rewards(row, actor_id, granted)
     await message.answer(reply, parse_mode="HTML")
@@ -3950,10 +3757,10 @@ async def solo_rp_action(message: Message, meta: dict, target_id, target_name):
     await love_cooldown_touch(actor_id, action_key)
     reply = (f"{text}\n\n💔 +{LOVE_ACTION_BONUS} {SOLO_CURRENCY} (всего {score})\n"
              f"➡️ {safe_text(next_level_text(score, SOLO_CURRENCY))}")
+    # Одиночке награда тоже выдаётся всегда — говорим об этом прямо.
+    for stage in granted:
+        reply += "\n" + safe_text(stage_reached_text(stage, stage.get("reward")))
     if granted:
-        # Одиночке награда тоже выдаётся всегда — говорим об этом прямо.
-        for stage in granted:
-            reply += "\n" + safe_text(stage_reached_text(stage, stage.get("reward")))
         reply += "\n<i>Награда уже зачислена.</i>"
     await message.answer(reply, parse_mode="HTML")
 
@@ -4609,7 +4416,7 @@ async def cmd_misc(message: Message):
         if active_summons.get(message.chat.id): return await message.answer("⚠️ Созыв уже идёт!")
         parts = strip_prefix(message_text(message)).split(maxsplit=1)
         call_text = parts[1] if len(parts) > 1 else "📢 Общий сбор!"
-        await message.answer(f"🔄 Начинаю созыв...", parse_mode="HTML")
+        await message.answer("🔄 Начинаю созыв...", parse_mode="HTML")
         asyncio.create_task(summon_all_members(message.chat.id, call_text, message.from_user.id))
     elif clean_text.startswith("стоп"):
         if message.chat.type in ("group", "supergroup"):
@@ -5201,14 +5008,6 @@ async def main():
                     f"(свои значения: {love_cooldown_overrides() or 'нет'})")
     except Exception as exc:  # noqa: BLE001
         logger.warning(f"Кулдаун РП не загрузился: {exc}")
-    # Задача 61: рубильник техработ живёт в game_settings — подтягиваем при
-    # старте и дальше раз в минуту, чтобы команда из одного чата действовала
-    # во всех запущенных копиях бота и процесс API не нужно было перезапускать.
-    try:
-        await ensure_access_state_loaded()
-        asyncio.create_task(sync_access_state_loop())
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(f"Рубильник техработ не загрузился: {exc}")
     # Задача 44: игнор наказанных в чате — до всех хендлеров сообщений.
     dp.message.outer_middleware(ChatWarnMiddleware())
     # Прогрев aura-api по активности в боте (был и раньше — не теряем).

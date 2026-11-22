@@ -6,6 +6,11 @@
 сервер и бот не могут разойтись в цифрах.
 """
 
+import logging
+import time
+
+logger = logging.getLogger(__name__)
+
 # Этапы отношений. min/max — границы по «Love коинам» пары (общий банк),
 # reward — сколько получает КАЖДЫЙ партнёр при первом достижении этапа.
 #
@@ -279,19 +284,26 @@ def next_level_text(score, currency: str = "Love") -> str:
     return f"До уровня {info['next_level']} — {info['to_next']} {currency}"
 
 
-def stage_reached_text(stage, amount_per_partner) -> str:
+def stage_reached_text(stage, amount_per_partner, solo: bool = False) -> str:
     """«Вы достигли 2 уровня отношений «Дружба влюблённых» — каждому по 2 000».
 
     Задача 61: награда за этап всегда начисляется (её не нужно «забирать»), но
     игрок должен узнать об этом — иначе рост баланса выглядит случайным.
     """
-    title = str((stage or {}).get("title") or "")
-    level = _safe_int((stage or {}).get("index"), 0) + 1
-    amount = _safe_int(amount_per_partner, 0)
+    stage = stage or {}
+    title = str(stage.get("title") or "")
+    # ВАЖНО: claim_stage_rewards отдаёт номер этапа в ключе "stage", а карточка
+    # public_stage — в "index". Раньше здесь читался только "index", поэтому
+    # ЛЮБОЕ сообщение о новом уровне говорило «1 уровня» — даже восьмого.
+    index = stage.get("index", stage.get("stage"))
+    level = _safe_int(index, 0) + 1
+    amount = _safe_int(amount_per_partner, 0) or _safe_int(stage.get("reward"), 0)
     head = f"💗 Вы достигли {level} уровня отношений"
     if title:
         head += f" «{title}»"
-    return f"{head} — каждому участнику +{amount} коинов!"
+    # У одиночки нет второго участника — «каждому участнику» ей врало.
+    tail = f"вам +{amount} коинов!" if solo else f"каждому участнику +{amount} коинов!"
+    return f"{head} — {tail}"
 
 
 def rp_action_key(raw):
@@ -343,6 +355,45 @@ def paid_stages(supabase, relationship_id) -> set:
     return {_safe_int(row.get("stage"), -1) for row in (res.data or [])}
 
 
+def _credit_coins(supabase, user_id, amount: int, attempts: int = 3) -> bool:
+    """Начислить коины с повтором. False — не смогли (тогда награду повторим).
+
+    Задача 62: раньше сбой одного `update` молча проглатывался, а этап уже был
+    отмечен выплаченным — награда терялась навсегда. Теперь неудачу видно
+    наверх: вызывающий код снимает отметку и попробует снова.
+    """
+    uid = _safe_int(user_id, 0)
+    amount = _safe_int(amount, 0)
+    if uid <= 0 or amount <= 0:
+        return False
+    for attempt in range(max(1, attempts)):
+        try:
+            res = supabase.table("users").select("coins").eq("user_id", uid).execute()
+            if res.data:
+                coins = _safe_int(res.data[0].get("coins"), 0) + amount
+                supabase.table("users").update({"coins": coins}).eq("user_id", uid).execute()
+                return True
+            # Строки игрока нет — повторять бессмысленно.
+            return False
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Коины игроку %s не начислены (попытка %s): %s",
+                           uid, attempt + 1, exc)
+            time.sleep(0.2 * (attempt + 1))
+    return False
+
+
+def _unmark_stage(supabase, table: str, match: dict, stage_index) -> None:
+    """Снять отметку о выплате этапа, если награда не дошла."""
+    try:
+        query = supabase.table(table).delete()
+        for column, value in match.items():
+            query = query.eq(column, value)
+        query.eq("stage", int(stage_index)).execute()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Отметку этапа %s в %s снять не удалось: %s",
+                       stage_index, table, exc)
+
+
 def claim_stage_rewards(supabase, relationship) -> list:
     """Награды за достигнутые этапы: каждому партнёру, ровно один раз на этап."""
     if not relationship:
@@ -366,18 +417,24 @@ def claim_stage_rewards(supabase, relationship) -> list:
             }).execute()
         except Exception:
             continue
+        failed = False
         for partner_id in partners:
             if partner_id <= 0:
                 continue
-            try:
-                res = supabase.table("users").select("coins").eq("user_id", partner_id).execute()
-                if not res.data:
-                    continue
-                coins = _safe_int(res.data[0].get("coins"), 0) + int(stage["reward"])
-                supabase.table("users").update({"coins": coins}).eq("user_id", partner_id).execute()
-            except Exception:
-                continue
-        granted.append({"stage": stage["index"], "title": stage["title"], "reward": stage["reward"]})
+            if not _credit_coins(supabase, partner_id, int(stage["reward"])):
+                failed = True
+        if failed:
+            # Деньги кому-то не дошли (сбой базы, нет строки игрока): отметку
+            # снимаем, чтобы награда выдалась при следующем действии. Раньше
+            # отметка оставалась, и награда за этап терялась НАВСЕГДА, а игрок
+            # при этом получал сообщение «вам начислено».
+            _unmark_stage(supabase, LOVE_REWARDS_TABLE, {"relationship_id": relationship_id},
+                          stage["index"])
+            logger.warning("Награда за этап %s пары %s не начислена — повторим позже",
+                           stage["index"], relationship_id)
+            continue
+        granted.append({"stage": stage["index"], "title": stage["title"],
+                        "reward": stage["reward"]})
     return granted
 
 
@@ -485,13 +542,13 @@ def claim_solo_stage_rewards(supabase, user_id, score) -> list:
             }).execute()
         except Exception:
             continue
-        try:
-            res = supabase.table("users").select("coins").eq("user_id", uid).execute()
-            if res.data:
-                coins = _safe_int(res.data[0].get("coins"), 0) + int(stage["reward"])
-                supabase.table("users").update({"coins": coins}).eq("user_id", uid).execute()
-        except Exception:
-            pass
+        if not _credit_coins(supabase, uid, int(stage["reward"])):
+            # Не смогли начислить — снимаем отметку, награда выдастся позже
+            # (см. тот же разбор в claim_stage_rewards).
+            _unmark_stage(supabase, SOLO_REWARDS_TABLE, {"user_id": uid}, stage["index"])
+            logger.warning("Награда за этап %s игрока %s не начислена — повторим позже",
+                           stage["index"], uid)
+            continue
         granted.append({"stage": stage["index"], "title": stage["title"],
                         "reward": stage["reward"]})
     return granted
