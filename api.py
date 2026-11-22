@@ -16,6 +16,7 @@ from shop_catalog import SHOP_ITEMS, ShopPurchaseError, is_admin_id, parse_inven
     serialize_shop_items, missing_stock_rows, shop_stock_snapshot, stock_diagnostics, \
     sold_out_items, STOCK_LIMITS_ENABLED
 from love import (LOVE_ACTION_BONUS, LOVE_ICE_COST,
+                  cooldown_from_setting,
                   love_cooldown_seconds,
                   RP_ACTIONS, SOLO_CURRENCY, claim_solo_stage_rewards,
                   claim_stage_rewards, public_stage as love_public_stage,
@@ -86,7 +87,7 @@ async def _http_json(url, method: str = "GET", params=None, payload=None, timeou
 
 # Номер сборки: по нему из /api/health видно, что на сервисе НЕ старый код.
 # Если после деплоя здесь прежнее значение — Render ещё не перезапустился.
-API_BUILD = "2026-10-27-task65-open-app-upgrade-targets"
+API_BUILD = "2026-10-27-task66-cooldown-really-on"
 
 # Момент старта процесса. По нему видно, что сервис только что «проснулся»:
 # Render на бесплатном тарифе усыпляет Web Service через 15 минут без входящих
@@ -6488,10 +6489,11 @@ def _love_cooldowns() -> dict:
             key = str(row.get("key") or "")
             raw = row.get("value")
             if key == "love_cooldown_seconds":
-                try:
-                    values["*all"] = max(0, int(float(raw)))
-                except (TypeError, ValueError):
-                    pass
+                # Задача 66: ноль в базе — остаток старых сборок, а не
+                # «кулдаун выключен». Осознанное выключение пишется словом "off".
+                seconds, explicit = cooldown_from_setting(raw, love_cooldown_seconds())
+                if explicit or seconds > 0:
+                    values["*all"] = seconds
             elif key == "love_cooldown_actions":
                 try:
                     data = json.loads(raw) if isinstance(raw, str) else (raw or {})

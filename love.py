@@ -121,6 +121,35 @@ def reset_love_cooldown_override(action) -> int:
     return love_cooldown_seconds(action)
 
 
+# Явное «кулдаун выключен» в game_settings. Пишется строкой, а НЕ нулём:
+# ноль в базе остался от старых сборок (задача 34: «кулдаун временно выключен,
+# чтобы прогнать уровень»), и если считать его настройкой админа, то после
+# деплоя кулдаун снова окажется выключенным — ровно жалоба «кд не работает».
+COOLDOWN_OFF_MARKER = "off"
+
+
+def cooldown_from_setting(raw, default: int = 0):
+    """Прочитать значение кулдауна из game_settings.
+
+    Возвращает (секунды, явно_ли_задано):
+      * `"off"` / `"выкл"` → (0, True)  — админ осознанно выключил;
+      * число > 0          → (N, True)  — админ поставил значение;
+      * число 0            → (default, False) — устаревший ноль старых сборок,
+                                              берём значение «как задумано»;
+      * пусто/мусор       → (default, False).
+    """
+    text = str(raw if raw is not None else "").strip().lower()
+    if text in ("off", "выкл", "нет", "none", "disabled"):
+        return 0, True
+    try:
+        value = int(float(text))
+    except (TypeError, ValueError):
+        return max(0, int(default)), False
+    if value <= 0:
+        return max(0, int(default)), False
+    return value, True
+
+
 def format_love_cooldown(seconds=None, action=None) -> str:
     """«без ограничения» / «5 ч» / «30 мин» / «45 сек» — для сообщений.
 

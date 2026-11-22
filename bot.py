@@ -27,7 +27,9 @@ from supabase import create_client, Client
 from mentions import clean_name, merge_names, parse_names
 from love import (
     LOVE_ACTION_BONUS,
+    COOLDOWN_OFF_MARKER,
     LOVE_ACTION_COOLDOWN_DEFAULT,
+    cooldown_from_setting,
     LOVE_ICE_COST,
     RP_ACTIONS,
     SOLO_CURRENCY,
@@ -978,10 +980,17 @@ def _cooldown_load_sync():
     for row in res.data or []:
         key = str(row.get("key") or "")
         if key == LOVE_COOLDOWN_SETTING_KEY:
-            try:
-                general = max(0, int(float(row.get("value"))))
-            except (TypeError, ValueError):
-                pass
+            # Задача 66: ноль в базе — это НЕ «выключено», а остаток старых
+            # сборок (задача 34 временно обнуляла кулдаун, чтобы прогнать
+            # уровень). Если считать его настройкой, после деплоя кулдаун снова
+            # не работает — вместе с жалобой «кд не работает». Выключить можно
+            # только осознанно: `кд 0` пишет строку "off".
+            seconds, explicit = cooldown_from_setting(
+                row.get("value"), LOVE_ACTION_COOLDOWN_DEFAULT)
+            if explicit or seconds > 0:
+                general = seconds
+            else:
+                general = None
         elif key == LOVE_COOLDOWN_ACTIONS_KEY:
             raw = row.get("value")
             try:
@@ -1010,7 +1019,10 @@ def _cooldown_save_sync(seconds=None, action=None):
             payload = json.dumps(data, ensure_ascii=False, sort_keys=True)
             key, value = LOVE_COOLDOWN_ACTIONS_KEY, payload
         else:
-            key, value = LOVE_COOLDOWN_SETTING_KEY, str(int(seconds))
+            # Задача 66: «выключено» пишем словом, чтобы отличить осознанный
+            # выбор админа от нуля старых сборок (см. _cooldown_load_sync).
+            key = LOVE_COOLDOWN_SETTING_KEY
+            value = COOLDOWN_OFF_MARKER if int(seconds) <= 0 else str(int(seconds))
         supabase.table("game_settings").upsert(
             {"key": key, "value": value}, on_conflict="key").execute()
         return True
@@ -1078,13 +1090,30 @@ def love_cooldown_diagnostics_sync(user_id=None) -> str:
     ли отметка в love_cooldowns (и с колонкой action или без неё) и что
     возвращает чтение.
     """
-    lines = [f"⏳ Кулдаун: общий {format_love_cooldown()}, "
-             f"свои значения: {love_cooldown_overrides() or 'нет'}"]
+    # Задача 66: сразу показываем, ВКЛЮЧЁН ли кулдаун и откуда взято значение.
+    # Главная причина «кд не работает» — общий кулдаун 0 секунд: в старых
+    # сборках он стоял по умолчанию, а ноль в game_settings означал не
+    # «выключено админом», а просто остаток задачи 34.
+    common = love_cooldown_seconds()
+    state = ("❌ ВЫКЛЮЧЕН (0 сек) — награда за каждое действие" if common <= 0
+             else f"✅ включён: {format_love_cooldown(common)}")
+    lines = [f"⏳ Кулдаун: {state}",
+             f"• свои значения: {love_cooldown_overrides() or 'нет'}"]
     try:
         probe = (supabase.table("game_settings").select("key, value")
                  .in_("key", [LOVE_COOLDOWN_SETTING_KEY, LOVE_COOLDOWN_ACTIONS_KEY]).execute())
-        lines.append("• game_settings: " + (", ".join(
-            f"{row.get('key')}={row.get('value')}" for row in (probe.data or [])) or "пусто"))
+        settings_text = (", ".join(
+            f"{row.get('key')}={row.get('value')}" for row in (probe.data or [])) or "пусто")
+        lines.append("• game_settings: " + settings_text)
+        # Ноль здесь — не настройка админа, а остаток старых сборок: код такое
+        # значение игнорирует и держит «как задумано» (5 ч). Выключить можно
+        # только командой `кд 0` — она пишет "off".
+        raw_common = next((str(row.get("value")) for row in (probe.data or [])
+                           if str(row.get("key")) == LOVE_COOLDOWN_SETTING_KEY), None)
+        if raw_common is not None and raw_common.strip().lower() in ("0", "0.0", ""):
+            lines.append(f"   ⚠️ в базе ноль — это остаток старых сборок, "
+                         f"игнорирую (действует {format_love_cooldown(common)}). "
+                         f"Выключить осознанно: <code>кд 0</code>.")
     except Exception as exc:  # noqa: BLE001
         lines.append(f"• game_settings: ❌ {type(exc).__name__}: {exc}")
     uid = int(user_id or 0)
