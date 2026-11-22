@@ -1475,3 +1475,17 @@ body.maintenance { overflow: hidden; }
 @media (max-width: 360px) {
     .up-presets { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 }
+
+/* Задача 58: ставка меньше минимума — подсветка вместо молчаливой подстановки. */
+.bet-input.bet-too-low {
+    border-color: #ff3b30;
+    box-shadow: 0 0 0 2px rgba(255, 59, 48, 0.25);
+}
+.bet-hint {
+    min-height: 14px;
+    font-size: 11px;
+    color: #ff6b60;
+    text-align: center;
+    line-height: 14px;
+}
+.bet-hint:not(.active) { visibility: hidden; }

@@ -1112,7 +1112,7 @@ def _warn_error_hint(exc) -> str:
     low = text.lower()
     if "does not exist" in low or "42p01" in low or "could not find the table" in low:
         return ("таблицы <code>chat_warns</code> нет — примените миграцию "
-                "<code>20261128000000_chat_warns_and_love_full.sql</code> и сделайте "
+                "<code>20261129000000_full_schema_all_points.sql</code> и сделайте "
                 "<code>NOTIFY pgrst, 'reload schema'</code>")
     if "on_conflict" in low or "no unique or exclusion constraint" in low:
         return ("у таблицы <code>chat_warns</code> нет составного ключа "
@@ -2673,17 +2673,17 @@ def _relationship_failure_message(exc) -> str:
     low = text.lower()
     if "row-level security" in low or "42501" in low or "permission denied" in low:
         return ("⚠️ База не даёт записать пару (RLS). Примените миграцию "
-                "20261128000000_chat_warns_and_love_full.sql в Supabase SQL Editor.")
+                "20261129000000_full_schema_all_points.sql в Supabase SQL Editor.")
     if ("could not find the table" in low or "does not exist" in low and "relationship" in low
             or "pgrst205" in low or "42p01" in low):
         return ("⚠️ Таблицы relationships нет. Примените миграцию "
-                "20261128000000_chat_warns_and_love_full.sql в Supabase SQL Editor.")
+                "20261129000000_full_schema_all_points.sql в Supabase SQL Editor.")
     if "уже состоит в активных отношениях" in low or "single active" in low:
         return "💔 Кто-то из вас уже в паре — сначала <code>-отны</code>."
     column = _missing_column_from_error(text)
     if column:
         return ("⚠️ В таблице relationships нет колонки «%s». Примените миграцию "
-                "20261128000000_chat_warns_and_love_full.sql." % column)
+                "20261129000000_full_schema_all_points.sql." % column)
     return "❌ Не удалось создать пару. Попробуйте позже."
 
 
@@ -3351,7 +3351,7 @@ def love_write_hint() -> str:
     """Человеческая причина, почему Love/Unlove не записались (для игрока)."""
     return ("Скорее всего в базе нет таблицы отношений или политики записи — "
             "передай админу: <code>relationships</code> / <code>solo_love</code>, "
-            "миграция <code>20261128000000_chat_warns_and_love_full.sql</code>.")
+            "миграция <code>20261129000000_full_schema_all_points.sql</code>.")
 
 
 async def add_love_points(row, amount: int):

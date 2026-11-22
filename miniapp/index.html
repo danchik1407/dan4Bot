@@ -12,7 +12,7 @@
     <meta http-equiv="Pragma" content="no-cache">
     <meta http-equiv="Expires" content="0">
     <title>AURA GAME</title>
-    <link rel="stylesheet" href="style.css?v=aura-57">
+    <link rel="stylesheet" href="style.css?v=aura-58">
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
 </head>
 <body>
@@ -339,8 +339,13 @@
             </div>
             <div class="hockey-controls" id="hockey-controls">
                 <div class="bet-input-container">
-                    <!-- Задача 56: минимум арены 100 (сервер отвечает тем же числом). -->
-                    <input type="number" id="hockey-bet" class="bet-input" value="100" min="100" max="10000">
+                    <!-- Задача 56: минимум арены 100 (сервер отвечает тем же числом).
+                         Задача 58: под полем маленькая подсказка «Минимум 100».
+                         Раньше при вводе 10 значение молча заменялось на 100, и
+                         игрок видел, что «оно само ставит 100». -->
+                    <input type="number" id="hockey-bet" class="bet-input" value="100" min="100" max="10000"
+                           oninput="markArenaBetTooLow('hockey', this.value)">
+                    <div class="bet-hint" id="hockey-bet-hint"></div>
                     <div class="bet-buttons">
                         <button onclick="addBet('hockey', 10)">+10</button>
                         <button onclick="addBet('hockey', 100)">+100</button>
@@ -574,6 +579,6 @@
         <div class="nav-item" onclick="switchTab('profile', this)"><span class="nav-icon">👤</span> Профиль</div>
     </nav>
 
-    <script src="app.js?v=aura-57" defer></script>
+    <script src="app.js?v=aura-58" defer></script>
 </body>
 </html>
