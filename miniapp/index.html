@@ -12,7 +12,7 @@
     <meta http-equiv="Pragma" content="no-cache">
     <meta http-equiv="Expires" content="0">
     <title>AURA GAME</title>
-    <link rel="stylesheet" href="style.css?v=aura-49">
+    <link rel="stylesheet" href="style.css?v=aura-50">
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
 </head>
 <body>
@@ -383,21 +383,22 @@
                 <span class="up-badge">ADMIN</span>
             </div>
 
-            <div class="up-layout">
-                <!-- ЛЕВАЯ ПАНЕЛЬ: ваш предмет -->
+            <!-- Задача 50: новый дизайн по наброску игрока — вертикальный экран.
+                 Сверху «ставка», в центре большой круг с шансом, снизу «цель»
+                 и крупная кнопка. Панели и круг — те же элементы, поэтому
+                 app.js (id/классы) менять не пришлось. -->
+            <div class="up-layout up-layout-v2">
+                <!-- ВЕРХ: ваш предмет -->
                 <section class="up-panel up-panel-from">
                     <header class="up-panel-head">Ваш предмет</header>
-                    <!-- Чёткий заголовок под предметом: игрок должен сразу видеть,
-                         откуда берётся ставка (задача 25). -->
                     <div class="up-slot">
                         <div class="up-slot-icon" id="up-from-icon"><img class="coin-img" src="coin.png" alt="AG"></div>
                         <div class="up-slot-name" id="up-from-name">Коины</div>
                         <div class="up-slot-value" id="up-from-value">100 <img class="coin-img" src="coin.png" alt="монета"></div>
                     </div>
 
-                    <!-- Задача 45: инвентарь ВНИЗУ нужен — апгрейд капсул без
-                         него невозможен (нечего ставить). Полоса «🎒 Инвентарь»
-                         снова видна: кнопки «Коины» + каждая капсула из инвентаря. -->
+                    <!-- Задача 45: без инвентаря апгрейд капсул невозможен — нечего
+                         ставить. Полоса «Инвентарь» видна всегда. -->
                     <div class="up-from-title" id="up-from-title">🎒 Инвентарь</div>
                     <div class="up-from-tabs" id="up-from-tabs"></div>
 
@@ -417,12 +418,10 @@
                     </div>
                 </section>
 
-                <!-- ЦЕНТР: круг с шансом и кнопка -->
+                <!-- ЦЕНТР: большой круг, итог и кнопка -->
                 <section class="up-panel up-panel-center">
                     <div class="up-circle" id="up-circle">
                         <div class="up-circle-ring" id="up-circle-ring"></div>
-                        <!-- Белой полосы между красным и зелёным больше нет: граница
-                             зон видна по самому контрасту цветов (задача 25). -->
                         <div class="up-arrow-wrap" id="up-arrow"><div class="up-arrow"></div></div>
                         <div class="up-circle-inner">
                             <div class="up-chance" id="up-chance">00.00%</div>
@@ -430,7 +429,6 @@
                         </div>
                     </div>
 
-                    <!-- Итог раунда: аккуратная цифра ПОД кругом (в потоке, не поверх). -->
                     <div class="up-net" id="up-net" aria-live="polite"></div>
                     <div class="up-outcome" id="up-outcome">Выигрыш: 1 000 <img class="coin-img" src="coin.png" alt="монета"></div>
 
@@ -443,12 +441,16 @@
                         <button class="up-chip" data-target="mult:50" onclick="selectUpgradeQuick('mult', 50, this)">x50</button>
                     </div>
 
-                    <!-- Задача 45: цель выбирается ЗДЕСЬ (никакого «ВЫБОРА ПРЕДМЕТА»
-                         справа). x1.12…x50 — множители коинов, а когда в инвентаре
-                         выбран предмет, сетка сама показывает предметы-цели. -->
+                    <button class="up-upgrade-btn" id="upgrade-btn" onclick="onUpgradeButtonClick()">АПГРЕЙД</button>
+                    <div class="up-result" id="upgrade-result">Выбери множитель и жми АПГРЕЙД</div>
+                </section>
+
+                <!-- НИЗ: цель и свой множитель. Цель выбирается здесь (задача 45):
+                     никакой правой панели «ВЫБОР ПРЕДМЕТА» нет. -->
+                <section class="up-panel up-panel-to">
+                    <header class="up-panel-head">Ваша цель</header>
                     <div class="up-to-grid up-to-grid-center" id="up-to-grid"></div>
 
-                    <!-- Задача 45: свой множитель переехал сюда из правой панели. -->
                     <div class="up-custom-mult" id="up-custom-mult">
                         <div class="up-custom-head">
                             <span>Свой множитель</span>
@@ -464,15 +466,9 @@
                             <span>x50</span>
                         </div>
                     </div>
-
-                    <button class="up-upgrade-btn" id="upgrade-btn" onclick="onUpgradeButtonClick()">АПГРЕЙД</button>
-                    <div class="up-result" id="upgrade-result">Выбери множитель и жми АПГРЕЙД</div>
                 </section>
 
-                <!-- Задача 45: правой панели «ВЫБОР ПРЕДМЕТА» больше нет (ни
-                     табов «Коины/Капсулы», ни сетки 6 предметов, ни строки
-                     «Шанс = 90 / X …»). Эти контейнеры оставлены пустыми и
-                     скрытыми только для старого app.js из кэша. -->
+                <!-- Скрытые контейнеры для старого app.js из кэша. -->
                 <div class="up-to-tabs" id="up-to-tabs" hidden></div>
                 <div class="up-to-hint" id="up-to-hint" hidden></div>
             </div>
@@ -565,6 +561,6 @@
         <div class="nav-item" onclick="switchTab('profile', this)"><span class="nav-icon">👤</span> Профиль</div>
     </nav>
 
-    <script src="app.js?v=aura-49" defer></script>
+    <script src="app.js?v=aura-50" defer></script>
 </body>
 </html>

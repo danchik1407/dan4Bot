@@ -279,8 +279,22 @@ main { padding: 0 16px; }
 .mine-btn.active { background: #ff3b30; border-color: #ff3b30; color: white; box-shadow: 0 0 15px rgba(255, 59, 48, 0.5); }
 .mine-btn:active { transform: scale(0.95); }
 .mines-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; width: 100%; max-width: 350px; margin-bottom: 20px; perspective: 1000px; }
-.cell { aspect-ratio: 1; background: var(--card); border-radius: 12px; border: 1px solid #333; cursor: pointer; display: flex; justify-content: center; align-items: center; font-size: 24px; transition: 0.4s; transform-style: preserve-3d; }
+/* Задача 50: открытие клетки в «Минах» стало быстрым — 0.16 с вместо 0.4 с,
+   только transform и фон (без перерисовки раскладки). Игрок жаловался, что
+   поле «тормозит» даже при быстром интернете. */
+.cell {
+    aspect-ratio: 1; background: var(--card); border-radius: 12px; border: 1px solid #333;
+    cursor: pointer; display: flex; justify-content: center; align-items: center; font-size: 24px;
+    transition: transform 0.16s ease-out, background-color 0.16s ease-out, border-color 0.16s ease-out;
+    transform-style: preserve-3d; will-change: transform;
+}
 .cell.flipped { transform: rotateY(180deg); }
+/* Пока сервер думает дольше 180 мс — лёгкая пульсация, чтобы тап не «терялся». */
+.cell.loading { animation: cellWait 0.6s ease-in-out infinite; }
+@keyframes cellWait {
+    0%, 100% { transform: rotateY(180deg) scale(1); }
+    50% { transform: rotateY(180deg) scale(0.9); }
+}
 .cell.flipped.good { background: #34c759; border-color: #34c759; color: white; }
 .cell.flipped.bad { background: #ff3b30; border-color: #ff3b30; color: white; }
 .cell:active { transform: scale(0.95); }
@@ -1183,11 +1197,10 @@ body.maintenance { overflow: hidden; }
     margin: 2px 0 4px;
 }
 /* Панель цели была третьей колонкой — без неё «Ваш предмет» и круг делят экран. */
-.up-layout { grid-template-columns: minmax(0, 1fr) minmax(0, 1.15fr) !important; }
 .up-panel-center .up-custom-mult { margin: 6px 0 8px; }
-@media (min-width: 720px) {
-    .up-layout { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) !important; }
-}
+/* Задача 50: колонки задачи 45 заменены вертикальной раскладкой
+   (.up-layout-v2). Старые правила по .up-layout удалены, иначе они
+   перебивали новые через !important. */
 
 /* ЗАДАЧА 45. Командная арена: честная выплата по ставке. */
 .arena-team-row .row-payout { color: #7ee787; }
@@ -1231,3 +1244,67 @@ body.maintenance { overflow: hidden; }
 .up-to-grid-center .up-to-tile-name { font-size: 11px; }
 .up-to-grid-center .up-to-tile-value { font-size: 9px; }
 .up-to-grid-center .up-to-tile-chance { font-size: 10px; }
+
+/* ============================================================================
+   ЗАДАЧА 50. Апгрейд, дизайн по наброску игрока: вертикальный экран.
+   Сверху — ваш предмет, в центре — большой круг и кнопка, снизу — цель.
+   Раньше было три узкие колонки, и на телефоне круг был мелким.
+   ========================================================================== */
+.up-layout-v2 {
+    display: flex !important;
+    flex-direction: column;
+    gap: 10px;
+    width: 100%;
+    max-width: 460px;
+    margin: 0 auto;
+}
+.up-layout-v2 .up-panel { padding: 12px 14px; border-radius: 20px; }
+/* Центральная панель — визуальный «герой» экрана. */
+.up-layout-v2 .up-panel-center {
+    order: 2;
+    align-items: center;
+    background: radial-gradient(120% 90% at 50% 0%, rgba(0, 122, 255, 0.16), rgba(10, 16, 26, 0.9));
+    border-color: rgba(59, 130, 246, 0.35);
+    box-shadow: 0 18px 40px rgba(0, 0, 0, 0.45), inset 0 1px 0 rgba(255, 255, 255, 0.05);
+}
+.up-layout-v2 .up-panel-from { order: 1; }
+.up-layout-v2 .up-panel-to { order: 3; }
+/* Круг стал крупнее: на телефоне это главный элемент, по нему считают шанс. */
+.up-layout-v2 .up-circle,
+.up-layout-v2 #up-circle {
+    width: min(64vw, 260px);
+    height: min(64vw, 260px);
+    margin: 4px auto 6px;
+}
+.up-layout-v2 .up-chance { font-size: clamp(26px, 8vw, 34px); }
+/* Кнопка — во всю ширину панели, крупная и «нажимабельная». */
+.up-layout-v2 .up-upgrade-btn {
+    width: 100%;
+    margin-top: 4px;
+    padding: 16px 18px;
+    border-radius: 16px;
+    font-size: 17px;
+    letter-spacing: 1.2px;
+}
+/* Чипы множителей ровно в две строки по три. */
+.up-layout-v2 .up-quick-chances {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 6px;
+    width: 100%;
+}
+.up-layout-v2 .up-chip { width: 100%; padding: 9px 0; }
+/* Сетка целей: широкие плитки, читаемые названия и шанс. */
+.up-layout-v2 .up-to-grid-center { gap: 8px; margin: 8px 0 4px; }
+.up-layout-v2 .up-to-grid-center .up-to-tile { padding: 10px 6px; border-radius: 14px; }
+.up-layout-v2 .up-to-grid-center .up-to-tile-name { font-size: 12px; }
+.up-layout-v2 .up-to-grid-center .up-to-tile-chance { font-size: 11px; }
+.up-layout-v2 .up-slot { padding: 12px 10px; border-radius: 16px; }
+.up-layout-v2 .up-slot-icon { width: 46px; height: 46px; }
+.up-layout-v2 .up-outcome { font-size: 15px; }
+/* Телефоны: убираем лишние отступы сверху, чтобы круг не уезжал под сгиб. */
+@media (max-width: 420px) {
+    .up-layout-v2 { gap: 8px; }
+    .up-layout-v2 .up-panel { padding: 10px 12px; }
+    .up-layout-v2 .up-circle, .up-layout-v2 #up-circle { width: min(70vw, 230px); height: min(70vw, 230px); }
+}
