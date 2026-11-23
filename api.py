@@ -87,7 +87,7 @@ async def _http_json(url, method: str = "GET", params=None, payload=None, timeou
 
 # Номер сборки: по нему из /api/health видно, что на сервисе НЕ старый код.
 # Если после деплоя здесь прежнее значение — Render ещё не перезапустился.
-API_BUILD = "2026-10-27-task70-arena-lag-pair-stars"
+API_BUILD = "2026-10-27-task71-maintenance-toggle"
 
 # Момент старта процесса. По нему видно, что сервис только что «проснулся»:
 # Render на бесплатном тарифе усыпляет Web Service через 15 минут без входящих
@@ -653,19 +653,63 @@ ADMIN_ONLY_MESSAGE = ""
 APP_CLOSED_SETTING_KEY = "app_closed"
 
 
-def app_closed_now() -> bool:
-    """Закрыта ли игра для всех, кроме админов. Задача 62: никогда.
+# Задача 71 («поставь всё на техработы»): тумблер вернулся, но уже как
+# ОСОЗНАННОЕ решение админа, а не как забытый флаг в окружении Render.
+# Значение живёт одной строкой в game_settings, читается с кэшем 15 секунд
+# (см. maintenance_now) и НИКОГДА не включается по умолчанию: нет строки —
+# игра открыта всем. Включить и выключить можно из Mini App (админ-панель) или
+# командой бота `техработы вкл` / `техработы выкл`.
+MAINTENANCE_SETTING_KEY = "maintenance_mode"
+_MAINTENANCE_CACHE = {"value": False, "at": 0.0}
+MAINTENANCE_CACHE_TTL = 15.0
 
-    Функция оставлена, потому что её вызывают ответы API (`admin_only_app`,
-    `maintenance`) и старые клиенты читают эти поля. Любое значение
-    game_settings.app_closed игнорируется: игра открыта всем.
+
+def maintenance_now() -> bool:
+    """Включены ли техработы прямо сейчас (только админ может их включить).
+
+    Читаем из game_settings с коротким кэшем: иначе каждый запрос игрока бил бы
+    в базу. Если база недоступна — остаётся последнее известное значение, но
+    НЕ «включено по умолчанию»: упавшая база не должна запирать игру.
     """
-    return False
+    now = time.time()
+    if (now - float(_MAINTENANCE_CACHE["at"] or 0)) < MAINTENANCE_CACHE_TTL:
+        return bool(_MAINTENANCE_CACHE["value"])
+    value = bool(_MAINTENANCE_CACHE["value"])
+    try:
+        row = _load_game_settings().get(MAINTENANCE_SETTING_KEY)
+        if row is not None:
+            value = str(row).strip().lower() in ("1", "true", "yes", "on", "вкл")
+            if str(row).strip().lower() in ("0", "false", "no", "off", "выкл", ""):
+                value = False
+    except Exception:  # noqa: BLE001 — не смогли прочитать, работаем как раньше
+        pass
+    _MAINTENANCE_CACHE.update({"value": value, "at": now})
+    return value
+
+
+def set_maintenance(enabled: bool) -> bool:
+    """Включить/выключить техработы. True — настройка записана в базу."""
+    ok = game_setting_set(MAINTENANCE_SETTING_KEY, "1" if enabled else "0")
+    _MAINTENANCE_CACHE.update({"value": bool(enabled), "at": time.time()})
+    # Настройки кэшируются на 30 с — после записи сбрасываем кэш, иначе админ
+    # переключит тумблер и 30 секунд будет видеть старое значение.
+    _game_settings_cache.update({"at": 0.0, "values": {}})
+    return bool(ok)
+
+
+def app_closed_now() -> bool:
+    """«Приложение закрыто для всех, кроме админов» — это и есть техработы.
+
+    Задача 62 убрала закрытый дефолт (после деплоя игра открывалась не у всех),
+    задача 71 вернула рубильник, но только как явное действие админа. Нет
+    строки в game_settings — False, то есть игра открыта всем.
+    """
+    return maintenance_now()
 
 
 def set_app_closed(closed: bool) -> bool:
-    """Совместимость: переключателя доступа больше нет. Всегда True."""
-    return True
+    """Совместимость со старыми вызовами: то же, что set_maintenance."""
+    return set_maintenance(closed)
 
 
 # ==================== ПОДПИСКА НА КАНАЛ ====================
@@ -818,13 +862,11 @@ def _legacy_access_flags_enabled() -> list:
 
 
 def _maintenance_enabled() -> bool:
-    """Аварийный стоп. Задача 67: выключен НАВСЕГДА — апка открыта всем.
+    """Аварийный стоп: читаем тумблер админа (задача 71).
 
-    Функция и переменная оставлены, потому что их читают ответы API
-    (`maintenance`), админ-API и старые клиенты. Но значение всегда False:
-    запереть вход в игру нельзя ни переменной окружения, ни строкой в базе.
+    Переменные окружения по-прежнему НЕ влияют — рубильник один и он в базе.
     """
-    return False
+    return maintenance_now()
 
 
 MAINTENANCE_MODE = False
@@ -842,16 +884,17 @@ MAINTENANCE_MESSAGE = "🛠️ Технические работы: скоро �
 def can_play(user_id) -> bool:
     """Может ли этот пользователь играть прямо сейчас.
 
-    Задача 67 (прямое требование): «ОТКРОЙ АПКУ ЧТОБЫ ВСЕ ВСЕ МОГЛИ ВХОДИТЬ».
-    Ответ — да, всегда, для любого игрока. Ни техработ, ни «только админы»:
-    функция существует как единая точка, но не блокирует никого. Бан
-    проверяется отдельно и продолжает работать.
+    Задача 67: «ОТКРОЙ АПКУ ЧТОБЫ ВСЕ ВСЕ МОГЛИ ВХОДИТЬ» — по умолчанию игра
+    открыта всем и навсегда, никакие переменные окружения её не закрывают.
 
-    Раньше здесь были рубильники MAINTENANCE_MODE / ADMIN_ONLY_APP, и любой
-    забытый флаг в Render запирал игру всем — на этом мы уже обжигались трижды
-    (задачи 57, 62, 65). Теперь блокировать вход нечем.
+    Задача 71: админ может осознанно включить техработы («поставь всё на тех
+    работы»). Тогда играют только ADMIN_IDS, остальные видят понятный экран.
+    Бан проверяется отдельно и работает всегда.
     """
-    return True
+    uid = _safe_int(user_id, None)
+    if uid is not None and is_admin_id(uid, ADMIN_IDS):
+        return True
+    return not maintenance_now()
 
 
 def require_play_access(user) -> int:
@@ -1474,6 +1517,9 @@ def _user_payload(row, is_admin, user_id=None):
         "maintenance_message": ("" if allowed else _access_denied_message(uid or 0)),
         "admin_only": app_closed_now(),
         "can_play": bool(allowed),
+        # Задача 71: админ-панель рисует тумблер по этому полю.
+        "maintenance_active": maintenance_now(),
+        "maintenance_message": MAINTENANCE_MESSAGE if maintenance_now() else "",
         "created_at": created_text,
         # Задача 43: дни считаем от ПЕРВОГО ЗАХОДА В АППКУ (app_first_seen),
         # а не от регистрации в боте. created_at оставлен для совместимости.
@@ -2981,6 +3027,12 @@ def _crash_reset_waiting(now):
 
 
 class UserAuth(BaseModel): initData: str
+
+
+class AdminMaintenanceRequest(BaseModel):
+    """Задача 71: тумблер техработ из админ-панели."""
+    initData: str
+    enabled: bool = False
 
 
 class UpdateBalance(BaseModel): initData: str; amount: int
@@ -6558,10 +6610,54 @@ async def admin_set_setting(data: AdminSettingRequest):
     touched = {}
     if key in ("love_cooldown_seconds", "love_cooldown_actions"):
         _LOVE_COOLDOWN_CACHE.update({"value": {}, "at": 0.0})
-    if key == "maintenance":
-        touched = {"maintenance": MAINTENANCE_MODE,
-                   "admin_only_app": app_closed_now()}
+    if key in ("maintenance", MAINTENANCE_SETTING_KEY):
+        # Задача 71: тумблер техработ. Принимаем "1"/"0", "on"/"off", true/false.
+        raw = data.value
+        enabled = (raw is True or str(raw).strip().lower()
+                   in ("1", "true", "yes", "on", "вкл", "включить"))
+        if not set_maintenance(enabled):
+            raise HTTPException(status_code=503, detail="Не удалось сохранить настройку")
+        touched = {"maintenance": maintenance_now(),
+                   "admin_only_app": app_closed_now(),
+                   "maintenance_message": MAINTENANCE_MESSAGE}
     return {"ok": True, "key": key, "value": data.value, **touched}
+
+
+@app.post("/api/admin/maintenance")
+async def admin_maintenance(data: UserAuth):
+    """Тумблер техработ: `{"enabled": true}` включает, `false` — выключает.
+
+    Читать состояние можно и без этого вызова: `/api/user` отдаёт `maintenance`
+    в профиле, а админ всегда может войти и увидеть панель.
+    """
+    _require_admin_api(data.initData)
+    return {"ok": True, "maintenance": maintenance_now(),
+            "message": MAINTENANCE_MESSAGE}
+
+
+@app.post("/api/admin/set_maintenance")
+async def admin_set_maintenance(data: AdminMaintenanceRequest):
+    """Включить/выключить техработы. Доступно только ADMIN_IDS."""
+    admin_id = _require_admin_api(data.initData)
+    if not set_maintenance(bool(data.enabled)):
+        raise HTTPException(status_code=503, detail="Не удалось сохранить настройку")
+    logger.warning("Техработы %s (админ %s)",
+                   "ВКЛЮЧЕНЫ" if data.enabled else "выключены", admin_id)
+    return {"ok": True, "maintenance": maintenance_now(),
+            "enabled": bool(data.enabled), "message": MAINTENANCE_MESSAGE}
+
+
+@app.post("/api/admin/game_settings")
+async def admin_game_settings(data: UserAuth):
+    """Что сейчас в настройках, которые читает игра (нужно админ-панели)."""
+    _require_admin_api(data.initData)
+    return {
+        "ok": True,
+        "maintenance": maintenance_now(),
+        "maintenance_message": MAINTENANCE_MESSAGE,
+        "love_cooldown_seconds": int(game_setting_float(
+            "love_cooldown_seconds", love_cooldown_seconds())),
+    }
 
 
 @app.post("/api/admin/give_coins")

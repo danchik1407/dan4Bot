@@ -420,10 +420,34 @@ def _env_flag(name: str, default: bool = False) -> bool:
 
 
 # Задача 67: «ОТКРОЙ АПКУ ЧТОБЫ ВСЕ МОГЛИ ВХОДИТЬ» — в чате играют все и всегда.
-# Флаг оставлен только для совместимости (его читает AdminOnlyMiddleware), но
-# значение всегда False: ни ADMINS_ONLY_BOT, ни AURA_ADMINS_ONLY_BOT больше
-# не закрывают команды. Бан и модерация чата работают отдельно, как раньше.
+# Задача 71: тумблер техработ вернулся, но как ЯВНОЕ действие админа
+# (`техработы вкл` / `техработы выкл` или кнопка в Mini App), а не флаг в
+# окружении Render. Значение читается из game_settings (ключ maintenance_mode):
+# нет строки — игра открыта всем.
 ADMINS_ONLY_BOT = False
+MAINTENANCE_SETTING_KEY = "maintenance_mode"
+# Кэш на 15 секунд: иначе каждый апдейт в чате делал бы запрос в базу.
+_MAINTENANCE_BOT_CACHE = {"value": False, "at": 0.0}
+MAINTENANCE_BOT_TTL = 15.0
+
+
+def maintenance_bot_enabled() -> bool:
+    """Включены ли техработы (только админ может включить, по умолчанию — нет)."""
+    now = time.time()
+    if (now - float(_MAINTENANCE_BOT_CACHE["at"] or 0)) < MAINTENANCE_BOT_TTL:
+        return bool(_MAINTENANCE_BOT_CACHE["value"])
+    value = bool(_MAINTENANCE_BOT_CACHE["value"])
+    raw = _setting_get_sync(MAINTENANCE_SETTING_KEY)
+    if raw is not None:
+        value = str(raw).strip().lower() in ("1", "true", "yes", "on", "вкл")
+    _MAINTENANCE_BOT_CACHE.update({"value": value, "at": now})
+    return value
+
+
+def set_maintenance_bot(enabled: bool) -> bool:
+    ok = _setting_set_sync(MAINTENANCE_SETTING_KEY, "1" if enabled else "0")
+    _MAINTENANCE_BOT_CACHE.update({"value": bool(enabled), "at": time.time()})
+    return bool(ok)
 
 # Что остаётся доступным не-админам, пока идёт закрытие: вход в бот и
 # модерация чата. Это не игра — денег эти команды не начисляют.
@@ -464,7 +488,7 @@ class AdminOnlyMiddleware(BaseMiddleware):
         return None
 
     def _allow(self, event) -> bool:
-        if not ADMINS_ONLY_BOT:
+        if not (ADMINS_ONLY_BOT or maintenance_bot_enabled()):
             return True
         actor = getattr(event, "from_user", None)
         if actor is None:
@@ -3215,6 +3239,53 @@ async def _resolve_pair_member(token):
     if row and row.get("user_id"):
         return int(row["user_id"]), row.get("username") or token
     return None, token
+
+
+# ================= АДМИН: ТЕХРАБОТЫ (задача 71) =================
+# «Поставь всё на тех работы» — тумблер, а не деплой: `техработы вкл` закрывает
+# игру всем, кроме ADMIN_IDS (и в чате, и в Mini App), `техработы выкл` снова
+# открывает. По умолчанию выключено: нет строки в game_settings — играют все.
+@dp.message(F.text.func(lambda t: strip_prefix(t).lower().replace("ё", "е").startswith(
+    ("техработы", "/техработы", "!техработы", "тех работы", "/тех работы", "!тех работы"))))
+async def cmd_maintenance(message: Message):
+    if not message.from_user or message.from_user.is_bot:
+        return
+    if not is_admin(message.from_user.id):
+        return await message.answer("❌ Эта команда доступна только администраторам бота.")
+    arg = strip_prefix(message_text(message)).lower().replace("ё", "е")
+    for word in ("!техработы", "/техработы", "тех работы", "/тех работы", "!тех работы", "техработы"):
+        arg = arg.replace(word, "", 1)
+    arg = arg.strip()
+    current = maintenance_bot_enabled()
+    if arg in ("вкл", "включить", "включи", "on", "1", "да", "старт"):
+        enabled = True
+    elif arg in ("выкл", "выключить", "выключи", "off", "0", "нет", "стоп"):
+        enabled = False
+    elif arg in ("", "статус", "status", "?"):
+        return await message.answer(
+            ("🛠️ <b>Техработы включены</b>\n\nИграют только администраторы. "
+             "Игроки видят «Технические работы: скоро вернёмся».\n\n"
+             "Открыть всем: <code>техработы выкл</code>")
+            if current else
+            ("✅ <b>Техработы выключены</b> — играют все.\n\n"
+             "Закрыть игру: <code>техработы вкл</code>"),
+            parse_mode="HTML")
+    else:
+        return await message.answer(
+            "🛠️ Формат: <code>техработы вкл</code> или <code>техработы выкл</code> "
+            "(без аргумента — показать статус)", parse_mode="HTML")
+    if not await asyncio.to_thread(set_maintenance_bot, enabled):
+        return await message.answer("❌ Не удалось сохранить настройку, попробуй позже.")
+    logger.warning("Техработы %s (админ %s)", "ВКЛЮЧЕНЫ" if enabled else "выключены",
+                   message.from_user.id)
+    if enabled:
+        return await message.answer(
+            "🛠️ <b>Техработы включены</b>\n\nИгра закрыта для всех, кроме администраторов — "
+            "и в чате, и в приложении. Настройка уже применилась (до 15 секунд на сервере).\n\n"
+            "Открыть обратно: <code>техработы выкл</code>", parse_mode="HTML")
+    await message.answer(
+        "✅ <b>Техработы выключены</b> — игра снова открыта всем.\n\n"
+        "Закрыть игру: <code>техработы вкл</code>", parse_mode="HTML")
 
 
 @dp.message(F.text.func(lambda t: strip_prefix(t).lower().replace("ё", "е").startswith(
