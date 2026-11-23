@@ -183,6 +183,14 @@ main { padding: 0 16px; }
    ширины: по ней считается остановка, поэтому картинка всегда встаёт ровно
    под указателем, а не «примерно». */
 .roulette-container { width: 100%; max-width: 360px; margin: 0 auto 16px auto; position: relative; background: linear-gradient(180deg, #151d29, #0c121a); border: 1px solid rgba(59, 130, 246, 0.35); border-radius: 16px; padding: 22px 0 16px 0; overflow: hidden; box-shadow: 0 12px 30px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.05); }
+/* Задача 70: «Skip» рядом с подписью прокрута — не мешает вёрстке и не
+   перекрывает ленту. */
+.roulette-head { position: relative; display: flex; align-items: center; justify-content: center; min-height: 22px; }
+.roulette-skip { position: absolute; right: 0; top: -2px; padding: 4px 10px; border-radius: 999px;
+    border: 1px solid rgba(120, 170, 255, 0.45); background: rgba(20, 34, 60, 0.85);
+    color: #9dc0ff; font-size: 10px; font-weight: 800; letter-spacing: 0.8px;
+    text-transform: uppercase; cursor: pointer; }
+.roulette-skip:active { background: rgba(40, 70, 120, 0.95); }
 .roulette-caption { text-align: center; font-size: 10px; font-weight: 900; letter-spacing: 1.4px; text-transform: uppercase; color: #6f8bb5; margin-bottom: 8px; transition: color 0.25s; }
 .roulette-container.hit .roulette-caption { color: #ffcc00; }
 /* Золотая линия в центре: показывает, какая ячейка сейчас под стрелками. */
@@ -991,13 +999,21 @@ body.maintenance { overflow: hidden; }
 }
 .arena-pie.settled { filter: saturate(1.15) brightness(1.05); }
 /* Командная арена: пока идёт бросок — кольцо «бежит», круг дышит. */
-.arena-circle.rolling .arena-ring { animation: arenaRingSpin 1.6s linear infinite; }
+/* Задача 70: вращающееся кольцо убрано с телефонов — на 350 px круг и так
+   маленький, а анимация рамки каждые 1.6 с заставляла перерисовывать весь
+   круг. Оставляем только на планшетах/десктопе, где есть запас по GPU. */
+@media (min-width: 720px) {
+    .arena-circle.rolling .arena-ring { animation: arenaRingSpin 1.6s linear infinite; }
+}
 @keyframes arenaRingSpin {
     from { transform: rotate(0deg); }
     to { transform: rotate(360deg); }
 }
 .arena-circle.rolling .arena-pie { filter: saturate(1.35) brightness(1.08); }
-.arena-circle.settled .arena-pie { animation: arenaPieWin 0.9s ease-in-out infinite alternate; }
+/* Победная пульсация: конечная (3 такта) вместо бесконечной. Раньше filter
+   крутился вечно даже после закрытия плашки победителя — телефон продолжал
+   греться, а арена «подлагивала». */
+.arena-circle.settled .arena-pie { animation: arenaPieWin 0.9s ease-in-out 3 alternate; }
 @keyframes arenaPieWin {
     from { filter: saturate(1.15) brightness(1.02); }
     to { filter: saturate(1.5) brightness(1.16); }
@@ -1005,6 +1021,18 @@ body.maintenance { overflow: hidden; }
 
 /* Фишки игроков появляются с «поп»-эффектом и не мигают при каждом опросе. */
 .arena-chip { animation: arenaChipIn 0.35s cubic-bezier(0.22, 1.2, 0.4, 1) both; }
+/* Задача 70: на телефоне фишку рисуем без тени и размытия — их больше всего
+   и именно они «съедали» кадры при вращении стрелки. */
+@media (max-width: 719px) {
+    .arena-chip-avatar { box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4); }
+    .arena-pointer-head { filter: none; }
+    .arena-pointer.spinning .arena-pointer-head { filter: drop-shadow(0 0 6px rgba(255, 255, 255, 0.7)); }
+    .arena-pie { transition: none; }
+    .hockey-field.rolling .hockey-scene { animation: none; }
+    /* Победная пульсация сектора — тоже 3 такта, а не вечно. */
+    .hockey-sector.win { animation: arenaSectorWin 0.9s ease-in-out 3 alternate; }
+    .hockey-field.rolling .hockey-ball { animation: none; }
+}
 @keyframes arenaChipIn {
     from { opacity: 0; transform: translate(-50%, -50%) scale(0.6); }
     to { opacity: 1; transform: translate(-50%, -50%) scale(1); }
@@ -1135,6 +1163,40 @@ body.maintenance { overflow: hidden; }
     background: linear-gradient(180deg, #232526, #191a1b);
     border: 1px solid #2f3132; color: #fff; font-family: inherit;
     transition: transform 0.12s ease, border-color 0.2s ease;
+    position: relative; overflow: hidden;
+}
+/* Задача 70: пакеты с бонусом за крупный донат — радужная рамка и блик. */
+.topup-item.is-bonus {
+    border: 1px solid transparent;
+    background:
+        linear-gradient(180deg, #232526, #191a1b) padding-box,
+        linear-gradient(115deg, #ff5f6d, #ffc371, #47e891, #4facfe, #b06ab3, #ff5f6d) border-box;
+    background-size: 100% 100%, 300% 300%;
+    animation: topup-rainbow 6s linear infinite;
+}
+.topup-item.is-bonus::after {
+    content: '';
+    position: absolute; inset: 0;
+    background: linear-gradient(105deg, transparent 35%, rgba(255, 255, 255, 0.18) 50%, transparent 65%);
+    transform: translateX(-120%);
+    animation: topup-shine 3.4s ease-in-out infinite;
+    pointer-events: none;
+}
+.topup-bonus {
+    font-size: 10px; font-weight: 800; letter-spacing: 0.4px; text-transform: uppercase;
+    padding: 3px 8px; border-radius: 999px; white-space: nowrap;
+    background: linear-gradient(90deg, #ff5f6d, #ffc371, #47e891, #4facfe);
+    background-size: 300% 100%;
+    animation: topup-rainbow 4s linear infinite;
+    color: #10131a;
+}
+@keyframes topup-rainbow {
+    0% { background-position: 0% 50%; }
+    100% { background-position: 300% 50%; }
+}
+@keyframes topup-shine {
+    0%, 60% { transform: translateX(-120%); }
+    100% { transform: translateX(120%); }
 }
 .topup-item:active { transform: scale(0.98); }
 .topup-item:disabled { opacity: 0.55; }

@@ -87,7 +87,7 @@ async def _http_json(url, method: str = "GET", params=None, payload=None, timeou
 
 # Номер сборки: по нему из /api/health видно, что на сервисе НЕ старый код.
 # Если после деплоя здесь прежнее значение — Render ещё не перезапустился.
-API_BUILD = "2026-10-27-task67-5h-cooldown-open-app"
+API_BUILD = "2026-10-27-task70-arena-lag-pair-stars"
 
 # Момент старта процесса. По нему видно, что сервис только что «проснулся»:
 # Render на бесплатном тарифе усыпляет Web Service через 15 минут без входящих
@@ -737,11 +737,49 @@ _BOT_USERNAME_CACHE = {"value": "", "at": 0.0}
 # Звёзды не требуют платёжного провайдера (currency = XTR), поэтому счёт
 # создаётся сразу. Выключить можно переменной окружения STARS_ENABLED=0.
 STARS_ENABLED = _env_flag("STARS_ENABLED", True)
+# Задача 70: прайс заказчика (STAR PACKS) + бонусные коины за крупный донат.
+# bonus — ДОПОЛНИТЕЛЬНЫЕ коины сверх пакета, их видно в витрине («+150»).
 STARS_PACKAGES = [
-    {"id": "coins_1000", "coins": 1000, "stars": 5},
-    {"id": "coins_5000", "coins": 5000, "stars": 20},
-    {"id": "coins_15000", "coins": 15000, "stars": 50},
+    {"id": "stars_1", "stars": 1, "coins": 15, "bonus": 0},
+    {"id": "stars_5", "stars": 5, "coins": 100, "bonus": 0},
+    {"id": "stars_10", "stars": 10, "coins": 210, "bonus": 0},
+    {"id": "stars_25", "stars": 25, "coins": 550, "bonus": 0},
+    {"id": "stars_50", "stars": 50, "coins": 1150, "bonus": 150},
+    {"id": "stars_100", "stars": 100, "coins": 2400, "bonus": 400},
+    {"id": "stars_250", "stars": 250, "coins": 6250, "bonus": 1000},
+    {"id": "stars_500", "stars": 500, "coins": 13000, "bonus": 2500},
+    {"id": "stars_1000", "stars": 1000, "coins": 27500, "bonus": 5000},
 ]
+STARS_PACKAGES_BY_ID = {p["id"]: p for p in STARS_PACKAGES}
+
+
+def stars_package_total(package) -> int:
+    """Сколько всего коинов придёт за пакет: цена + бонус."""
+    if not package:
+        return 0
+    return int(package.get("coins") or 0) + int(package.get("bonus") or 0)
+
+
+def stars_package_by_payload(payload: str):
+    """Пакет по payload инвойса: «stars:stars_50:<uid>» или старый «coins:coins_5000:<uid>».
+
+    Старые инвойсы должны оплачиваться: у них другой id, поэтому сначала ищем
+    текущий прайс, а потом — совместимость по числу звёзд.
+    """
+    parts = str(payload or "").split(":")
+    if len(parts) < 2:
+        return None
+    package = STARS_PACKAGES_BY_ID.get(parts[1])
+    if package:
+        return package
+    # Старые инвойсы (задача 3): id — это «за сколько коинов» платили.
+    # Цифра справа — сколько звёзд стоила покупка, по ней и находим пакет
+    # текущего прайса: 1000 → 5★ (100 коинов), 5000 → 25★ (550),
+    # 15000 → 50★ (1150 + 150 бонуса = 1300). Игрок получает не меньше,
+    # чем ожидал, а не «инвойс не найден» после оплаты.
+    legacy = {"coins_1000": 5, "coins_5000": 25, "coins_15000": 50}
+    stars = legacy.get(parts[1])
+    return next((p for p in STARS_PACKAGES if p["stars"] == stars), None)
 STARS_PAYMENTS_TABLE = "stars_payments"
 
 # ==================== IDEMPOTENCY ====================
@@ -3022,6 +3060,9 @@ class UpgradeAck(BaseModel):
 class UpgradeAction(BaseModel):
     initData: str
     request_id: Optional[str] = None
+    # Задача 70: клиент присылает уже сыгранный раунд, чтобы забрать его
+    # результат (ответ потерялся по сети). Ставка не списывается повторно.
+    replay_of: Optional[str] = None
     # Новый контракт: что ставим (item_from) и что хотим получить (item_to).
     item_from: Optional[str] = None
     amount_from: Optional[int] = None
@@ -4017,6 +4058,13 @@ def _is_pending_claim(claim_id) -> bool:
     return isinstance(claim_id, str) and claim_id.startswith("mem-")
 
 
+def _pending_claims_for(user_id) -> list:
+    """Незабранные награды этого игрока в памяти: [(claim_id, запись), …]."""
+    _pending_claim_gc()
+    return [(claim_id, entry) for claim_id, entry in list(_PENDING_CHEST_CLAIMS.items())
+            if str(entry.get("user_id")) == str(user_id)]
+
+
 # ==================== КАПСУЛА ИЗ СУНДУКА ====================
 # Шанс выпадения обычной капсулы: золотой сундук — 10%, обычный — 0.1%.
 # Бросок независимый: капсула идёт В ДОБАВОК к коинам/ключу.
@@ -4554,6 +4602,83 @@ async def claim_chest(auth: "ClaimChestRequest"):
             "inventory": inventory, "new_balance": new_coins, "new_keys": new_keys}
 
 
+@app.post("/api/chest_pending_claim")
+async def chest_pending_claim(data: UserAuth):
+    """Есть ли незабранная награда сундука — и сразу забрать её (задача 70).
+
+    Заказчик: открыл сундук, вышел из аппки на анимации, вернулся — КД идёт,
+    а награды нет. Награда ВСЕГДА лежала в chest_claims незабранной: её выдаёт
+    только кнопка «Забрать», а клиент после перезахода про неё не спрашивал.
+
+    Теперь: (1) при заходе клиент спрашивает этот эндпоинт, (2) если награда
+    есть — зачисляем её сразу и возвращаем, что именно пришло.
+    """
+    user = verify_telegram_data(data.initData)
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid auth data")
+    user_id = _safe_int(user.get("id"), None)
+    if user_id is None:
+        raise HTTPException(status_code=400, detail="Некорректный id пользователя")
+    check_ban(str(user_id))
+
+    try:
+        pending = await asyncio.to_thread(_fetch_unclaimed_claims, user_id)
+    except ChestUnavailable as exc:
+        _log_chest_error("pending claim: таблица недоступна", exc, user_id)
+        return {"ok": True, "available": False, "pending": 0}
+    except Exception as exc:  # noqa: BLE001
+        _log_chest_error("pending claim: чтение", exc, user_id)
+        return {"ok": True, "available": False, "pending": 0}
+    if not pending:
+        # Задача 70: награда могла остаться ТОЛЬКО в памяти процесса (таблица
+        # chest_claims недоступна, миграция не применена). Ищем и её — иначе
+        # именно та награда, из-за которой игрок писал «сундук не выдался»,
+        # так и осталась бы висеть.
+        pending_mem = _pending_claims_for(user_id)
+        if not pending_mem:
+            return {"ok": True, "available": True, "pending": 0, "claimed": 0,
+                    "reward_coins": 0, "reward_keys": 0, "items": []}
+        pending = [{"id": claim_id, "reward_coins": int(item.get("coins") or 0),
+                    "reward_keys": int(item.get("keys") or 0),
+                    "reward_item": str(item.get("item") or ""),
+                    "reward_item_amount": int(item.get("item_amount") or 0)}
+                   for claim_id, item in pending_mem]
+
+    totals = {"coins": 0, "keys": 0, "items": []}
+    claimed = 0
+    for item in pending:
+        claim_id = item.get("id")
+        if claim_id is None:
+            continue
+        try:
+            # Повторяем ровно путь кнопки «Забрать»: занимаем и зачисляем.
+            response = await claim_chest(ClaimChestRequest(initData=data.initData,
+                                                          claim_id=claim_id))
+        except HTTPException as exc:
+            logger.warning("Автовыдача сундука id=%s не прошла: %s", claim_id, exc.detail)
+            continue
+        except Exception as exc:  # noqa: BLE001
+            _log_chest_error("автовыдача сундука id=%s" % claim_id, exc, user_id)
+            continue
+        if response.get("already_claimed"):
+            continue
+        totals["coins"] += int(response.get("reward_coins") or 0)
+        totals["keys"] += int(response.get("reward_keys") or 0)
+        item_id = str(response.get("reward_item") or "")
+        amount = int(response.get("reward_item_amount") or 0)
+        if item_id and amount > 0:
+            totals["items"].extend([item_id] * amount)
+        claimed += 1
+        totals["new_balance"] = response.get("new_balance")
+        totals["new_keys"] = response.get("new_keys")
+
+    return {"ok": True, "available": True, "pending": len(pending), "claimed": claimed,
+            "reward_coins": totals["coins"], "reward_keys": totals["keys"],
+            "items": totals["items"],
+            "new_balance": totals.get("new_balance"), "new_keys": totals.get("new_keys"),
+            "detail": ("Награда за сундук зачислена" if claimed else "Награду забрать не удалось")}
+
+
 @app.post("/api/shop_items")
 async def get_shop_items(data: ShopCatalogRequest):
     """Shop catalog for the current user. Admin-only capsules are never included for regular users,
@@ -5024,6 +5149,19 @@ async def upgrade_action(data: UpgradeAction):
         cached["idempotent_replay"] = True
         return cached
 
+    # Задача 70: «Сервер не ответил, а ставка сгорела». Клиент, не дождавшись
+    # ответа, присылает replay_of=<request_id прошлого раунда>: раунд уже
+    # сыгран и записан, надо только вернуть его результат. Ставка не
+    # списывается, баланс не двигается — ответ берётся из журнала идемпотентности
+    # (или из upgrade_log, если ключ успел истечь).
+    if data.replay_of:
+        replay = _upgrade_replay(user_id, str(data.replay_of))
+        if replay is not None:
+            replay["replay"] = True
+            return replay
+        raise HTTPException(status_code=404,
+                            detail="Раунд не найден — ставка не списана, можно ставить заново")
+
     try:
         source, amount, target, _ = _upgrade_normalize_request(data)
     except HTTPException:
@@ -5174,6 +5312,25 @@ async def upgrade_action(data: UpgradeAction):
     raise HTTPException(
         status_code=409,
         detail="Ставка не списана: баланс изменился во время раунда. Попробуйте ещё раз")
+
+
+def _upgrade_replay(user_id: int, request_id: str):
+    """Вернуть результат уже сыгранного раунда по его request_id (задача 70).
+
+    Два источника: журнал идемпотентности (там лежит ровно тот ответ, который
+    получил бы клиент) и upgrade_log (если ключ истёк или таблица недоступна).
+    None — раунда нет, значит ставка НЕ списывалась.
+    """
+    key = _idempotency_key(user_id, request_id, "upgrade")
+    cached = idempotency_lookup(key)
+    if cached is not None:
+        return cached
+    # Журнал идемпотентности — единственный точный источник: в нём лежит ровно
+    # тот ответ, который должен был получить клиент. Если ключа нет (истёк TTL
+    # или таблица недоступна), НЕ подставляем «какой-нибудь» раунд из лога:
+    # так игрок мог получить чужой (уже показанный) результат. Пусть повторит —
+    # ставка в этом случае не списана.
+    return None
 
 
 @app.post("/api/upgrade_pending")
@@ -6269,13 +6426,21 @@ async def stars_invoice(data: StarsInvoiceRequest):
     if not BOT_TOKEN:
         raise HTTPException(status_code=503, detail="BOT_TOKEN не задан")
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/createInvoiceLink"
+    total = stars_package_total(package)
+    title = f"{package['stars']} ⭐ → {total} коинов"
+    description = f"{package['coins']} коинов"
+    if package.get("bonus"):
+        description += f" + {package['bonus']} бонус за крупный донат"
+    description += " в AURA GAME"
     payload = {
-        "title": f"{package['coins']} коинов",
-        "description": f"Пакет {package['coins']} коинов в AURA GAME",
-        "payload": f"coins:{package['id']}:{uid}",
+        "title": title,
+        "description": description,
+        # Префикс «stars» — новый прайс; старые инвойсы с «coins:» тоже
+        # принимаются (stars_package_by_payload), чтобы никто не потерял оплату.
+        "payload": f"stars:{package['id']}:{uid}",
         "currency": "XTR",
         # Для Stars цена передаётся в самом «звёздном» номинале, без *100.
-        "prices": [{"label": f"{package['coins']} коинов", "amount": int(package["stars"])}],
+        "prices": [{"label": f"{total} коинов", "amount": int(package["stars"])}],
     }
     try:
         result = await _http_json(url, method="POST", payload=payload, timeout=10)
@@ -6285,12 +6450,16 @@ async def stars_invoice(data: StarsInvoiceRequest):
         detail = (result or {}).get("description") if isinstance(result, dict) else ""
         raise HTTPException(status_code=503, detail=detail or "Не удалось создать счёт")
     return {"ok": True, "enabled": True, "url": result.get("result"),
-            "coins": package["coins"], "stars": package["stars"]}
+            "coins": package["coins"], "bonus": package.get("bonus", 0),
+            "total": total, "stars": package["stars"]}
 
 
 @app.get("/api/stars_packages")
 async def stars_packages():
-    return {"enabled": STARS_ENABLED, "packages": STARS_PACKAGES, "currency": "XTR"}
+    # Витрина: у каждого пакета есть total с бонусом — клиент подсвечивает
+    # радужным именно бонусные пакеты (задача 70).
+    packages = [{**p, "total": stars_package_total(p)} for p in STARS_PACKAGES]
+    return {"enabled": STARS_ENABLED, "packages": packages, "currency": "XTR"}
 
 
 def stars_credit(user_id, coins, charge_id, stars: int = 0) -> Optional[int]:
@@ -6317,6 +6486,45 @@ def stars_credit(user_id, coins, charge_id, stars: int = 0) -> Optional[int]:
         logger.warning("stars_payments недоступна: %s", exc)
         return None
     return award_coins(uid, int(coins))
+
+
+def _stars_periods(rows) -> dict:
+    """Покупки звёзд по периодам: сколько раз, сколько звёзд и коинов (задача 70)."""
+    now = time.time()
+    periods = {"24h": now - 86400, "week": now - 7 * 86400, "month": now - 30 * 86400}
+    result = {name: {"count": 0, "stars": 0, "coins": 0} for name in ("24h", "week", "month", "all")}
+    for row in rows or []:
+        created = _parse_timestamp(row.get("created_at"))
+        stamp = created if created is not None else 0
+        stars = _safe_int(row.get("stars"), 0)
+        coins = _safe_int(row.get("coins"), 0)
+        for name, edge in periods.items():
+            if stamp >= edge:
+                result[name]["count"] += 1
+                result[name]["stars"] += stars
+                result[name]["coins"] += coins
+        result["all"]["count"] += 1
+        result["all"]["stars"] += stars
+        result["all"]["coins"] += coins
+    return result
+
+
+def stars_stats_sync() -> dict:
+    """Статистика донатов: по периодам + сколько всего (для админки и `стата бота`)."""
+    try:
+        rows = (supabase.table(STARS_PAYMENTS_TABLE)
+                .select("stars, coins, created_at").execute().data or [])
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("stars_payments недоступна для статистики: %s", exc)
+        return {"ok": False, "detail": f"{type(exc).__name__}: {exc}"}
+    return {"ok": True, "periods": _stars_periods(rows), "rows": len(rows)}
+
+
+@app.post("/api/stars_stats")
+async def stars_stats(data: UserAuth):
+    """Статистика покупок за звёзды — только админам."""
+    _require_admin_api(data.initData)
+    return await asyncio.to_thread(stars_stats_sync)
 
 
 # ---------- Админ-API (то же, что показывает бот) ----------
