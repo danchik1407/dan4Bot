@@ -12,7 +12,7 @@
     <meta http-equiv="Pragma" content="no-cache">
     <meta http-equiv="Expires" content="0">
     <title>AURA GAME</title>
-    <link rel="stylesheet" href="style.css?v=aura-74">
+    <link rel="stylesheet" href="style.css?v=aura-75">
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
 </head>
 <body>
@@ -233,9 +233,9 @@
                     <div class="stat-box"><span class="stat-icon">🔑</span><span class="stat-value" id="profile-keys">0</span><span class="stat-label">Ключи</span></div>
                     <div class="stat-box"><span class="stat-icon">📅</span><span class="stat-value" id="profile-days">0</span><span class="stat-label">Дней с нами</span></div>
                 </div>
-                <h3 style="margin-top: 25px; margin-bottom: 10px; text-align: left;">🎒 Инвентарь</h3>
-                <div class="inventory-grid" id="inventory"></div>
-
+                <!-- Задача 75: инвентарь из профиля убран — он живёт во вкладке
+                     «Карман» (там же баланс, ключи и любовь). В профиле остаются
+                     только факты про игрока: дни, достижения, пассивка, рефералы. -->
                 <!-- Задача 74: «Достижения» — маленькие факты про самого игрока
                      (сколько потратил, лучший занос, лучший апгрейд), а не про
                      имущество: имущество живёт в «Кармане». Значения считает
@@ -320,20 +320,40 @@
                             onclick="openTopUp()">Открыть магазин Stars</button>
                 </div>
 
-                <!-- Задача 71: техработы. Карточку видит ТОЛЬКО админ: включает
-                     игру для всех, выключает — тоже. У игроков её нет вовсе. -->
-                <div class="profile-extra admin-maint-card" id="admin-maint-card" hidden>
-                    <div class="extra-head">
-                        <span class="extra-title">🛠️ Техработы</span>
-                        <span class="extra-value" id="admin-maint-state">выключены</span>
-                    </div>
-                    <div class="extra-hint" id="admin-maint-hint">
-                        Выключены — играют все. Включи, чтобы закрыть игру всем, кроме админов.
-                    </div>
-                    <button class="extra-btn" id="admin-maint-btn" type="button"
-                            onclick="toggleMaintenance()">Включить техработы</button>
-                </div>
+            </div>
+        </section>
 
+        <!-- Задача 75: админ-панель. Вкладки и пункта в меню у игроков нет:
+             элемент скрыт, а switchTab('admin') для не-админа ничего не делает.
+             Сюда переехал тумблер техработ (задача 71) — в профиле игрока ему
+             не место. -->
+        <section id="tab-admin" class="tab">
+            <div class="page-header"><h2>⚙️ Админ-панель</h2></div>
+
+            <div class="profile-extra admin-maint-card" id="admin-maint-card" hidden>
+                <div class="extra-head">
+                    <span class="extra-title">🛠️ Техработы</span>
+                    <span class="extra-value" id="admin-maint-state">выключены</span>
+                </div>
+                <div class="extra-hint" id="admin-maint-hint">
+                    Выключены — играют все. Включи, чтобы закрыть игру всем, кроме админов.
+                </div>
+                <button class="extra-btn" id="admin-maint-btn" type="button"
+                        onclick="toggleMaintenance()">Включить техработы</button>
+            </div>
+
+            <div class="profile-extra">
+                <div class="extra-head">
+                    <span class="extra-title">👥 Игроки</span>
+                    <span class="extra-value">топ по балансу</span>
+                </div>
+                <div class="extra-hint">
+                    Точная статистика бота — командой <b>стата бота</b> в личке бота,
+                    схема базы — командой <b>бд</b>.
+                </div>
+                <div class="admin-players" id="admin-players">
+                    <div class="ach-empty">Загрузка…</div>
+                </div>
             </div>
         </section>
 
@@ -646,8 +666,10 @@
         <div class="nav-item" onclick="switchTab('shop', this)"><span class="nav-icon">🛒</span> Магазин</div>
         <div class="nav-item" onclick="switchTab('pocket', this)"><span class="nav-icon">💰</span> Карман</div>
         <div class="nav-item" onclick="switchTab('profile', this)"><span class="nav-icon">👤</span> Профиль</div>
+        <!-- Задача 75: пункт есть в разметке, но у игроков скрыт (hidden в app.js). -->
+        <div class="nav-item" id="nav-admin" onclick="switchTab('admin', this)" hidden><span class="nav-icon">⚙️</span> Админ</div>
     </nav>
 
-    <script src="app.js?v=aura-74" defer></script>
+    <script src="app.js?v=aura-75" defer></script>
 </body>
 </html>

@@ -410,6 +410,15 @@ main { padding: 0 16px; }
    перебивал браузерный [hidden], и надпись висела поверх профиля. */
 .soon-overlay[hidden], .profile-extra.is-soon .soon-overlay[hidden] { display: none !important; }
 
+/* ============ АДМИН-ВКЛАДКА (задача 75) ============
+   Пункт меню и сама вкладка есть только у админа. Восемь пунктов в нижнем
+   меню не влезают на узкий экран, поэтому у админа они чуть компактнее. */
+#nav-admin[hidden] { display: none !important; }
+.bottom-nav.has-admin .nav-item { padding: 0 2px; }
+.bottom-nav.has-admin .nav-icon { font-size: 19px; }
+.bottom-nav.has-admin { gap: 2px; }
+.admin-players { display: flex; flex-direction: column; gap: 6px; margin-bottom: 10px; }
+
 /* ============ ДОСТИЖЕНИЯ ПРОФИЛЯ (задача 74) ============
    Плотный список «подпись — значение». Строки в одну линию не влезают на
    узком экране, поэтому значение всегда отдельной колонкой справа, а подпись
