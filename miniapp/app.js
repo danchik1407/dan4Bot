@@ -256,6 +256,8 @@ let loveState = null;
 // Задача 74: «Достижения» профиля — строки, посчитанные сервером
 // (/api/profile_stats). Клиент ничего не складывает сам: только рисует.
 let profileStats = null;
+// Задача 75: список игроков для админ-вкладки (обновляется при её открытии).
+let adminPlayers = [];
 let profileStatsAt = 0;
 const PROFILE_STATS_TTL = 60 * 1000;      // не чаще раза в минуту
 let referralBound = false;
@@ -561,8 +563,7 @@ function updateUI() {
     const daysEl = document.getElementById('profile-days');
     if (daysEl) daysEl.innerText = daysInGame;
     document.querySelectorAll('.game-balance-val').forEach(el => { el.innerText = shown; });
-    const inv = document.getElementById('inventory');
-    if (inv) inv.innerHTML = inventoryGridHtml();
+    // Задача 75: инвентарь в профиле больше не рисуем — он в «Кармане».
     renderUpgrade();
     updateUpgradeStatsUI();
     renderPocket();
@@ -753,8 +754,57 @@ function scheduleProfileRetry(delay = 5000) {
 // приложения, без деплоя.
 let maintToggleBusy = false;
 
+// Задача 75: пункт «⚙️ Админ» в нижнем меню существует только у админа.
+// У игроков его нет даже в разметке на экране (hidden), поэтому «кнопку
+// техработ видят только админы» — это не уговор, а единственное состояние.
+function syncAdminNav() {
+    const nav = document.getElementById('nav-admin');
+    const bottom = document.getElementById('main-nav');
+    // Задача 75 (заказчик): «кнопку техработ видно только админам». Поэтому
+    // пункт «⚙️ Админ» появляется строго у админа — и в разметке, и в меню.
+    if (nav) nav.hidden = !isAdmin;
+    // У админа пунктов семь — на узком экране им тесно, включаем компактный режим.
+    if (bottom) bottom.classList.toggle('has-admin', isAdmin);
+    const tab = document.getElementById('tab-admin');
+    if (tab && !isAdmin) tab.classList.remove('active');
+}
+
+async function renderAdminPlayers() {
+    const box = document.getElementById('admin-players');
+    if (!box) return;
+    if (adminPlayers.length) {
+        box.innerHTML = adminPlayersHtml();
+        return;
+    }
+    box.innerHTML = '<div class="ach-empty">Загрузка…</div>';
+    try {
+        const res = await fetch(`${API_URL}/api/global_top`);
+        const payload = await res.json().catch(() => null);
+        const users = Array.isArray(payload) ? payload : [];
+        adminPlayers = users.slice(0, 10).map(u => ({
+            name: u.username || `id${u.user_id || ''}`,
+            coins: _safeCoins(u.coins),
+        }));
+    } catch (e) {
+        adminPlayers = [];
+    }
+    box.innerHTML = adminPlayers.length ? adminPlayersHtml()
+        : '<div class="ach-empty">Список игроков временно недоступен</div>';
+}
+
+function adminPlayersHtml() {
+    return adminPlayers.map((player, index) => `
+        <div class="ach-row">
+            <span class="ach-icon">${index + 1}</span>
+            <span class="ach-body"><span class="ach-label">${escapeHtml(player.name)}</span></span>
+            <span class="ach-value">${formatCoins(player.coins)}</span>
+        </div>
+    `).join('');
+}
+
 function renderAdminMaintenanceCard(data) {
     const card = document.getElementById('admin-maint-card');
+    syncAdminNav();
     if (!card) return;
     if (!isAdmin) { card.hidden = true; return; }
     card.hidden = false;
@@ -915,6 +965,15 @@ function switchTab(tabId, element) {
     document.getElementById('tab-' + tabId).classList.add('active');
     document.querySelectorAll('.nav-item').forEach(nav => nav.classList.remove('active'));
     if (element) element.classList.add('active');
+    // Задача 75: вкладка админа. Игрок до неё не дойдёт: пункт меню скрыт, а
+    // прямой вызов из консоли возвращает на «Играть».
+    if (tabId === 'admin') {
+        if (!isAdmin) { switchTab('play'); return; }
+        renderAdminMaintenanceCard({ maintenance_active: serverMaintenance });
+        adminPlayers = [];
+        renderAdminPlayers();
+        return;
+    }
     if (tabId === 'top') { loadGlobalTop(); }
     if (tabId === 'shop') {
         // Задача 43: витрина рисуется мгновенно (кэш), обновление — фоном.
