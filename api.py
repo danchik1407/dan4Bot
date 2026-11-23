@@ -88,7 +88,7 @@ async def _http_json(url, method: str = "GET", params=None, payload=None, timeou
 
 # Номер сборки: по нему из /api/health видно, что на сервисе НЕ старый код.
 # Если после деплоя здесь прежнее значение — Render ещё не перезапустился.
-API_BUILD = "2026-10-27-task83-love-rewards-fixed"
+API_BUILD = "2026-10-27-task84-rewards-always"
 
 # Момент старта процесса. По нему видно, что сервис только что «проснулся»:
 # Render на бесплатном тарифе усыпляет Web Service через 15 минут без входящих
@@ -7242,26 +7242,28 @@ async def love_state(data: UserAuth):
         # начислить (действие без интернета), награждаем здесь. Размер награды
         # и название этапа наружу не уходят, только флаг «стало теплее».
         score = _safe_int(state.get("unlove"), 0)
-        if score > 0:
-            try:
-                granted = claim_solo_stage_rewards(supabase, uid, score)
-            except Exception:
-                granted = []
-            if granted:
-                state["stage_up"] = True
-                # Задача 74: призы за этапы отношений — тоже «заработано».
-                # Задача 83: сумма — только те уровни, за которые заплатили
-                # этому игроку (награды стали персональными).
-                reward_total = sum(int(g.get("reward") or 0) for g in granted
-                                   if _granted_for(g, uid))
+        # Задача 84: даже при нулевом счёте проверяем долг — награда могла не
+        # дойти раньше, и «0 Unlove» не повод её не возвращать.
+        try:
+            granted = claim_solo_stage_rewards(supabase, uid, score)
+        except Exception:
+            granted = []
+        if granted:
+            state["stage_up"] = True
+            # Задача 74: призы за этапы отношений — тоже «заработано».
+            # Задача 83: сумма — только те уровни, за которые заплатили
+            # этому игроку (награды стали персональными).
+            reward_total = sum(int(g.get("reward") or 0) for g in granted
+                               if _granted_for(g, uid))
+            if reward_total:
                 stats_note(uid, coins_earned=reward_total, won_love=reward_total)
-                # Задача 81: одиночке — то же поздравление в аппке.
-                state["stage_rewards"] = [
-                    _stage_celebration_payload(stage, stage.get("reward"), solo=True,
-                                               balance=_safe_int((_db_user(uid) or {}).get("coins"), None))
-                    for stage in granted
-                ]
-                await _love_stage_dm({"user_a": uid}, granted)
+            # Задача 81: одиночке — то же поздравление в аппке.
+            state["stage_rewards"] = [
+                _stage_celebration_payload(stage, stage.get("reward"), solo=True,
+                                           balance=_safe_int((_db_user(uid) or {}).get("coins"), None))
+                for stage in granted
+            ]
+            await _love_stage_dm({"user_a": uid}, granted)
         return state
     # Пара: та же страховка через общую таблицу наград.
     row = _love_relationship_for(uid)
