@@ -912,6 +912,30 @@ body.maintenance { overflow: hidden; }
 .love-badge b { color: #fff; }
 .love-badge-stage { color: rgba(255, 215, 236, 0.85); font-weight: 600; }
 
+/* Задача 82: плашка отношений в две строки и обе — по центру.
+   Сверху «💗 В отношениях с Имя», снизу статус пары («Близость»).
+   Раньше статус стоял сбоку от надписи и читался как часть имени. */
+.love-badge-pair {
+    display: inline-flex; flex-direction: column; align-items: center;
+    justify-content: center; gap: 3px; text-align: center;
+    padding: 8px 16px; border-radius: 16px;
+    max-width: 100%; white-space: normal; flex-wrap: nowrap;
+}
+.love-badge-line {
+    display: flex; align-items: baseline; justify-content: center; gap: 5px;
+    max-width: 100%; min-width: 0;
+}
+.love-badge-line b {
+    max-width: 60vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.love-badge-status {
+    display: block; width: 100%; text-align: center;
+    font-size: 12.5px; font-weight: 800; letter-spacing: 0.2px;
+    color: #ffd7ec;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.love-badge-pair .love-badge-stage { font-size: 12px; }
+
 .profile-extra {
     margin-top: 14px; padding: 14px;
     background: var(--card); border: 1px solid #262626; border-radius: 16px;

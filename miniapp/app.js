@@ -1849,10 +1849,22 @@ function freeLoveLabel() {
     return /[ая]$/i.test(name) ? 'Свободна' : 'Свободен';
 }
 
+// Задача 82: «В отношениях с <имя>» — ровно человеческое имя, без @ника и без
+// «id123». Сервер уже присылает first_name (partner_name); если его нет —
+// подстраховываемся: username без «@», и только в крайнем случае «партнёр».
+function partnerDisplayName() {
+    const raw = String((loveState && loveState.partner_name) || '').trim();
+    if (raw) return raw.replace(/^@/, '').replace(/^id\d+$/i, 'партнёр');
+    const nick = String((loveState && loveState.partner_username) || '').trim();
+    if (nick) return nick.replace(/^@/, '');
+    return 'партнёр';
+}
+
 function renderLoveBadge() {
     const badge = document.getElementById('profile-love-badge');
     const freeBadge = document.getElementById('profile-love-free');
     const stage = document.getElementById('profile-love-stage');
+    const partnerEl = document.getElementById('profile-love-partner');
     const freeText = document.getElementById('profile-love-free-text');
     const freeStageEl = document.getElementById('profile-love-free-stage');
     if (!badge && !freeBadge) return;
@@ -1865,19 +1877,25 @@ function renderLoveBadge() {
         // убраны по просьбе заказчика: сумма в плашке дублировала баланс и
         // путала («ур. 1 · 10 Unlove» рядом с коинами). Счёт игрока виден в
         // карточке отношений и в «любовь инфа».
+        // Задача 82: статус — отдельной строкой ПО ЦЕНТРУ под надписью.
         if (freeStageEl) {
+            const title = String((loveState && loveState.solo_title) || '').trim();
             const level = Number(loveState && loveState.solo_level) || 1;
-            freeStageEl.textContent = ` · ур. ${level}`;
+            freeStageEl.textContent = title ? title : `Уровень ${level}`;
         }
         return;
     }
+    // Задача 82: имя партнёра прямо в надписи «В отношениях с …».
+    if (partnerEl) partnerEl.textContent = partnerDisplayName();
     // Задача 60: в плашке остаётся ТОЛЬКО название ранга. Раньше там же
     // висели партнёр (`id1615872008` — сырой id из базы), «0 Love», «до ур. 2: 50»
     // и дни: игрок видел четыре разных числа и не понимал, что из этого важно.
     // Уровень и прогресс остаются в карточке отношений, в плашке — только ранг.
     if (stage) {
-        const title = loveState.stage && loveState.stage.title ? String(loveState.stage.title) : '';
-        stage.textContent = title;
+        // Название статуса пары: сервер отдаёт stage_title («Близость»).
+        const title = (loveState && (loveState.stage_title
+            || (loveState.stage && loveState.stage.title))) || '';
+        stage.textContent = String(title || '');
     }
 }
 

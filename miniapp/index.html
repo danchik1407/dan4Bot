@@ -12,7 +12,7 @@
     <meta http-equiv="Pragma" content="no-cache">
     <meta http-equiv="Expires" content="0">
     <title>AURA GAME</title>
-    <link rel="stylesheet" href="style.css?v=aura-81">
+    <link rel="stylesheet" href="style.css?v=aura-82">
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
 </head>
 <body>
@@ -222,16 +222,20 @@
             <div class="profile-card-pro">
                 <!-- Плашка отношений (задача 25): появляется над аватаркой, если у
                      игрока есть пара. Данные приходят из /api/love_state. -->
-                <!-- Задача 60: в плашке только название ранга пары. Имя партнёра,
-                     Love, дни и «до уровня» из неё убраны — они остаются в
-                     карточке отношений, а плашка не должна путать игрока. -->
-                <div class="love-badge" id="profile-love-badge" hidden>
-                    💗 В отношениях
-                    <span class="love-badge-stage" id="profile-love-stage"></span>
+                <!-- Задача 82: заказчик просил «В отношениях с <имя>» и под низом
+                     ПО ЦЕНТРУ статус пары. Имя — человеческое (first_name),
+                     без @ника и без id. Статус стоит отдельной строкой под
+                     надписью, а не сбоку. -->
+                <div class="love-badge love-badge-pair" id="profile-love-badge" hidden>
+                    <span class="love-badge-line">
+                        💗 В отношениях с <b id="profile-love-partner">партнёр</b>
+                    </span>
+                    <span class="love-badge-status" id="profile-love-stage"></span>
                 </div>
                 <!-- Свободен/свободна: зелёная плашка вместо пустого места. -->
-                <div class="love-badge love-badge-free" id="profile-love-free" hidden>
-                    💚 <b id="profile-love-free-text">Свободен</b><span class="love-badge-stage" id="profile-love-free-stage"></span>
+                <div class="love-badge love-badge-free love-badge-pair" id="profile-love-free" hidden>
+                    <span class="love-badge-line">💚 <b id="profile-love-free-text">Свободен</b></span>
+                    <span class="love-badge-status" id="profile-love-free-stage"></span>
                 </div>
                 <div class="profile-avatar-large"><img id="profile-avatar-large" src="avatar_placeholder.svg" alt="Avatar"></div>
                 <h2 class="profile-name" id="profile-name">Загрузка...</h2>
@@ -705,6 +709,6 @@
          маленькой кнопкой ⚙️ рядом с ником в шапке (см. #admin-gear). -->
     </nav>
 
-    <script src="app.js?v=aura-81" defer></script>
+    <script src="app.js?v=aura-82" defer></script>
 </body>
 </html>

@@ -4001,3 +4001,40 @@ N коинов, и всё».
 
 Билд `2026-10-27-task81-level-up-celebration`, `?v=aura-81`.
 
+
+## 4.50. Задача 82: плашка отношений — имя человека и статус по центру
+
+Заказчик (голосом): «В отношениях с кем? Просто имя человека, не юзер.
+А под низом, прямо по центру — не сбоку, где-то слева, справа — под надписью
+«В отношениях с» пишешь, какой статус. Например, „Близость“ — просто под этим
+слово „Близость“ по центру».
+
+Раньше в плашке профиля рядом с «В отношениях с …» стоял ник/партнёр из базы
+(`@ник` или сырой `id1615872008`) и статус назывался «ур. 3» в той же строке —
+глаз читал это как часть имени.
+
+Стало (Mini App, профиль):
+
+    💗 В отношениях с Аня
+            Близость
+
+    💚 Свободна
+            Признание
+
+- `miniapp/index.html` — плашка стала двухстрочной:
+  `.love-badge-line` («💗 В отношениях с <b id="profile-love-partner">») и
+  `.love-badge-status id="profile-love-stage"` отдельной строкой. У плашки
+  «Свободен(на)» то же самое (`#profile-love-free-stage`), класс `love-badge-pair`.
+- `miniapp/style.css` — `.love-badge-pair` (`display: inline-flex;
+  flex-direction: column; align-items: center; text-align: center`),
+  `.love-badge-line` (baseline, центр, ellipsis на длинном имени),
+  `.love-badge-status` (`display: block; width: 100%; text-align: center`).
+  Статус физически не может встать сбоку.
+- `miniapp/app.js` — `partnerDisplayName()`: срезает `@`, `id<число>` заменяет
+  на «партнёр», пустое имя → «партнёр»; `renderLoveBadge()` пишет имя в
+  `#profile-love-partner`, а статус — `love_state.stage_title`
+  (у одиночки `solo_title`, иначе «Уровень N»).
+- Сервер не менялся: `/api/love_state` уже отдаёт `partner_name` (first_name/name,
+  без @ника — `_love_partner_name`) и `stage_title`. Миграций нет.
+
+Билд `2026-10-27-task82-relationship-badge`, `?v=aura-82`.
