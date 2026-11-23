@@ -87,7 +87,7 @@ async def _http_json(url, method: str = "GET", params=None, payload=None, timeou
 
 # Номер сборки: по нему из /api/health видно, что на сервисе НЕ старый код.
 # Если после деплоя здесь прежнее значение — Render ещё не перезапустился.
-API_BUILD = "2026-10-27-task78-admin-gear-in-header"
+API_BUILD = "2026-10-27-task79-stats-fix-love-cd-switch"
 
 # Момент старта процесса. По нему видно, что сервис только что «проснулся»:
 # Render на бесплатном тарифе усыпляет Web Service через 15 минут без входящих
@@ -687,6 +687,63 @@ def maintenance_now() -> bool:
     return value
 
 
+# Задача 79: админ может выключить КД РП полностью (0 секунд) кнопкой в
+# админ-панели. По умолчанию — включён, 5 часов, общий на все команды.
+# Значение живёт в game_settings, чтобы его видели ОБА сервиса Render: бот
+# (начисляет награду) и api (отдаёт состояние в Mini App).
+LOVE_COOLDOWN_SETTING_KEY = "love_cooldown_enabled"
+# Метка «выключено» в ту же строку, которую когда-то писала команда `кд`:
+# старая настройка `love_cooldown_seconds = off` тоже читается как «КД нет».
+LOVE_COOLDOWN_SECONDS_KEY = "love_cooldown_seconds"
+_LOVE_COOLDOWN_CACHE = {"value": True, "at": 0.0}
+LOVE_COOLDOWN_CACHE_TTL = 10.0
+
+
+def love_cooldown_enabled() -> bool:
+    """Включён ли КД РП (кнопка админа). Ошибка базы — считаем, что ВКЛЮЧЁН.
+
+    Это осознанно: «не смогли прочитать» не должно превращаться в «награда
+    капает за каждое действие». Выключение — только явное действие админа.
+    """
+    now = time.time()
+    if (now - float(_LOVE_COOLDOWN_CACHE["at"] or 0)) < LOVE_COOLDOWN_CACHE_TTL:
+        return bool(_LOVE_COOLDOWN_CACHE["value"])
+    value = bool(_LOVE_COOLDOWN_CACHE["value"])
+    try:
+        settings = _load_game_settings()
+        raw = settings.get(LOVE_COOLDOWN_SETTING_KEY)
+        if raw is not None:
+            text = str(raw).strip().lower()
+            value = text not in ("0", "false", "no", "off", "выкл", "")
+        else:
+            # Совместимость: `love_cooldown_seconds = off` из старой команды.
+            legacy = str(settings.get(LOVE_COOLDOWN_SECONDS_KEY) or "").strip().lower()
+            if legacy in ("off", "0", "выкл"):
+                value = False
+    except Exception:  # noqa: BLE001 — база недоступна: оставляем как было
+        pass
+    _LOVE_COOLDOWN_CACHE.update({"value": value, "at": now})
+    return value
+
+
+def set_love_cooldown_enabled(enabled: bool) -> bool:
+    """Записать тумблер КД. True — база приняла значение."""
+    ok = game_setting_set(LOVE_COOLDOWN_SETTING_KEY, "1" if enabled else "0")
+    _LOVE_COOLDOWN_CACHE.update({"value": bool(enabled), "at": time.time()})
+    # Старую метку снимаем, иначе она будет спорить с новой настройкой.
+    try:
+        game_setting_set(LOVE_COOLDOWN_SECONDS_KEY, "18000" if enabled else "off")
+    except Exception:  # noqa: BLE001
+        pass
+    _game_settings_cache.update({"at": 0.0, "values": {}})
+    return bool(ok)
+
+
+def love_cooldown_now() -> int:
+    """Действующий КД РП в секундах: 18000 при включённом, 0 при выключенном."""
+    return love_cooldown_seconds() if love_cooldown_enabled() else 0
+
+
 def set_maintenance(enabled: bool) -> bool:
     """Включить/выключить техработы. True — настройка записана в базу."""
     ok = game_setting_set(MAINTENANCE_SETTING_KEY, "1" if enabled else "0")
@@ -1103,10 +1160,29 @@ UPGRADE_TARGETS = ("coin",) + tuple(UPGRADE_ITEM_PRICES)
 # ==================== ИГРОВЫЕ МОМЕНТЫ ПРОФИЛЯ (задача 74) ====================
 # Счётчики пишем «в фоне»: ответ игроку не должен ждать базу статистики, а
 # сломанная статистика не должна ломать игру (см. player_stats.py).
+def _stats_write(user_id, deltas: dict) -> None:
+    """Записать счётчики и НЕ потерять их молча (задача 79).
+
+    Раньше единственным признаком сбоя был debug-лог: игрок играл, а в профиле
+    оставался ноль. Теперь неудачная запись уходит в warning с точным списком
+    полей — по логу сразу видно, чего не хватает в базе.
+    """
+    try:
+        ok = player_stats.add_stats(supabase, user_id, **deltas)
+    except Exception:  # noqa: BLE001
+        logger.warning("статистика профиля не записалась (user_id=%s, %s)",
+                       user_id, sorted(deltas), exc_info=True)
+        return
+    if not ok:
+        logger.warning("статистика профиля НЕ принята базой (user_id=%s, %s) — "
+                       "проверьте миграцию %s", user_id, sorted(deltas),
+                       player_stats.MIGRATION_FILE)
+
+
 def stats_note(user_id, **deltas) -> None:
     def _write():
         try:
-            player_stats.add_stats(supabase, user_id, **deltas)
+            _stats_write(user_id, dict(deltas))
         except Exception:  # noqa: BLE001
             logger.debug("статистика: запись не удалась", exc_info=True)
     try:
@@ -1123,9 +1199,14 @@ def ledger_note(user_id, kind: str, amount: int, title: str = "", meta=None) -> 
     """
     def _write():
         try:
-            player_stats.add_ledger(supabase, user_id, kind, amount, title, meta)
+            ok = player_stats.add_ledger(supabase, user_id, kind, amount, title, meta)
+            if not ok:
+                logger.warning("история операций не записалась (user_id=%s, %s %s) — "
+                               "проверьте таблицу player_ledger из %s",
+                               user_id, kind, amount, player_stats.MIGRATION_FILE)
         except Exception:  # noqa: BLE001
-            logger.debug("история операций: запись не удалась", exc_info=True)
+            logger.warning("история операций: ошибка записи (user_id=%s)", user_id,
+                           exc_info=True)
     try:
         asyncio.create_task(asyncio.to_thread(_write))
     except RuntimeError:
@@ -2459,6 +2540,16 @@ def _ledger_mark_paid(entry: dict) -> None:
         logger.debug("arena_payouts: статус не обновился: %s", exc)
 
 
+# Задача 79: «выигрыш» в истории — это только чистый плюс. Заказчик: «если я
+# выиграл, писать выигрыш +N; если проиграл — ничего не писать, просто что
+# списано». Поэтому выигрыш пишем как (выплата − ставка): при кэше 1.5× и ставке
+# 100 в истории будет «+50», а не «+150» рядом со «−100». Ноль не пишем вовсе.
+def ledger_win_note(user_id, total_returned: int, bet_amount: int, title: str) -> None:
+    profit = int(total_returned) - int(bet_amount)
+    if profit > 0:
+        ledger_note(user_id, "win", profit, title)
+
+
 def _credit_arena_payout(entry: dict) -> str:
     """Начислить один выигрыш. Возвращает 'paid' | 'duplicate' | 'error'.
 
@@ -2472,7 +2563,9 @@ def _credit_arena_payout(entry: dict) -> str:
     if str(entry.get("kind") or "") != "refund":
         stats_note(entry["user_id"], coins_earned=int(entry["amount"]),
                    won_arena=int(entry["amount"]), best_arena_win=int(entry["amount"]))
-        ledger_note(entry["user_id"], "win", int(entry["amount"]), "🏒 Арена")
+        # Задача 79: в арене выплата уже равна чистому выигрышу (ставка списана
+        # отдельной операцией), поэтому bet_amount=0 — пишем как есть.
+        ledger_win_note(entry["user_id"], int(entry["amount"]), 0, "🏒 Арена")
     elif int(entry.get("amount") or 0) > 0:
         # Возврат ставки после рестарта — не выигрыш, но деньги игрок получил.
         ledger_note(entry["user_id"], "claim", int(entry["amount"]), "↩️ Возврат ставки")
@@ -3106,6 +3199,12 @@ class UserAuth(BaseModel): initData: str
 
 class AdminMaintenanceRequest(BaseModel):
     """Задача 71: тумблер техработ из админ-панели."""
+    initData: str
+    enabled: bool = False
+
+
+class AdminLoveCooldownRequest(BaseModel):
+    """Задача 79: тумблер «КД РП включён / выключен» из админ-панели."""
     initData: str
     enabled: bool = False
 
@@ -3776,7 +3875,8 @@ async def crash_cashout(data: CrashCashout):
     # сравнивает суммы, а не x2.1 против x3.0.
     stats_note(user_id, coins_earned=win_amount, won_crash=win_amount,
                best_crash_win=win_amount)
-    ledger_note(user_id, "win", win_amount, f"🚀 Ракета x{cashout_mult:g}")
+    ledger_win_note(user_id, win_amount, int(player["bet"]),
+                    f"🚀 Ракета x{cashout_mult:g}")
     return {"success": True, "win_amount": win_amount, "mult": cashout_mult, "new_balance": new_coins}
 
 
@@ -3946,7 +4046,7 @@ async def mines_cashout(data: MinesCashout):
         raise HTTPException(status_code=500, detail="Не удалось зачислить выигрыш")
     stats_note(user_id, coins_earned=win_amount, won_mines=win_amount,
                best_mines_win=win_amount)
-    ledger_note(user_id, "win", win_amount, "💣 Мины")
+    ledger_win_note(user_id, win_amount, int(game.get("bet") or 0), "💣 Мины")
     return {"success": True, "win_amount": win_amount, "new_balance": coins,
             "coef": round(_mines_multiplier(game["mines"], len(game["opened"])), 2)}
 
@@ -5458,7 +5558,8 @@ async def upgrade_action(data: UpgradeAction):
             if won:
                 won_value = payout if target == "coin" else UPGRADE_ITEM_PRICES.get(target, 0)
                 stats_note(user_id, coins_earned=won_value, won_upgrade=won_value)
-                ledger_note(user_id, "win", won_value, f"⚗️ Апгрейд · {moment_text}")
+                ledger_win_note(user_id, won_value, stake_value,
+                                f"⚗️ Апгрейд · {moment_text}")
                 stats_event(user_id, "upgrade", moment_text,
                             max(moment_from, won_value),
                             {"from": source, "amount": amount, "to": target,
@@ -6798,14 +6899,39 @@ async def admin_set_maintenance(data: AdminMaintenanceRequest):
 async def admin_game_settings(data: UserAuth):
     """Что сейчас в настройках, которые читает игра (нужно админ-панели)."""
     _require_admin_api(data.initData)
+    enabled = love_cooldown_enabled()
     return {
         "ok": True,
         "maintenance": maintenance_now(),
         "maintenance_message": MAINTENANCE_MESSAGE,
-        # Задача 76: значение фиксированное, из базы не читается.
-        "love_cooldown_seconds": love_cooldown_seconds(),
-        "love_cooldown_note": "5 часов, общий для всех РП, не настраивается",
+        # Задача 79: КД РП включается/выключается кнопкой в админ-панели.
+        "love_cooldown_enabled": enabled,
+        "love_cooldown_seconds": _love_cooldown_seconds(),
+        "love_cooldown_full_seconds": love_cooldown_seconds(),
+        "love_cooldown_note": ("включён — 5 часов на все РП" if enabled
+                               else "выключен — РП без ожидания"),
     }
+
+
+@app.post("/api/admin/set_love_cooldown")
+async def admin_set_love_cooldown(data: AdminLoveCooldownRequest):
+    """Кнопка «КД РП»: включить (5 часов) или выключить (0 секунд).
+
+    Заказчик: «сделай кнопку в админ панели в апке чтобы я мог переключать есть
+    кд на рп команды все (5 часов) или нету (0 сек)». Значение читает и бот,
+    поэтому после переключения ждать деплоя не нужно.
+    """
+    admin_id = _require_admin_api(data.initData)
+    enabled = bool(data.enabled)
+    if not set_love_cooldown_enabled(enabled):
+        raise HTTPException(status_code=503,
+                            detail="Не удалось сохранить настройку КД — попробуйте ещё раз")
+    logger.warning("КД РП %s (админ %s)", "ВКЛЮЧЁН (5 ч)" if enabled else "выключен (0 с)",
+                   admin_id)
+    return {"ok": True, "enabled": enabled, "love_cooldown_enabled": enabled,
+            "love_cooldown_seconds": _love_cooldown_seconds(),
+            "love_cooldown_note": ("включён — 5 часов на все РП" if enabled
+                                   else "выключен — РП без ожидания")}
 
 
 @app.post("/api/admin/give_coins")
@@ -7025,8 +7151,11 @@ def _love_cooldowns() -> dict:
 
 
 def _love_cooldown_seconds(action=None) -> int:
-    """Кулдаун РП в секундах. От команды не зависит (задача 76)."""
-    return love_cooldown_seconds(action)
+    """Кулдаун РП в секундах. От команды не зависит (задача 76).
+
+    Задача 79: если админ выключил КД кнопкой в админ-панели — 0 секунд.
+    """
+    return love_cooldown_now()
 
 
 def love_state_for(user_id) -> dict:
@@ -7047,6 +7176,7 @@ def love_state_for(user_id) -> dict:
                 # команд — карта по действиям больше не нужна.
                 "cooldown_hours": round(_love_cooldown_seconds() / 3600, 1),
                 "cooldown_seconds": _love_cooldown_seconds(),
+                "cooldown_enabled": love_cooldown_enabled(),
                 # Задача 76: персональных кулдаунов нет — поле оставлено пустым
                 # для старых сборок Mini App.
                 "cooldowns": {},
@@ -7075,6 +7205,8 @@ def love_state_for(user_id) -> dict:
         # Задача 61: своё значение у каждой команды + общее (cooldown_*).
         "cooldown_hours": round(_love_cooldown_seconds() / 3600, 1),
         "cooldown_seconds": _love_cooldown_seconds(),
+        # Задача 79: кнопка админа может выключить КД целиком.
+        "cooldown_enabled": love_cooldown_enabled(),
         # Задача 76: персональных кулдаунов нет (КД общий на игрока).
         "cooldowns": {},
         "ice_cost": LOVE_ICE_COST,
@@ -7229,7 +7361,22 @@ async def profile_stats(data: UserAuth):
     first_seen = _app_first_seen_get(uid)
     payload = _profile_stats_record(uid, stat_row or {}, first_seen)
     payload["history"] = _profile_history(uid)
-    payload["migration"] = player_stats.MIGRATION_FILE
+    payload["migration"] = player_stats.FIX_MIGRATION_FILE
+    # Задача 79: честный ответ «статистика не применяется / включена».
+    # Раньше игрок видел пустые достижения и не мог понять, что дело в базе.
+    db_state = await asyncio.to_thread(player_stats.health, supabase)
+    payload["db"] = {
+        "ready": bool(db_state.get("ok")),
+        "reason": db_state.get("reason") or "",
+        "version": db_state.get("version") or "",
+        "stats_table": bool(db_state.get("stats_table")),
+        "ledger_table": bool(db_state.get("ledger_table")),
+        "rpc": bool(db_state.get("rpc")),
+        "mines_games": bool(db_state.get("mines_games")),
+    }
+    if not payload["db"]["ready"]:
+        payload["hint"] = ("Статистика не запишется: в Supabase не применена миграция "
+                           + player_stats.FIX_MIGRATION_FILE)
     return payload
 
 

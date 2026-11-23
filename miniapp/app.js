@@ -259,7 +259,11 @@ let profileStats = null;
 // Задача 75: список игроков для админ-вкладки (обновляется при её открытии).
 let adminPlayers = [];
 let profileStatsAt = 0;
-const PROFILE_STATS_TTL = 60 * 1000;      // не чаще раза в минуту
+// Задача 79: 60 секунд — это и был баг «сыграл, а в профиле пусто»: игрок
+// открывал профиль сразу после игры, а в кэше лежал ответ ДО ставки. Теперь
+// 10 секунд, а после любой ставки/выигрыша кэш сбрасывается принудительно
+// (см. refreshProfileStatsSoon).
+const PROFILE_STATS_TTL = 10 * 1000;
 let referralBound = false;
 const PASSIVE_INTERVAL = 15 * 60 * 1000;      // раз в 15 минут, пока аппка открыта
 const PASSIVE_PENDING_REFRESH = 60 * 1000;    // «накоплено» в профиле — раз в минуту
@@ -698,6 +702,8 @@ function applyProfile(data) {
     setSyncBanner('');
     // Задача 71: тумблер техработ в профиле админа.
     renderAdminMaintenanceCard(data);
+    // Задача 79: админу сразу показываем реальное состояние КД РП.
+    if (isAdmin) loadAdminLoveCooldown();
     // Задача 67: профиль пришёл → пускаем сразу, без проверок «а админ ли».
     resolveAccess(data);
     hideMaintenance();
@@ -832,9 +838,81 @@ function adminPlayersHtml() {
     `).join('');
 }
 
+// ============ КД РП: КНОПКА АДМИНА (задача 79) ============
+// Заказчик: «сделай кнопку в админ панели в апке чтобы я мог переключать есть
+// кд на рп команды все (5 часов) или нету (0 сек)». Состояние живёт на сервере
+// (game_settings), поэтому после нажатия его видят и бот, и аппка.
+let loveCooldownEnabled = true;
+let loveCooldownBusy = false;
+
+function renderLoveCooldownCard(data) {
+    const card = document.getElementById('admin-lovecd-card');
+    if (!card) return;
+    if (!isAdmin) { card.hidden = true; return; }
+    card.hidden = false;
+    if (data && typeof data.love_cooldown_enabled === 'boolean') {
+        loveCooldownEnabled = data.love_cooldown_enabled;
+    }
+    const on = Boolean(loveCooldownEnabled);
+    const state = document.getElementById('admin-lovecd-state');
+    const hint = document.getElementById('admin-lovecd-hint');
+    const btn = document.getElementById('admin-lovecd-btn');
+    if (state) {
+        state.textContent = on ? 'включён · 5 ч' : 'выключен · 0 сек';
+        state.classList.toggle('is-on', !on);
+    }
+    if (hint) {
+        hint.textContent = on
+            ? 'Одно РП-действие в 5 часов на все команды сразу. Нажми, чтобы выключить.'
+            : 'РП без ожидания: награду можно получать за каждое действие. Нажми, чтобы вернуть 5 часов.';
+    }
+    if (btn) {
+        btn.textContent = on ? 'Выключить КД' : 'Включить КД (5 ч)';
+        btn.classList.toggle('is-on', false);
+    }
+}
+
+async function loadAdminLoveCooldown() {
+    if (!isAdmin) return;
+    try {
+        const data = await apiPost('/api/admin/game_settings', { initData: tg.initData });
+        renderLoveCooldownCard(data);
+    } catch (e) {
+        // Не смогли прочитать — карточку не прячем, просто показываем последнее.
+        renderLoveCooldownCard(null);
+    }
+}
+
+async function toggleLoveCooldown() {
+    if (!isAdmin) { tg.showAlert('КД РП переключает только админ'); return; }
+    if (loveCooldownBusy) return;
+    loveCooldownBusy = true;
+    const btn = document.getElementById('admin-lovecd-btn');
+    const want = !loveCooldownEnabled;
+    if (btn) { btn.disabled = true; btn.textContent = 'Сохраняем…'; }
+    try {
+        const data = await apiPost('/api/admin/set_love_cooldown',
+            { initData: tg.initData, enabled: want });
+        loveCooldownEnabled = Boolean(data && data.love_cooldown_enabled);
+        renderLoveCooldownCard(data);
+        tg.showAlert(loveCooldownEnabled
+            ? '✅ КД включён: одно РП-действие в 5 часов на все команды.'
+            : '✅ КД выключен: РП-команды работают без ожидания.');
+    } catch (e) {
+        tg.showAlert(e.message || 'Не удалось переключить КД');
+        renderLoveCooldownCard(null);
+    } finally {
+        loveCooldownBusy = false;
+        if (btn) btn.disabled = false;
+    }
+}
+
+
 function renderAdminMaintenanceCard(data) {
     const card = document.getElementById('admin-maint-card');
     syncAdminNav();
+    // Задача 79: рядом с техработами — кнопка КД РП (только у админа).
+    renderLoveCooldownCard(null);
     if (!card) return;
     if (!isAdmin) { card.hidden = true; return; }
     card.hidden = false;
@@ -1006,6 +1084,8 @@ function switchTab(tabId, element) {
         // Задача 78: нижнего меню с «Админ» больше нет — активного пункта у
         // вкладки нет, подсвечивать нечего (element === null).
         renderAdminMaintenanceCard({ maintenance_active: serverMaintenance });
+        // Задача 79: состояние КД РП читаем с сервера (его же читает бот).
+        loadAdminLoveCooldown();
         adminPlayers = [];
         renderAdminPlayers();
         return;
@@ -1629,6 +1709,17 @@ async function loadLoveState() {
 // ================= ДОСТИЖЕНИЯ ПРОФИЛЯ (задача 74) =================
 // «Профиль — это профиль»: тут факты про игрока (сколько потратил, лучший
 // занос, лучший апгрейд), а имущество остаётся в «Кармане».
+// Задача 79: после игры/выигрыша подтягиваем статистику и историю заново.
+// force=true обязателен: иначе можно показать минутный кэш и снова услышать
+// «оно не учитывает, что я играю».
+function refreshProfileStatsSoon(delay) {
+    clearTimeout(refreshProfileStatsSoon._t);
+    refreshProfileStatsSoon._t = setTimeout(() => {
+        // Открытый профиль перерисуется сам, закрытый — обновится к открытию.
+        loadProfileStats(true);
+    }, delay || 600);
+}
+
 async function loadProfileStats(force) {
     if (!tg.initData) return;
     if (!force && profileStats && (Date.now() - profileStatsAt) < PROFILE_STATS_TTL) {
@@ -1686,6 +1777,13 @@ function historyDateText(iso) {
 function renderHistory() {
     const list = document.getElementById('history-list');
     if (!list) return;
+    // Задача 79: если база не готова, честно говорим об этом, а не «операций нет» —
+    // иначе кажется, что игра не засчиталась, хотя не применена миграция.
+    if (profileStats && profileStats.db && profileStats.db.ready === false) {
+        list.innerHTML = '<div class="ach-empty">История недоступна: в Supabase не применена миграция. ' +
+            'Скопируй файл из ответа бота и нажми Run в SQL Editor.</div>';
+        return;
+    }
     const rows = (profileStats && Array.isArray(profileStats.history)) ? profileStats.history : [];
     if (!rows.length) {
         list.innerHTML = '<div class="ach-empty">Операций пока нет — сделай ставку или открой сундук.</div>';
@@ -1709,6 +1807,15 @@ function renderHistory() {
 function renderAchievements() {
     const list = document.getElementById('achievements-list');
     if (!list) return;
+    // Задача 79: предупреждение о неприменённой миграции — один раз над списком.
+    const warn = document.getElementById('ach-db-warn');
+    if (warn) {
+        const dbReady = !(profileStats && profileStats.db && profileStats.db.ready === false);
+        warn.hidden = dbReady;
+        if (!dbReady) {
+            warn.textContent = '⚠️ Статистика не пишется: примени миграцию Supabase (файл 20261203000000_stats_fix_and_love_cooldown_switch.sql).';
+        }
+    }
     const rows = achievementRows();
     const daysEl = document.getElementById('ach-days');
     const days = profileStats ? Math.max(0, Number(profileStats.days) || 0) : daysInGame;
@@ -4363,6 +4470,8 @@ async function startMines() {
         updateMinesInfo(1, bet);
         setMinesButton(`Забрать (${coinAmount(bet)})`, '#34c759', false);
         playSound('click');
+        // Задача 79: профиль и история должны увидеть катку сразу, а не через кэш.
+        refreshProfileStatsSoon();
     } catch (e) {
         tg.showAlert("Ошибка соединения. Ставка не принята, попробуйте ещё раз.");
     } finally {
@@ -4390,6 +4499,8 @@ async function cashoutMines() {
             paid = true;
             showWin(`+ ${coinAmount(data.win_amount)}`);
             playSound('win');
+            // Задача 79: выигрыш в истории — сразу, без ожидания конца кэша.
+            refreshProfileStatsSoon();
         }
     } catch (e) {
         tg.showAlert("Ошибка соединения. Попробуйте забрать ещё раз.");
@@ -5893,6 +6004,7 @@ async function crashAction() {
             const data = await res.json();
             balance = data.new_balance; balanceKnown = true; updateUI();
             playSound('click');
+            refreshProfileStatsSoon();
             await pollCrashState();
         } else if (s.my_status === 'bet' && s.status === 'flying') {
             const res = await fetch(`${API_URL}/api/crash_cashout`, {
@@ -5908,6 +6020,7 @@ async function crashAction() {
             balance = data.new_balance; balanceKnown = true; updateUI();
             showWin(`+${coinAmount(data.win_amount)}`);
             playSound('win');
+            refreshProfileStatsSoon();
             await pollCrashState();
         }
     } catch(e) {

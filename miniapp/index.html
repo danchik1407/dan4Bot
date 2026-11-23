@@ -12,7 +12,7 @@
     <meta http-equiv="Pragma" content="no-cache">
     <meta http-equiv="Expires" content="0">
     <title>AURA GAME</title>
-    <link rel="stylesheet" href="style.css?v=aura-78">
+    <link rel="stylesheet" href="style.css?v=aura-79">
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
 </head>
 <body>
@@ -253,6 +253,10 @@
                         <span class="extra-title">📊 Твои игровые моменты</span>
                         <span class="extra-value" id="ach-days">0 дн.</span>
                     </div>
+                    <!-- Задача 79: предупреждение, если миграция Supabase не применена.
+                         Иначе игрок видит пустые достижения и думает, что игра не
+                         засчиталась, хотя проблема в базе. -->
+                    <div class="ach-db-warn" id="ach-db-warn" hidden></div>
                     <div class="achievements" id="achievements-list">
                         <div class="ach-empty">Считаем…</div>
                     </div>
@@ -365,6 +369,22 @@
                 </div>
                 <button class="extra-btn" id="admin-maint-btn" type="button"
                         onclick="toggleMaintenance()">Включить техработы</button>
+            </div>
+
+            <!-- Задача 79: кнопка КД РП. Заказчик: «сделай кнопку в админ панели
+                 в апке чтобы я мог переключать есть кд на рп команды (5 часов)
+                 или нету (0 сек)». По умолчанию КД включён; нажатие выключает,
+                 повторное — включает обратно. -->
+            <div class="profile-extra admin-maint-card admin-lovecd-card" id="admin-lovecd-card" hidden>
+                <div class="extra-head">
+                    <span class="extra-title">💗 КД на РП</span>
+                    <span class="extra-value" id="admin-lovecd-state">включён · 5 ч</span>
+                </div>
+                <div class="extra-hint" id="admin-lovecd-hint">
+                    Одно РП-действие в 5 часов на все команды сразу. Нажми, чтобы выключить.
+                </div>
+                <button class="extra-btn" id="admin-lovecd-btn" type="button"
+                        onclick="toggleLoveCooldown()">Выключить КД</button>
             </div>
 
             <div class="profile-extra">
@@ -695,6 +715,6 @@
          маленькой кнопкой ⚙️ рядом с ником в шапке (см. #admin-gear). -->
     </nav>
 
-    <script src="app.js?v=aura-78" defer></script>
+    <script src="app.js?v=aura-79" defer></script>
 </body>
 </html>
