@@ -20,7 +20,8 @@ from love import (LOVE_ACTION_BONUS, LOVE_ICE_COST, action_progress_text,
                   love_cooldown_seconds,
                   RP_ACTIONS, SOLO_CURRENCY, claim_solo_stage_rewards,
                   claim_stage_rewards, public_stage as love_public_stage,
-                  public_stages as love_public_stages, stage_reached_text,
+                  public_stages as love_public_stages,
+                  celebration_text, LOVE_STAGES,
                   solo_state as love_solo_state)
 
 load_dotenv()
@@ -87,7 +88,7 @@ async def _http_json(url, method: str = "GET", params=None, payload=None, timeou
 
 # Номер сборки: по нему из /api/health видно, что на сервисе НЕ старый код.
 # Если после деплоя здесь прежнее значение — Render ещё не перезапустился.
-API_BUILD = "2026-10-27-task80-history-removed"
+API_BUILD = "2026-10-27-task81-level-up-celebration"
 
 # Момент старта процесса. По нему видно, что сервис только что «проснулся»:
 # Render на бесплатном тарифе усыпляет Web Service через 15 минут без входящих
@@ -7251,6 +7252,12 @@ async def love_state(data: UserAuth):
                 # Задача 74: призы за этапы отношений — тоже «заработано».
                 reward_total = sum(int(g.get("reward") or 0) for g in granted)
                 stats_note(uid, coins_earned=reward_total, won_love=reward_total)
+                # Задача 81: одиночке — то же поздравление в аппке.
+                state["stage_rewards"] = [
+                    _stage_celebration_payload(stage, stage.get("reward"), solo=True,
+                                               balance=_safe_int((_db_user(uid) or {}).get("coins"), None))
+                    for stage in granted
+                ]
                 await _love_stage_dm({"user_a": uid}, granted)
         return state
     # Пара: та же страховка через общую таблицу наград.
@@ -7268,12 +7275,61 @@ async def love_state(data: UserAuth):
                 if partner_id > 0:
                     reward_total = sum(int(g.get("reward") or 0) for g in granted)
                     stats_note(partner_id, coins_earned=reward_total, won_love=reward_total)
+            # Задача 81: что показать игроку в аппке — уровень, название, своя
+            # сумма награды и следующий уровень.
+            partner_id = _safe_int(state.get("partner_id"), 0)
+            state["stage_rewards"] = [
+                _stage_celebration_payload(stage, stage.get("reward"),
+                                           partner_name=str(state.get("partner_name") or ""),
+                                           balance=_safe_int((_db_user(uid) or {}).get("coins"), None))
+                for stage in granted
+            ]
             await _love_stage_dm(row, granted)
     return state
 
 
+def _stage_celebration_payload(stage, amount, partner_name="", balance=None, solo=False) -> dict:
+    """Поздравление для Mini App (задача 81).
+
+    Клиент показывает всплывающее окно «Вы перешли на N уровень» с суммой,
+    которую игрок РЕАЛЬНО получил, и следующим уровнем. Никаких наград вперёд:
+    сумма следующего уровня не уходит (задача 29).
+    """
+    stage = stage or {}
+    index = _safe_int(stage.get("index", stage.get("stage")), 0)
+    nxt = _next_stage_public_http(stage) or {}
+    return {
+        "level": index + 1,
+        "title": str(stage.get("title") or ""),
+        "reward": int(amount or 0),
+        "reward_text": _coins_text(int(amount or 0)) if int(amount or 0) > 0 else "",
+        "partner_name": partner_name,
+        "balance": balance,
+        "solo": bool(solo),
+        "next_level": nxt.get("level"),
+        "next_title": nxt.get("title") or "",
+        "next_need": nxt.get("love_need") or 0,
+    }
+
+
+def _next_stage_public_http(stage) -> dict:
+    """Следующий уровень для строки «➡️ Следующий уровень — N «Название»»."""
+    try:
+        index = int((stage or {}).get("index", (stage or {}).get("stage")))
+    except (TypeError, ValueError):
+        return {}
+    if index + 1 >= len(LOVE_STAGES):
+        return {}
+    nxt = LOVE_STAGES[index + 1]
+    return {"level": nxt["index"] + 1, "title": nxt["title"], "love_need": nxt["min"]}
+
+
 async def _love_stage_dm(row, granted) -> None:
-    """Личное сообщение каждому партнёру: «вы достигли N уровня, получаете X».
+    """Поздравление каждому партнёру: «вы перешли на N уровень, вот награда».
+
+    Задача 81: раньше здесь была сухая строка «Вы достигли 2 уровня отношений —
+    каждому участнику +1000» без «поздравляем», без нового баланса и без
+    следующего уровня. Теперь тот же красивый текст, что и в чате.
 
     Вызывается и из Mini App (`/api/love_state`), и из бота — но в базе
     love_stage_rewards этап отмечается до начисления, поэтому «granted»
@@ -7287,12 +7343,28 @@ async def _love_stage_dm(row, granted) -> None:
         if uid > 0 and uid not in partners:
             partners.append(uid)
     for uid in partners:
-        lines = ["💗 <b>Новый этап отношений!</b>", ""]
-        for stage in granted:
-            lines.append(stage_reached_text(stage, stage.get("reward")))
-        lines += ["", "Коины уже начислены на баланс — забирать ничего не нужно.",
-                  "Прогресс: «любовь инфа» в боте."]
-        await _send_user_dm(uid, "\n".join(lines))
+        partner_id = next((other for other in partners if other != uid), None)
+        partner_name = ""
+        if partner_id:
+            try:
+                partner_row = _db_user(partner_id) or {}
+                partner_name = str(partner_row.get("username") or "")
+            except Exception:  # noqa: BLE001
+                partner_name = ""
+            if partner_name:
+                partner_name = "@" + partner_name.lstrip("@")
+        balance = None
+        try:
+            balance = _safe_int((_db_user(uid) or {}).get("coins"), None)
+        except Exception:  # noqa: BLE001
+            balance = None
+        blocks = [celebration_text(stage, stage.get("reward"),
+                                   partner_name=partner_name, balance=balance,
+                                   next_stage=_next_stage_public_http(stage))
+                  for stage in granted]
+        text = "\n\n".join(blocks)
+        text += "\n\n<i>Коины уже на балансе у обоих — забирать не нужно.</i>"
+        await _send_user_dm(uid, text)
 
 # ==================== ИГРОВЫЕ МОМЕНТЫ ПРОФИЛЯ (задача 74) ====================
 # Заказчик: «профиль — это профиль». В профиле нужны маленькие факты про

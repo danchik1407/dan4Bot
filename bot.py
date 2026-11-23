@@ -43,7 +43,8 @@ from love import (
     rp_action_for,
     rp_action_key,
     solo_state,
-    stage_reached_text,
+    celebration_text,
+    LOVE_STAGES,
 )
 import player_stats
 from db_schema import audit as db_schema_audit, format_report as db_schema_report
@@ -3808,14 +3809,38 @@ def _cooldown_wait_text(action, left, currency="Love") -> str:
             f"Кулдаун один на все команды: пока он идёт, другие РП тоже не дают награду.")
 
 
-async def _notify_stage_rewards(row, actor_id, granted) -> None:
-    """Личное сообщение КАЖДОМУ участнику пары о достигнутом этапе.
+def _next_stage_public(stage) -> dict:
+    """Карточка следующего уровня: номер, название и сколько Love нужно.
 
-    Задача 61: «награды игрокам не видны, только когда достигают уровня — им в
-    личку пишут: вы достигли N уровня отношений, получаете столько коинов
-    (каждому участнику столько)». Начисление делает love.claim_stage_rewards,
-    здесь только уведомление — и второму партнёру тоже, даже если он сейчас
-    ничего не писал.
+    Нужна для строки «➡️ Следующий уровень — 3 «Близость», нужно 200 Love».
+    Суммы наград вперёд не показываем (это секретная механика, задача 29).
+    """
+    try:
+        index = int((stage or {}).get("index", (stage or {}).get("stage")))
+    except (TypeError, ValueError):
+        return {}
+    if index + 1 >= len(LOVE_STAGES):
+        return {}
+    nxt = LOVE_STAGES[index + 1]
+    return {"level": nxt["index"] + 1, "title": nxt["title"], "love_need": nxt["min"]}
+
+
+async def _stage_brand_new_balance(uid):
+    """Баланс игрока для строки «теперь на балансе» (нет данных — None)."""
+    try:
+        row = await get_user(uid)
+        return int((row or {}).get("coins") or 0)
+    except Exception:  # noqa: BLE001 — баланс не обязателен, поздравление важнее
+        return None
+
+
+async def _notify_stage_rewards(row, actor_id, granted) -> None:
+    """Поздравление КАЖДОМУ участнику пары + награда за новый уровень (задача 81).
+
+    Заказчик: «сделай красивый текст поздравительный — ты перешёл на новый
+    уровень, вот тебе награда; награда выдаётся обоим, как только уровень
+    повышается у пары». Начисление делает love.claim_stage_rewards (КАЖДОМУ
+    партнёру), здесь — красивое сообщение и в чат, и в личку.
     """
     if not row or not granted:
         return
@@ -3828,13 +3853,27 @@ async def _notify_stage_rewards(row, actor_id, granted) -> None:
         if uid > 0 and uid not in partners:
             partners.append(uid)
     for uid in partners:
-        lines = ["💗 <b>Новый этап отношений!</b>", ""]
+        partner_id = next((other for other in partners if other != uid), None)
+        partner_name = ""
+        if partner_id:
+            try:
+                partner_row = await get_user(partner_id)
+                partner_name = str((partner_row or {}).get("username") or "")
+            except Exception:  # noqa: BLE001
+                partner_name = ""
+            if partner_name:
+                partner_name = "@" + partner_name.lstrip("@")
+        balance = await _stage_brand_new_balance(uid)
+        blocks = []
         for stage in granted:
-            lines.append(stage_reached_text(stage, stage.get("reward")))
-        lines += ["", "Коины уже начислены на баланс — забирать ничего не нужно.",
-                  "Прогресс: <code>любовь инфа</code>"]
+            blocks.append(celebration_text(stage, stage.get("reward"),
+                                           partner_name=partner_name,
+                                           balance=balance,
+                                           next_stage=_next_stage_public(stage)))
+        text = "\n\n".join(blocks)
+        text += "\n\n<i>Забирать награду не нужно — коины уже зачислены.</i>"
         try:
-            await bot.send_message(uid, "\n".join(lines), parse_mode="HTML")
+            await bot.send_message(uid, text, parse_mode="HTML")
         except Exception as exc:  # noqa: BLE001 — игрок мог не писать боту
             logger.info("Не удалось написать о награде за этап игроку %s: %s", uid, exc)
 
@@ -3898,12 +3937,28 @@ async def cmd_rp_action(message: Message):
     #     ➡️ До уровня 2 — 10/50❤️
     reply = (f"{text}\n\n+{LOVE_ACTION_BONUS} Love❤️\n"
              f"{safe_text(action_progress_text(new_score))}")
-    # Задача 61: награда за этап выдаётся ВСЕГДА и сразу, но игрок должен видеть,
-    # за что пришли коины — и в чате, и личным сообщением каждому участнику.
-    for stage in granted:
-        reply += "\n" + safe_text(stage_reached_text(stage, stage.get("reward")))
+    # Задача 81: заказчик увидел в чате сухую строку «обнимает» без награды и без
+    # поздравления. Теперь при новом уровне прямо в ответе — полноценное
+    # поздравление: уровень, название, сумма КАЖДОМУ, новый баланс и следующий
+    # уровень. Награду получают оба партнёра (love.claim_stage_rewards).
     if granted:
-        reply += "\n<i>Награда уже зачислена каждому участнику.</i>"
+        balance = await _stage_brand_new_balance(actor_id)
+        partner_name = ""
+        try:
+            partner_row = await get_user(partner_id)
+            partner_name = str((partner_row or {}).get("username") or "")
+        except Exception:  # noqa: BLE001
+            partner_name = ""
+        if partner_name:
+            partner_name = "@" + partner_name.lstrip("@")
+        blocks = []
+        for stage in granted:
+            blocks.append(celebration_text(stage, stage.get("reward"),
+                                           partner_name=partner_name,
+                                           balance=balance,
+                                           next_stage=_next_stage_public(stage)))
+        reply += "\n\n" + "\n\n".join(blocks)
+        reply += "\n\n<i>Награда уже на балансе у обоих — забирать не нужно.</i>"
         await _notify_stage_rewards(row, actor_id, granted)
     await message.answer(reply, parse_mode="HTML")
 
@@ -3944,9 +3999,14 @@ async def solo_rp_action(message: Message, meta: dict, target_id, target_name):
     # Задача 72: «+10 Unlove💔 / ➡️ До уровня 2 — 10/40💔» — без слова «всего».
     reply = (f"{text}\n\n+{LOVE_ACTION_BONUS} {SOLO_CURRENCY}💔\n"
              f"{safe_text(action_progress_text(score, solo=True))}")
-    # Одиночке награда тоже выдаётся всегда — говорим об этом прямо.
-    for stage in granted:
-        reply += "\n" + safe_text(stage_reached_text(stage, stage.get("reward")))
+    # Задача 81: одиночке — такое же поздравление, только без «каждому».
+    if granted:
+        balance = await _stage_brand_new_balance(actor_id)
+        blocks = [celebration_text(stage, stage.get("reward"), solo=True,
+                                   balance=balance,
+                                   next_stage=_next_stage_public(stage))
+                  for stage in granted]
+        reply += "\n\n" + "\n\n".join(blocks)
     if granted:
         reply += "\n<i>Награда уже зачислена.</i>"
     await message.answer(reply, parse_mode="HTML")

@@ -328,6 +328,64 @@ def action_progress_text(score, solo: bool = False) -> str:
     return f"➡️ До уровня {info['next_level']} — {have}/{need}{heart}"
 
 
+def _coins_fmt(amount) -> str:
+    """«1 000» — коины с пробелом между тысячами (так читается на телефоне)."""
+    value = _safe_int(amount, 0)
+    return f"{value:,}".replace(",", " ")
+
+
+def celebration_text(stage, amount_per_partner=0, solo: bool = False,
+                     partner_name: str = "", balance=None,
+                     next_stage=None) -> str:
+    """ПОЗДРАВЛЕНИЕ о новом уровне отношений (задача 81).
+
+    Заказчик: «сделай красивый текст поздравительный, типа ты перешёл на новый
+    уровень, вот тебе награда» — раньше в ответе была одна сухая строка без
+    суммы, без «поздравляем» и без пояснения, что деньги уже на балансе.
+
+    Возвращает HTML (parse_mode="HTML"):
+        🎉 ПОЗДРАВЛЯЕМ!
+        Вы перешли на 2 уровень отношений
+        💗 «Дружба влюблённых»
+        🎁 Награда: +1 000 коинов — уже на балансе
+        ...
+    """
+    stage = stage or {}
+    index = _safe_int(stage.get("index", stage.get("stage")), 0)
+    level = index + 1
+    title = str(stage.get("title") or "")
+    amount = _safe_int(amount_per_partner, 0) or _safe_int(stage.get("reward"), 0)
+
+    lines = ["🎉 <b>ПОЗДРАВЛЯЕМ!</b>", ""]
+    lines.append(f"Вы перешли на <b>{level} уровень отношений</b>")
+    if title:
+        lines.append(f"💗 «{title}»")
+    lines.append("")
+    if amount > 0:
+        if solo:
+            lines.append(f"🎁 Награда: <b>+{_coins_fmt(amount)} коинов</b> — уже на балансе")
+        else:
+            partner = f" с {partner_name}" if partner_name else ""
+            lines.append(f"🎁 Награда за новый уровень{partner}:")
+            lines.append(f"<b>+{_coins_fmt(amount)} коинов каждому</b> — уже на балансе")
+            lines.append("У вас обоих уровень вырос одновременно, поэтому коины "
+                         "получил каждый.")
+    if balance is not None:
+        lines.append(f"💰 Теперь на балансе: <b>{_coins_fmt(balance)}</b> коинов")
+    nxt_title = str((next_stage or {}).get("title") or "")
+    nxt_level = _safe_int((next_stage or {}).get("level"), 0)  # 0 — финальный уровень
+    if nxt_level:
+        lines.append("")
+        line = f"➡️ Следующий уровень — <b>{nxt_level}</b>"
+        if nxt_title:
+            line += f" «{nxt_title}»"
+        need = _safe_int((next_stage or {}).get("love_need"), 0)
+        if need > 0:
+            line += f", нужно {_coins_fmt(need)} Love❤️"
+        lines.append(line)
+    return "\n".join(lines)
+
+
 def stage_reached_text(stage, amount_per_partner, solo: bool = False) -> str:
     """«Вы достигли 2 уровня отношений «Дружба влюблённых» — каждому по 2 000».
 
