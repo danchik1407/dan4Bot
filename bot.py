@@ -3172,6 +3172,160 @@ async def resolve_partner_target(message: Message):
     return None, None
 
 
+# ================= АДМИН: СВЕСТИ / РАЗВЕСТИ ПАРУ (задача 70) =================
+# Заказчик: «!свести пару @юз @юз» и «!развести пару @юз @юз».
+# Обе — только для админов бота. Сведение создаёт пару сразу, без согласия
+# второго игрока (это инструмент админа), разведение удаляет строку пары,
+# как обычная «-любовь»: статус снимается у обоих, Love сгорает.
+_PAIR_SET_PREFIXES = ("!свести пару", "!свести", "свести пару")
+_PAIR_UNSET_PREFIXES = ("!развести пару", "!развести", "развести пару")
+
+
+def _pair_target_ids(text) -> list:
+    """@ники и/или числовые id из сообщения — по порядку."""
+    raw = strip_prefix(text or "")
+    parts = raw.split()[2:] if raw.lower().startswith(("!свести", "!развести", "свести", "развести")) else raw.split()[1:]
+    result = []
+    for part in parts:
+        token = part.strip().strip(",")
+        if token.startswith("@"):
+            result.append(token[1:])
+        elif token.isdigit():
+            result.append(token)
+    return result
+
+
+async def _resolve_pair_member(token):
+    """@ник / id → (user_id, имя) или (None, причина)."""
+    if str(token).isdigit():
+        uid = int(token)
+        return uid, await _player_name(uid)
+    found = await get_user_global("@" + token)
+    if found:
+        return int(found.id), found.username or token
+    # Игрок мог ещё не писать боту — ищем по users.username без @.
+    def _by_name():
+        try:
+            rows = (supabase.table("users").select("user_id, username")
+                    .ilike("username", token).limit(1).execute()).data or []
+            return rows[0] if rows else None
+        except Exception:
+            return None
+    row = await asyncio.to_thread(_by_name)
+    if row and row.get("user_id"):
+        return int(row["user_id"]), row.get("username") or token
+    return None, token
+
+
+@dp.message(F.text.func(lambda t: strip_prefix(t).lower().replace("ё", "е").startswith(
+    _PAIR_SET_PREFIXES)))
+async def cmd_pair_set(message: Message):
+    """`!свести пару @a @b` — админ сводит двух игроков."""
+    if not message.from_user or message.from_user.is_bot:
+        return
+    if not is_admin(message.from_user.id):
+        return await message.answer("❌ Эта команда доступна только администраторам бота.")
+    tokens = _pair_target_ids(message_text(message))
+    if len(tokens) < 2:
+        return await message.answer(
+            "💞 Формат: <code>!свести пару @ник1 @ник2</code>",
+            parse_mode="HTML")
+    first_id, first_name = await _resolve_pair_member(tokens[0])
+    second_id, second_name = await _resolve_pair_member(tokens[1])
+    missing = [tokens[i] for i, uid in enumerate((first_id, second_id)) if uid is None]
+    if missing:
+        return await message.answer(
+            f"❌ Не нашёл игрока: {', '.join('@' + str(m) for m in missing)}.\n"
+            "Он должен хотя бы раз написать боту.", parse_mode="HTML")
+    if first_id == second_id:
+        return await message.answer("🙃 Это один и тот же игрок — пару так не свести.")
+    existing = await get_relationship(first_id)
+    if existing:
+        partner = _partner_of(existing, first_id)
+        return await message.answer(
+            f"💔 {await _player_display(first_id)} уже в паре с {await _player_display(partner)}.\n"
+            "Сначала: <code>!развести пару</code>.", parse_mode="HTML")
+    existing = await get_relationship(second_id)
+    if existing:
+        partner = _partner_of(existing, second_id)
+        return await message.answer(
+            f"💔 {await _player_display(second_id)} уже в паре с {await _player_display(partner)}.\n"
+            "Сначала: <code>!развести пару</code>.", parse_mode="HTML")
+    try:
+        await asyncio.to_thread(_create_relationship, first_id, second_id, "СВЕСТИ: ")
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Не удалось свести пару %s + %s: %s", first_id, second_id, exc)
+        return await message.answer(_relationship_failure_message(exc), parse_mode="HTML")
+    # Сведение — это не «случайное знакомство»: обнуляем одиночные счётчики,
+    # иначе у игроков остаётся Unlove, которого в паре уже не должно быть.
+    for uid in (first_id, second_id):
+        try:
+            await drop_solo_status(uid)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Не удалось сбросить Unlove при сведении %s: %s", uid, exc)
+    first_mention = await _player_display(first_id)
+    second_mention = await _player_display(second_id)
+    stage = public_stage(0)
+    await message.answer(
+        f"👩‍❤️‍👨 <b>{safe_text(message.from_user.full_name)} свёл {first_mention} и {second_mention}</b>\n\n"
+        f"💗 Теперь вы пара!\n\n"
+        f"💗 Уровень {stage['level']} · {safe_text(stage['title'])}\n"
+        f"Love коинов: <b>0</b>\n"
+        f"➡️ {safe_text(next_level_text(0))} (качается РП-командами в паре)\n\n"
+        f"Пишите друг другу РП-команды: <code>поцеловать</code>, <code>обнять</code>, "
+        f"<code>прижать</code>… — так копится Love.\n"
+        f"Весь список: <code>все рп</code> · ваша пара: <code>любовь инфа</code>",
+        parse_mode="HTML")
+
+
+@dp.message(F.text.func(lambda t: strip_prefix(t).lower().replace("ё", "е").startswith(
+    _PAIR_UNSET_PREFIXES)))
+async def cmd_pair_unset(message: Message):
+    """`!развести пару @a @b` — админ разводит пару."""
+    if not message.from_user or message.from_user.is_bot:
+        return
+    if not is_admin(message.from_user.id):
+        return await message.answer("❌ Эта команда доступна только администраторам бота.")
+    tokens = _pair_target_ids(message_text(message))
+    if not tokens:
+        return await message.answer(
+            "💔 Формат: <code>!развести пару @ник1 @ник2</code>",
+            parse_mode="HTML")
+    first_id, _first_name = await _resolve_pair_member(tokens[0])
+    if first_id is None:
+        return await message.answer(
+            f"❌ Не нашёл игрока @{tokens[0]}.", parse_mode="HTML")
+    row = await get_relationship(first_id)
+    if not row:
+        return await message.answer(
+            f"💔 {await _player_display(first_id)} ни с кем не в паре.",
+            parse_mode="HTML")
+    if len(tokens) >= 2:
+        second_id, _second_name = await _resolve_pair_member(tokens[1])
+        if second_id is not None and _partner_of(row, first_id) != second_id:
+            return await message.answer(
+                f"💔 {await _player_display(first_id)} в паре не с "
+                f"{await _player_display(second_id)}, а с "
+                f"{await _player_display(_partner_of(row, first_id))}.",
+                parse_mode="HTML")
+    partner = _partner_of(row, first_id)
+    try:
+        await asyncio.to_thread(lambda: supabase.table(RELATIONSHIPS_TABLE)
+                                .delete().eq("id", row["id"]).execute())
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Не удалось развести пару %s: %s", row.get("id"), exc)
+        return await message.answer("❌ Не удалось развести пару, попробуй позже.")
+    love_proposals.pop(first_id, None)
+    love_proposals.pop(partner, None)
+    await message.answer(
+        f"💔 <b>{safe_text(message.from_user.full_name)} развёл пару</b>\n\n"
+        f"{await _player_display(first_id)} и {await _player_display(partner)} "
+        f"снова свободны: статус снят у обоих, накопленные Love сброшены.\n"
+        f"Заработанные награды за уровни остаются у игроков — их никто не отбирает.\n\n"
+        f"Начать заново: <code>+любовь</code> · все РП: <code>все рп</code>",
+        parse_mode="HTML")
+
+
 @dp.message(F.text.func(lambda t: strip_prefix(t).lower().startswith("+любовь")))
 async def cmd_love_propose(message: Message):
     if not message.from_user or message.from_user.is_bot:
@@ -3564,14 +3718,16 @@ async def love_cooldown_left(user_id, action=None) -> int:
             res = (supabase.table(LOVE_COOLDOWNS_TABLE)
                    .select("action_at").eq("user_id", user_id).execute())
         rows = res.data or []
-        exact, shared = None, None
         for row in rows:
-            row_action = str(row.get("action") or "*all").strip().lower()
+            row_action = str(row.get("action") or "").strip().lower()
+            # Задача 70: сравниваем ТОЛЬКО с этой командой. Раньше «запасным»
+            # значением была общая отметка '*all', и любая команда после
+            # «обнять» считалась «уже было» — заказчик видел КД на все РП
+            # сразу. '*all' — остаток старой схемы (одна строка на игрока);
+            # он больше не участвует: у каждой команды своя отметка.
             if key and row_action == key:
-                exact = row.get("action_at")
-            elif row_action == "*all":
-                shared = row.get("action_at")
-        return exact or shared, False
+                return row.get("action_at"), False
+        return None, False
 
     try:
         raw, db_broken = await asyncio.to_thread(_read)
@@ -4099,8 +4255,39 @@ async def cb_admin_panel(callback: CallbackQuery):
 # Оплата приходит в бот: pre_checkout_query подтверждает заказ, а successful_payment
 # начисляет коины. Ключ идемпотентности — telegram_payment_charge_id, поэтому
 # повторный апдейт от Telegram не начислит деньги дважды.
-STARS_PACKAGES = {"coins_1000": 1000, "coins_5000": 5000, "coins_15000": 15000}
+# Задача 70: прайс заказчика + бонус за крупный донат (см. api.STARS_PACKAGES —
+# там же витрина; здесь нужно только «сколько коинов придёт» по payload).
+STARS_PACKAGES = {
+    "stars_1": 15, "stars_5": 100, "stars_10": 210, "stars_25": 550,
+    "stars_50": 1150 + 150, "stars_100": 2400 + 400, "stars_250": 6250 + 1000,
+    "stars_500": 13000 + 2500, "stars_1000": 27500 + 5000,
+    # Старые инвойсы (могли остаться в переписке игроков) — по тем же ценам.
+    "coins_1000": 100, "coins_5000": 550, "coins_15000": 1150 + 150,
+}
 STARS_PAYMENTS_TABLE = "stars_payments"
+
+
+# Комиссия: сколько коинов за столько звёзд — на случай незнакомого payload.
+STARS_COINS_BY_STARS = {1: 15, 5: 100, 10: 210, 25: 550, 50: 1150 + 150,
+                        100: 2400 + 400, 250: 6250 + 1000, 500: 13000 + 2500,
+                        1000: 27500 + 5000}
+
+
+def _stars_coins_by_amount_sync(stars: int) -> int:
+    """Сколько коинов начислить за N звёзд (бонус уже внутри)."""
+    try:
+        stars = int(stars or 0)
+    except (TypeError, ValueError):
+        return 0
+    if stars in STARS_COINS_BY_STARS:
+        return STARS_COINS_BY_STARS[stars]
+    # Нестандартная сумма: берём ближайший меньший пакет и считаем по его курсу.
+    known = sorted(STARS_COINS_BY_STARS)
+    for value in reversed(known):
+        if stars >= value:
+            rate = STARS_COINS_BY_STARS[value] / value
+            return int(round(stars * rate))
+    return 0
 
 
 def _credit_stars_payment_sync(charge_id: str, user_id: int, coins: int, stars: int) -> bool:
@@ -4141,6 +4328,11 @@ async def on_successful_payment(message: Message):
         return
     payload = (payment.invoice_payload or "").split(":")
     coins = STARS_PACKAGES.get(payload[1], 0) if len(payload) >= 2 else 0
+    # Если id незнакомый (новый прайс без обновления бота) — считаем по количеству
+    # звёзд: так оплата никогда не останется без начисления.
+    if coins <= 0:
+        stars_paid = int(payment.total_amount or 0)
+        coins = _stars_coins_by_amount_sync(stars_paid)
     actor = message_actor(message)
     user_id = (int(payload[2]) if len(payload) >= 3 and payload[2].isdigit()
                else getattr(actor, "id", None))
@@ -4157,6 +4349,39 @@ async def on_successful_payment(message: Message):
     else:
         await message.answer("⭐ Оплата получена, но начисление задерживается. "
                              "Напиши администратору — платёж сохранён.")
+
+
+def _stars_stats_report_sync() -> str:
+    """Сколько куплено за звёзды: 24 ч / неделя / месяц / всё время (задача 70)."""
+    try:
+        rows = (supabase.table(STARS_PAYMENTS_TABLE)
+                .select("stars, coins, created_at").execute().data or [])
+    except Exception as exc:  # noqa: BLE001
+        return f"• недоступно: {type(exc).__name__}: {exc}\n"
+    now = time.time()
+    edges = (("24 ч", now - 86400), ("неделя", now - 7 * 86400), ("месяц", now - 30 * 86400))
+    lines = []
+    for label, edge in edges:
+        count = stars = coins = 0
+        for row in rows:
+            created = row.get("created_at")
+            try:
+                from datetime import datetime, timezone
+                stamp = datetime.fromisoformat(str(created).replace("Z", "+00:00"))
+                if stamp.tzinfo is None:
+                    stamp = stamp.replace(tzinfo=timezone.utc)
+                ts = stamp.timestamp()
+            except Exception:
+                ts = 0
+            if ts >= edge:
+                count += 1
+                stars += int(row.get("stars") or 0)
+                coins += int(row.get("coins") or 0)
+        lines.append(f"• {label}: <b>{count}</b> покупок · ⭐ {stars:,} · коинов {coins:,}")
+    total_stars = sum(int(row.get("stars") or 0) for row in rows)
+    total_coins = sum(int(row.get("coins") or 0) for row in rows)
+    lines.append(f"• всё время: <b>{len(rows)}</b> покупок · ⭐ {total_stars:,} · коинов {total_coins:,}")
+    return "\n".join(lines) + "\n"
 
 
 # ================= СТАТИСТИКА =================
@@ -4185,6 +4410,8 @@ async def cmd_bot_stats(message: Message):
             f"💰 Всего коинов в системе: <b>{total_coins:,}</b>\n\n"
             "🛒 <b>КУПЛЕНО В МАГАЗИНЕ</b>\n"
             + shop_stats_report(users, stats)
+            + "\n⭐ <b>ДОНАТЫ (Telegram Stars)</b>\n"
+            + await asyncio.to_thread(_stars_stats_report_sync)
         )
         await message.answer(text, parse_mode="HTML")
     except Exception as e:

@@ -353,15 +353,21 @@ let upgradeBusy = false, upgradeStartedAt = 0;
 let upgradeArrowAngle = 0, upgradeArrowRaf = null, upgradeSpinToken = 0;
 let upgradeFetchPending = false;     // ждём ответ сервера по текущей ставке
 let upgradeBusyTimer = null;         // сторож «кнопка залипла»
-const UPGRADE_DURATION = 5400;        // полный раунд: быстрый спин + плавное затухание
-const UPGRADE_ARROW_SPEED = 900;      // градусов в секунду в фазе ожидания ответа сервера
-const UPGRADE_ARROW_MIN_LAND = 3800;  // минимум времени на «рулеточное» затухание, мс
+// Задача 70: заказчик просил «5–4 секунды» вместо прежних 5.4 с + долгого
+// торможения. Полный раунд — 4 с: разгон, затем плавное затухание ~2.6 с.
+const UPGRADE_DURATION = 4000;        // полный раунд: быстрый спин + плавное затухание
+const UPGRADE_ARROW_SPEED = 1080;     // градусов в секунду в фазе ожидания ответа сервера
+const UPGRADE_ARROW_MIN_LAND = 2600;  // минимум времени на «рулеточное» затухание, мс
+// Сколько ждём ответ сервера до решения «сеть/сервер не ответил». Было 8 с:
+// на холодном Render (сервис просыпается 20–50 с) запрос обрывался, игрок
+// видел «Сервер не ответил», хотя ставка уже была принята и сыграна.
+const UPGRADE_FETCH_TIMEOUT = 45000;
 const UPGRADE_MIN_COINS = 50, UPGRADE_MAX_COINS = 10000, UPGRADE_MAX_CAPSULES = 50;
 const UPGRADE_MAX_CHANCE = 95;
 // Задача 25: x4 и x8 убраны. x1.12…x1.75 — «почти монетка», x20/x50 — риск.
 const UPGRADE_MULTS = [1.12, 1.35, 1.55, 1.75, 20, 50];
 // Куда именно крутится стрелка: одна CSS-кривая на весь финиш, без рывков.
-const UPGRADE_LAND_MS = 5000;
+const UPGRADE_LAND_MS = 2600;
 const UPGRADE_LAND_EASING = 'cubic-bezier(0.1, 0.7, 0.1, 1)';
 const UPGRADE_FALLBACK_PRICES = {
     capsule: 100, uniq_capsule: 500, ruby: 1000, diamond: 5000,
@@ -401,7 +407,14 @@ let crashPollFailures = 0;
 // Стрелка командной арены: angle — текущий угол (0..360), rafId — кадр
 // непрерывного вращения, landedRound — раунд, за который стрелка уже встала
 // на победителя (чтобы не «доезжать» повторно на каждом опросе).
-let arenaPointer = { angle: 0, roundId: null, landedRound: null, spinning: false, rafId: null, landToken: 0 };
+let arenaPointer = { angle: 0, roundId: null, landedRound: null, spinning: false, rafId: null, landToken: 0,
+    rollStartedAt: 0, rollTotalMs: 0 };
+let arenaPollInFlight = false;
+// Задача 70: ориентир старта броска для «позднего» входа. Это НЕ время
+// анимации: оно нужно только чтобы понять, сколько осталось до финиша.
+// Клиентское время старта (Date.now) живёт в том же масштабе, что и серверное,
+// поэтому разница «сервер — клиент» считается без сюрпризов WebView.
+let arenaRollClock = { roundId: null, startedAtMs: 0, totalMs: 0 };
 // Задача 31: сервер держит ДВЕ арены одновременно. Здесь только то, какую из
 // них смотрит игрок (view) и последний снимок обеих арен (arenas).
 // mode — синоним view, оставлен для совместимости с прежним кодом и тестами.
@@ -626,6 +639,8 @@ function applyProfile(data) {
     updateUpgradeAccess();
     updateUI();
     try { checkChestCooldown(); } catch (e) { console.error(e); }
+    // Награда прошлого сундука, которую игрок не успел забрать (вышел на анимации).
+    try { collectPendingChestReward(); } catch (e) { console.error(e); }
     renderPassiveCard();
     renderLoveBadge();
 }
@@ -1441,7 +1456,8 @@ let topUpBusy = false;
 // Покупка коинов за Telegram Stars пока выключена: в профиле карточка размыта
 // с надписью «Скоро…», а кнопка «+» у баланса честно говорит то же самое.
 // Когда включим — достаточно поставить true и вернуть кнопке обработчик.
-let STARS_SOON = true;
+// Задача 70: донатная система включена — прайс и бонусы приходят с сервера.
+let STARS_SOON = false;
 const STARS_SOON_TEXT = 'Скоро… Пополнение за Telegram Stars ещё готовится.';
 
 function topUpModal() { return document.getElementById('topup-modal'); }
@@ -1459,13 +1475,22 @@ function renderTopUpList(message) {
         list.innerHTML = `<div class="topup-loading">${message || 'Пакеты недоступны'}</div>`;
         return;
     }
-    list.innerHTML = packages.map(pkg => `
-        <button class="topup-item" data-package="${escapeHtml(pkg.id)}">
+    // Задача 70: пакет с бонусом подсвечивается радужным и показывает
+    // «+N бонусом» — игрок видит, что за крупный донат дают больше коинов.
+    list.innerHTML = packages.map(pkg => {
+        const bonus = Number(pkg.bonus) || 0;
+        const total = Number(pkg.total) || (Number(pkg.coins) || 0) + bonus;
+        const bonusHtml = bonus > 0
+            ? `<span class="topup-bonus">+${formatCoins(bonus)} бонус</span>` : '';
+        return `
+        <button class="topup-item${bonus > 0 ? ' is-bonus' : ''}" data-package="${escapeHtml(pkg.id)}">
             <span class="topup-item-coins">
-                <img src="coin.png" alt="монета"> ${formatCoins(pkg.coins)}
+                <img src="coin.png" alt="монета"> ${formatCoins(total)}
             </span>
+            ${bonusHtml}
             <span class="topup-item-price">⭐ ${Number(pkg.stars) || 0}</span>
-        </button>`).join('');
+        </button>`;
+    }).join('');
     list.querySelectorAll('.topup-item').forEach(btn => {
         btn.addEventListener('click', () => buyCoinPackage(btn.dataset.package, btn));
     });
@@ -1613,6 +1638,39 @@ function playChestFlash(durationMs = 1000) {
     });
 }
 
+// Задача 70: награда сундука не должна теряться, если игрок вышел из аппки на
+// анимации. Сервер держит её в chest_claims незабранной; при заходе забираем
+// автоматически и говорим игроку, что пришло.
+let chestPendingCheckedAt = 0;
+async function collectPendingChestReward(force) {
+    if (!tg.initData) return false;
+    // Не чаще раза в минуту, кроме явного вызова после открытия сундука.
+    if (!force && Date.now() - chestPendingCheckedAt < 60000) return false;
+    chestPendingCheckedAt = Date.now();
+    try {
+        const data = await apiPost('/api/chest_pending_claim', {}, { fallback: '' });
+        if (!data || !data.claimed) return false;
+        const chestBalance = Number(data.new_balance);
+        if (Number.isFinite(chestBalance)) { balance = chestBalance; balanceKnown = true; }
+        if (Number.isFinite(Number(data.new_keys))) keys = Number(data.new_keys);
+        if (Array.isArray(data.items) && data.items.length) {
+            inventory = inventory.concat(data.items);
+        }
+        updateUI();
+        const parts = [];
+        if (Number(data.reward_keys) > 0) parts.push('🔑 Золотой ключ');
+        if (Number(data.reward_coins) > 0) parts.push(coinAmount(Number(data.reward_coins)));
+        if (Array.isArray(data.items) && data.items.length) parts.push(chestCapsuleText(data.items.length));
+        if (parts.length) {
+            tg.showAlert(`🎁 Награда за сундук зачислена: ${parts.join(' и ')}`);
+            playSound('win');
+        }
+        return true;
+    } catch (e) {
+        return false;
+    }
+}
+
 function hideChestRoulette() {
     const roulette = document.getElementById('roulette-container');
     if (roulette) {
@@ -1676,8 +1734,22 @@ function buildChestRouletteTrack({ isGold, winner }) {
 }
 
 // Крутит рулетку и резолвится, когда ячейка встала на место и подсвечена.
+// Задача 70: «Skip». Награда уже известна (сервер её выдал до анимации),
+// поэтому пропуск ничего не ломает: обрываем прокрут и сразу показываем награду.
+let chestSkipRequested = false;
+let chestRouletteActive = false;
+
+function skipChestAnimation() {
+    if (!chestRouletteActive) return;
+    chestSkipRequested = true;
+    const container = document.getElementById('roulette-container');
+    if (container) { container.classList.remove('spinning'); container.classList.add('hit'); }
+}
+
 function runChestRoulette({ isGold, winner }) {
     return new Promise(resolve => {
+        chestSkipRequested = false;
+        chestRouletteActive = true;
         const container = document.getElementById('roulette-container');
         const built = buildChestRouletteTrack({ isGold, winner });
         if (!container || !built) return resolve(false);
@@ -1714,8 +1786,9 @@ function runChestRoulette({ isGold, winner }) {
                 }
             }
 
-            if (progress < 1) { requestAnimationFrame(frame); return; }
+            if (progress < 1 && !chestSkipRequested) { requestAnimationFrame(frame); return; }
 
+            chestRouletteActive = false;
             track.style.transform = `translateX(-${target}px)`;
             container.classList.remove('spinning');
             container.classList.add('hit');
@@ -1809,6 +1882,13 @@ async function openChest(type) {
     const winner = hasCapsule ? { kind: 'capsule', amount: rewardItemAmount }
         : (isKey ? { kind: 'key', amount: 0 } : { kind: 'coin', amount: rewardCoins });
     await flashPromise;
+    // Задача 70: если игрок ушёл из аппки во время прокрута (вкладка скрыта),
+    // не держим награду до кнопки — сервер зачислит её сам при следующем заходе
+    // через /api/chest_pending_claim. Здесь просто не запускаем долгую анимацию.
+    if (document.visibilityState === 'hidden') {
+        pendingChestClaimId = data.claim_id != null ? data.claim_id : null;
+        return;
+    }
     await runChestRoulette({ isGold, winner });
     // Небольшая пауза: игрок должен увидеть, что ячейка встала под меткой и
     // подсветилась, а уже потом поверх открывается окно награды.
@@ -3467,13 +3547,17 @@ async function startUpgrade() {
         return tg.showAlert('Не удалось подготовить апгрейд');
     }
 
+    // id раунда запоминаем ДО отправки: если ответ потеряется, по нему можно
+    // догнать уже сыгранный раунд (задача 70) и не потерять ставку.
+    const roundId = requestId();
+    lastUpgradeRequestId = roundId;
     const payload = {
         initData: tg.initData,
         item_from: upgradeFrom,
         amount_from: Math.round(upgradeFromAmount),
         item_to: upgradeTarget.kind === 'item' ? upgradeTarget.value : 'coin',
         // Ключ идемпотентности: повторная отправка не спишет ставку второй раз.
-        request_id: requestId()
+        request_id: roundId
     };
     if (upgradeTarget.kind === 'mult') payload.target_multiplier = Number(upgradeTarget.value);
     if (upgradeTarget.kind === 'chance') payload.target_chance = Number(upgradeTarget.value);
@@ -3511,7 +3595,10 @@ async function startUpgrade() {
     let unauthorized = false;
     let timedOut = false;
     const controller = (typeof AbortController === 'function') ? new AbortController() : null;
-    const abortTimer = controller ? setTimeout(() => { timedOut = true; controller.abort(); }, 8000) : null;
+    // Задача 70: 45 с вместо 8 с. Холодный Render просыпается дольше, и раньше
+    // запрос обрывался на середине: игрок читал «Сервер не ответил», а ставка
+    // к этому моменту уже была списана и разыграна.
+    const abortTimer = controller ? setTimeout(() => { timedOut = true; controller.abort(); }, UPGRADE_FETCH_TIMEOUT) : null;
     try {
         const options = {
             method: 'POST',
@@ -3555,6 +3642,18 @@ async function startUpgrade() {
 
     if (errorText || !data) {
         stopUpgradeArrow();
+        // Задача 70: прежде чем говорить «сервер не ответил», проверяем, не
+        // сыгран ли раунд на самом деле. Раньше ставка уже была списана и
+        // разыграна, а игрок видел ошибку — деньги «сгорали».
+        const played = await fetchPlayedUpgrade(lastUpgradeRequestId);
+        if (played) {
+            console.info('Апгрейд: ответ потерялся, раунд забран повторно', played);
+            applyUpgradeServerState(played);
+            if (btn) { btn.disabled = false; btn.classList.remove('win', 'lose'); }
+            finishUpgradeAnimation(played, upgradeEffectiveChance(played, chance) || chance);
+            try { updateUI(); } catch (e) {}
+            return;
+        }
         // Ставка не сыграла — возвращаем показанный баланс/капсулы на место.
         restoreUpgradeStakePreview();
         if (circle) circle.classList.remove('spinning', 'win', 'lose');
@@ -3587,6 +3686,28 @@ async function startUpgrade() {
         if (token !== upgradeSpinToken) return;
         finishUpgradeAnimation(data, roundChance);
     }, data.roll);
+}
+
+// Задача 70: id последнего отправленного раунда. Нужен, если ответ потерялся:
+// «Сервер не ответил» больше не значит «ставка сгорела».
+let lastUpgradeRequestId = null;
+
+// Догнать уже сыгранный раунд по request_id. Сервер не списывает ставку
+// повторно — он возвращает результат, который уже записан в журнале.
+async function fetchPlayedUpgrade(requestId) {
+    if (!requestId) return null;
+    try {
+        const res = await fetch(`${API_URL}/api/upgrade_action`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ initData: tg.initData, replay_of: requestId })
+        });
+        if (!res.ok) return null;
+        const data = await res.json().catch(() => null);
+        return data && typeof data === 'object' ? data : null;
+    } catch (e) {
+        return null;
+    }
 }
 
 // Единая точка применения ответа сервера: баланс и инвентарь берём только отсюда,
@@ -4773,7 +4894,7 @@ function replayArenaAnimation(state, instant) {
 // последней секунде стрелка делает меньше градуса в кадр и визуально «встаёт».
 // Стартуем в НАЧАЛЕ броска: финальная точка приходит с сервера сразу вместе с
 // началом раунда (roll_data.final_x), поэтому не нужно ничего досчитывать после.
-function arenaBeginTeamRoll(finalX) {
+function arenaBeginTeamRoll(finalX, lateMs) {
     const pointer = arenaPointerNode();
     arenaPointerStopSpin();
     if (!pointer) return;
@@ -4797,9 +4918,14 @@ function arenaBeginTeamRoll(finalX) {
 
     const nowMs = arenaNowMs;
     const startedAt = nowMs();
+    // Задача 70: если зашли в середине броска, отсчёт начинается «задним
+    // числом» — стрелка сразу продолжает с той точки, где она была бы сейчас,
+    // и не пролетает весь путь за секунду.
+    const skipMs = Math.max(0, Math.min(total - 600, Number(lateMs) || 0));
+    const animStart = startedAt - skipMs;
     // Запоминаем старт и длительность: по ним экран финиша понимает, сколько
     // осталось до реальной остановки стрелки, и не показывает победителя раньше.
-    arenaPointer.rollStartedAt = startedAt;
+    arenaPointer.rollStartedAt = animStart;
     arenaPointer.rollTotalMs = total;
     pointer.classList.remove('landing');
     pointer.classList.add('spinning');
@@ -4829,7 +4955,7 @@ function arenaBeginTeamRoll(finalX) {
 
     const step = () => {
         if (finished || token !== arenaPointer.landToken) return;
-        const elapsed = Math.max(0, nowMs() - startedAt);
+        const elapsed = Math.max(0, nowMs() - animStart);
         let angle;
         if (elapsed <= ARENA_SPIN_UP_MS) {
             // Разгон.
@@ -4904,6 +5030,9 @@ function updateArenaView(mode) {
 function applyHockeyCamera(x, y, elapsedSeconds) {
     const camera = document.getElementById('hockey-camera');
     if (!camera) return;
+    // Задача 70: на телефоне наезд камеры убран — scale() поверх картинки с
+    // кучей теней стоил дороже всего, из-за него арена и «подлагивала».
+    if (isCompactArenaViewport()) { resetArenaCamera(); return; }
     const span = Math.max(0.001, HOCKEY_ROLL_DURATION - ARENA_CAMERA_ZOOM_START);
     const progress = Math.max(0, Math.min(1, (Number(elapsedSeconds) - ARENA_CAMERA_ZOOM_START) / span));
     const eased = progress * progress * (3 - 2 * progress);   // smoothstep
@@ -4911,6 +5040,16 @@ function applyHockeyCamera(x, y, elapsedSeconds) {
     arenaBall.zoom = scale;
     camera.style.transformOrigin = `${Math.max(0, Math.min(100, Number(x) || 0))}% ${Math.max(0, Math.min(100, Number(y) || 0))}%`;
     camera.style.transform = `scale(${scale.toFixed(4)})`;
+}
+
+// Телефонный режим арены: узкий экран (или экономия движения в системе).
+function isCompactArenaViewport() {
+    try {
+        if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) return true;
+        return window.innerWidth <= 719;
+    } catch (e) {
+        return true;
+    }
 }
 
 function resetArenaCamera() {
@@ -5044,7 +5183,11 @@ async function loadArenaRollPath(roundId) {
 // Сколько секунд прошло с начала броска по СЕРВЕРНЫМ часам: мяч окажется ровно
 // там, где он сейчас, даже если экран открыли на середине раунда.
 function arenaElapsedSeconds() {
-    const startedAt = Number(arenaBall.startedAt) || 0;
+    return arenaElapsedSecondsFor(arenaBall.startedAt);
+}
+
+function arenaElapsedSecondsFor(startedAtSeconds) {
+    const startedAt = Number(startedAtSeconds) || 0;
     if (!startedAt) return 0;
     const serverNowMs = performance.now() + hockeyServerOffsetMs;
     return Math.max(0, (serverNowMs - startedAt * 1000) / 1000);
@@ -5079,10 +5222,28 @@ function startArenaBall(state) {
     arenaBall.active = true;
     arenaBall.startedAt = Number(state && state.rolling_started_at) || (Date.now() / 1000);
     placeArenaBall(50, 50);
+    // Задача 70: если мы зашли в середине броска (или телефон проснулся, или
+    // сеть подвисла), траектория приезжает уже после финиша раунда. Раньше в
+    // этот момент мяч просто «телепортировался» на победителя. Теперь такая
+    // ситуация видна сразу: как только известна финальная точка — ставим мяч
+    // туда, без промежуточного кадра.
+    const finishNow = () => {
+        if (!arenaBall.active || arenaBall.roundId !== roundId) return;
+        arenaBall.active = false;
+        arenaBall.rafId = null;
+        const roll = (state && state.roll_data) || null;
+        if (roll && Number.isFinite(Number(roll.final_x))) {
+            freezeArenaBall(Object.assign({}, state, { round_id: roundId, roll_data: roll }));
+        }
+    };
+    if (arenaElapsedSecondsFor(arenaBall.startedAt) >= HOCKEY_ROLL_DURATION) { finishNow(); return; }
     loadArenaRollPath(roundId).then(path => {
         if (!arenaBall.active || arenaBall.roundId !== roundId) return;
         arenaBall.path = path;
         arenaBall.loading = false;
+        // Пока грузилась траектория, раунд успел закончиться — не начинаем
+        // анимацию «с начала», иначе мяч прыгает на последнем кадре.
+        if (arenaElapsedSeconds() >= HOCKEY_ROLL_DURATION) { finishNow(); return; }
         animateArenaBall();
     }).catch(() => { arenaBall.loading = false; });
 }
@@ -5134,6 +5295,13 @@ function freezeArenaBall(state) {
 
 async function pollHockeyState() {
     if (!document.getElementById('screen-hockey').classList.contains('active')) return;
+    // Задача 70: свёрнутая аппка не должна тянуть ответы сервера — на телефоне
+    // это и батарея, и «лаги» при возврате (пока догоняешь 20 запросов).
+    if (document.visibilityState === 'hidden') return;
+    // Опрос не должен наслаиваться: если Render отвечает медленно, следующий
+    // тик ждёт, а не плодит параллельные запросы (они и тормозили арену).
+    if (arenaPollInFlight) return;
+    arenaPollInFlight = true;
     try {
         const requestStartedAt = performance.now();
         // Задача 57: состояние арены закрыто админами, поэтому передаём initData —
@@ -5191,18 +5359,42 @@ async function pollHockeyState() {
             statusEl.innerText = 'Идёт бросок...'; statusEl.style.color = '#007aff';
             document.getElementById('hockey-controls').style.display = 'none';
             if (isTeamMode) {
-                // Командная арена: 3 с разгон + 5 с торможение (как апгрейд).
+                // Командная арена: 2 с разгон + 3.5 с торможение (как апгрейд).
                 // Запускаем ОДИН раз на раунд, в начале броска; финальную точку
                 // сервер отдаёт сразу, поэтому анимация нигде не «догоняет».
                 if (arenaPointer.roundId !== round.round_id) {
                     arenaPointer.roundId = round.round_id;
                     arenaResetPointer();
                     arenaPointer.roundId = round.round_id;
+                    arenaRollClock = { roundId: round.round_id, startedAtMs: 0, totalMs: 0 };
                 }
                 const teamRoll = activePool.roll_data || state.roll_data || {};
-                if (arenaPointer.landedRound !== round.round_id
+                const rollStartedAtMs = Number(activePool.rolling_started_at
+                    || state.rolling_started_at || 0) * 1000;
+                // Задача 70: «шарик сразу становится на победителя». Причина —
+                // поздний вход: игрок открыл арену/вернулся в аппку в середине
+                // броска, анимация считала elapsed от своего старта и через
+                // секунду прыгала в конец. Время броска берём у сервера.
+                if (rollStartedAtMs > 0) {
+                    const serverNowMs = arenaNowMs() + hockeyServerOffsetMs;
+                    const rollLeft = Math.max(0, (rollStartedAtMs + ARENA_TEAM_ROLL_MS) - serverNowMs);
+                    const lateMs = Math.max(0, serverNowMs - rollStartedAtMs);
+                    arenaRollClock = { roundId: round.round_id, startedAtMs: rollStartedAtMs, totalMs: ARENA_TEAM_ROLL_MS };
+                    if (rollLeft <= 1200) {
+                        // Осталось меньше секунды: нормальный финиш не покажешь,
+                        // поэтому сразу ставим стрелку на победителя и помечаем
+                        // раунд завершённым — без рывка и без «прыжка».
+                        arenaPointerJumpTo(teamRoll.final_x);
+                        arenaPointer.landedRound = round.round_id;
+                        arenaPointer.rollStartedAt = arenaNowMs() - lateMs;
+                        arenaPointer.rollTotalMs = ARENA_TEAM_ROLL_MS;
+                    } else if (arenaPointer.landedRound !== round.round_id
+                            && !arenaPointer.spinning && !arenaPointer.rafId) {
+                        arenaBeginTeamRoll(teamRoll.final_x, lateMs);
+                    }
+                } else if (arenaPointer.landedRound !== round.round_id
                         && !arenaPointer.spinning && !arenaPointer.rafId) {
-                    arenaBeginTeamRoll(teamRoll.final_x);
+                    arenaBeginTeamRoll(teamRoll.final_x, 0);
                 }
             } else if (arenaBall.roundId !== String(round.round_id) || !arenaBall.active) {
                 // Обычная арена: один раз на раунд берём траекторию и запускаем мяч.
@@ -5223,9 +5415,24 @@ async function pollHockeyState() {
                 const rollData = activePool.roll_data || state.roll_data || {};
                 const finalX = Number(rollData.final_x) || 0;
                 if (arenaPointer.landedRound !== round.round_id) {
+                    // Задача 70: раунд уже закрыт, а мы видели только начало —
+                    // не крутим полные 5.5 с «в пустоту», досчитываем от
+                    // серверного времени старта броска.
+                    const rollStartedMs = Number(activePool.rolling_started_at
+                        || state.rolling_started_at || 0) * 1000;
+                    const serverNowMs = arenaNowMs() + hockeyServerOffsetMs;
+                    const lateMs = rollStartedMs > 0
+                        ? Math.max(0, serverNowMs - rollStartedMs) : 0;
                     if (!arenaPointer.spinning && !arenaPointer.rafId) {
                         arenaPointer.roundId = round.round_id;
-                        arenaBeginTeamRoll(finalX);
+                        if (rollStartedMs > 0 && lateMs >= ARENA_TEAM_ROLL_MS - 1000) {
+                            arenaPointerJumpTo(finalX);
+                            arenaPointer.landedRound = round.round_id;
+                            arenaPointer.rollStartedAt = arenaNowMs();
+                            arenaPointer.rollTotalMs = 0;
+                        } else {
+                            arenaBeginTeamRoll(finalX, lateMs);
+                        }
                     }
                     // Сообщим победителя, когда стрелка реально встанет: берём
                     // остаток анимации от её старта, а не фиксированные 5 секунд
@@ -5273,12 +5480,16 @@ async function pollHockeyState() {
             arena.classList.toggle('settled', isTeamMode && round.status === 'finished');
         }
     } catch (e) { console.error(e); }
+    finally { arenaPollInFlight = false; }
 }
 
 function startHockeyPolling() {
     if (hockeyInterval) clearInterval(hockeyInterval);
     pollHockeyState();
-    hockeyInterval = setInterval(pollHockeyState, 200);
+    // Задача 70: было 200 мс — телефон грелся и арена «подлагивала». Анимация
+    // всё равно рисуется на клиенте каждый кадр, а с сервера нужны только
+    // статус, таймер и победитель, поэтому 500 мс достаточно.
+    hockeyInterval = setInterval(pollHockeyState, 500);
 }
 function stopHockeyPolling() {
     if (hockeyInterval) clearInterval(hockeyInterval);
