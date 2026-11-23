@@ -1623,8 +1623,12 @@ function applyStarsSoonState() {
     const card = document.getElementById('stars-card');
     if (!card) return;
     card.classList.toggle('is-soon', STARS_SOON);
-    const overlay = document.getElementById('stars-soon');
-    if (overlay) overlay.hidden = !STARS_SOON;
+    // Задача 73: плашки «Скоро…» больше нет — она висела поверх профиля.
+    // Если старая разметка всё же приедет из кэша, гасим её принудительно.
+    document.querySelectorAll('.soon-overlay').forEach(el => {
+        el.hidden = true;
+        el.style.display = 'none';
+    });
     const button = document.getElementById('stars-btn');
     if (button) {
         button.textContent = STARS_SOON ? 'Скоро…' : 'Открыть магазин Stars';
