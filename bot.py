@@ -27,6 +27,7 @@ from supabase import create_client, Client
 from mentions import clean_name, merge_names, parse_names
 from love import (
     LOVE_ACTION_BONUS,
+    action_progress_text,
     COOLDOWN_OFF_MARKER,
     LOVE_ACTION_COOLDOWN_DEFAULT,
     cooldown_from_setting,
@@ -666,12 +667,12 @@ async def cmd_admin_help(message: Message):
         "• <code>админы</code> — пингануть админов чата\n"
         "• <code>стоп</code> — остановить созыв\n\n"
         "💗 <b>Отношения (кулдаун — 5 часов на каждую команду):</b>\n"
-        "• после действия бот пишет, сколько ждать; ускорить нельзя — просто ждём\n"
-        "• <code>кд</code> — показать правило и ужесточённые значения\n"
-        "• <code>кд обнять 6ч</code> — ужесточить одну команду\n"
-        "• <code>кд обнять сброс</code> — вернуть к 5 часам\n"
-        "• <code>кд проверка</code> — диагностика: применяется ли КД и пишется ли отметка\n"
-        "• выключить или уменьшить нельзя: 5 ч — правило сервера\n\n"
+        "• после действия бот пишет, сколько ждать\n"
+        "• <code>кд</code> — показать кулдауны\n"
+        "• <code>кд 3ч</code> или <code>кд все 3ч</code> — на все РП сразу (30 мин…24 ч)\n"
+        "• <code>кд обнять 5ч</code> — своё время одной команде\n"
+        "• <code>кд обнять сброс</code> — вернуть к общему значению\n"
+        "• <code>кд проверка</code> — диагностика: применяется ли КД и пишется ли отметка\n\n"
         "📊 <b>Статистика:</b>\n"
         "• <code>стата бота</code> — общая статистика (работает только в ЛС)\n"
         "• <code>бд</code> — проверка схемы базы: каких миграций не хватает\n\n"
@@ -1203,10 +1204,11 @@ def _cooldown_overview() -> str:
         for action in sorted(overrides):
             lines.append(f"   — <code>{action}</code>: {format_love_cooldown(action=action)}")
     lines.append("")
-    lines.append("Задача 67: кулдаун зафиксирован — 5 часов на каждое РП-действие. "
-                 "Выключить или уменьшить нельзя (защита от накрутки Love).")
-    lines.append("Можно только ужесточить: <code>кд обнять 6ч</code>. "
-                 "Вернуть к 5 часам: <code>кд обнять сброс</code>.")
+    lines.append("Задача 72: значение настраивается — от 30 минут до 24 часов. "
+                 "По умолчанию 5 часов.")
+    lines.append("Для всех РП сразу: <code>кд все 3ч</code>. "
+                 "Для одной команды: <code>кд обнять 5ч</code>.")
+    lines.append("Вернуть команду к общему: <code>кд обнять сброс</code>.")
     lines.append("Проверить, что реально работает: <code>кд проверка</code>. "
                  "Все команды: <code>все рп</code>.")
     return "\n".join(lines)
@@ -1218,12 +1220,13 @@ async def cmd_love_cooldown(message: Message):
     """Секретная админ-команда: кулдаун награды за РП — общий или на команду.
 
     Задача 61: у каждого РП-действия СВОЙ кулдаун.
-    Задача 67: минимум 5 часов, выключить нельзя.
+    Задача 72: значение настраивается — 30 минут … 24 часа, 5 часов по умолчанию.
         кд                  — показать всё
-        кд 6ч               — ужесточить общий кулдаун
-        кд обнять 6ч        — ужесточить только «обнять»
-        кд обнять сброс     — вернуть «обнять» к общим 5 часам
-        кд обнять 0         — не выключит: код поднимет до 5 часов
+        кд 3ч               — общий кулдаун для всех команд
+        кд все 3ч           — то же самое («на все рп сразу»)
+        кд обнять 3ч        — только «обнять»
+        кд обнять сброс     — вернуть «обнять» к общему значению
+        кд обнять 0         — зажмётся в минимум (30 минут), не выключит
     """
     if not message.from_user or not is_admin(message.from_user.id):
         return      # не админ — молчим, команда скрытая
@@ -1236,16 +1239,21 @@ async def cmd_love_cooldown(message: Message):
         diag = await asyncio.to_thread(love_cooldown_diagnostics_sync, message.from_user.id)
         return await message.answer(diag, parse_mode="HTML")
 
+    # «кд все 3ч» — то же, что «кд 3ч»: кулдаун для ВСЕХ РП сразу (задача 72,
+    # заказчик: «можно поставить кд на все рп команды»).
+    if parts[1].strip().lower().replace("ё", "е") in ("все", "всем", "all", "всех"):
+        parts = [parts[0]] + parts[2:]
+
     # Вариант 1: «кд <команда> <значение>» — кулдаун отдельной РП-команды.
-    action = rp_action_key(parts[1])
+    action = rp_action_key(parts[1]) if len(parts) > 1 else None
     if action and len(parts) < 3:
         # «кд обнять» без значения: раньше эта строка падала во второй вариант
         # и админ получал «Не понял значение», хотя команда распознана.
         return await message.answer(
             f"⏳ Кулдаун команды «{action}»: "
             f"<b>{format_love_cooldown(action=action)}</b>.\n\n"
-            f"Минимум — 5 часов, выключить нельзя. Ужесточить: "
-            f"<code>кд {action} 6ч</code>, вернуть к общему: "
+            f"Можно от 30 минут до 24 часов. Поставить своё: "
+            f"<code>кд {action} 3ч</code>, вернуть к общему: "
             f"<code>кд {action} сброс</code>.",
             parse_mode="HTML")
     if action and len(parts) >= 3:
@@ -1268,16 +1276,13 @@ async def cmd_love_cooldown(message: Message):
         applied = set_love_cooldown_seconds(seconds, action)
         saved = await asyncio.to_thread(_cooldown_save_sync, applied, action)
         note = "" if saved else "\n<i>⚠️ В базу не сохранилось — после рестарта сбросится.</i>"
-        if applied <= LOVE_COOLDOWN_FIXED:
-            # Просили 0 или меньше 5 часов → команда просто осталась на общем
-            # правиле; говорим это прямо, без «✅ поставлено».
-            text = (f"ℹ️ У «{action}» и так общий кулдаун: "
+        if applied == love_cooldown_seconds():
+            text = (f"ℹ️ У «{action}» теперь общий кулдаун: "
                     f"<b>{format_love_cooldown(applied)}</b>.\n"
-                    f"Меньше 5 часов поставить нельзя — 5 ч правило сервера. "
-                    f"Ужесточить: <code>кд {action} 6ч</code>.")
+                    f"Поставить своё значение: <code>кд {action} 3ч</code>.")
         else:
             text = (f"✅ Кулдаун команды «{action}»: <b>{format_love_cooldown(applied)}</b>.\n"
-                    f"Другие команды не меняются. Вернуть к 5 часам: "
+                    f"Другие команды не меняются. Вернуть к общему: "
                     f"<code>кд {action} сброс</code>.")
         return await message.answer(text + note, parse_mode="HTML")
 
@@ -1292,11 +1297,11 @@ async def cmd_love_cooldown(message: Message):
     applied = set_love_cooldown_seconds(seconds)
     saved = await asyncio.to_thread(_cooldown_save_sync, applied)
     note = "" if saved else "\n<i>⚠️ В базу не сохранилось — после рестарта сбросится.</i>"
-    # Задача 67: меньше 5 часов и «выключить» больше не бывает — set_love_cooldown_seconds
-    # поднимает любое значение до пяти часов, поэтому здесь всегда 5 ч или больше.
+    # Задача 72: значение настраивается (30 минут … 24 часа), а «кд 0» больше
+    # не выключает кулдаун — просто зажимается в минимум.
     text = (f"✅ Кулдаун награды за РП: <b>{format_love_cooldown(applied)}</b> "
             f"({applied} сек) на каждую команду.\n"
-            f"Меньше 5 часов нельзя: 5 ч — правило сервера. Вернуть: <code>кд 5ч</code>.")
+            f"Допустимо от 30 минут до 24 часов. Вернуть к 5 ч: <code>кд 5ч</code>.")
     await message.answer(text + note, parse_mode="HTML")
 
 
@@ -2366,7 +2371,11 @@ async def cmd_pocket(message: Message):
     inv = parse_inventory(user.get("inventory"))
     name = _player_mention(target.id, getattr(target, "username", None))
     text = f"💰 <b>Карман {name}</b>\n\n👛 Баланс: <b>{user['coins']}</b> коинов\n"
+    # Задача 72: «в кармане» теперь видно и любовь — ❤️ Love у пары или
+    # 💔 Unlove у одиночки. Раньше эти числа жили только в «любовь инфа».
+    love_line = await _pocket_love_line(target.id)
     if user.get("keys", 0) > 0: text += f"🔑 Ключи: <b>{user['keys']}</b>\n"
+    if love_line: text += love_line
     inventory_lines = []
     for item_id, item in visible_inventory_items(is_admin(message.from_user.id)).items():
         count = inv.count(item_id)
@@ -2377,6 +2386,21 @@ async def cmd_pocket(message: Message):
     else:
         text += "\n🎒 <b>Инвентарь:</b> Пусто\n"
     await message.answer(text, parse_mode="HTML")
+
+
+async def _pocket_love_line(user_id) -> str:
+    """Строка «❤️ Love: N» или «💔 Unlove: N» для кармана (задача 72)."""
+    try:
+        row = await get_relationship(user_id)
+    except Exception:
+        row = None
+    if row:
+        score = int(row.get("love") or 0)
+        return f"❤️ Love: <b>{coin_amount(score)}</b>\n"
+    score = await get_solo_love(user_id)
+    if score > 0:
+        return f"💔 {SOLO_CURRENCY}: <b>{coin_amount(score)}</b>\n"
+    return ""
 
 
 # ================= ТОП =================
@@ -2964,9 +2988,11 @@ def _stage_text(score: int) -> str:
     # Задача 55: без строки «до следующего уровня» игрок видел «Уровень 1 ·
     # Love 0» и не понимал, что вообще двигает уровень (и растёт ли счёт).
     # Плюс прямая подсказка, чем его качать: РП-команды в паре.
+    # Задача 72: прогресс показываем как «10/50❤️» — видно, сколько уже есть
+    # на уровне и сколько осталось, вместо сухого «До уровня 2 — 40 Love».
     tail = ("➡️ Максимальный уровень — дальше только теплее"
             if info["next_level"] is None
-            else f"➡️ {safe_text(next_level_text(info['love']))} "
+            else f"{safe_text(action_progress_text(info['love']))} "
                  f"(качается РП-командами в паре)")
     return (f"💗 <b>Уровень {info['level']} · {safe_text(info['title'])}</b>\n"
             f"Love коинов: <b>{coin_amount(info['love'])}</b>\n{tail}")
@@ -3729,7 +3755,7 @@ async def cmd_love_info(message: Message):
         f"📅 Вместе: <b>{_days_text(days)}</b>\n"
         f"🏅 Уровень: <b>{info['level']} · {safe_text(info['title'])}</b>\n"
         f"💗 Love коинов: <b>{coin_amount(score)}</b>\n"
-        f"➡️ {safe_text(next_level_text(score))}",
+        f"{safe_text(action_progress_text(score))}",
         parse_mode="HTML")
 
 
@@ -4119,8 +4145,12 @@ async def cmd_rp_action(message: Message):
             return await message.answer(
                 f"{text}\n\n⚠️ Love не записался в базу — бонус не начислен.\n"
                 f"{love_write_hint()}", parse_mode="HTML")
-    reply = (f"{text}\n\n💗 +{LOVE_ACTION_BONUS} Love (всего {new_score})\n"
-             f"➡️ {safe_text(next_level_text(new_score))}")
+    # Задача 72: текст ответа — как просил заказчик:
+    #     🫂 Broker обнимает
+    #     +10 Love❤️
+    #     ➡️ До уровня 2 — 10/50❤️
+    reply = (f"{text}\n\n+{LOVE_ACTION_BONUS} Love❤️\n"
+             f"{safe_text(action_progress_text(new_score))}")
     # Задача 61: награда за этап выдаётся ВСЕГДА и сразу, но игрок должен видеть,
     # за что пришли коины — и в чате, и личным сообщением каждому участнику.
     for stage in granted:
@@ -4164,8 +4194,9 @@ async def solo_rp_action(message: Message, meta: dict, target_id, target_name):
             return await message.answer(
                 f"{text}\n\n⚠️ {SOLO_CURRENCY} не записался в базу — бонус не начислен.\n"
                 f"{love_write_hint()}", parse_mode="HTML")
-    reply = (f"{text}\n\n💔 +{LOVE_ACTION_BONUS} {SOLO_CURRENCY} (всего {score})\n"
-             f"➡️ {safe_text(next_level_text(score, SOLO_CURRENCY))}")
+    # Задача 72: «+10 Unlove💔 / ➡️ До уровня 2 — 10/40💔» — без слова «всего».
+    reply = (f"{text}\n\n+{LOVE_ACTION_BONUS} {SOLO_CURRENCY}💔\n"
+             f"{safe_text(action_progress_text(score, solo=True))}")
     # Одиночке награда тоже выдаётся всегда — говорим об этом прямо.
     for stage in granted:
         reply += "\n" + safe_text(stage_reached_text(stage, stage.get("reward")))

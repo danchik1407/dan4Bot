@@ -557,28 +557,58 @@ function updateUI() {
     if (daysEl) daysEl.innerText = daysInGame;
     document.querySelectorAll('.game-balance-val').forEach(el => { el.innerText = shown; });
     const inv = document.getElementById('inventory');
-    const inventoryCounts = {};
-    inventory.forEach(itemId => { inventoryCounts[itemId] = (inventoryCounts[itemId] || 0) + 1; });
-    const ownedItems = Object.entries(SHOP_ITEMS).filter(([itemId]) => inventoryCounts[itemId] > 0);
-    if (ownedItems.length === 0) {
-        inv.innerHTML = `<div class="inv-empty">📦 Инвентарь пуст</div>`;
-    } else {
-        inv.innerHTML = ownedItems.map(([itemId, item]) => {
-            // Картинка капсулы (PNG с прозрачным фоном), эмодзи — только запасной вариант.
-            const art = inventoryImageFor(itemId, item);
-            const artHtml = art
-                ? `<div class="inv-art"><img src="${art}" alt="${escapeHtml(item.name)}" loading="lazy"></div>`
-                : `<div class="inv-emoji">${item.emoji || '💊'}</div>`;
-            return `
-            <div class="inv-item">
-                ${artHtml}
-                <span>${escapeHtml(item.shortName || item.name)} x${inventoryCounts[itemId]}</span>
-            </div>
-        `;
-        }).join('');
-    }
+    if (inv) inv.innerHTML = inventoryGridHtml();
     renderUpgrade();
     updateUpgradeStatsUI();
+    renderPocket();
+}
+
+// ================= КАРМАН (задача 72) =================
+// Один экран с имуществом: баланс, ключи, Love/Unlove и весь инвентарь —
+// ровно то, что бот показывает командой `карман`. Данные только с сервера.
+function renderPocket() {
+    const coinsEl = document.getElementById('pocket-coins');
+    if (!coinsEl) return;
+    coinsEl.innerHTML = balanceKnown ? coinAmount(balance) : '…';
+    const keysEl = document.getElementById('pocket-keys');
+    if (keysEl) keysEl.innerText = keys;
+    // Любовь: у пары — ❤️ Love, одиночке — 💔 Unlove. Нет ни того, ни другого —
+    // строку не показываем совсем (пустая строка «0» только путала).
+    const row = document.getElementById('pocket-love-row');
+    const label = document.getElementById('pocket-love-label');
+    const value = document.getElementById('pocket-love');
+    const inPair = Boolean(loveState && loveState.in_relationship);
+    const loveAmount = inPair ? Number(loveState.love) || 0 : Number(loveState && loveState.unlove) || 0;
+    if (row && label && value) {
+        const show = Boolean(loveState) && (inPair || loveAmount > 0);
+        row.hidden = !show;
+        if (show) {
+            label.textContent = inPair ? '❤️ Love' : '💔 Unlove';
+            value.innerHTML = coinAmount(loveAmount);
+        }
+    }
+    const grid = document.getElementById('pocket-inventory');
+    if (grid) grid.innerHTML = inventoryGridHtml();
+}
+
+// Разметка инвентаря одна для профиля и кармана — чтобы не разъезжались.
+function inventoryGridHtml() {
+    const counts = {};
+    inventory.forEach(itemId => { counts[itemId] = (counts[itemId] || 0) + 1; });
+    const owned = Object.entries(SHOP_ITEMS).filter(([itemId]) => counts[itemId] > 0);
+    if (!owned.length) return `<div class="inv-empty">📦 Инвентарь пуст</div>`;
+    return owned.map(([itemId, item]) => {
+        const art = inventoryImageFor(itemId, item);
+        const artHtml = art
+            ? `<div class="inv-art"><img src="${art}" alt="${escapeHtml(item.name)}" loading="lazy"></div>`
+            : `<div class="inv-emoji">${item.emoji || '💊'}</div>`;
+        return `
+            <div class="inv-item">
+                ${artHtml}
+                <span>${escapeHtml(item.shortName || item.name)} x${counts[itemId]}</span>
+            </div>
+        `;
+    }).join('');
 }
 
 // ================= СИНХРОНИЗАЦИЯ ПРОФИЛЯ =================
@@ -883,6 +913,12 @@ function switchTab(tabId, element) {
         // Раньше каждый вход на вкладку показывал «Загрузка магазина…».
         renderShop();
         loadShopItems();
+    }
+    if (tabId === 'pocket') {
+        // Задача 72: карман рисуем из уже полученных данных и обновляем фоном.
+        renderPocket();
+        loadLoveState();
+        if (!userDataLoaded) refreshProfile();
     }
     if (tabId === 'profile') {
         // Карточки профиля рисуем ДО сети, чтобы вкладка не «думала»:
@@ -1476,6 +1512,7 @@ async function loadLoveState() {
     try {
         loveState = await apiPost('/api/love_state', {});
         renderLoveBadge();
+        renderPocket();
         if (loveState && todayStageRewards(loveState)) {
             // Этапы и награды — секретная механика: не раскрываем ни название,
             // ни сумму, только мягко сообщаем, что стало теплее.

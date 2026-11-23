@@ -18,16 +18,28 @@ logger = logging.getLogger(__name__)
 # достигают 50 — каждому по 1000 коинов». Значит этап «закрыт» уже на его ПРАВОЙ
 # границе: 50 Love = 2-й этап, 200 = 3-й и т.д. Поэтому `min` следующего этапа и
 # есть «сколько нужно» (поле `need` в публичной карточке).
+# Задача 72: заказчик сам прислал таблицу призов и правило её выдачи:
+#   «1 этап: Случайное знакомство 0/50 — награда за первый уровень НЕ даётся;
+#    2 этап: Дружба влюблённых 50/200 — приз 1 000 каждому;
+#    3 Близость 200/500 — 3 000; 4 Признание 500/2000 — 8 000;
+#    5 Крепкая любовь 2000/5000 — 15 000; 6 Вместе до смерти 5000/12000 — 40 000;
+#    7 Почти брак 12000/20000 — 100 000; 8 Вечная любовь 20000∞ — 500 000».
+# То есть reward — это приз ЗА ПЕРЕХОД на уровень (за уровень 2 — 1000).
+# Уровень 1 не оплачивается никогда: reward = 0, поэтому в базе даже не
+# появляется отметка о выплате, и «нахимичить» повторно её нельзя.
 LOVE_STAGES = [
-    {"index": 0, "min": 0, "max": 50, "title": "Случайное знакомство", "reward": 1000},
-    {"index": 1, "min": 50, "max": 200, "title": "Дружба влюблённых", "reward": 2000},
-    {"index": 2, "min": 200, "max": 500, "title": "Близость", "reward": 5000},
-    {"index": 3, "min": 500, "max": 2000, "title": "Признание", "reward": 10000},
-    {"index": 4, "min": 2000, "max": 5000, "title": "Крепкая любовь", "reward": 25000},
-    {"index": 5, "min": 5000, "max": 12000, "title": "Вместе до смерти", "reward": 50000},
+    {"index": 0, "min": 0, "max": 50, "title": "Случайное знакомство", "reward": 0},
+    {"index": 1, "min": 50, "max": 200, "title": "Дружба влюблённых", "reward": 1000},
+    {"index": 2, "min": 200, "max": 500, "title": "Близость", "reward": 3000},
+    {"index": 3, "min": 500, "max": 2000, "title": "Признание", "reward": 8000},
+    {"index": 4, "min": 2000, "max": 5000, "title": "Крепкая любовь", "reward": 15000},
+    {"index": 5, "min": 5000, "max": 12000, "title": "Вместе до смерти", "reward": 40000},
     {"index": 6, "min": 12000, "max": 20000, "title": "Почти брак", "reward": 100000},
     {"index": 7, "min": 20000, "max": None, "title": "Вечная любовь", "reward": 500000},
 ]
+
+# Этапы, за которые приз не выдаётся вообще (первый уровень).
+LOVE_FREE_STAGES = frozenset({0})
 
 # Сколько Love нужно, чтобы получить награду этапа (правая граница этапа).
 # Нужно для честного текста «Достигли этапа N: +X коинов каждому».
@@ -46,8 +58,17 @@ LOVE_ACTION_BONUS = 10              # +10 Love коинов в общий бан
 # понадобится ужесточить), но меньше 5 часов код не опустит никогда.
 LOVE_ACTION_COOLDOWN = 5 * 3600
 LOVE_ACTION_COOLDOWN_DEFAULT = 5 * 3600   # «как задумано»
-# Нижняя граница: любое «0», «30м», «off» из базы/команды трактуется как 5 часов.
-LOVE_COOLDOWN_FIXED = 5 * 3600
+# Задача 72 (прямое уточнение заказчика): «кд команда можно поставить кд на все
+# рп команды типо обнять допустим раз в 3 часа или 5». Значит админ НАСТРАИВАЕТ
+# значение — и 3 часа, и 5 часов, и «на все рп сразу». Пятёрка остаётся
+# значением ПО УМОЛЧАНИЮ для новой команды, но не минимумом: минимум теперь
+# LOVE_COOLDOWN_MIN (полчаса), чтобы «раз в 3 часа» действительно работало.
+LOVE_COOLDOWN_MIN = 30 * 60
+# Оставлено для совместимости со старым кодом: ниже этого значения кулдаун не
+# опускается (раньше здесь была пятёрка часов — из-за неё `кд 3ч` не работал).
+LOVE_COOLDOWN_FIXED = LOVE_COOLDOWN_MIN
+# Предел сверху: сутки. Больше — почти «выключено», и это точно ошибка ввода.
+LOVE_COOLDOWN_MAX = 24 * 3600
 # Задача 68: ускорения за i¢ больше нет (заказчик убрал и текст, и кнопку).
 # Константа оставлена только для совместимости формата /api/love_*: старые
 # сборки Mini App читают поле ice_cost. Никаких списаний по ней не происходит.
@@ -65,12 +86,12 @@ _COOLDOWN_OVERRIDES: dict = {}
 
 
 def love_cooldown_seconds(action=None) -> int:
-    """Кулдаун конкретной РП-команды в секундах. Задача 67: минимум 5 часов.
+    """Кулдаун конкретной РП-команды в секундах.
 
-    Правило заказчика: «на все рп команды кд 5 часов». Поэтому функция больше
-    не может вернуть 0 (выключено) или что-то меньше пяти часов — ни из памяти,
-    ни из `game_settings`, ни из старого нуля задачи 34. Значение только растёт:
-    если админ когда-нибудь поставит больше — применится больше.
+    Задача 72: админ ставит любое значение от 30 минут до 24 часов — `кд 3ч`,
+    `кд 5ч`, `кд обнять 6ч`, `кд все 3ч`. Пятёрка часов — только значение по
+    умолчанию (LOVE_ACTION_COOLDOWN_DEFAULT), а не минимум: раньше код не
+    опускался ниже 5 часов, и просьба «раз в 3 часа» молча игнорировалась.
     """
     value = 0
     if action:
@@ -88,23 +109,29 @@ def love_cooldown_seconds(action=None) -> int:
     return max(LOVE_COOLDOWN_FIXED, value)
 
 
+def clamp_love_cooldown(seconds) -> int:
+    """Привести значение к допустимому: 30 минут … 24 часа."""
+    try:
+        value = int(seconds)
+    except (TypeError, ValueError):
+        value = LOVE_ACTION_COOLDOWN_DEFAULT
+    return max(LOVE_COOLDOWN_MIN, min(LOVE_COOLDOWN_MAX, value))
+
+
 def set_love_cooldown_seconds(seconds, action=None) -> int:
     """Поставить кулдаун. Без `action` — общий, с `action` — для этой команды.
 
-    Задача 67: значение ниже пяти часов поднимается до пяти. Если для команды
-    просят ровно 5 часов (то есть «как у всех»), персональное значение
-    удаляется, а не пишется в базу отдельной строкой — иначе `кд обнять 0`
-    оставлял в базе «своё» 18000 и путал диагностику.
+    Задача 72: значение зажимается в 30 минут … 24 часа. Персональное значение,
+    совпадающее с общим, не храним отдельной строкой — иначе в базе остаётся
+    мусор и диагностика путается.
 
     Возвращает применённое значение.
     """
-    try:
-        value = max(LOVE_COOLDOWN_FIXED, int(seconds))
-    except (TypeError, ValueError):
-        value = LOVE_COOLDOWN_FIXED
+    value = clamp_love_cooldown(seconds)
     if action:
         key = str(action).strip().lower()
-        if value <= LOVE_COOLDOWN_FIXED:
+        general = love_cooldown_seconds()
+        if value == general:
             _COOLDOWN_OVERRIDES.pop(key, None)
         else:
             _COOLDOWN_OVERRIDES[key] = value
@@ -132,9 +159,9 @@ def load_love_cooldown_overrides(raw) -> None:
     _COOLDOWN_OVERRIDES.clear()
     for key, value in data.items():
         try:
-            # Задача 67: из базы тоже нельзя притащить «0» или «10 минут» —
-            # минимальный кулдаун всегда 5 часов.
-            _COOLDOWN_OVERRIDES[str(key).strip().lower()] = max(LOVE_COOLDOWN_FIXED, int(value))
+            # Задача 72: из базы принимаем 30 минут … 24 часа (раньше всё, что
+            # меньше 5 часов, поднималось до 5 — `кд 3ч` не работал).
+            _COOLDOWN_OVERRIDES[str(key).strip().lower()] = clamp_love_cooldown(int(value))
         except (TypeError, ValueError):
             continue
 
@@ -155,27 +182,26 @@ COOLDOWN_OFF_MARKER = "off"
 def cooldown_from_setting(raw, default: int = 0):
     """Прочитать значение кулдауна из game_settings.
 
-    Задача 67: вернуть «выключено» (0) эта функция больше не может.
-
     Возвращает (секунды, явно_ли_задано):
-      * `"off"` / `"выкл"` → (5 ч, False) — старая метка, игнорируется;
-      * число >= 5 ч       → (N, True)    — админ ужесточил;
-      * число 0…5 ч        → (5 ч, False) — поднимаем до правила сервера;
-      * пусто/мусор        → (5 ч, False).
+      * `"off"` / `"выкл"` → (по умолчанию, False) — старая метка задачи 34/66,
+        «выключить» больше не значит ничего: кулдаун всегда включён;
+      * число 30 мин…24 ч  → (N, True) — админ настроил (в т.ч. 3 часа);
+      * 0 / мусор          → (по умолчанию, False) — берём дефолт.
+
+    Задача 72: раньше всё, что меньше 5 часов, поднималось до 5 — из-за этого
+    `кд 3ч` в базе читался как «5 часов», и настройка «не работала».
     """
     text = str(raw if raw is not None else "").strip().lower()
-    # Задача 67: выключить кулдаун нельзя. «off»/«0» из старых сборок и из
-    # старых команд читаем как «как задумано» — 5 часов.
+    fallback = clamp_love_cooldown(default if default else LOVE_ACTION_COOLDOWN_DEFAULT)
     if text in ("off", "выкл", "нет", "none", "disabled"):
-        return LOVE_COOLDOWN_FIXED, False
+        return fallback, False
     try:
         value = int(float(text))
     except (TypeError, ValueError):
-        return max(LOVE_COOLDOWN_FIXED, int(default)), False
+        return fallback, False
     if value <= 0:
-        return max(LOVE_COOLDOWN_FIXED, int(default)), False
-    # Меньше пяти часов не бывает — даже если в базе лежит 600 секунд.
-    return max(LOVE_COOLDOWN_FIXED, value), True
+        return fallback, False
+    return clamp_love_cooldown(value), True
 
 
 def format_love_cooldown(seconds=None, action=None) -> str:
@@ -295,6 +321,16 @@ def stages_reached(previous_score, new_score) -> list:
     return [dict(stage) for stage in LOVE_STAGES[previous_index + 1:new_index + 1]]
 
 
+def stage_is_paid(stage) -> bool:
+    """Платный ли этап: за 1-й уровень приз не дают никогда (задача 72)."""
+    if not stage:
+        return False
+    index = _safe_int(stage.get("index", stage.get("stage")), -1)
+    if index in LOVE_FREE_STAGES:
+        return False
+    return _safe_int(stage.get("reward"), 0) > 0
+
+
 def _safe_int(value, default=0):
     """Терпимое к мусору число: None/«abc» → default."""
     try:
@@ -354,6 +390,25 @@ def next_level_text(score, currency: str = "Love") -> str:
     if info["next_level"] is None:
         return "Максимальный уровень"
     return f"До уровня {info['next_level']} — {info['to_next']} {currency}"
+
+
+def action_progress_text(score, solo: bool = False) -> str:
+    """«До уровня 2 — 10/50💔» — прогресс внутри текущего уровня.
+
+    Задача 72: заказчик прислал ровно такой вид ответа на РП-команду:
+        🫂 Broker обнимает
+        +10 Unlove💔
+        ➡️ До уровня 2 — 10/40💔
+    Числа — «сколько Love уже есть на этом уровне / сколько нужно до
+    следующего», поэтому видно и прибавку, и остаток, без слова «всего».
+    """
+    info = public_stage(score)
+    heart = "💔" if solo else "❤️"
+    if info["next_level"] is None:
+        return f"💞 Максимальный уровень — {info['love']}{heart}"
+    have = max(0, info["love"] - int(info["stage_min"] or 0))
+    need = max(0, int(info["need"] or 0) - int(info["stage_min"] or 0))
+    return f"➡️ До уровня {info['next_level']} — {have}/{need}{heart}"
 
 
 def stage_reached_text(stage, amount_per_partner, solo: bool = False) -> str:
@@ -481,6 +536,10 @@ def claim_stage_rewards(supabase, relationship) -> list:
     for stage in LOVE_STAGES:
         if stage["index"] > current_index or stage["index"] in already:
             continue
+        # Задача 72: за 1-й уровень приз не даётся — этап просто пропускаем,
+        # отметку в базе не ставим (выдавать там нечего).
+        if not stage_is_paid(stage):
+            continue
         # Отметку ставим ДО начисления: повторный вызов и гонка двух действий
         # не выдадут награду второй раз.
         try:
@@ -606,6 +665,9 @@ def claim_solo_stage_rewards(supabase, user_id, score) -> list:
     granted = []
     for stage in LOVE_STAGES:
         if stage["index"] > current_index or stage["index"] in already:
+            continue
+        # Задача 72: 1-й уровень не оплачивается и в одиночной ветке.
+        if not stage_is_paid(stage):
             continue
         # Отметку — ДО начисления: гонка двух действий не выдаст награду дважды.
         try:
