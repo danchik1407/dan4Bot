@@ -12,7 +12,7 @@
     <meta http-equiv="Pragma" content="no-cache">
     <meta http-equiv="Expires" content="0">
     <title>AURA GAME</title>
-    <link rel="stylesheet" href="style.css?v=aura-71">
+    <link rel="stylesheet" href="style.css?v=aura-72">
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
 </head>
 <body>
@@ -132,7 +132,7 @@
                     <span class="game-thumb game-thumb-up"><span class="thumb-hammer">🔨</span><span class="thumb-arrow">↑</span></span>
                     <span class="game-text">
                         <span class="game-name">Апгрейд <span class="up-lock" id="upgrade-lock-icon">🔒</span></span>
-                        <span class="game-desc" id="upgrade-card-sub">Скоро...</span>
+                        <span class="game-desc" id="upgrade-card-sub">Улучшай капсулы</span>
                     </span>
                     <span class="game-chevron">›</span>
                 </div>
@@ -184,6 +184,30 @@
         <section id="tab-shop" class="tab">
             <div class="page-header"><h2>🛒 Магазин</h2></div>
             <div class="shop-grid" id="shop-grid"><div class="inv-empty">Загрузка магазина…</div></div>
+        </section>
+
+        <!-- Задача 72: вкладка «Карман» — всё имущество одним экраном, как
+             сообщение `карман` в боте: баланс, ключи, Love/Unlove, инвентарь. -->
+        <section id="tab-pocket" class="tab">
+            <div class="page-header"><h2>💰 Карман</h2></div>
+            <div class="pocket-card">
+                <div class="pocket-row">
+                    <span class="pocket-label">👛 Баланс</span>
+                    <span class="pocket-value" id="pocket-coins">…</span>
+                </div>
+                <div class="pocket-row">
+                    <span class="pocket-label">🔑 Ключи</span>
+                    <span class="pocket-value" id="pocket-keys">0</span>
+                </div>
+                <div class="pocket-row" id="pocket-love-row" hidden>
+                    <span class="pocket-label" id="pocket-love-label">❤️ Love</span>
+                    <span class="pocket-value" id="pocket-love">0</span>
+                </div>
+            </div>
+            <h3 class="pocket-title">🎒 Инвентарь</h3>
+            <div class="inventory-grid" id="pocket-inventory">
+                <div class="inv-empty">📦 Инвентарь пуст</div>
+            </div>
         </section>
 
         <section id="tab-profile" class="tab">
@@ -266,16 +290,18 @@
                     <div class="extra-hint" id="ref-detail"></div>
                 </div>
 
-                <!-- Донат: Telegram Stars. Пока выключен — карточка размыта и
-                     честно подписана «Скоро…», чтобы игрок не искал кнопку. -->
-                <div class="profile-extra is-soon" id="stars-card">
+                <!-- Донат: Telegram Stars. Задача 70 система включена, задача 72:
+                     убрали класс is-soon из разметки — из-за него карточка
+                     оставалась размытой с «Скоро…» даже после включения
+                     (на этом и был баг со скрина: «Скоро…» поверх профиля). -->
+                <div class="profile-extra" id="stars-card">
                     <div class="extra-head">
                         <span class="extra-title">⭐ Купить коины</span>
                         <span class="extra-value">Telegram Stars</span>
                     </div>
                     <div class="extra-hint" id="stars-hint">Пополнение коинов за звёзды</div>
-                    <button class="extra-btn" id="stars-btn" type="button">Скоро…</button>
-                    <div class="soon-overlay" id="stars-soon"><span>Скоро…</span></div>
+                    <button class="extra-btn" id="stars-btn" type="button">Открыть магазин Stars</button>
+                    <div class="soon-overlay" id="stars-soon" hidden><span>Скоро…</span></div>
                 </div>
 
                 <!-- Задача 71: техработы. Карточку видит ТОЛЬКО админ: включает
@@ -602,9 +628,10 @@
         <div class="nav-item" onclick="switchTab('top', this)"><span class="nav-icon">🏆</span> Топ</div>
         <div class="nav-item" onclick="switchTab('chests', this)"><span class="nav-icon">📦</span> Сундуки</div>
         <div class="nav-item" onclick="switchTab('shop', this)"><span class="nav-icon">🛒</span> Магазин</div>
+        <div class="nav-item" onclick="switchTab('pocket', this)"><span class="nav-icon">💰</span> Карман</div>
         <div class="nav-item" onclick="switchTab('profile', this)"><span class="nav-icon">👤</span> Профиль</div>
     </nav>
 
-    <script src="app.js?v=aura-71" defer></script>
+    <script src="app.js?v=aura-72" defer></script>
 </body>
 </html>

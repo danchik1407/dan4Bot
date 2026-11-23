@@ -15,7 +15,7 @@ from db_schema import audit as db_schema_audit
 from shop_catalog import SHOP_ITEMS, ShopPurchaseError, is_admin_id, parse_inventory, purchase_shop_item, \
     serialize_shop_items, missing_stock_rows, shop_stock_snapshot, stock_diagnostics, \
     sold_out_items, STOCK_LIMITS_ENABLED
-from love import (LOVE_ACTION_BONUS, LOVE_ICE_COST,
+from love import (LOVE_ACTION_BONUS, LOVE_ICE_COST, action_progress_text,
                   cooldown_from_setting,
                   love_cooldown_seconds,
                   RP_ACTIONS, SOLO_CURRENCY, claim_solo_stage_rewards,
@@ -87,7 +87,7 @@ async def _http_json(url, method: str = "GET", params=None, payload=None, timeou
 
 # Номер сборки: по нему из /api/health видно, что на сервисе НЕ старый код.
 # Если после деплоя здесь прежнее значение — Render ещё не перезапустился.
-API_BUILD = "2026-10-27-task71-maintenance-toggle"
+API_BUILD = "2026-10-27-task72-love-rewards-pocket-cd"
 
 # Момент старта процесса. По нему видно, что сервис только что «проснулся»:
 # Render на бесплатном тарифе усыпляет Web Service через 15 минут без входящих
@@ -6969,6 +6969,8 @@ def love_state_for(user_id) -> dict:
         "stage_title": level["title"],
         "progress": level["progress"],
         "action_bonus": LOVE_ACTION_BONUS,
+        # Задача 72: готовый текст прогресса — клиент не считает его сам.
+        "progress_text": action_progress_text(score),
         # Задача 61: своё значение у каждой команды + общее (cooldown_*).
         "cooldown_hours": round(_love_cooldown_seconds() / 3600, 1),
         "cooldown_seconds": _love_cooldown_seconds(),
