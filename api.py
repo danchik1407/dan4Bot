@@ -15,6 +15,7 @@ from db_schema import audit as db_schema_audit
 from shop_catalog import SHOP_ITEMS, ShopPurchaseError, is_admin_id, parse_inventory, purchase_shop_item, \
     serialize_shop_items, missing_stock_rows, shop_stock_snapshot, stock_diagnostics, \
     sold_out_items, STOCK_LIMITS_ENABLED
+import player_stats
 from love import (LOVE_ACTION_BONUS, LOVE_ICE_COST, action_progress_text,
                   cooldown_from_setting,
                   love_cooldown_seconds,
@@ -87,7 +88,7 @@ async def _http_json(url, method: str = "GET", params=None, payload=None, timeou
 
 # Номер сборки: по нему из /api/health видно, что на сервисе НЕ старый код.
 # Если после деплоя здесь прежнее значение — Render ещё не перезапустился.
-API_BUILD = "2026-10-27-task73-no-soon-overlay"
+API_BUILD = "2026-10-27-task74-profile-stats"
 
 # Момент старта процесса. По нему видно, что сервис только что «проснулся»:
 # Render на бесплатном тарифе усыпляет Web Service через 15 минут без входящих
@@ -1098,6 +1099,53 @@ UPGRADE_ITEM_TITLES = {"capsule": "Обычная капсула", "uniq_capsule
                        "emerald": "Изумрудная капсула"}
 UPGRADE_SOURCES = ("coin",) + tuple(UPGRADE_ITEM_PRICES)
 UPGRADE_TARGETS = ("coin",) + tuple(UPGRADE_ITEM_PRICES)
+
+
+# ==================== ИГРОВЫЕ МОМЕНТЫ ПРОФИЛЯ (задача 74) ====================
+# Счётчики пишем «в фоне»: ответ игроку не должен ждать базу статистики, а
+# сломанная статистика не должна ломать игру (см. player_stats.py).
+def stats_note(user_id, **deltas) -> None:
+    def _write():
+        try:
+            player_stats.add_stats(supabase, user_id, **deltas)
+        except Exception:  # noqa: BLE001
+            logger.debug("статистика: запись не удалась", exc_info=True)
+    try:
+        asyncio.create_task(asyncio.to_thread(_write))
+    except RuntimeError:      # нет цикла событий (скрипты, тесты)
+        _write()
+
+
+def stats_event(user_id, kind: str, title: str, amount: int = 0, meta=None) -> None:
+    def _write():
+        try:
+            player_stats.add_event(supabase, user_id, kind, title, amount, meta)
+        except Exception:  # noqa: BLE001
+            logger.debug("статистика: событие не записано", exc_info=True)
+    try:
+        asyncio.create_task(asyncio.to_thread(_write))
+    except RuntimeError:
+        _write()
+
+
+def _upgrade_item_title(item_id) -> str:
+    if not item_id:
+        return ""
+    if item_id == "coin":
+        return "коины"
+    return UPGRADE_ITEM_TITLES.get(item_id, str(item_id))
+
+
+def _upgrade_moment(source: str, amount: int, target: str) -> tuple[str, int, int]:
+    """(текст, ценность «из», ценность «в») — для «Лучшего апгрейда» в профиле."""
+    from_value = _upgrade_source_value(source, amount)
+    if target == "coin":
+        to_value = from_value  # множитель считает сервер; ценность уточним ниже
+        text = f"{_upgrade_item_title(source)} x{amount} → коины"
+    else:
+        to_value = UPGRADE_ITEM_PRICES.get(target, 0)
+        text = f"{_upgrade_item_title(source)} x{amount} → {_upgrade_item_title(target)}"
+    return text, from_value, to_value
 # В апгрейде пока играют только админы — шанс честный. Когда откроем для всех,
 # реальный шанс = визуальный / этот делитель (то есть x2 = 25%).
 UPGRADE_NON_ADMIN_DIVIDER = 1
@@ -2401,6 +2449,13 @@ def _credit_arena_payout(entry: dict) -> str:
     'duplicate' — деньги уже начислены этим же раундом (повторная попытка или
     рестарт), второй раз платить нельзя.
     """
+    # Задача 74: выигрыш в арене считается ТОЛЬКО здесь — это единственная точка,
+    # где деньги реально начисляются (включая доплаты после рестарта), поэтому
+    # в профиле не бывает «двух побед» на одну выплату. Возврат ставки (refund)
+    # победой не считается: это свои же деньги.
+    if str(entry.get("kind") or "") != "refund":
+        stats_note(entry["user_id"], coins_earned=int(entry["amount"]),
+                   won_arena=int(entry["amount"]), best_arena_win=int(entry["amount"]))
     arena = str(entry["arena"])
     round_id = str(entry["round_id"])
     uid = int(entry["user_id"])
@@ -3399,6 +3454,10 @@ async def place_bet(data: PlaceBet):
     if not _write_primary_coins(user_id, new_coins):
         raise HTTPException(status_code=500, detail="Не удалось списать ставку")
 
+    # Задача 74: ставка в арене + рекорд ставки для профиля.
+    stats_note(user_id, coins_spent=data.amount, spent_arena=data.amount,
+               best_arena_bet=data.amount)
+
     if existing_player is not None:
         existing_player["bet"] += data.amount
     else:
@@ -3661,6 +3720,9 @@ async def crash_bet(data: CrashBet):
             {"id": user_id, "name": name, "bet": data.amount, "cashout_mult": 0, "is_bot": False, "avatar": avatar,
              "auto_mult": 0})
     crash_state["bank"] += data.amount
+    # Задача 74: ставка в ракете + «самая большая ставка» для профиля.
+    stats_note(user_id, coins_spent=data.amount, spent_crash=data.amount,
+               best_crash_bet=data.amount)
     return {"success": True, "new_balance": current_coins - data.amount}
 
 
@@ -3687,6 +3749,11 @@ async def crash_cashout(data: CrashCashout):
     if not _write_primary_coins(user_id, new_coins):
         raise HTTPException(status_code=500, detail="Не удалось зачислить выигрыш")
     player["cashout_mult"] = cashout_mult
+    # Задача 74: «сколько больше всего забрал в ракете» = выигрыш в коинах
+    # (ставка × множитель). Считаем по деньгам, а не по множителю: игрок
+    # сравнивает суммы, а не x2.1 против x3.0.
+    stats_note(user_id, coins_earned=win_amount, won_crash=win_amount,
+               best_crash_win=win_amount)
     return {"success": True, "win_amount": win_amount, "mult": cashout_mult, "new_balance": new_coins}
 
 
@@ -3767,6 +3834,9 @@ async def mines_start(data: MinesStart):
         "first_click_chance": _mines_first_click_chance(amount, mines_count),
         "started_at": time.time(), "status": "active",
     }
+    # Задача 74: ставка в профиле. «Проиграно» считается в момент, когда игра
+    # закончилась без выплаты (мина), см. mines_open.
+    stats_note(user_id, coins_spent=amount, spent_mines=amount, best_mines_bet=amount)
     return {"success": True, "new_balance": coins, "coef": 1.0, "cashout": amount,
             "mines": mines_count, "bet": amount}
 
@@ -3810,6 +3880,9 @@ async def mines_open(data: MinesOpen):
     if cell in game["positions"]:
         game["status"] = "lost"
         mines_games.pop(user_id, None)
+        # Задача 74: мина — единственный момент, когда ставка в минах проиграна.
+        # В профиле это строка «Проиграно в минах».
+        stats_note(user_id, lost_games=int(game.get("bet") or 0))
         return {"success": True, "hit": True, "positions": list(game["positions"]),
                 "bet": game["bet"], "mines": game["mines"]}
 
@@ -3846,6 +3919,8 @@ async def mines_cashout(data: MinesCashout):
     coins = int(row.get("coins", 0) or 0) + win_amount
     if not _db_update_user(user_id, coins=coins):
         raise HTTPException(status_code=500, detail="Не удалось зачислить выигрыш")
+    stats_note(user_id, coins_earned=win_amount, won_mines=win_amount,
+               best_mines_win=win_amount)
     return {"success": True, "win_amount": win_amount, "new_balance": coins,
             "coef": round(_mines_multiplier(game["mines"], len(game["opened"])), 2)}
 
@@ -4543,6 +4618,9 @@ async def open_chest(auth: OpenChestRequest):
     if not _db_update_user(user_id, coins=coins, keys=keys, last_chest=last_chest):
         raise HTTPException(status_code=500, detail="Не удалось открыть сундук")
 
+    # Задача 74: «сколько открыл сундуков» — считаем в момент открытия, а не
+    # в момент «Забрать»: рулетка уже крутилась, попытка потрачена.
+    stats_note(user_id, chests_opened=1, **({"golden_chests": 1} if chest_type == "gold" else {}))
     payload = {
         "success": True, "chest_type": chest_type,
         "reward_coins": reward_coins, "reward_keys": reward_keys,
@@ -4605,6 +4683,10 @@ async def claim_chest(auth: "ClaimChestRequest"):
             _pending_claim_release(auth.claim_id, pending)
             raise HTTPException(status_code=500, detail="Не удалось забрать награду")
         _chest_item_bonus_clear(auth.claim_id)
+        # Задача 74: награда из памяти — та же статистика, что и из базы.
+        chest_won = reward_coins + UPGRADE_ITEM_PRICES.get(reward_item, 0) * reward_item_amount
+        if chest_won:
+            stats_note(user_id, coins_earned=chest_won, won_chests=chest_won)
         print(f"СУНДУК: награда забрана из памяти user_id={user_id} "
               f"+{reward_coins} коинов, +{reward_keys} ключей, "
               f"капсула={reward_item or 'нет'} x{reward_item_amount}", flush=True)
@@ -4644,6 +4726,10 @@ async def claim_chest(auth: "ClaimChestRequest"):
         await asyncio.to_thread(_chest_release, auth.claim_id, user_id)
         raise HTTPException(status_code=500, detail="Не удалось забрать награду")
     _chest_item_bonus_clear(auth.claim_id)
+    # Задача 74: «сколько выпало из сундуков» — ценность награды в коинах.
+    chest_won = reward_coins + UPGRADE_ITEM_PRICES.get(reward_item, 0) * reward_item_amount
+    if chest_won:
+        stats_note(user_id, coins_earned=chest_won, won_chests=chest_won)
 
     print(f"СУНДУК: награда забрана user_id={user_id} +{reward_coins} коинов, "
           f"+{reward_keys} ключей, капсула={reward_item or 'нет'} x{reward_item_amount}",
@@ -4812,6 +4898,11 @@ async def buy_item(data: BuyItem):
                          user_id, data.item_id)
         raise HTTPException(status_code=503, detail=_db_error_detail(
             exc, "Не удалось завершить покупку, попробуйте ещё раз")) from exc
+    # Задача 74: расходы в магазине. Считаем по факту покупки: сервер уже
+    # списал цену из каталога, значит это ровно то, что ушло из кошелька.
+    _bought_price = int((SHOP_ITEMS.get(data.item_id) or {}).get("price") or 0)
+    if _bought_price > 0:
+        stats_note(user_id, coins_spent=_bought_price, spent_shop=_bought_price)
     if STOCK_LIMITS_ENABLED and not result.get("stock_ready", True):
         # Купили, но тираж не списан: говорим прямо, а не делаем вид, что всё хорошо.
         print(f"МАГАЗИН: ВНИМАНИЕ тираж не списан (stock_ready=false) item={data.item_id} — "
@@ -5317,6 +5408,27 @@ async def upgrade_action(data: UpgradeAction):
             new_inventory = list(inventory)
 
         if _upgrade_write_user(user_id, raw_coins, raw_inventory, new_coins, new_inventory, row_id):
+            # Задача 74: «сколько потратил в апгрейде» и «лучший апгрейд» — из
+            # факта розыгрыша (баланс уже записан, значит ставка реально ушла).
+            # Апгрейд не «проигрыш в игре»: ставка всегда уходит из кошелька
+            # (coins_spent), а проигранной становится только при неудаче.
+            stake_value = _upgrade_source_value(source, amount)
+            moment_text, moment_from, moment_to = _upgrade_moment(source, amount, target)
+            deltas = {"coins_spent": stake_value, "spent_upgrade": stake_value,
+                      "upgrades_total": 1}
+            if won:
+                deltas["upgrades_won"] = 1
+            else:
+                deltas["lost_games"] = stake_value
+            stats_note(user_id, **deltas)
+            if won:
+                won_value = payout if target == "coin" else UPGRADE_ITEM_PRICES.get(target, 0)
+                stats_note(user_id, coins_earned=won_value, won_upgrade=won_value)
+                stats_event(user_id, "upgrade", moment_text,
+                            max(moment_from, won_value),
+                            {"from": source, "amount": amount, "to": target,
+                             "coins_from": moment_from,
+                             "coins_to": won_value if target == "coin" else moment_to})
             # Лог пишем ПОСЛЕ успешной записи баланса: если она не прошла, розыгрыша не было.
             log_id = _upgrade_log_write(
                 user_id, item_from=source, amount_from=amount, item_to=target,
@@ -6999,6 +7111,9 @@ async def love_state(data: UserAuth):
                 granted = []
             if granted:
                 state["stage_up"] = True
+                # Задача 74: призы за этапы отношений — тоже «заработано».
+                stats_note(uid, coins_earned=sum(int(g.get("reward") or 0) for g in granted),
+                           won_love=sum(int(g.get("reward") or 0) for g in granted))
                 await _love_stage_dm({"user_a": uid}, granted)
         return state
     # Пара: та же страховка через общую таблицу наград.
@@ -7011,6 +7126,12 @@ async def love_state(data: UserAuth):
         # и он должен знать, за что пришли коины.
         if granted:
             state["stage_up"] = True
+            # Задача 74: каждому партнёру — своя сумма приза в статистику.
+            for partner_id in (_safe_int(row.get("user_a"), 0), _safe_int(row.get("user_b"), 0)):
+                if partner_id > 0:
+                    stats_note(partner_id,
+                               coins_earned=sum(int(g.get("reward") or 0) for g in granted),
+                               won_love=sum(int(g.get("reward") or 0) for g in granted))
             await _love_stage_dm(row, granted)
     return state
 
@@ -7036,6 +7157,119 @@ async def _love_stage_dm(row, granted) -> None:
         lines += ["", "Коины уже начислены на баланс — забирать ничего не нужно.",
                   "Прогресс: «любовь инфа» в боте."]
         await _send_user_dm(uid, "\n".join(lines))
+
+# ==================== ИГРОВЫЕ МОМЕНТЫ ПРОФИЛЯ (задача 74) ====================
+# Заказчик: «профиль — это профиль». В профиле нужны маленькие факты про
+# игрока, а не про вещи (вещи — в «Кармане»). Всё, что не накопилось, отдаём
+# нулём и флагом ready=False — клиент покажет «—», а не выдуманное число.
+
+
+def _profile_stats_record(user_id, stat_row: dict, best_upgrade: dict | None,
+                          best_transfer: dict | None, first_seen) -> dict:
+    """Одна запись «Достижений» для клиента: подпись, значение и пояснение."""
+
+    def num(key):
+        return _safe_int(stat_row.get(key), 0)
+
+    spent = num("coins_spent")
+    rows = [
+        {"key": "spent", "icon": "💸", "label": "Потрачено всего",
+         "value": spent, "money": True,
+         "hint": (f"Апгрейды {num('spent_upgrade')} · магазин {num('spent_shop')} · "
+                  f"ракета {num('spent_crash')} · арена {num('spent_arena')} · "
+                  f"мины {num('spent_mines')}") if spent else "Пока ничего не потрачено"},
+        {"key": "earned", "icon": "🏆", "label": "Выиграно всего",
+         "value": num("coins_earned"), "money": True,
+         "hint": "Выигрыши в играх и призы за уровни"},
+        {"key": "lost", "icon": "🪦", "label": "Проиграно ставок",
+         "value": num("lost_games"), "money": True,
+         "hint": "Ставки, которые не вернулись"},
+        {"key": "best_crash", "icon": "🚀", "label": "Лучший занос в ракете",
+         "value": num("best_crash_win"), "money": True,
+         "hint": f"Самая крупная ставка: {num('best_crash_bet')}"},
+        {"key": "best_arena", "icon": "🏒", "label": "Лучшая ставка на арене",
+         "value": num("best_arena_win"), "money": True,
+         "hint": f"Самая крупная ставка: {num('best_arena_bet')}"},
+        {"key": "best_mines", "icon": "💣", "label": "Лучший занос в минах",
+         "value": num("best_mines_win"), "money": True,
+         "hint": f"Самая крупная ставка: {num('best_mines_bet')}"},
+        {"key": "best_dice", "icon": "🎲", "label": "Лучший выигрыш в кубах",
+         "value": num("best_dice_win"), "money": True,
+         "hint": f"Самая крупная ставка: {num('best_dice_bet')}"},
+        {"key": "upgrade", "icon": "⚗️", "label": "Лучший апгрейд",
+         "text": (best_upgrade or {}).get("title") or "",
+         "value": (best_upgrade or {}).get("amount") or 0, "money": True,
+         "hint": "Во что удалось превратить ставку"},
+        {"key": "upgrades", "icon": "🔁", "label": "Апгрейдов · удачных",
+         "text": f"{num('upgrades_total')} · {num('upgrades_won')}"
+                 if num("upgrades_total") else "",
+         "hint": "Сколько крутил и сколько зашло"},
+        {"key": "chests", "icon": "📦", "label": "Открыто сундуков",
+         "value": num("chests_opened"), "count": True,
+         "hint": f"Золотых: {num('golden_chests')}"},
+        {"key": "sent", "icon": "📤", "label": "Передал другим",
+         "value": num("sent_transfer"), "money": True,
+         "hint": f"Переводов: {num('sent_transfer_cnt')}"},
+        {"key": "got", "icon": "📥", "label": "Получил переводами",
+         "value": num("got_transfer"), "money": True, "hint": "От других игроков"},
+        {"key": "transfer", "icon": "🤝", "label": "Лучший перевод",
+         "text": (best_transfer or {}).get("title") or "",
+         "value": (best_transfer or {}).get("amount") or 0, "money": True,
+         "hint": "Кому и сколько отправил"},
+    ]
+    for row in rows:
+        value = num_of(row.get("value"))
+        row["value"] = value
+        if row.get("text"):
+            # Есть готовый текст («💊 Капсула x33 → 💎 Алмазная», «12 · 4») — он и
+            # показывается; число остаётся для сортировки и подсказок.
+            row["value_text"] = str(row["text"])
+        elif row.get("count"):
+            row["value_text"] = str(value) if value else "—"
+        else:
+            row["value_text"] = _coins_text(value)
+    return {
+        "ok": True,
+        # ready=False — таблицы ещё нет (миграция не применена): клиент честно
+        # пишет «Статистика копится», а не рисует нули как достижения.
+        "ready": bool(stat_row),
+        "days": _days_since(first_seen) if first_seen else 0,
+        "since": _iso_from_timestamp(first_seen) if first_seen else None,
+        "rows": rows,
+    }
+
+
+def num_of(value) -> int:
+    """int без исключений: None/''/мусор → 0 (статистика не должна падать)."""
+    return _safe_int(value, 0)
+
+
+def _coins_text(value: int) -> str:
+    """Коины для профиля: «1 234 567». Пустое значение — «—», а не «0»."""
+    amount = num_of(value)
+    if amount <= 0:
+        return "—"
+    return f"{amount:,}".replace(",", " ")
+
+
+@app.post("/api/profile_stats")
+async def profile_stats(data: UserAuth):
+    """«Игровые моменты» для экрана профиля (задача 74).
+
+    Отдаём сразу готовые строки: клиент не считает деньги и не знает, где что
+    лежит в базе. Нет миграции — строки приходят нулевыми с ready=False,
+    профиль при этом открывается как обычно.
+    """
+    uid = _auth_user_id(data.initData)
+    require_play_access_uid(uid)
+    stat_row = await asyncio.to_thread(player_stats.read_stats, supabase, uid)
+    best_upgrade = await asyncio.to_thread(player_stats.best_event, supabase, uid, "upgrade")
+    best_transfer = await asyncio.to_thread(player_stats.best_event, supabase, uid, "transfer")
+    first_seen = _app_first_seen_get(uid)
+    payload = _profile_stats_record(uid, stat_row or {}, best_upgrade, best_transfer, first_seen)
+    payload["migration"] = player_stats.MIGRATION_FILE
+    return payload
+
 
 @app.get("/api/global_top")
 async def get_global_top():

@@ -51,6 +51,7 @@ from love import (
     solo_state,
     stage_reached_text,
 )
+import player_stats
 from db_schema import audit as db_schema_audit, format_report as db_schema_report
 from shop_catalog import (
     DAILY_LIMITS_ENABLED,
@@ -194,6 +195,24 @@ DROP_IMAGE = "drop.jpg"
 MIN_BET = 10
 MAX_BET = 10000
 DAILY_TRANSFER_LIMIT = 5000
+
+
+def stats_note(user_id, **deltas) -> None:
+    """Игровые моменты профиля (задача 74) — не мешая основному действию.
+
+    Всё, что пишется здесь, видно в профиле игрока: сколько перевёл, сколько
+    выиграл в кубах, сколько получил призов. Ошибка статистики не должна
+    ломать команду, поэтому пишем «в фоне» и глушим исключения.
+    """
+    def _write():
+        try:
+            player_stats.add_stats(supabase, user_id, **deltas)
+        except Exception:  # noqa: BLE001
+            logger.debug("статистика профиля: запись не удалась", exc_info=True)
+    try:
+        asyncio.create_task(asyncio.to_thread(_write))
+    except RuntimeError:      # нет цикла событий (скрипты, тесты)
+        _write()
 
 def coin_amount(amount) -> str:
     """«1 коин», «2 коина», «5 коинов» — чтобы в сообщениях не было «1 коинов»."""
@@ -1964,6 +1983,11 @@ async def cmd_transfer(message: Message):
                       last_transfer_reset=today)
     await update_user(target.id, coins=target_user["coins"] + amount)
 
+    # Задача 74: «сколько коинов передал» и «сколько получил» — в профиле обоих.
+    stats_note(message.from_user.id, sent_transfer=amount, sent_transfer_cnt=1,
+               best_transfer=amount, coins_spent=amount)
+    stats_note(target.id, got_transfer=amount, coins_earned=amount)
+
     text = f"✅ <b>Перевод выполнен!</b>\n👤 Кому: @{target.username}\n💸 Сумма: <b>{amount}</b> коинов"
     if comment: text += f"\n💬 Комментарий к переводу: <i>{safe_text(comment)}</i>"
 
@@ -2792,6 +2816,11 @@ async def cb_dice_accept(callback: CallbackQuery):
         loser = await get_user(loser_id)
         await update_user(winner_id, coins=winner["coins"] + amount)
         await update_user(loser_id, coins=loser["coins"] - amount)
+        # Задача 74: кубы — ставка, победа и рекорд для профиля обоих.
+        stats_note(winner_id, coins_earned=amount, won_dice=amount,
+                   best_dice_win=amount, best_dice_bet=amount)
+        stats_note(loser_id, coins_spent=amount, spent_dice=amount,
+                   lost_games=amount, best_dice_bet=amount)
         result = f"🏆 Победил @{winner['username']} ({r1} : {r2})\n💰 +{amount} коинов"
     active_challenges.pop(challenge_id, None)
     await callback.message.answer(f"🎲 <b>Кубы брошены!</b>\n\n{result}", parse_mode="HTML")
@@ -3994,6 +4023,15 @@ async def add_love_points(row, amount: int):
     # Пустые этапы не считаем: если награду уже выплатили раньше (или её закрыла
     # страховка API), игроку не нужно второе «вы достигли уровня».
     granted = [item for item in granted if int(item.get("reward") or 0) > 0]
+    # Задача 74: приз за уровень — «заработано» в профиле каждого партнёра.
+    if granted:
+        total = sum(int(item.get("reward") or 0) for item in granted)
+        for partner in (row.get("user_a"), row.get("user_b")):
+            try:
+                partner_id = int(partner)
+            except (TypeError, ValueError):
+                continue
+            stats_note(partner_id, coins_earned=total, won_love=total)
     return new_score, granted, True
 
 
@@ -4026,6 +4064,11 @@ async def add_solo_points(user_id, amount: int):
         saved = await asyncio.to_thread(solo_saved, supabase, user_id, score)
     except Exception:  # noqa: BLE001
         saved = False
+    # Задача 74: приз одиночке — тоже «заработано призами» в профиле.
+    paid = [item for item in (granted or []) if int(item.get("reward") or 0) > 0]
+    if paid and saved:
+        total = sum(int(item.get("reward") or 0) for item in paid)
+        stats_note(user_id, coins_earned=total, won_love=total)
     return score, granted, saved
 
 

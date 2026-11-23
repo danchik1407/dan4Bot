@@ -253,6 +253,11 @@ let passiveTimer = null;
 let passivePending = { amount: 0, whole: 0, rate: 0, hours: 0, capped: false, night: false };
 let subscriptionChecked = false;
 let loveState = null;
+// Задача 74: «Достижения» профиля — строки, посчитанные сервером
+// (/api/profile_stats). Клиент ничего не складывает сам: только рисует.
+let profileStats = null;
+let profileStatsAt = 0;
+const PROFILE_STATS_TTL = 60 * 1000;      // не чаще раза в минуту
 let referralBound = false;
 const PASSIVE_INTERVAL = 15 * 60 * 1000;      // раз в 15 минут, пока аппка открыта
 const PASSIVE_PENDING_REFRESH = 60 * 1000;    // «накоплено» в профиле — раз в минуту
@@ -697,6 +702,9 @@ function applyProfile(data) {
     hideMaintenance();
     updateUpgradeAccess();
     updateUI();
+    // Задача 74: «Достижения» подтягиваем сразу после профиля — они у игрока
+    // на виду, а сервер отвечает одним запросом.
+    loadProfileStats();
     try { checkChestCooldown(); } catch (e) { console.error(e); }
     // Награда прошлого сундука, которую игрок не успел забрать (вышел на анимации).
     try { collectPendingChestReward(); } catch (e) { console.error(e); }
@@ -926,6 +934,7 @@ function switchTab(tabId, element) {
         renderPassiveCard();
         renderReferralStats();
         loadReferralStats(); loadLoveState();
+        loadProfileStats();
         // «Сколько накопил» должно быть актуальным на момент открытия профиля:
         // пересчитываем карточку и подтягиваем серверное число (без начисления).
         renderPassiveCard();
@@ -1520,6 +1529,69 @@ async function loadLoveState() {
             await loadUserData().catch(() => {});
         }
     } catch (e) { console.warn('love_state', e); }
+}
+
+// ================= ДОСТИЖЕНИЯ ПРОФИЛЯ (задача 74) =================
+// «Профиль — это профиль»: тут факты про игрока (сколько потратил, лучший
+// занос, лучший апгрейд), а имущество остаётся в «Кармане».
+async function loadProfileStats(force) {
+    if (!tg.initData) return;
+    if (!force && profileStats && (Date.now() - profileStatsAt) < PROFILE_STATS_TTL) {
+        renderAchievements();
+        return;
+    }
+    try {
+        const data = await apiPost('/api/profile_stats', {});
+        if (data && data.ok) {
+            profileStats = data;
+            profileStatsAt = Date.now();
+        }
+    } catch (e) {
+        // Профиль не должен ломаться из-за статистики: показываем что есть.
+        console.warn('profile_stats', e);
+    }
+    renderAchievements();
+}
+
+// Только осмысленные строки: пустое значение — «—», а не «0 коинов».
+function achievementRows() {
+    const rows = (profileStats && Array.isArray(profileStats.rows)) ? profileStats.rows : [];
+    return rows.map(row => {
+        const valueText = row.value_text != null ? String(row.value_text) : '';
+        const text = row.text ? String(row.text) : '';
+        // Ни числа, ни текста — момент ещё не случился.
+        const empty = (!valueText || valueText === '—') && !text;
+        return { row, valueText: empty ? '—' : (text || valueText), empty };
+    });
+}
+
+function renderAchievements() {
+    const list = document.getElementById('achievements-list');
+    if (!list) return;
+    const rows = achievementRows();
+    const daysEl = document.getElementById('ach-days');
+    const days = profileStats ? Math.max(0, Number(profileStats.days) || 0) : daysInGame;
+    if (daysEl) daysEl.innerText = `${days} дн.`;
+    if (!rows.length) {
+        list.innerHTML = '<div class="ach-empty">Считаем…</div>';
+        return;
+    }
+    list.innerHTML = rows.map(({ row, valueText, empty }) => `
+        <div class="ach-row${empty ? ' is-empty' : ''}">
+            <span class="ach-icon">${row.icon || '•'}</span>
+            <span class="ach-body">
+                <span class="ach-label">${escapeHtml(row.label || '')}</span>
+                ${row.hint ? `<span class="ach-hint">${escapeHtml(row.hint)}</span>` : ''}
+            </span>
+            <span class="ach-value">${escapeHtml(valueText)}</span>
+        </div>
+    `).join('');
+    const hint = document.getElementById('ach-hint');
+    if (hint) {
+        hint.innerText = (profileStats && profileStats.ready === false)
+            ? 'Статистика начнёт копиться с этого захода — обнови приложение позже.'
+            : 'Цифры копятся с первого дня в приложении и не сгорают.';
+    }
 }
 
 function todayStageRewards(state) {
