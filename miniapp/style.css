@@ -843,6 +843,20 @@ main { padding: 0 16px; }
     border-color: rgba(255, 120, 110, 0.55); color: #ffd7d3;
 }
 .admin-maint-card { border-color: rgba(255, 204, 102, 0.3); }
+/* Задача 79: кнопка «КД на РП». Зелёный — КД выключен (играть можно),
+   жёлтый — включён. Цвет состояния тот же, что у техработ, чтобы панель
+   читалась одинаково. */
+/* Задача 79: плашка «статистика не пишется» над достижениями. Красноватая,
+   но не кричащая: это подсказка админу/игроку про миграцию. */
+.ach-db-warn {
+    margin-bottom: 8px; padding: 8px 10px; border-radius: 10px;
+    background: rgba(255, 90, 79, 0.12); border: 1px solid rgba(255, 120, 110, 0.35);
+    color: #ffb3ad; font-size: 11.5px; line-height: 1.45;
+}
+.ach-db-warn[hidden] { display: none !important; }
+.admin-lovecd-card { border-color: rgba(120, 200, 255, 0.28); }
+.admin-lovecd-card .extra-value { color: #7ee2a8; }
+.admin-lovecd-card .extra-value.is-on { color: #ffcc66; }
 .maintenance-screen .maint-icon { transition: transform 0.2s ease; }
 
 /* Пока идут техработы, интерфейс игры не показываем даже под заставкой. */

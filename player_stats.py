@@ -39,6 +39,11 @@ LEDGER_LABELS = {
 }
 STATS_RPC = "player_stats_add"
 MIGRATION_FILE = "supabase/migrations/20261202000000_player_stats.sql"
+# Задача 79: если статистика не пишется, показываем игроку именно этот файл —
+# он создаёт/дополняет таблицы и функции, даже если прошлая миграция пропущена.
+FIX_MIGRATION_FILE = "supabase/migrations/20261203000000_stats_fix_and_love_cooldown_switch.sql"
+ENSURE_RPC = "player_stats_ensure"
+HEALTH_RPC = "player_stats_health"
 
 # Счётчики, которые складываются.
 SUM_FIELDS = (
@@ -103,7 +108,7 @@ def add_stats(supabase_client, user_id, **deltas) -> bool:
         return True
     except Exception as exc:  # noqa: BLE001 — статистика не должна ронять игру
         logger.warning("Статистика профиля не записана (user_id=%s): %s. "
-                       "Примените %s", uid, exc, MIGRATION_FILE)
+                       "Примените %s", uid, exc, FIX_MIGRATION_FILE)
         return False
 
 
@@ -132,17 +137,53 @@ def add_event(supabase_client, user_id, kind: str, title: str,
 
 
 def read_stats(supabase_client, user_id) -> dict:
-    """Счётчики игрока. Пустой словарь по умолчанию — профиль открывается всегда."""
+    """Счётчики игрока. Пустой словарь — профиль открывается всегда.
+
+    Задача 79: если строки ещё нет, создаём её функцией player_stats_ensure —
+    иначе самый первый профиль выглядел как «статистика не работает» (ready=False),
+    хотя всё в порядке, игрок просто новый.
+    """
     uid = _int(user_id, None) if user_id is not None else None
     if uid is None:
         return {}
     try:
         rows = (supabase_client.table(STATS_TABLE).select("*")
                 .eq("user_id", uid).limit(1).execute().data) or []
+        if rows:
+            return rows[0]
     except Exception as exc:  # noqa: BLE001 — нет таблицы: профиль покажет «—»
         logger.debug("player_stats недоступны (user_id=%s): %s", uid, exc)
         return {}
-    return rows[0] if rows else {}
+    # Строки нет — просим функцию создать её. Нет функции/миграции — молча
+    # возвращаемся, профиль покажет «статистика начнёт копиться».
+    try:
+        created = supabase_client.rpc(ENSURE_RPC, {"p_user_id": uid}).execute()
+        data = created.data
+        if isinstance(data, list) and data:
+            return data[0]
+        if isinstance(data, dict):
+            return data
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("player_stats_ensure недоступна (user_id=%s): %s", uid, exc)
+    return {}
+
+
+def health(supabase_client) -> dict:
+    """Проверка «миграция применена?» — для честного текста в профиле.
+
+    Возвращает {'ok': True, ...} или {'ok': False, 'reason': ...}. Никогда не
+    бросает исключение: профиль открывается даже при мёртвой базе.
+    """
+    try:
+        res = supabase_client.rpc(HEALTH_RPC, {}).execute()
+        data = res.data
+        if isinstance(data, list) and data:
+            data = data[0]
+        if isinstance(data, dict):
+            return data
+        return {"ok": False, "reason": "health rpc вернул пустоту"}
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "reason": str(exc)[:200]}
 
 
 def best_event(supabase_client, user_id, kind: str) -> dict | None:

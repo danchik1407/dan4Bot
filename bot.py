@@ -1020,6 +1020,39 @@ async def cb_sub_check(callback: CallbackQuery):
 # сборок (`love_cooldown_seconds`, `love_cooldown_actions`) не читаются.
 _REMOVED_COOLDOWN_SETTING_KEYS = ("love_cooldown_seconds", "love_cooldown_actions")
 
+# Задача 79: админ может выключить КД РП кнопкой в админ-панели Mini App — тогда
+# ждать не нужно вообще (0 секунд). Флаг живёт в game_settings и читается с
+# кэшем; по умолчанию КД ВКЛЮЧЁН. Ошибка базы не должна выключать кулдаун
+# (иначе награда капала бы за каждое действие) — при сбое живём по последнему
+# известному значению, а в самом начале считаем его включённым.
+LOVE_COOLDOWN_ENABLED_KEY = "love_cooldown_enabled"
+_LOVE_COOLDOWN_ENABLED_CACHE = {"value": True, "at": 0.0}
+LOVE_COOLDOWN_ENABLED_TTL = 10.0
+
+
+def love_cooldown_enabled_sync() -> bool:
+    now = time.time()
+    if (now - float(_LOVE_COOLDOWN_ENABLED_CACHE["at"] or 0)) < LOVE_COOLDOWN_ENABLED_TTL:
+        return bool(_LOVE_COOLDOWN_ENABLED_CACHE["value"])
+    value = bool(_LOVE_COOLDOWN_ENABLED_CACHE["value"])
+    try:
+        raw = _setting_get_sync(LOVE_COOLDOWN_ENABLED_KEY)
+        if raw is not None:
+            value = str(raw).strip().lower() not in ("0", "false", "no", "off", "выкл", "")
+        else:
+            legacy = str(_setting_get_sync("love_cooldown_seconds") or "").strip().lower()
+            if legacy in ("off", "0", "выкл"):
+                value = False
+    except Exception:  # noqa: BLE001
+        pass
+    _LOVE_COOLDOWN_ENABLED_CACHE.update({"value": value, "at": now})
+    return value
+
+
+def active_love_cooldown_seconds() -> int:
+    """Действующий КД РП: 5 часов или 0, если админ выключил его кнопкой."""
+    return love_cooldown_seconds() if love_cooldown_enabled_sync() else 0
+
 
 # ================= ПРЕДУПРЕЖДЕНИЯ В ЧАТЕ (задача 44) =================
 # `!аурапред` — «фиолетовые» (создатели/админы) выдают предупреждение игроку.
@@ -3502,9 +3535,16 @@ async def cmd_rp_list(message: Message):
         lines.append(f"{meta['emoji']} <code>{key}</code> — {meta['text']}")
     lines.append("")
     # Задача 76: КД ОДИН на игрока — после любого действия нельзя ничего 5 часов.
-    lines.append(f"💗 За действие пара получает +{LOVE_ACTION_BONUS} Love. "
-                 f"Кулдаун: <b>{format_love_cooldown()}</b> — один на все команды "
-                 f"сразу: использовал «обнять», значит остальные тоже ждут.")
+    # Задача 79: админ может выключить его кнопкой в админ-панели — тогда пишем
+    # честно «без ограничения», а не обещаем 5 часов.
+    cooldown_seconds = active_love_cooldown_seconds()
+    if cooldown_seconds > 0:
+        lines.append(f"💗 За действие пара получает +{LOVE_ACTION_BONUS} Love. "
+                     f"Кулдаун: <b>{format_love_cooldown(cooldown_seconds)}</b> — один на все "
+                     f"команды сразу: использовал «обнять», значит остальные тоже ждут.")
+    else:
+        lines.append(f"💗 За действие пара получает +{LOVE_ACTION_BONUS} Love. "
+                     f"Кулдаун сейчас <b>выключен</b> — РП-команды не ждут.")
     lines.append(f"💔 Без пары то же действие даёт +{LOVE_ACTION_BONUS} {SOLO_CURRENCY} "
                  f"— и только тому, кто пишет: передать Love другому нельзя.")
     lines.append("💞 Своя пара: <code>любовь инфа</code> · все пары: <code>топ отношений</code>")
@@ -3553,7 +3593,8 @@ async def love_cooldown_left(user_id, action=None) -> int:
     for (memory_uid, _key), stamp in _LOVE_COOLDOWN_MEMORY.items():
         if memory_uid == uid and stamp:
             stamps.append(stamp)
-    cooldown = love_cooldown_seconds()
+    # Задача 79: «0 секунд», если админ выключил КД кнопкой в админ-панели.
+    cooldown = await asyncio.to_thread(active_love_cooldown_seconds)
     if cooldown <= 0:
         return 0
     best = 0
