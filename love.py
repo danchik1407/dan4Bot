@@ -47,161 +47,78 @@ LOVE_STAGE_TARGETS = [50, 200, 500, 2000, 5000, 12000, 20000]
 
 # Экономика Love.
 LOVE_ACTION_BONUS = 10              # +10 Love коинов в общий банк пары за действие
-# Задача 67 (прямое требование заказчика): «просто сделай на все рп команды
-# кд 5 часов». Теперь это ЖЁСТКОЕ правило, а не настройка:
-#   * 5 часов — на КАЖДУЮ РП-команду отдельно («обнять» не блокирует
-#     «поцеловать», но «обнять» — ровно одно начисление за 5 часов);
-#   * выключить или уменьшить нельзя ни командой `кд`, ни строкой в
-#     game_settings, ни нолём из старых сборок (задача 34 ставила 0 —
-#     из-за него награда капала за каждое действие).
-# Переопределения по командам оставлены только для увеличения (если когда-то
-# понадобится ужесточить), но меньше 5 часов код не опустит никогда.
+# Задача 76 (прямое требование заказчика): «если использовали одну РП-команду,
+# больше никакие нельзя использовать в течение 5 часов». То есть КД — ОДИН на
+# игрока, общий для всех РП. Раньше (задача 61) он считался на каждую команду
+# отдельно, и после «обнять» можно было сразу «смотреть фильм» — заказчик
+# увидел в чате именно это.
+#
+# Задача 76: команда `кд` удалена полностью, значение НЕ настраивается:
+# 5 часов — жёсткое правило. Строки в game_settings, оставшиеся от старых
+# сборок, больше не читаются, поэтому «3 часа» из прежней настройки тоже
+# не действует.
 LOVE_ACTION_COOLDOWN = 5 * 3600
-LOVE_ACTION_COOLDOWN_DEFAULT = 5 * 3600   # «как задумано»
-# Задача 72 (прямое уточнение заказчика): «кд команда можно поставить кд на все
-# рп команды типо обнять допустим раз в 3 часа или 5». Значит админ НАСТРАИВАЕТ
-# значение — и 3 часа, и 5 часов, и «на все рп сразу». Пятёрка остаётся
-# значением ПО УМОЛЧАНИЮ для новой команды, но не минимумом: минимум теперь
-# LOVE_COOLDOWN_MIN (полчаса), чтобы «раз в 3 часа» действительно работало.
-LOVE_COOLDOWN_MIN = 30 * 60
-# Оставлено для совместимости со старым кодом: ниже этого значения кулдаун не
-# опускается (раньше здесь была пятёрка часов — из-за неё `кд 3ч` не работал).
-LOVE_COOLDOWN_FIXED = LOVE_COOLDOWN_MIN
-# Предел сверху: сутки. Больше — почти «выключено», и это точно ошибка ввода.
-LOVE_COOLDOWN_MAX = 24 * 3600
+LOVE_ACTION_COOLDOWN_DEFAULT = 5 * 3600   # значение по умолчанию = единственное
+# Минимум/максимум оставлены для арифметики страховок: clamp не даст поставить
+# отрицательное или бесконечное значение из старых данных.
+LOVE_COOLDOWN_MIN = 5 * 3600
+LOVE_COOLDOWN_FIXED = LOVE_ACTION_COOLDOWN
+LOVE_COOLDOWN_MAX = 5 * 3600
+
 # Задача 68: ускорения за i¢ больше нет (заказчик убрал и текст, и кнопку).
 # Константа оставлена только для совместимости формата /api/love_*: старые
 # сборки Mini App читают поле ice_cost. Никаких списаний по ней не происходит.
 LOVE_ICE_COST = 3
 
-# Текущий кулдаун в секундах. Живёт в памяти процесса и переопределяется
-# админ-командой; и бот (награды), и API (цифра в Mini App) читают его отсюда.
-#
-# Задача 61: кулдаун считается НА КОМАНДУ — «обнять» и «поцеловать» независимы.
-# Здесь лежит общее значение (по умолчанию для всех команд), а персональные
-# переопределения — в `_COOLDOWN_OVERRIDES` (команда → секунды). В базе это
-# одна строка game_settings `love_cooldown_actions` в виде JSON.
-_COOLDOWN_STATE = {"seconds": LOVE_ACTION_COOLDOWN}
-_COOLDOWN_OVERRIDES: dict = {}
-
-
+# Задача 76: очередь одна на игрока. Значение всегда 5 часов, поэтому состояние
+# в памяти не нужно — оставлены только совместимые функции, которые его отдают.
 def love_cooldown_seconds(action=None) -> int:
-    """Кулдаун конкретной РП-команды в секундах.
+    """Кулдаун РП-награды в секундах. Один на игрока, 5 часов, не настраивается.
 
-    Задача 72: админ ставит любое значение от 30 минут до 24 часов — `кд 3ч`,
-    `кд 5ч`, `кд обнять 6ч`, `кд все 3ч`. Пятёрка часов — только значение по
-    умолчанию (LOVE_ACTION_COOLDOWN_DEFAULT), а не минимум: раньше код не
-    опускался ниже 5 часов, и просьба «раз в 3 часа» молча игнорировалась.
+    `action` принимается только ради совместимости со старыми вызовами
+    (задача 61 считала КД на каждую команду отдельно) — значение от него не
+    зависит.
     """
-    value = 0
-    if action:
-        key = str(action).strip().lower()
-        if key in _COOLDOWN_OVERRIDES:
-            try:
-                value = int(_COOLDOWN_OVERRIDES[key])
-            except (TypeError, ValueError):
-                value = 0
-    if value <= 0:
-        try:
-            value = int(_COOLDOWN_STATE.get("seconds") or 0)
-        except (TypeError, ValueError):
-            value = 0
-    return max(LOVE_COOLDOWN_FIXED, value)
+    return LOVE_ACTION_COOLDOWN
 
 
 def clamp_love_cooldown(seconds) -> int:
-    """Привести значение к допустимому: 30 минут … 24 часа."""
-    try:
-        value = int(seconds)
-    except (TypeError, ValueError):
-        value = LOVE_ACTION_COOLDOWN_DEFAULT
-    return max(LOVE_COOLDOWN_MIN, min(LOVE_COOLDOWN_MAX, value))
+    """Любое значение → 5 часов: настройки больше нет (задача 76)."""
+    return LOVE_ACTION_COOLDOWN
 
 
 def set_love_cooldown_seconds(seconds, action=None) -> int:
-    """Поставить кулдаун. Без `action` — общий, с `action` — для этой команды.
-
-    Задача 72: значение зажимается в 30 минут … 24 часа. Персональное значение,
-    совпадающее с общим, не храним отдельной строкой — иначе в базе остаётся
-    мусор и диагностика путается.
-
-    Возвращает применённое значение.
-    """
-    value = clamp_love_cooldown(seconds)
-    if action:
-        key = str(action).strip().lower()
-        general = love_cooldown_seconds()
-        if value == general:
-            _COOLDOWN_OVERRIDES.pop(key, None)
-        else:
-            _COOLDOWN_OVERRIDES[key] = value
-    else:
-        _COOLDOWN_STATE["seconds"] = value
-    return value
+    """Совместимость: настройка отключена, всегда возвращает 5 часов."""
+    return LOVE_ACTION_COOLDOWN
 
 
 def love_cooldown_overrides() -> dict:
-    """Копия персональных кулдаунов: {команда: секунды} — для сохранения в базу."""
-    return dict(_COOLDOWN_OVERRIDES)
+    """Совместимость: персональных значений больше нет."""
+    return {}
 
 
 def load_love_cooldown_overrides(raw) -> None:
-    """Загрузить персональные кулдауны (JSON-строка или уже словарь)."""
-    data = raw
-    if isinstance(raw, str):
-        try:
-            import json as _json
-            data = _json.loads(raw) if raw.strip() else {}
-        except Exception:
-            return
-    if not isinstance(data, dict):
-        return
-    _COOLDOWN_OVERRIDES.clear()
-    for key, value in data.items():
-        try:
-            # Задача 72: из базы принимаем 30 минут … 24 часа (раньше всё, что
-            # меньше 5 часов, поднималось до 5 — `кд 3ч` не работал).
-            _COOLDOWN_OVERRIDES[str(key).strip().lower()] = clamp_love_cooldown(int(value))
-        except (TypeError, ValueError):
-            continue
+    """Совместимость: старые значения из базы игнорируются (задача 76)."""
+    return None
 
 
 def reset_love_cooldown_override(action) -> int:
-    """Убрать персональный кулдаун команды. Возвращает действующее значение."""
-    _COOLDOWN_OVERRIDES.pop(str(action or "").strip().lower(), None)
-    return love_cooldown_seconds(action)
+    """Совместимость: сбрасывать нечего — КД один и всегда 5 часов."""
+    return LOVE_ACTION_COOLDOWN
 
 
-# Метка старого «кулдаун выключен» в game_settings. Задача 67: она больше НЕ
-# выключает награду — читается как «как задумано», то есть 5 часов. Константа
-# оставлена, потому что её пишет/сравнивает код задач 61–66 и старые строки в
-# базе («off» от прежних `кд 0») надо узнавать, чтобы честно их игнорировать.
+# Метка старого «кулдаун выключен» в game_settings (задача 34). Больше ничего
+# не значит: код её только узнаёт, чтобы честно игнорировать старые строки.
 COOLDOWN_OFF_MARKER = "off"
 
 
 def cooldown_from_setting(raw, default: int = 0):
-    """Прочитать значение кулдауна из game_settings.
+    """Старая настройка из game_settings → (5 часов, False): игнорируется.
 
-    Возвращает (секунды, явно_ли_задано):
-      * `"off"` / `"выкл"` → (по умолчанию, False) — старая метка задачи 34/66,
-        «выключить» больше не значит ничего: кулдаун всегда включён;
-      * число 30 мин…24 ч  → (N, True) — админ настроил (в т.ч. 3 часа);
-      * 0 / мусор          → (по умолчанию, False) — берём дефолт.
-
-    Задача 72: раньше всё, что меньше 5 часов, поднималось до 5 — из-за этого
-    `кд 3ч` в базе читался как «5 часов», и настройка «не работала».
+    Задача 76: команда `кд` удалена, поэтому любые строки `love_cooldown_seconds`
+    и `love_cooldown_actions` в базе не влияют на игру.
     """
-    text = str(raw if raw is not None else "").strip().lower()
-    fallback = clamp_love_cooldown(default if default else LOVE_ACTION_COOLDOWN_DEFAULT)
-    if text in ("off", "выкл", "нет", "none", "disabled"):
-        return fallback, False
-    try:
-        value = int(float(text))
-    except (TypeError, ValueError):
-        return fallback, False
-    if value <= 0:
-        return fallback, False
-    return clamp_love_cooldown(value), True
+    return LOVE_ACTION_COOLDOWN, False
 
 
 def format_love_cooldown(seconds=None, action=None) -> str:
