@@ -39,7 +39,6 @@ from love import (
     love_cooldown_seconds,
     next_level_text,
     public_stage,
-    reset_solo_love,
     rp_action_for,
     rp_action_key,
     solo_state,
@@ -3248,7 +3247,9 @@ async def cb_love_answer(callback: CallbackQuery):
         logger.error(f"Не удалось создать пару: {e}")
         return await callback.answer(_relationship_failure_message(e), show_alert=True)
 
-    # Задача 30: одиночный статус обоих сгорает — начинается общая история пары.
+    # Задача 83: одиночный прогресс НЕ сгорает — призы, которые человек уже
+    # заработал в одиночку, остаются за ним (заказчик: «кто раньше получал —
+    # не получает» быть не должно). Вызов оставлен для совместимости.
     await drop_solo_status(proposer_id)
     await drop_solo_status(target_id)
     love_proposals.pop(target_id, None)
@@ -3486,7 +3487,8 @@ async def cmd_love_info(message: Message):
                 f"<code>поцеловать</code>, <code>подарить цветы</code>… — "
                 f"+{LOVE_ACTION_BONUS} {SOLO_CURRENCY} только тебе.\n"
                 f"Передать {SOLO_CURRENCY} другому нельзя — только заработать.\n"
-                f"Вступишь в отношения — одиночный счёт сгорит, начнёте общий.\n\n"
+                f"Вступишь в отношения — общий счёт пары начнётся с нуля, "
+                f"а твои призы за одиночные уровни останутся при тебе.\n\n"
                 f"Список РП: <code>все рп</code> · предложить пару: <code>+любовь</code> "
                 f"ответом на сообщение",
                 parse_mode="HTML")
@@ -3728,16 +3730,24 @@ async def add_love_points(row, amount: int):
         granted = []
     # Пустые этапы не считаем: если награду уже выплатили раньше (или её закрыла
     # страховка API), игроку не нужно второе «вы достигли уровня».
+    # Задача 83: сюда попадают и «догоняющие» награды — уровни, которые игрок
+    # должен был получить раньше, но деньги не дошли. Он увидит их в первом же
+    # действии/заходе в профиль, а не «тихо» на балансе.
     granted = [item for item in granted if int(item.get("reward") or 0) > 0]
     # Задача 74: приз за уровень — «заработано» в профиле каждого партнёра.
+    # Задача 83: награды теперь персональные (в granted есть user_id), поэтому
+    # каждому игроку в статистику пишем РОВНО его сумму, а не общий котёл
+    # (раньше один приз учитывался у обоих, и цифры в профиле врали).
     if granted:
-        total = sum(int(item.get("reward") or 0) for item in granted)
         for partner in (row.get("user_a"), row.get("user_b")):
             try:
                 partner_id = int(partner)
             except (TypeError, ValueError):
                 continue
-            stats_note(partner_id, coins_earned=total, won_love=total)
+            total = sum(int(item.get("reward") or 0) for item in granted
+                        if _granted_for_user(item, partner_id))
+            if total:
+                stats_note(partner_id, coins_earned=total, won_love=total)
     return new_score, granted, True
 
 
@@ -3745,7 +3755,7 @@ async def add_love_points(row, amount: int):
 # Задача 30: у кого пары нет — тот не «застревает», а качает свою ветку.
 # Экономика та же (те же +10, тот же кулдаун, те же этапы), но награду за этап
 # получает один человек, а не двое. Как только игрок вступает в отношения,
-# одиночный счёт сгорает (см. reset_solo_love).
+# одиночный прогресс сохраняется (задача 83: призы не отбираем).
 async def get_solo_love(user_id) -> int:
     """Сколько Unlove накопил одиночка (нет таблицы — 0)."""
     try:
@@ -3779,11 +3789,16 @@ async def add_solo_points(user_id, amount: int):
 
 
 async def drop_solo_status(user_id):
-    """Вступление в отношения: одиночный счёт сгорает."""
-    try:
-        await asyncio.to_thread(reset_solo_love, supabase, user_id)
-    except Exception as e:
-        logger.warning(f"Не удалось сбросить Unlove: {e}")
+    """Вступление в отношения (задача 83).
+
+    Раньше здесь сгорал весь одиночный прогресс: человек, который копил
+    Unlove и получал за это призы, после вступления в пару терял и счёт, и
+    возможность получить награды за пройденные уровни («кто раньше получал —
+    не получает»). Заказчик запретил так делать — теперь прогресс одиночки
+    остаётся за игроком, поэтому функция больше ничего не сбрасывает.
+    Оставлена как точка совместимости для существующих вызовов.
+    """
+    return None
 
 
 def _human_left(seconds) -> str:
@@ -3834,6 +3849,26 @@ async def _stage_brand_new_balance(uid):
         return None
 
 
+def _granted_for_user(item, user_id) -> bool:
+    """Относится ли награда к этому игроку (задача 83: награды персональные).
+
+    В старом формате user_id в записи нет (награда «на пару») — тогда считаем,
+    что она относится ко всем участникам.
+    """
+    owner = item.get("user_id") if isinstance(item, dict) else None
+    if owner is None:
+        return True
+    try:
+        return int(owner) == int(user_id)
+    except (TypeError, ValueError):
+        return True
+
+
+def _granted_for(granted, user_id) -> list:
+    """Награды, которые получил конкретно этот игрок."""
+    return [item for item in (granted or []) if _granted_for_user(item, user_id)]
+
+
 async def _notify_stage_rewards(row, actor_id, granted) -> None:
     """Поздравление КАЖДОМУ участнику пары + награда за новый уровень (задача 81).
 
@@ -3853,6 +3888,10 @@ async def _notify_stage_rewards(row, actor_id, granted) -> None:
         if uid > 0 and uid not in partners:
             partners.append(uid)
     for uid in partners:
+        # Задача 83: каждому — только то, что получил он сам.
+        mine = _granted_for(granted, uid)
+        if not mine:
+            continue
         partner_id = next((other for other in partners if other != uid), None)
         partner_name = ""
         if partner_id:
@@ -3865,7 +3904,7 @@ async def _notify_stage_rewards(row, actor_id, granted) -> None:
                 partner_name = "@" + partner_name.lstrip("@")
         balance = await _stage_brand_new_balance(uid)
         blocks = []
-        for stage in granted:
+        for stage in mine:
             blocks.append(celebration_text(stage, stage.get("reward"),
                                            partner_name=partner_name,
                                            balance=balance,
@@ -3941,7 +3980,9 @@ async def cmd_rp_action(message: Message):
     # поздравления. Теперь при новом уровне прямо в ответе — полноценное
     # поздравление: уровень, название, сумма КАЖДОМУ, новый баланс и следующий
     # уровень. Награду получают оба партнёра (love.claim_stage_rewards).
-    if granted:
+    # Задача 83: в чате показываем только уровни, за которые заплатили автору.
+    my_rewards = _granted_for(granted, actor_id)
+    if my_rewards:
         balance = await _stage_brand_new_balance(actor_id)
         partner_name = ""
         try:
@@ -3952,7 +3993,7 @@ async def cmd_rp_action(message: Message):
         if partner_name:
             partner_name = "@" + partner_name.lstrip("@")
         blocks = []
-        for stage in granted:
+        for stage in my_rewards:
             blocks.append(celebration_text(stage, stage.get("reward"),
                                            partner_name=partner_name,
                                            balance=balance,

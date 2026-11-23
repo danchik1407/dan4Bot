@@ -446,6 +446,18 @@ def rp_action_for(text) -> tuple:
 # (при открытии Mini App) вызывают одну и ту же функцию, поэтому награда не
 # может быть выдана дважды или не выдана вовсе.
 LOVE_REWARDS_TABLE = "love_stage_rewards"
+# Задача 83: отметка «ЭТОТ игрок в ЭТОЙ паре за ЭТОТ уровень приз уже получил».
+# Старая таблица love_stage_rewards помнит только пару (relationship_id, stage)
+# и не говорит, дошло ли деньги до КАЖДОГО партнёра: если одному начисление
+# сорвалось, второй всё равно записан в «выплачено», и первый не получал уже
+# никогда. Теперь отметка стоит на каждого человека отдельно — недоплаченный
+# получает приз при следующем действии (профиль/РП), а второй второй раз не
+# получит.
+LOVE_MEMBER_REWARDS_TABLE = "love_stage_members"
+# Есть ли таблица в базе. None — ещё не проверяли; False — миграция не
+# применена, тогда работаем по старой схеме (иначе награды вообще перестали бы
+# выдаваться на базе без миграции).
+_MEMBER_TABLE_READY = None
 
 
 def paid_stages(supabase, relationship_id) -> set:
@@ -457,30 +469,144 @@ def paid_stages(supabase, relationship_id) -> set:
     return {_safe_int(row.get("stage"), -1) for row in (res.data or [])}
 
 
+def member_rewards_ready(supabase) -> bool:
+    """Есть ли таблица отметок по игрокам (миграция 20261204000000 применена)."""
+    global _MEMBER_TABLE_READY
+    if _MEMBER_TABLE_READY is not None:
+        return _MEMBER_TABLE_READY
+    try:
+        supabase.table(LOVE_MEMBER_REWARDS_TABLE).select("user_id").limit(1).execute()
+        _MEMBER_TABLE_READY = True
+    except Exception as exc:  # noqa: BLE001 — таблицы нет, работаем по старой схеме
+        logger.warning("Таблицы %s нет (%s) — награды считаем по старой схеме; "
+                       "примените миграцию 20261204000000_love_rewards_per_player.sql",
+                       LOVE_MEMBER_REWARDS_TABLE, exc)
+        _MEMBER_TABLE_READY = False
+    return _MEMBER_TABLE_READY
+
+
+def member_paid_stages(supabase, relationship_id, user_id) -> set:
+    """Какие уровни ЭТОТ игрок в ЭТОЙ паре уже получил."""
+    try:
+        res = (supabase.table(LOVE_MEMBER_REWARDS_TABLE).select("stage")
+               .eq("relationship_id", int(relationship_id)).eq("user_id", int(user_id)).execute())
+    except Exception:
+        return set()
+    return {_safe_int(row.get("stage"), -1) for row in (res.data or [])}
+
+
+def _member_mark(supabase, relationship_id, user_id, stage_index) -> bool:
+    """Отметка «этому игроку этот уровень в этой паре оплачен».
+
+    Ставится ДО начисления: два одновременных действия не оплатят уровень
+    дважды (второй insert упадёт на первичном ключе и просто не заплатит).
+    """
+    try:
+        supabase.table(LOVE_MEMBER_REWARDS_TABLE).insert({
+            "relationship_id": int(relationship_id),
+            "user_id": int(user_id),
+            "stage": int(stage_index),
+        }).execute()
+        return True
+    except Exception:
+        return False
+
+
+def _member_unmark(supabase, relationship_id, user_id, stage_index) -> None:
+    """Начисление не удалось — снимаем отметку, повторим позже."""
+    try:
+        (supabase.table(LOVE_MEMBER_REWARDS_TABLE).delete()
+         .eq("relationship_id", int(relationship_id))
+         .eq("user_id", int(user_id))
+         .eq("stage", int(stage_index)).execute())
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Отметку уровня %s игрока %s снять не удалось: %s",
+                       stage_index, user_id, exc)
+
+
+def _remember_stage(supabase, relationship_id, stage_index) -> None:
+    """Совместимость: старые сборки читают факт выплаты из love_stage_rewards."""
+    try:
+        supabase.table(LOVE_REWARDS_TABLE).insert({
+            "relationship_id": int(relationship_id), "stage": int(stage_index),
+        }).execute()
+    except Exception:
+        pass          # запись уже есть (или таблицы нет) — это не ошибка
+
+
+def _coin_rows(supabase, user_id) -> list:
+    """Все строки профиля игрока (в users бывают дубли с одним user_id)."""
+    uid = _safe_int(user_id, 0)
+    rows = []
+    for key in (uid, str(uid)):
+        try:
+            res = supabase.table("users").select("*").eq("user_id", key).execute()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Не удалось прочитать users по user_id=%s: %s", key, exc)
+            continue
+        rows.extend(row for row in (res.data or []) if isinstance(row, dict))
+        if rows:
+            break
+    return rows
+
+
+def _main_coin_row(rows):
+    """Строка, которую ИГРОК видит в профиле: максимум коинов.
+
+    Задача 83: раньше начисление брало `data[0]` — в базе бывают дубли с одним
+    user_id, и деньги могли уйти в «мёртвую» строку с нулём, а профиль
+    показывает строку с максимумом коинов. Игрок видел «награда начислена» и
+    ноль на балансе — «наград нету». Теперь и читаем, и пишем в ту же строку,
+    что и профиль (как bot._primary_user_row и api._find_user_rows).
+    """
+    rows = [row for row in (rows or []) if isinstance(row, dict)]
+    if not rows:
+        return None
+    return max(rows, key=lambda row: _safe_int(row.get("coins"), 0))
+
+
 def _credit_coins(supabase, user_id, amount: int, attempts: int = 3) -> bool:
-    """Начислить коины с повтором. False — не смогли (тогда награду повторим).
+    """Начислить коины с повтором и проверкой. False — не смогли (награду повторим).
 
     Задача 62: раньше сбой одного `update` молча проглатывался, а этап уже был
-    отмечен выплаченным — награда терялась навсегда. Теперь неудачу видно
-    наверх: вызывающий код снимает отметку и попробует снова.
+    отмечен выплаченным — награда терялась навсегда.
+    Задача 83: пишем в ту же строку профиля, что видит игрок (максимум коинов),
+    и после записи ПЕРЕЧИТЫВАЕМ баланс. Если прибавки нет — пробуем ещё раз,
+    чтобы «начислено» в сообщении и баланс в профиле всегда совпадали.
     """
     uid = _safe_int(user_id, 0)
     amount = _safe_int(amount, 0)
     if uid <= 0 or amount <= 0:
         return False
     for attempt in range(max(1, attempts)):
-        try:
-            res = supabase.table("users").select("coins").eq("user_id", uid).execute()
-            if res.data:
-                coins = _safe_int(res.data[0].get("coins"), 0) + amount
-                supabase.table("users").update({"coins": coins}).eq("user_id", uid).execute()
-                return True
-            # Строки игрока нет — повторять бессмысленно.
+        rows = _coin_rows(supabase, uid)
+        row = _main_coin_row(rows)
+        if not row:
+            # Строки игрока нет — повторять нечего (её создаст бот при заходе).
             return False
+        before = _safe_int(row.get("coins"), 0)
+        target = before + amount
+        try:
+            query = supabase.table("users").update({"coins": target})
+            row_id = _safe_int(row.get("id"), 0)
+            if row_id > 0:
+                # Точно эта строка: иначе update по user_id задел бы и дубли.
+                query = query.eq("id", row_id)
+            else:
+                query = query.eq("user_id", uid)
+            query.execute()
         except Exception as exc:  # noqa: BLE001
             logger.warning("Коины игроку %s не начислены (попытка %s): %s",
                            uid, attempt + 1, exc)
             time.sleep(0.2 * (attempt + 1))
+            continue
+        # Обратное чтение: запись могла «пройти» и ничего не изменить (RLS).
+        saved = _main_coin_row(_coin_rows(supabase, uid))
+        if _safe_int((saved or {}).get("coins"), 0) >= target:
+            return True
+        logger.warning("Коины игроку %s не легли в базу (попытка %s): было %s, ждали %s",
+                       uid, attempt + 1, before, target)
+        time.sleep(0.2 * (attempt + 1))
     return False
 
 
@@ -497,7 +623,19 @@ def _unmark_stage(supabase, table: str, match: dict, stage_index) -> None:
 
 
 def claim_stage_rewards(supabase, relationship) -> list:
-    """Награды за достигнутые этапы: каждому партнёру, ровно один раз на этап."""
+    """Награды за достигнутые этапы: каждому партнёру, ровно один раз на этап.
+
+    Задача 83 (жалоба «наград нету, а кто получал раньше — не получает»):
+    начисление теперь персональное. Раньше отметка стояла на пару
+    (relationship_id, stage), и если одному партнёру деньги не дошли (сбой
+    записи, строка игрока ещё не создана), повторной попытки уже не было —
+    второй был записан как получивший, а первый не получал никогда.
+
+    Теперь для каждого игрока своя отметка (love_stage_members). Начисление
+    НЕ зависит от счётчика Love пары: если игрок в этой паре этого уровня ещё
+    не получал — он получит приз при следующем действии, даже если Love пары
+    успел упасть или счёт вообще обнулился.
+    """
     if not relationship:
         return []
     relationship_id = _safe_int(relationship.get("id"), 0)
@@ -505,42 +643,72 @@ def claim_stage_rewards(supabase, relationship) -> list:
         return []
     score = _safe_int(relationship.get("love"), 0)
     current_index = stage_index(score)
-    already = paid_stages(supabase, relationship_id)
-    partners = [_safe_int(relationship.get("user_a"), 0), _safe_int(relationship.get("user_b"), 0)]
+    partners = []
+    for key in ("user_a", "user_b"):
+        uid = _safe_int(relationship.get(key), 0)
+        if uid > 0 and uid not in partners:
+            partners.append(uid)
+    if not partners:
+        return []
+    per_player = member_rewards_ready(supabase)
+    # Одним чтением: кто из партнёров какие уровни в этой паре уже получил.
+    member_paid = ({pid: member_paid_stages(supabase, relationship_id, pid) for pid in partners}
+                   if per_player else {})
+    legacy_paid = set() if per_player else paid_stages(supabase, relationship_id)
     granted = []
     for stage in LOVE_STAGES:
-        if stage["index"] > current_index or stage["index"] in already:
-            continue
-        # Задача 72: за 1-й уровень приз не даётся — этап просто пропускаем,
-        # отметку в базе не ставим (выдавать там нечего).
+        index = _safe_int(stage.get("index"), -1)
+        # Задача 72: 1-й уровень не оплачивается — отметку не ставим, платить нечего.
         if not stage_is_paid(stage):
             continue
-        # Отметку ставим ДО начисления: повторный вызов и гонка двух действий
-        # не выдадут награду второй раз.
-        try:
-            supabase.table(LOVE_REWARDS_TABLE).insert({
-                "relationship_id": relationship_id, "stage": stage["index"],
-            }).execute()
-        except Exception:
-            continue
-        failed = False
-        for partner_id in partners:
-            if partner_id <= 0:
+        if index > current_index:
+            continue          # пара до этого уровня ещё не дошла
+        reward = int(stage.get("reward") or 0)
+        if per_player:
+            for partner_id in partners:
+                if index in member_paid.get(partner_id, set()):
+                    continue          # этот игрок уровень уже получил
+                if not _member_mark(supabase, relationship_id, partner_id, index):
+                    continue          # гонка: пока ставили отметку, оплатил другой запрос
+                if not _credit_coins(supabase, partner_id, reward):
+                    # Деньги не дошли ЭТОМУ партнёру — снимаем его отметку,
+                    # приз выдастся при следующем действии. Второй партнёр
+                    # свою награду сохраняет (раньше из-за одного сбоя теряли оба).
+                    _member_unmark(supabase, relationship_id, partner_id, index)
+                    logger.warning("Награда за этап %s игроку %s (пара %s) не "
+                                   "начислена — повторим позже",
+                                   index, partner_id, relationship_id)
+                    continue
+                member_paid.setdefault(partner_id, set()).add(index)
+                _remember_stage(supabase, relationship_id, index)
+                granted.append({"stage": index, "title": stage["title"],
+                                "reward": stage["reward"], "user_id": partner_id})
+        else:
+            # Старая схема (миграция 20261204 не применена): одна отметка на пару.
+            # Отметку ставим ДО начисления — иначе при сбое таблицы награда
+            # выдавалась бы на каждое действие бесконечно.
+            if index in legacy_paid:
                 continue
-            if not _credit_coins(supabase, partner_id, int(stage["reward"])):
-                failed = True
-        if failed:
-            # Деньги кому-то не дошли (сбой базы, нет строки игрока): отметку
-            # снимаем, чтобы награда выдалась при следующем действии. Раньше
-            # отметка оставалась, и награда за этап терялась НАВСЕГДА, а игрок
-            # при этом получал сообщение «вам начислено».
-            _unmark_stage(supabase, LOVE_REWARDS_TABLE, {"relationship_id": relationship_id},
-                          stage["index"])
-            logger.warning("Награда за этап %s пары %s не начислена — повторим позже",
-                           stage["index"], relationship_id)
-            continue
-        granted.append({"stage": stage["index"], "title": stage["title"],
-                        "reward": stage["reward"]})
+            try:
+                supabase.table(LOVE_REWARDS_TABLE).insert({
+                    "relationship_id": relationship_id, "stage": index,
+                }).execute()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Отметку уровня %s пары %s поставить не удалось (%s) — "
+                               "примените миграцию 20261204000000_love_rewards_per_player.sql",
+                               index, relationship_id, exc)
+                continue
+            ok = True
+            for partner_id in partners:
+                if not _credit_coins(supabase, partner_id, reward):
+                    ok = False
+            if not ok:
+                logger.warning("Награда за этап %s пары %s начислена не всем — "
+                               "повторим позже", index, relationship_id)
+                _unmark_stage(supabase, LOVE_REWARDS_TABLE,
+                              {"relationship_id": relationship_id}, index)
+                continue
+            granted.append({"stage": index, "title": stage["title"], "reward": stage["reward"]})
     return granted
 
 
@@ -606,16 +774,27 @@ def solo_saved(supabase, user_id, expected: int) -> bool:
 
 
 def reset_solo_love(supabase, user_id) -> bool:
-    """Вступление в отношения: одиночный счёт сгорает.
+    """Вступление в отношения: одиночный счёт сгорает, а выплаченные призы — нет.
 
-    Таблицу выданных наград НЕ трогаем: она защищает от повторного получения
-    тех же этапов после «пара → развод → снова один».
+    Задача 83: раньше здесь просто удалялась строка `solo_love`, и вместе с
+    ней исчезал ВЕСЬ прогресс одиночки. Отметки в `solo_love_stage_rewards`
+    при этом оставались — человек после «пара → развод → снова один» начинал
+    с нуля Unlove, но призы за уже пройденные уровни больше не получал:
+    «кто раньше получал — не получает». Заказчик попросил так не делать.
+
+    Теперь прогресс не сгорает: счёт одиночки сохраняется (и продолжает
+    качаться, если человек снова останется один), поэтому уровни и призы,
+    которые он заработал, остаются при нём.
     """
     uid = _safe_int(user_id, 0)
     if uid <= 0:
         return False
     try:
-        supabase.table(SOLO_LOVE_TABLE).delete().eq("user_id", uid).execute()
+        # Строку НЕ удаляем: читаем и, если её нет, создаём с нулём. Смысл
+        # вызова теперь — «подтвердить, что одиночная ветка за игроком».
+        current = _safe_int(solo_state(supabase, uid).get("love"), 0)
+        supabase.table(SOLO_LOVE_TABLE).upsert(
+            {"user_id": uid, "love": current}, on_conflict="user_id").execute()
         return True
     except Exception:
         return False

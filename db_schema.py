@@ -28,6 +28,9 @@ REQUIRED = {
     # bank нужен выплатам/RPC пары: без него бот писал «примените миграцию».
     "relationships": ["id", "user_a", "user_b", "love", "bank", "status", "created_at"],
     "love_stage_rewards": ["relationship_id", "stage"],
+    # Задача 83: персональные отметки наград — без таблицы награда не может
+    # догнать игрока, которому в прошлый раз не начислилась.
+    "love_stage_members": ["relationship_id", "user_id", "stage"],
     # Задача 61: кулдаун стал «на команду» — без колонки action он общий на
     # игрока (так было до миграции), поэтому аудит должен её видеть.
     "love_cooldowns": ["user_id", "action", "action_at"],

@@ -1701,8 +1701,12 @@ async function loadLoveState() {
             // Задача 81: заказчик просил настоящее поздравление, а не «стало
             // теплее»: уровень, название, награда на балансе и следующий уровень.
             // Сумму следующего уровня сервер не присылает — только «нужно Love».
-            showStageCelebration(loveState.stage_rewards);
-            await loadUserData().catch(() => {});
+            // Задача 83: сервер присылает только те награды, которые получил
+            // ИМЕННО этот игрок; если их нет — окно не показываем (пустое).
+            if (Array.isArray(loveState.stage_rewards) && loveState.stage_rewards.length) {
+                showStageCelebration(loveState.stage_rewards);
+                await loadUserData().catch(() => {});
+            }
         }
     } catch (e) { console.warn('love_state', e); }
 }
