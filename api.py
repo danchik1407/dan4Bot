@@ -88,7 +88,7 @@ async def _http_json(url, method: str = "GET", params=None, payload=None, timeou
 
 # Номер сборки: по нему из /api/health видно, что на сервисе НЕ старый код.
 # Если после деплоя здесь прежнее значение — Render ещё не перезапустился.
-API_BUILD = "2026-10-27-task82-relationship-badge"
+API_BUILD = "2026-10-27-task83-love-rewards-fixed"
 
 # Момент старта процесса. По нему видно, что сервис только что «проснулся»:
 # Render на бесплатном тарифе усыпляет Web Service через 15 минут без входящих
@@ -7250,7 +7250,10 @@ async def love_state(data: UserAuth):
             if granted:
                 state["stage_up"] = True
                 # Задача 74: призы за этапы отношений — тоже «заработано».
-                reward_total = sum(int(g.get("reward") or 0) for g in granted)
+                # Задача 83: сумма — только те уровни, за которые заплатили
+                # этому игроку (награды стали персональными).
+                reward_total = sum(int(g.get("reward") or 0) for g in granted
+                                   if _granted_for(g, uid))
                 stats_note(uid, coins_earned=reward_total, won_love=reward_total)
                 # Задача 81: одиночке — то же поздравление в аппке.
                 state["stage_rewards"] = [
@@ -7271,18 +7274,22 @@ async def love_state(data: UserAuth):
         if granted:
             state["stage_up"] = True
             # Задача 74: каждому партнёру — своя сумма приза в статистику.
+            # Задача 83: ровно его награды (в granted есть user_id).
             for partner_id in (_safe_int(row.get("user_a"), 0), _safe_int(row.get("user_b"), 0)):
                 if partner_id > 0:
-                    reward_total = sum(int(g.get("reward") or 0) for g in granted)
-                    stats_note(partner_id, coins_earned=reward_total, won_love=reward_total)
+                    reward_total = sum(int(g.get("reward") or 0) for g in granted
+                                       if _granted_for(g, partner_id))
+                    if reward_total:
+                        stats_note(partner_id, coins_earned=reward_total, won_love=reward_total)
             # Задача 81: что показать игроку в аппке — уровень, название, своя
             # сумма награды и следующий уровень.
-            partner_id = _safe_int(state.get("partner_id"), 0)
+            # Задача 83: в окне — только те уровни, за которые заплатили ему.
+            my_rewards = [stage for stage in granted if _granted_for(stage, uid)]
             state["stage_rewards"] = [
                 _stage_celebration_payload(stage, stage.get("reward"),
                                            partner_name=str(state.get("partner_name") or ""),
                                            balance=_safe_int((_db_user(uid) or {}).get("coins"), None))
-                for stage in granted
+                for stage in my_rewards
             ]
             await _love_stage_dm(row, granted)
     return state
@@ -7324,6 +7331,26 @@ def _next_stage_public_http(stage) -> dict:
     return {"level": nxt["index"] + 1, "title": nxt["title"], "love_need": nxt["min"]}
 
 
+def _granted_for_user(item, user_id) -> bool:
+    """Получил ли ЭТОТ игрок эту награду (задача 83).
+
+    В старом формате (награда «на пару») поля user_id нет — считаем, что
+    награда относится ко всем участникам.
+    """
+    owner = item.get("user_id") if isinstance(item, dict) else None
+    if owner is None:
+        return True
+    try:
+        return int(owner) == int(user_id)
+    except (TypeError, ValueError):
+        return True
+
+
+def _granted_for(granted, user_id) -> list:
+    """Список наград конкретного игрока."""
+    return [item for item in (granted or []) if _granted_for_user(item, user_id)]
+
+
 async def _love_stage_dm(row, granted) -> None:
     """Поздравление каждому партнёру: «вы перешли на N уровень, вот награда».
 
@@ -7358,12 +7385,16 @@ async def _love_stage_dm(row, granted) -> None:
             balance = _safe_int((_db_user(uid) or {}).get("coins"), None)
         except Exception:  # noqa: BLE001
             balance = None
+        # Задача 83: каждому — только его награды.
+        mine = _granted_for(granted, uid)
+        if not mine:
+            continue
         blocks = [celebration_text(stage, stage.get("reward"),
                                    partner_name=partner_name, balance=balance,
                                    next_stage=_next_stage_public_http(stage))
-                  for stage in granted]
+                  for stage in mine]
         text = "\n\n".join(blocks)
-        text += "\n\n<i>Коины уже на балансе у обоих — забирать не нужно.</i>"
+        text += "\n\n<i>Коины уже на балансе — забирать не нужно.</i>"
         await _send_user_dm(uid, text)
 
 # ==================== ИГРОВЫЕ МОМЕНТЫ ПРОФИЛЯ (задача 74) ====================
