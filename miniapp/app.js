@@ -1751,59 +1751,10 @@ function achievementRows() {
     });
 }
 
-// История ставок и пополнений (задача 77). Свёрнута по умолчанию: 30 строк
-// всегда на экране — это простыня, а не профиль.
-let historyOpen = false;
-
-function toggleHistory() {
-    historyOpen = !historyOpen;
-    const list = document.getElementById('history-list');
-    const arrow = document.getElementById('history-arrow');
-    const toggle = document.getElementById('history-toggle');
-    if (list) list.hidden = !historyOpen;
-    if (arrow) arrow.textContent = historyOpen ? '▴' : '▾';
-    if (toggle) toggle.setAttribute('aria-expanded', historyOpen ? 'true' : 'false');
-    if (historyOpen) renderHistory();
-}
-
-function historyDateText(iso) {
-    if (!iso) return '';
-    const date = new Date(iso);
-    if (isNaN(date.getTime())) return '';
-    const pad = v => String(v).padStart(2, '0');
-    return `${pad(date.getDate())}.${pad(date.getMonth() + 1)} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
-}
-
-function renderHistory() {
-    const list = document.getElementById('history-list');
-    if (!list) return;
-    // Задача 79: если база не готова, честно говорим об этом, а не «операций нет» —
-    // иначе кажется, что игра не засчиталась, хотя не применена миграция.
-    if (profileStats && profileStats.db && profileStats.db.ready === false) {
-        list.innerHTML = '<div class="ach-empty">История недоступна: в Supabase не применена миграция. ' +
-            'Скопируй файл из ответа бота и нажми Run в SQL Editor.</div>';
-        return;
-    }
-    const rows = (profileStats && Array.isArray(profileStats.history)) ? profileStats.history : [];
-    if (!rows.length) {
-        list.innerHTML = '<div class="ach-empty">Операций пока нет — сделай ставку или открой сундук.</div>';
-        return;
-    }
-    list.innerHTML = rows.map(item => {
-        const sign = item.sign === '-' ? '−' : '+';
-        const cls = item.sign === '-' ? 'is-out' : 'is-in';
-        return `
-            <div class="history-row">
-                <span class="history-body">
-                    <span class="history-title">${escapeHtml(item.title || item.label || 'Операция')}</span>
-                    <span class="history-date">${escapeHtml(historyDateText(item.created_at))}</span>
-                </span>
-                <span class="history-amount ${cls}">${sign}${escapeHtml(item.amount_text || '0')}</span>
-            </div>
-        `;
-    }).join('');
-}
-
+// Задача 80: история ставок и пополнений удалена полностью. Вместо ленты в
+// профиле после пополнения приходит сообщение в личку с ботом. Функции
+// toggleHistory/renderHistory/historyDateText убраны намеренно: если старая
+// разметка из кэша Telegram вызовет их, ничего не произойдёт.
 function renderAchievements() {
     const list = document.getElementById('achievements-list');
     if (!list) return;
@@ -1834,7 +1785,7 @@ function renderAchievements() {
             <span class="ach-value">${escapeHtml(valueText)}</span>
         </div>
     `).join('');
-    if (historyOpen) renderHistory();
+    // Задача 80: истории больше нет — перерисовывать нечего.
     const hint = document.getElementById('ach-hint');
     if (hint) {
         hint.innerText = (profileStats && profileStats.ready === false)

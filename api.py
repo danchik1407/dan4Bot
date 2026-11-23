@@ -87,7 +87,7 @@ async def _http_json(url, method: str = "GET", params=None, payload=None, timeou
 
 # Номер сборки: по нему из /api/health видно, что на сервисе НЕ старый код.
 # Если после деплоя здесь прежнее значение — Render ещё не перезапустился.
-API_BUILD = "2026-10-27-task79-stats-fix-love-cd-switch"
+API_BUILD = "2026-10-27-task80-history-removed"
 
 # Момент старта процесса. По нему видно, что сервис только что «проснулся»:
 # Render на бесплатном тарифе усыпляет Web Service через 15 минут без входящих
@@ -1191,26 +1191,8 @@ def stats_note(user_id, **deltas) -> None:
         _write()
 
 
-def ledger_note(user_id, kind: str, amount: int, title: str = "", meta=None) -> None:
-    """История ставок и пополнений для профиля (задача 77) — в фоне.
-
-    Пишем тем же способом, что и статистику: ответ игроку не ждёт базу, а
-    сломанная лента игру не ломает.
-    """
-    def _write():
-        try:
-            ok = player_stats.add_ledger(supabase, user_id, kind, amount, title, meta)
-            if not ok:
-                logger.warning("история операций не записалась (user_id=%s, %s %s) — "
-                               "проверьте таблицу player_ledger из %s",
-                               user_id, kind, amount, player_stats.MIGRATION_FILE)
-        except Exception:  # noqa: BLE001
-            logger.warning("история операций: ошибка записи (user_id=%s)", user_id,
-                           exc_info=True)
-    try:
-        asyncio.create_task(asyncio.to_thread(_write))
-    except RuntimeError:
-        _write()
+# Задача 80: история ставок и пополнений удалена полностью вместе с функциями
+# ledger_note()/ledger_win_note(). Пополнение игрок видит сообщением в личке.
 
 
 def stats_event(user_id, kind: str, title: str, amount: int = 0, meta=None) -> None:
@@ -2540,16 +2522,6 @@ def _ledger_mark_paid(entry: dict) -> None:
         logger.debug("arena_payouts: статус не обновился: %s", exc)
 
 
-# Задача 79: «выигрыш» в истории — это только чистый плюс. Заказчик: «если я
-# выиграл, писать выигрыш +N; если проиграл — ничего не писать, просто что
-# списано». Поэтому выигрыш пишем как (выплата − ставка): при кэше 1.5× и ставке
-# 100 в истории будет «+50», а не «+150» рядом со «−100». Ноль не пишем вовсе.
-def ledger_win_note(user_id, total_returned: int, bet_amount: int, title: str) -> None:
-    profit = int(total_returned) - int(bet_amount)
-    if profit > 0:
-        ledger_note(user_id, "win", profit, title)
-
-
 def _credit_arena_payout(entry: dict) -> str:
     """Начислить один выигрыш. Возвращает 'paid' | 'duplicate' | 'error'.
 
@@ -2563,12 +2535,7 @@ def _credit_arena_payout(entry: dict) -> str:
     if str(entry.get("kind") or "") != "refund":
         stats_note(entry["user_id"], coins_earned=int(entry["amount"]),
                    won_arena=int(entry["amount"]), best_arena_win=int(entry["amount"]))
-        # Задача 79: в арене выплата уже равна чистому выигрышу (ставка списана
-        # отдельной операцией), поэтому bet_amount=0 — пишем как есть.
-        ledger_win_note(entry["user_id"], int(entry["amount"]), 0, "🏒 Арена")
-    elif int(entry.get("amount") or 0) > 0:
-        # Возврат ставки после рестарта — не выигрыш, но деньги игрок получил.
-        ledger_note(entry["user_id"], "claim", int(entry["amount"]), "↩️ Возврат ставки")
+    # Задача 80: история операций удалена — в профиле её больше нет.
     arena = str(entry["arena"])
     round_id = str(entry["round_id"])
     uid = int(entry["user_id"])
@@ -3843,7 +3810,6 @@ async def crash_bet(data: CrashBet):
     # Задача 74: ставка в ракете + «самая большая ставка» для профиля.
     stats_note(user_id, coins_spent=data.amount, spent_crash=data.amount,
                best_crash_bet=data.amount)
-    ledger_note(user_id, "bet", data.amount, "🚀 Ракета")
     return {"success": True, "new_balance": current_coins - data.amount}
 
 
@@ -3875,8 +3841,6 @@ async def crash_cashout(data: CrashCashout):
     # сравнивает суммы, а не x2.1 против x3.0.
     stats_note(user_id, coins_earned=win_amount, won_crash=win_amount,
                best_crash_win=win_amount)
-    ledger_win_note(user_id, win_amount, int(player["bet"]),
-                    f"🚀 Ракета x{cashout_mult:g}")
     return {"success": True, "win_amount": win_amount, "mult": cashout_mult, "new_balance": new_coins}
 
 
@@ -3961,7 +3925,6 @@ async def mines_start(data: MinesStart):
     # закончилась без выплаты (мина), см. mines_open.
     stats_note(user_id, coins_spent=amount, spent_mines=amount, best_mines_bet=amount,
                mines_games=1)
-    ledger_note(user_id, "bet", amount, f"💣 Мины · {mines_count} мин")
     return {"success": True, "new_balance": coins, "coef": 1.0, "cashout": amount,
             "mines": mines_count, "bet": amount}
 
@@ -4046,7 +4009,6 @@ async def mines_cashout(data: MinesCashout):
         raise HTTPException(status_code=500, detail="Не удалось зачислить выигрыш")
     stats_note(user_id, coins_earned=win_amount, won_mines=win_amount,
                best_mines_win=win_amount)
-    ledger_win_note(user_id, win_amount, int(game.get("bet") or 0), "💣 Мины")
     return {"success": True, "win_amount": win_amount, "new_balance": coins,
             "coef": round(_mines_multiplier(game["mines"], len(game["opened"])), 2)}
 
@@ -4813,8 +4775,6 @@ async def claim_chest(auth: "ClaimChestRequest"):
         chest_won = reward_coins + UPGRADE_ITEM_PRICES.get(reward_item, 0) * reward_item_amount
         if chest_won:
             stats_note(user_id, coins_earned=chest_won, won_chests=chest_won)
-            ledger_note(user_id, "chest", chest_won,
-                        "🎁 " + ("Золотой сундук" if chest_type == "gold" else "Сундук"))
         print(f"СУНДУК: награда забрана из памяти user_id={user_id} "
               f"+{reward_coins} коинов, +{reward_keys} ключей, "
               f"капсула={reward_item or 'нет'} x{reward_item_amount}", flush=True)
@@ -4858,8 +4818,6 @@ async def claim_chest(auth: "ClaimChestRequest"):
     chest_won = reward_coins + UPGRADE_ITEM_PRICES.get(reward_item, 0) * reward_item_amount
     if chest_won:
         stats_note(user_id, coins_earned=chest_won, won_chests=chest_won)
-        ledger_note(user_id, "chest", chest_won,
-                    "🎁 " + ("Золотой сундук" if claim.get("chest_type") == "gold" else "Сундук"))
 
     print(f"СУНДУК: награда забрана user_id={user_id} +{reward_coins} коинов, "
           f"+{reward_keys} ключей, капсула={reward_item or 'нет'} x{reward_item_amount}",
@@ -5033,9 +4991,6 @@ async def buy_item(data: BuyItem):
     _bought_price = int((SHOP_ITEMS.get(data.item_id) or {}).get("price") or 0)
     if _bought_price > 0:
         stats_note(user_id, coins_spent=_bought_price, spent_shop=_bought_price)
-        item = SHOP_ITEMS.get(data.item_id) or {}
-        ledger_note(user_id, "buy", _bought_price,
-                    f"🛒 {item.get('short_name') or data.item_id}")
     if STOCK_LIMITS_ENABLED and not result.get("stock_ready", True):
         # Купили, но тираж не списан: говорим прямо, а не делаем вид, что всё хорошо.
         print(f"МАГАЗИН: ВНИМАНИЕ тираж не списан (stock_ready=false) item={data.item_id} — "
@@ -5554,12 +5509,9 @@ async def upgrade_action(data: UpgradeAction):
             else:
                 deltas["lost_games"] = stake_value
             stats_note(user_id, **deltas)
-            ledger_note(user_id, "bet", stake_value, f"⚗️ Апгрейд · {moment_text}")
             if won:
                 won_value = payout if target == "coin" else UPGRADE_ITEM_PRICES.get(target, 0)
                 stats_note(user_id, coins_earned=won_value, won_upgrade=won_value)
-                ledger_win_note(user_id, won_value, stake_value,
-                                f"⚗️ Апгрейд · {moment_text}")
                 stats_event(user_id, "upgrade", moment_text,
                             max(moment_from, won_value),
                             {"from": source, "amount": amount, "to": target,
@@ -6455,8 +6407,6 @@ def _passive_income_locked(data: PassiveIncomeRequest, uid):
     new_coins = award_coins(uid, accrued)
     if new_coins is None:
         raise HTTPException(status_code=503, detail="Не удалось начислить пассивный доход")
-    # Задача 77: забранная пассивка — тоже операция в истории профиля.
-    ledger_note(uid, "claim", accrued, "💤 Пассивный доход")
     # Сколько времени реально «съели» выданные коины, и что осталось в мелочи.
     # consumed_hours = (accrued - carry) / rate — время, за которое набежали
     # именно выданные коины; всё, что не влезло в целые, уходит в carry.
@@ -6754,6 +6704,72 @@ async def stars_invoice(data: StarsInvoiceRequest):
     return {"ok": True, "enabled": True, "url": result.get("result"),
             "coins": package["coins"], "bonus": package.get("bonus", 0),
             "total": total, "stars": package["stars"]}
+
+
+# Задача 80: «если человек пополняет, пусть в личку с ботом приходит сообщение
+# — вы успешно пополнили баланс на N коинов». Заказчик убрал и кредиты, и
+# историю пополнений, поэтому бот должен узнать о платеже от сервиса API: у
+# бота свой процесс, напрямую он этот запрос не увидит. Отправляем сообщение
+# от того же бота через Bot API; токен читаем из окружения сервиса.
+TELEGRAM_API_BASE = "https://api.telegram.org"
+
+
+def _telegram_bot_token() -> str:
+    return (os.getenv("BOT_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN") or "").strip()
+
+
+async def notify_topup_in_private(user_id, coins: int, balance=None) -> bool:
+    """Личное сообщение «баланс пополнен на N коинов». True — Telegram принял.
+
+    Не мешает оплате: любая ошибка только в лог, деньги уже начислены.
+    """
+    token = _telegram_bot_token()
+    uid = _safe_int(user_id, None)
+    if not token or uid is None or int(coins) <= 0:
+        logger.warning("Уведомление о пополнении не отправлено (токен/сумма): uid=%s coins=%s",
+                       user_id, coins)
+        return False
+    text = f"✅ <b>Баланс пополнен на {int(coins):,} коинов</b>".replace(",", " ")
+    text += "\n\nСпасибо за поддержку игры 💙"
+    if balance is not None:
+        text += f"\n💰 Теперь на балансе: <b>{int(balance):,}</b> коинов.".replace(",", " ")
+    payload = {"chat_id": uid, "text": text, "parse_mode": "HTML",
+               "disable_web_page_preview": True}
+    # _http_json сам выбирает доступный клиент (httpx → aiohttp → urllib):
+    # на сборке aura-api aiohttp может отсутствовать, а httpx есть не всегда.
+    try:
+        data = await _http_json(f"{TELEGRAM_API_BASE}/bot{token}/sendMessage",
+                                method="POST", payload=payload, timeout=10.0)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Сообщение о пополнении не отправлено uid=%s: %s", uid, exc)
+        return False
+    if isinstance(data, dict) and data.get("ok"):
+        return True
+    logger.warning("Telegram не принял сообщение о пополнении uid=%s: %s", uid, data)
+    return False
+
+
+class StarsNotifyRequest(BaseModel):
+    """Бот сообщает, что платёж Stars прошёл: игроку нужно личное сообщение."""
+    initData: str
+    coins: int = 0
+    balance: Optional[int] = None
+
+
+@app.post("/api/stars_notify")
+async def stars_notify(data: StarsNotifyRequest):
+    """Задача 80: «пополнил — приходит сообщение в личку».
+
+    Бот после successful_payment зовёт эту ручку. Сообщение отправляет сервис
+    API (так у него всегда свежий токен), а бот дублирует его своим ответом,
+    если API недоступен: игрок в любом случае узнает, что баланс пополнен.
+    """
+    uid = _auth_user_id(data.initData)
+    coins = int(data.coins or 0)
+    if coins <= 0:
+        raise HTTPException(status_code=400, detail="Некорректная сумма пополнения")
+    sent = await notify_topup_in_private(uid, coins, data.balance)
+    return {"ok": True, "sent": bool(sent)}
 
 
 @app.get("/api/stars_packages")
@@ -7235,7 +7251,6 @@ async def love_state(data: UserAuth):
                 # Задача 74: призы за этапы отношений — тоже «заработано».
                 reward_total = sum(int(g.get("reward") or 0) for g in granted)
                 stats_note(uid, coins_earned=reward_total, won_love=reward_total)
-                ledger_note(uid, "reward", reward_total, "💗 Награда за уровень")
                 await _love_stage_dm({"user_a": uid}, granted)
         return state
     # Пара: та же страховка через общую таблицу наград.
@@ -7253,7 +7268,6 @@ async def love_state(data: UserAuth):
                 if partner_id > 0:
                     reward_total = sum(int(g.get("reward") or 0) for g in granted)
                     stats_note(partner_id, coins_earned=reward_total, won_love=reward_total)
-                    ledger_note(partner_id, "reward", reward_total, "💗 Награда за уровень")
             await _love_stage_dm(row, granted)
     return state
 
@@ -7360,7 +7374,8 @@ async def profile_stats(data: UserAuth):
     stat_row = await asyncio.to_thread(player_stats.read_stats, supabase, uid)
     first_seen = _app_first_seen_get(uid)
     payload = _profile_stats_record(uid, stat_row or {}, first_seen)
-    payload["history"] = _profile_history(uid)
+    # Задача 80: история ставок и пополнений удалена — в ответе её больше нет.
+    # Пополнение приходит игроку отдельным сообщением в личку с ботом.
     payload["migration"] = player_stats.FIX_MIGRATION_FILE
     # Задача 79: честный ответ «статистика не применяется / включена».
     # Раньше игрок видел пустые достижения и не мог понять, что дело в базе.
@@ -7378,31 +7393,6 @@ async def profile_stats(data: UserAuth):
         payload["hint"] = ("Статистика не запишется: в Supabase не применена миграция "
                            + player_stats.FIX_MIGRATION_FILE)
     return payload
-
-
-def _profile_history(user_id, limit: int = 30) -> list:
-    """История ставок и пополнений «всё в одном» (задача 77).
-
-    Одна строка = одна операция по кошельку. Знак и цвет считает клиент по
-    `sign`: минус — ставка/покупка/перевод другу, плюс — выигрыш/награда.
-    """
-    rows = player_stats.read_ledger(supabase, user_id, limit)
-    out = []
-    for row in rows:
-        kind = str(row.get("kind") or "")
-        amount = _safe_int(row.get("amount"), 0)
-        created = row.get("created_at")
-        out.append({
-            "id": _safe_int(row.get("id"), None),
-            "kind": kind,
-            "label": player_stats.LEDGER_LABELS.get(kind, "Операция"),
-            "title": row.get("title") or player_stats.LEDGER_LABELS.get(kind, ""),
-            "amount": amount,
-            "amount_text": _coins_text(amount),
-            "sign": "-" if kind in ("bet", "buy", "transfer_out") else "+",
-            "created_at": created.isoformat() if hasattr(created, "isoformat") else created,
-        })
-    return out
 
 
 @app.get("/api/global_top")

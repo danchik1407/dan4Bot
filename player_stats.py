@@ -27,16 +27,9 @@ logger = logging.getLogger("aura-stats")
 
 STATS_TABLE = "player_stats"
 EVENTS_TABLE = "player_events"
-# Задача 77: история ставок и пополнений — отдельная таблица, чтобы профиль мог
-# показать «все операции» и при этом не читать журналы игр по одному запросу.
-LEDGER_TABLE = "player_ledger"
-LEDGER_KINDS = ("bet", "win", "buy", "chest", "transfer_out", "transfer_in",
-                "reward", "claim")
-LEDGER_LABELS = {
-    "bet": "Ставка", "win": "Выигрыш", "buy": "Покупка", "chest": "Сундук",
-    "transfer_out": "Перевод другу", "transfer_in": "Перевод от друга",
-    "reward": "Награда", "claim": "Забрал",
-}
+# Задача 80: история ставок и пополнений удалена полностью (заказчик: «убери
+# полностью»). Таблица player_ledger больше не пишется и не читается; код
+# add_ledger/read_ledger убран, чтобы не было мёртвых путей.
 STATS_RPC = "player_stats_add"
 MIGRATION_FILE = "supabase/migrations/20261202000000_player_stats.sql"
 # Задача 79: если статистика не пишется, показываем игроку именно этот файл —
@@ -205,47 +198,3 @@ def best_event(supabase_client, user_id, kind: str) -> dict | None:
     return {"title": row.get("title") or "", "amount": _int(row.get("amount"), 0),
             "meta": row.get("meta") or {},
             "created_at": created.isoformat() if hasattr(created, "isoformat") else created}
-
-
-def add_ledger(supabase_client, user_id, kind: str, amount: int, title: str = "",
-               meta: dict | None = None) -> bool:
-    """Записать операцию в историю профиля: ставка, выигрыш, покупка, перевод.
-
-    `amount` — положительное число; знак определяет `kind` (bet/buy/transfer_out
-    уходят в минус, win/transfer_in/claim — в плюс). Так клиенту не нужно
-    угадывать направление по тексту.
-    """
-    uid = _int(user_id, None) if user_id is not None else None
-    if uid is None or kind not in LEDGER_KINDS:
-        return False
-    amount = abs(_int(amount, 0))
-    if amount <= 0:
-        return False
-    payload = {
-        "user_id": uid,
-        "kind": kind,
-        "amount": amount,
-        "title": str(title or LEDGER_LABELS.get(kind, ""))[:120],
-        "meta": meta or {},
-    }
-    try:
-        supabase_client.table(LEDGER_TABLE).insert(payload).execute()
-        return True
-    except Exception as exc:  # noqa: BLE001 — нет таблицы: профиль просто короче
-        logger.debug("player_ledger не записан (user_id=%s): %s", uid, exc)
-        return False
-
-
-def read_ledger(supabase_client, user_id, limit: int = 30) -> list:
-    """Последние операции игрока (новые сверху). Пустой список — таблицы нет."""
-    uid = _int(user_id, None) if user_id is not None else None
-    if uid is None:
-        return []
-    try:
-        rows = (supabase_client.table(LEDGER_TABLE).select("*")
-                .eq("user_id", uid).order("id", desc=True)
-                .limit(max(1, min(100, int(limit)))).execute().data) or []
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("player_ledger недоступен (user_id=%s): %s", uid, exc)
-        return []
-    return rows
