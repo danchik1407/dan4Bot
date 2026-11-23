@@ -2,11 +2,11 @@
 -- Задача 79. «Игры не засчитываются» + кнопка КД РП в админ-панели.
 --
 -- 1) ПОЧЕМУ игры не попадали в профиль и историю.
---    Счётчики профиля (player_stats) и лента операций (player_ledger) — это
---    отдельные таблицы, которые создаёт миграция 20261202000000_player_stats.sql.
---    Если её не применить, api.py пишет только debug-лог и молча живёт дальше:
---    игра идёт, деньги начисляются, а в профиле ноль. Здесь мы:
---      • создаём обе таблицы (и player_events), если их почему-то нет;
+--    Счётчики профиля (player_stats) — отдельная таблица, которую создаёт
+--    миграция 20261202000000_player_stats.sql. Если её не применить, api.py
+--    пишет только debug-лог и молча живёт дальше: игра идёт, деньги
+--    начисляются, а в профиле ноль. Здесь мы:
+--      • создаём таблицы (player_stats, player_events), если их почему-то нет;
 --      • ДОБАВЛЯЕМ недостающие колонки, если таблица была создана старой
 --        версией (например, до счётчика «каток в мины»);
 --      • заново объявляем функции player_stats_add и player_stats_ensure —
@@ -161,33 +161,12 @@ delete from public.player_events
     ) ranked where rn > 20
  );
 
--- --- 3) player_ledger: история ставок, выигрышей и пополнений ----------------
-create table if not exists public.player_ledger (
-    id         bigserial primary key,
-    user_id    bigint not null,
-    kind       text   not null,
-    amount     bigint not null default 0,
-    title      text   not null default '',
-    meta       jsonb  not null default '{}'::jsonb,
-    created_at timestamptz not null default now()
-);
-
-create index if not exists player_ledger_user_idx
-    on public.player_ledger (user_id, id desc);
-
-alter table public.player_ledger enable row level security;
-drop policy if exists player_ledger_all on public.player_ledger;
-create policy player_ledger_all on public.player_ledger
-    for all to anon, authenticated, service_role
-    using (true) with check (true);
-
-delete from public.player_ledger
- where id in (
-    select id from (
-        select id, row_number() over (partition by user_id order by id desc) as rn
-          from public.player_ledger
-    ) ranked where rn > 60
- );
+-- --- 3) player_ledger: УДАЛЕНО (задача 80) -----------------------------------
+-- Заказчик: «историю ставок и пополнений убери полностью». Таблица больше не
+-- создаётся и не пишется: подтверждение пополнения приходит сообщением в личку
+-- с ботом. Если таблица осталась от прошлых версий, она просто не используется;
+-- удалять её не нужно (данные никому не мешают).
+drop function if exists public.player_ledger_trim();
 
 -- --- 4) player_stats_add: атомарное прибавление ------------------------------
 -- Полный список колонок. Если добавляете новый счётчик — допишите и сюда, и в
@@ -280,16 +259,17 @@ set search_path = public
 as $$
     select jsonb_build_object(
         'ok', true,
-        'version', '20261203000000',
+        'version', '20261204000000',
         'stats_table', to_regclass('public.player_stats') is not null,
-        'ledger_table', to_regclass('public.player_ledger') is not null,
+        'ledger_table', false,   -- задача 80: история удалена, поле оставлено
+                                 -- для совместимости со старой сборкой API
         'rpc', exists (select 1 from pg_proc where proname = 'player_stats_add'),
         'mines_games', exists (
             select 1 from information_schema.columns
              where table_schema = 'public' and table_name = 'player_stats'
                and column_name = 'mines_games'
         ),
-        'ledger_kinds', (select count(distinct kind) from public.player_ledger)
+        'ledger_kinds', 0       -- задача 80: истории больше нет
     );
 $$;
 

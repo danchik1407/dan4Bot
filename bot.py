@@ -191,17 +191,9 @@ MAX_BET = 10000
 DAILY_TRANSFER_LIMIT = 5000
 
 
-def ledger_note(user_id, kind: str, amount: int, title: str = "") -> None:
-    """История ставок и пополнений профиля (задача 77) — не мешая команде."""
-    def _write():
-        try:
-            player_stats.add_ledger(supabase, user_id, kind, amount, title)
-        except Exception:  # noqa: BLE001
-            logger.debug("история операций: запись не удалась", exc_info=True)
-    try:
-        asyncio.create_task(asyncio.to_thread(_write))
-    except RuntimeError:
-        _write()
+# Задача 80: история ставок и пополнений удалена полностью (заказчик: «убери
+# полностью»). Вместо неё пополнение приходит игроку сообщением в личку с ботом
+# (см. on_successful_payment), а ставки и награды живут в достижениях профиля.
 
 
 def stats_note(user_id, **deltas) -> None:
@@ -1717,9 +1709,6 @@ async def cmd_transfer(message: Message):
     stats_note(message.from_user.id, sent_transfer=amount, sent_transfer_cnt=1,
                best_transfer=amount, coins_spent=amount)
     stats_note(target.id, got_transfer=amount, coins_earned=amount)
-    ledger_note(message.from_user.id, "transfer_out", amount,
-                f"📤 {('@' + str(target.username)) if target.username else 'другу'}")
-    ledger_note(target.id, "transfer_in", amount, "📥 Перевод от друга")
 
     text = f"✅ <b>Перевод выполнен!</b>\n👤 Кому: @{target.username}\n💸 Сумма: <b>{amount}</b> коинов"
     if comment: text += f"\n💬 Комментарий к переводу: <i>{safe_text(comment)}</i>"
@@ -2552,8 +2541,6 @@ async def cb_dice_accept(callback: CallbackQuery):
         # Задача 74: кубы — ставка, победа и рекорд для профиля обоих.
         stats_note(winner_id, coins_earned=amount, won_dice=amount,
                    best_dice_win=amount, best_dice_bet=amount)
-        ledger_note(winner_id, "win", amount, "🎲 Кубы")
-        ledger_note(loser_id, "bet", amount, "🎲 Кубы")
         stats_note(loser_id, coins_spent=amount, spent_dice=amount,
                    lost_games=amount, best_dice_bet=amount)
         result = f"🏆 Победил @{winner['username']} ({r1} : {r2})\n💰 +{amount} коинов"
@@ -3750,7 +3737,6 @@ async def add_love_points(row, amount: int):
             except (TypeError, ValueError):
                 continue
             stats_note(partner_id, coins_earned=total, won_love=total)
-            ledger_note(partner_id, "reward", total, "💗 Награда за уровень")
     return new_score, granted, True
 
 
@@ -3788,7 +3774,6 @@ async def add_solo_points(user_id, amount: int):
     if paid and saved:
         total = sum(int(item.get("reward") or 0) for item in paid)
         stats_note(user_id, coins_earned=total, won_love=total)
-        ledger_note(user_id, "reward", total, "💗 Награда за уровень")
     return score, granted, saved
 
 
@@ -4154,30 +4139,66 @@ def _stars_coins_by_amount_sync(stars: int) -> int:
     return 0
 
 
-def _credit_stars_payment_sync(charge_id: str, user_id: int, coins: int, stars: int) -> bool:
+def _credit_stars_payment_sync(charge_id: str, user_id: int, coins: int, stars: int) -> dict:
+    """Зачислить коины за Stars ровно один раз.
+
+    Возвращает словарь, а не bool (задача 80): игроку нужно сообщить и сумму
+    пополнения, и новый баланс, а на повторный апдейт Telegram — не соврать,
+    будто деньги пришли второй раз.
+
+    {"ok": True, "duplicate": False, "balance": 1234}  — начислено
+    {"ok": True, "duplicate": True,  "balance": 1234}  — уже было (повтор апдейта)
+    {"ok": False, "duplicate": False, "balance": None} — база не дала записать
+    """
     try:
         existing = (supabase.table(STARS_PAYMENTS_TABLE).select("charge_id")
                     .eq("charge_id", charge_id).execute())
         if existing.data:
-            return False
+            row = None
+            try:
+                res = supabase.table("users").select("coins").eq("user_id", int(user_id)).execute()
+                row = _primary_user_row(res.data) if res.data else None
+            except Exception:  # noqa: BLE001
+                row = None
+            return {"ok": True, "duplicate": True,
+                    "balance": int(row.get("coins") or 0) if row else None}
         supabase.table(STARS_PAYMENTS_TABLE).insert({
             "charge_id": charge_id, "user_id": int(user_id),
             "coins": int(coins), "stars": int(stars),
         }).execute()
     except Exception as e:
         logger.error(f"stars_payments недоступна: {e}")
-        return False
+        return {"ok": False, "duplicate": False, "balance": None}
     try:
         res = supabase.table("users").select("coins").eq("user_id", int(user_id)).execute()
         if not res.data:
-            return False
+            return {"ok": False, "duplicate": False, "balance": None}
         _row = _primary_user_row(res.data)
         new_coins = (int(_row.get("coins") or 0) if _row else 0) + int(coins)
         supabase.table("users").update({"coins": new_coins}).eq("user_id", int(user_id)).execute()
-        return True
+        return {"ok": True, "duplicate": False, "balance": new_coins}
     except Exception as e:
         logger.error(f"Не удалось начислить коины за Stars: {e}")
-        return False
+        return {"ok": False, "duplicate": False, "balance": None}
+
+
+async def _notify_topup_via_api(message, coins: int, balance) -> None:
+    """Попросить API отправить «баланс пополнен» в личку (задача 80).
+
+    Ошибка API не должна ломать оплату: у вызывающего кода есть свой ответ
+    игроку, а деньги уже зачислены.
+    """
+    init_data = _referral_start_init_data(int(message.from_user.id))
+    if not init_data or not API_URL:
+        return
+    try:
+        timeout = aiohttp.ClientTimeout(total=8)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            await session.post(f"{API_URL}/api/stars_notify",
+                               json={"initData": init_data, "coins": int(coins),
+                                     "balance": int(balance) if balance is not None else None})
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("stars_notify не отправлен: %s", exc)
 
 
 @dp.pre_checkout_query()
@@ -4205,11 +4226,33 @@ async def on_successful_payment(message: Message):
         return
     if coins <= 0:
         return
-    ok = await asyncio.to_thread(_credit_stars_payment_sync, payment.telegram_payment_charge_id,
-                                 user_id, coins, int(payment.total_amount or 0))
-    if ok:
-        await message.answer(f"⭐ Оплата получена! Начислено <b>{coins:,}</b> коинов. Спасибо!",
-                             parse_mode="HTML")
+    result = await asyncio.to_thread(_credit_stars_payment_sync,
+                                     payment.telegram_payment_charge_id,
+                                     user_id, coins, int(payment.total_amount or 0))
+    # Задача 80: «если человек пополняет, пусть в личку с ботом просто приходит
+    # сообщение — вы успешно пополнили баланс на N коинов, и всё». Никакой
+    # истории в профиле больше нет: подтверждение живёт только в этом чате.
+    if result.get("ok") and result.get("duplicate"):
+        # Telegram повторил апдейт (или игрок дважды открыл один и тот же чек) —
+        # деньги уже на месте, второй раз не начисляем и честно об этом говорим.
+        balance = result.get("balance")
+        text = ("ℹ️ Это пополнение уже зачислено ранее — повторно коины не начисляются.")
+        if balance is not None:
+            text += f"\n💰 Баланс: <b>{int(balance):,}</b> коинов.".replace(",", " ")
+        await message.answer(text, parse_mode="HTML")
+        return
+    if result.get("ok"):
+        balance = result.get("balance")
+        text = (f"✅ <b>Баланс пополнен на {int(coins):,} коинов</b>".replace(",", " ")
+                + "\n\nСпасибо за поддержку игры 💙")
+        if balance is not None:
+            text += f"\n💰 Теперь на балансе: <b>{int(balance):,}</b> коинов.".replace(",", " ")
+        # Задача 80: сообщение о пополнении отправляет и сервис API — так оно
+        # придёт в личку даже если игрок закрыл чат с ботом сразу после оплаты.
+        # Дублирование безопасно: текст один и тот же, а если API не ответил,
+        # уведомление всё равно уйдёт из этого места.
+        await _notify_topup_via_api(message, coins, balance)
+        await message.answer(text, parse_mode="HTML")
     else:
         await message.answer("⭐ Оплата получена, но начисление задерживается. "
                              "Напиши администратору — платёж сохранён.")

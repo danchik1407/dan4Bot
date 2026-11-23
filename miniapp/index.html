@@ -12,7 +12,7 @@
     <meta http-equiv="Pragma" content="no-cache">
     <meta http-equiv="Expires" content="0">
     <title>AURA GAME</title>
-    <link rel="stylesheet" href="style.css?v=aura-79">
+    <link rel="stylesheet" href="style.css?v=aura-80">
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
 </head>
 <body>
@@ -263,19 +263,9 @@
                     <div class="extra-hint" id="ach-hint">Цифры копятся с первого дня в приложении.</div>
                 </div>
 
-                <!-- Задача 77: история ставок и пополнений «всё в одном» — по
-                     тапу разворачивается, по умолчанию свёрнута, чтобы профиль
-                     не превращался в бесконечную ленту. -->
-                <div class="profile-extra history-card" id="history-card">
-                    <button class="history-toggle" id="history-toggle" type="button"
-                            onclick="toggleHistory()" aria-expanded="false">
-                        <span class="history-toggle-title">📜 История ставок и пополнений</span>
-                        <span class="history-toggle-arrow" id="history-arrow">▾</span>
-                    </button>
-                    <div class="history-list" id="history-list" hidden>
-                        <div class="ach-empty">Считаем…</div>
-                    </div>
-                </div>
+                <!-- Задача 80: историю ставок и пополнений убрали полностью по
+                         просьбе заказчика. Пополнение теперь приходит сообщением
+                         в личку с ботом — см. on_successful_payment в bot.py. -->
 
                 <!-- Пассивный доход с капсул: ставки считает сервер, клиент только
                      показывает накопленное и кнопку «Забрать». -->
@@ -715,6 +705,6 @@
          маленькой кнопкой ⚙️ рядом с ником в шапке (см. #admin-gear). -->
     </nav>
 
-    <script src="app.js?v=aura-79" defer></script>
+    <script src="app.js?v=aura-80" defer></script>
 </body>
 </html>
