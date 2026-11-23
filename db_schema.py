@@ -22,6 +22,8 @@ REQUIRED = {
     "subscriptions_history": ["user_id", "bonus_claimed", "reward", "created_at"],
     "passive_income": ["user_id", "last_at"],
     "referrals": ["referred_id", "referrer_id", "reward", "status", "created_at"],
+    # Задача 85: по этой таблице сверяются донаты (getStarTransactions → база).
+    # Без stars_amount донат не восстановить, если апдейт о платеже потерялся.
     "stars_payments": ["charge_id", "user_id", "coins", "stars", "created_at"],
     "idempotency_keys": ["key", "user_id", "endpoint", "response", "created_at"],
     "game_settings": ["key", "value"],
