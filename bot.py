@@ -44,7 +44,9 @@ from love import (
     solo_state,
     celebration_text,
     LOVE_STAGES,
+    LOVE_MEMBER_REWARDS_TABLE,
 )
+from love import _coins_fmt
 import player_stats
 from db_schema import audit as db_schema_audit, format_report as db_schema_report
 from shop_catalog import (
@@ -3442,6 +3444,107 @@ async def cmd_love_status(message: Message):
         parse_mode="HTML")
 
 
+def _love_stage_reward(index) -> int:
+    """Сколько коинов дали за переход на уровень `index` (0-й — бесплатный)."""
+    for stage in LOVE_STAGES:
+        if int(stage.get("index", -1)) == int(index):
+            return int(stage.get("reward") or 0)
+    return 0
+
+
+def _love_stage_title(index) -> str:
+    """Название уровня по индексу (0 → «Случайное знакомство»)."""
+    for stage in LOVE_STAGES:
+        if int(stage.get("index", -1)) == int(index):
+            return str(stage.get("title") or "")
+    return ""
+
+
+def _love_stage_next_number(score) -> int:
+    """Номер следующего уровня с наградой (0 — уже максимум)."""
+    index = int(public_stage(score or 0).get("level") or 1)
+    return index + 1 if index < len(LOVE_STAGES) else 0
+
+
+# Задача 83: «где мои награды?» — короткая и понятная команда. Игрок видит,
+# за какие уровни ему уже пришли коины и сколько всего, а не ищет это по чату.
+@dp.message(F.text.func(lambda t: strip_prefix(t).lower().replace("ё", "е") == "награды"))
+async def cmd_love_rewards(message: Message):
+    if not message.from_user or message.from_user.is_bot:
+        return
+    uid = message.from_user.id
+    row = await get_relationship(uid)
+
+    def _paid_pairs():
+        res = (supabase.table(LOVE_MEMBER_REWARDS_TABLE).select("stage, relationship_id")
+               .eq("user_id", int(uid)).execute())
+        return res.data or []
+
+    def _paid_solo():
+        res = (supabase.table("solo_love_stage_rewards").select("stage")
+               .eq("user_id", int(uid)).execute())
+        return [row.get("stage") for row in (res.data or [])]
+
+    try:
+        pair_stages = await asyncio.to_thread(_paid_pairs)
+    except Exception as exc:  # noqa: BLE001 — миграция не применена
+        logger.info("Награды по игрокам недоступны: %s", exc)
+        pair_stages = []
+    try:
+        solo_stages = await asyncio.to_thread(_paid_solo)
+    except Exception:  # noqa: BLE001
+        solo_stages = []
+
+    lines = ["💎 <b>ТВОИ НАГРАДЫ</b>", "━━━━━━━━━━━━━━━━━━━━"]
+    if row:
+        # Только награды ЭТОЙ пары: уровни, полученные с бывшим партнёром,
+        # в новую пару не переносятся (там всё начинается с нуля, и призы за
+        # пройденные уровни новой пары игрок получит заново).
+        rid = _love_int(row.get("id"))
+        stages = sorted({_love_int(item.get("stage")) for item in pair_stages
+                         if _love_int(item.get("relationship_id")) == rid} - {None})
+        total = 0
+        for index in stages:
+            reward = _love_stage_reward(index)
+            total += reward
+            lines.append(f"✅ {index + 1} уровень · {safe_text(_love_stage_title(index))}"
+                         f" — <b>+{_coins_fmt(reward)}</b>")
+        if not stages:
+            lines.append("Пока пусто — первый приз придёт на 2-м уровне отношений.")
+        else:
+            lines.append("")
+            lines.append(f"💰 Всего за уровни: <b>{_coins_fmt(total)}</b> коинов")
+        lines.append("")
+        lines.append("За каждый новый уровень коины приходят <b>обоим</b> сразу на "
+                     "баланс, забирать не нужно. Если награда не дошла — она придёт "
+                     "сама при следующем РП-действии.")
+        score = _love_int(row.get("love")) or 0
+        info = public_stage(score)
+        nxt = _love_stage_next_number(score)
+        if nxt:
+            lines.append(f"➡️ Сейчас: {info['level']} · {safe_text(info['title'])} — "
+                         f"следующая награда на {nxt} уровне.")
+        lines.append("")
+    else:
+        total = 0
+        for index in sorted({_love_int(v) for v in solo_stages} - {None}):
+            reward = _love_stage_reward(index)
+            total += reward
+            lines.append(f"✅ {index + 1} уровень · {safe_text(_love_stage_title(index))}"
+                         f" — <b>+{_coins_fmt(reward)}</b>")
+        if not solo_stages:
+            lines.append("Пока пусто — первый приз придёт на 2-м уровне.")
+        else:
+            lines.append("")
+            lines.append(f"💰 Всего за уровни: <b>{_coins_fmt(total)}</b> коинов")
+        lines.append("")
+        lines.append("Одиночный прогресс за тобой: вступишь в пару — заработанные "
+                     "призы останутся, а общий счёт пары начнётся с нуля.")
+        lines.append("")
+    lines.append("РП-команды: <code>все рп</code> · своя пара: <code>любовь инфа</code>")
+    await message.answer("\n".join(lines), parse_mode="HTML")
+
+
 # ================= ОТНОШЕНИЯ: ИНФО И СПИСОК РП =================
 @dp.message(F.text.func(lambda t: strip_prefix(t).lower().replace("ё", "е").startswith(
     _LOVE_INFO_PREFIXES)))
@@ -3509,7 +3612,8 @@ async def cmd_love_info(message: Message):
         f"📅 Вместе: <b>{_days_text(days)}</b>\n"
         f"🏅 Уровень: <b>{info['level']} · {safe_text(info['title'])}</b>\n"
         f"💗 Love коинов: <b>{coin_amount(score)}</b>\n"
-        f"{safe_text(action_progress_text(score))}",
+        f"{safe_text(action_progress_text(score))}\n"
+        f"💎 Полученные награды: <code>награды</code>",
         parse_mode="HTML")
 
 
@@ -3537,7 +3641,8 @@ async def cmd_rp_list(message: Message):
                      f"Кулдаун сейчас <b>выключен</b> — РП-команды не ждут.")
     lines.append(f"💔 Без пары то же действие даёт +{LOVE_ACTION_BONUS} {SOLO_CURRENCY} "
                  f"— и только тому, кто пишет: передать Love другому нельзя.")
-    lines.append("💞 Своя пара: <code>любовь инфа</code> · все пары: <code>топ отношений</code>")
+    lines.append("💞 Своя пара: <code>любовь инфа</code> · награды: <code>награды</code> · "
+                 "все пары: <code>топ отношений</code>")
     await message.answer("\n".join(lines), parse_mode="HTML")
 
 
@@ -3976,6 +4081,10 @@ async def cmd_rp_action(message: Message):
     #     ➡️ До уровня 2 — 10/50❤️
     reply = (f"{text}\n\n+{LOVE_ACTION_BONUS} Love❤️\n"
              f"{safe_text(action_progress_text(new_score))}")
+    # Задача 83: «где мои награды?» — команда `награды` показывает, за какие
+    # уровни игрок уже получил коины и сколько всего пришло.
+    if granted:
+        reply += "\n\n💎 Награды за уровни — <code>награды</code>"
     # Задача 81: заказчик увидел в чате сухую строку «обнимает» без награды и без
     # поздравления. Теперь при новом уровне прямо в ответе — полноценное
     # поздравление: уровень, название, сумма КАЖДОМУ, новый баланс и следующий
@@ -4765,7 +4874,7 @@ async def cmd_help_command(message: Message):
     F.text.func(lambda t: strip_prefix(t).lower().startswith("помощь") or strip_prefix(t).lower().startswith("help")))
 async def cmd_help(message: Message):
     text = (
-        "📖 <b>СПИСОК КОМАНД БОТА</b>\n━━━━━━━━━━━━━━━━━━━━\n\n🎟️ <b>Промокоды:</b>\n• <code>промо код</code> — активировать промокод\n\n💰 <b>Экономика:</b>\n• <code>карман</code> — твой баланс\n• <code>карман @user</code> — баланс другого\n• <code>перевод @user сумма</code> — перевести\n• <code>перевод сумма</code> (ответом) — быстрый перевод\n• <code>топ</code> — топ-10 богачей\n• <code>магазин</code> — магазин\n\n🎲 <b>Игры:</b>\n• <code>кубы @user ставка</code> — дуэль в кости\n• <code>кубы ставка</code> (ответом) — быстрый вызов\n\n💗 <b>Отношения:</b>\n• <code>+любовь</code> (ответом на сообщение) — предложить отношения\n• <code>все рп</code> — список всех РП-команд\n• <code>поцеловать</code>, <code>обнять</code>, <code>погладить</code>… — РП-команды (+10 Love паре) — одно действие в 5 часов, кулдаун общий на все команды\n• <code>любовь инфа</code> — с кем, сколько дней, уровень и Love (только своё)\n• уровень растёт по Love пары, награду за новый уровень обоим присылают в личку\n• <code>топ отношений</code> — все пары и их Love (одиночки не показываются)\n• <code>-любовь</code> — разорвать отношения (у обоих сгорает статус и Love)\n• одному РП-команда даёт +10 Unlove — награды только тебе\n\n🛡️ <b>Модерация чата:</b>\n• <code>!аурапред</code> (ответом или @ник) — предупреждение: 3 из 3 → игнор 5 ч в этом чате\n• <code>!аурапредлист</code> — предупреждения в этом чате\n• <code>!снять игнор</code> (ответом, @ник или id) — досрочно снять наказание\n\n• <code>апка</code> — ссылка и кнопка на приложение AURA GAME\n• <code>тег</code> — проверка бота\n• <code>помощь</code> — эта справка")
+        "📖 <b>СПИСОК КОМАНД БОТА</b>\n━━━━━━━━━━━━━━━━━━━━\n\n🎟️ <b>Промокоды:</b>\n• <code>промо код</code> — активировать промокод\n\n💰 <b>Экономика:</b>\n• <code>карман</code> — твой баланс\n• <code>карман @user</code> — баланс другого\n• <code>перевод @user сумма</code> — перевести\n• <code>перевод сумма</code> (ответом) — быстрый перевод\n• <code>топ</code> — топ-10 богачей\n• <code>магазин</code> — магазин\n\n🎲 <b>Игры:</b>\n• <code>кубы @user ставка</code> — дуэль в кости\n• <code>кубы ставка</code> (ответом) — быстрый вызов\n\n💗 <b>Отношения:</b>\n• <code>+любовь</code> (ответом на сообщение) — предложить отношения\n• <code>все рп</code> — список всех РП-команд\n• <code>поцеловать</code>, <code>обнять</code>, <code>погладить</code>… — РП-команды (+10 Love паре) — одно действие в 5 часов, кулдаун общий на все команды\n• <code>любовь инфа</code> — с кем, сколько дней, уровень и Love (только своё)\n• уровень растёт по Love пары, награду за новый уровень обоим присылают в личку\n• <code>награды</code> — за какие уровни ты уже получил коины и сколько всего\n• <code>топ отношений</code> — все пары и их Love (одиночки не показываются)\n• <code>-любовь</code> — разорвать отношения (у обоих сгорает статус и Love)\n• одному РП-команда даёт +10 Unlove — награды только тебе\n\n🛡️ <b>Модерация чата:</b>\n• <code>!аурапред</code> (ответом или @ник) — предупреждение: 3 из 3 → игнор 5 ч в этом чате\n• <code>!аурапредлист</code> — предупреждения в этом чате\n• <code>!снять игнор</code> (ответом, @ник или id) — досрочно снять наказание\n\n• <code>апка</code> — ссылка и кнопка на приложение AURA GAME\n• <code>тег</code> — проверка бота\n• <code>помощь</code> — эта справка")
     await message.answer(text, parse_mode="HTML")
 
 
