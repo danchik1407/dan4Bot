@@ -12,7 +12,7 @@
     <meta http-equiv="Pragma" content="no-cache">
     <meta http-equiv="Expires" content="0">
     <title>AURA GAME</title>
-    <link rel="stylesheet" href="style.css?v=aura-77">
+    <link rel="stylesheet" href="style.css?v=aura-78">
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
 </head>
 <body>
@@ -56,9 +56,16 @@
     </a>
 
     <header class="top-bar" id="main-header">
+        <!-- Задача 78: админская кнопка — маленький кружок ⚙️ сразу справа от
+             ника (заказчик: «вот тут должны быть кнопка админская маленькая,
+             а не в нижней»). Игрокам она не показывается: hidden, а полный
+             контроль — в syncAdminNav(). -->
         <div class="profile-badge">
             <img id="user-avatar" src="avatar_placeholder.svg" alt="Avatar">
             <span id="user-name">Загрузка...</span>
+            <button class="admin-gear" id="admin-gear" type="button" hidden
+                    onclick="openAdminPanel(event)" aria-label="Админ-панель"
+                    title="Админ-панель">⚙️</button>
         </div>
         <div class="balance-badge">
             <img class="coin-img" src="coin.png" alt="монета">
@@ -337,12 +344,16 @@
             </div>
         </section>
 
-        <!-- Задача 75: админ-панель. Вкладки и пункта в меню у игроков нет:
-             элемент скрыт, а switchTab('admin') для не-админа ничего не делает.
+        <!-- Задача 75/78: админ-панель. Пункта в нижнем меню нет ни у кого —
+             админку открывает маленькая кнопка ⚙️ в шапке (#admin-gear),
+             а switchTab('admin') для не-админа ничего не делает.
              Сюда переехал тумблер техработ (задача 71) — в профиле игрока ему
              не место. -->
         <section id="tab-admin" class="tab">
-            <div class="page-header"><h2>⚙️ Админ-панель</h2></div>
+            <div class="page-header page-header-admin">
+                <button class="back-btn admin-back" type="button" onclick="closeAdminPanel()">← Назад</button>
+                <h2>⚙️ Админ-панель</h2>
+            </div>
 
             <div class="profile-extra admin-maint-card" id="admin-maint-card" hidden>
                 <div class="extra-head">
@@ -674,16 +685,16 @@
     <div id="win-popup" class="win-popup"><div class="win-text">+ 0 <img class="coin-img" src="coin.png" alt="монета"></div></div>
 
     <nav class="bottom-nav" id="main-nav">
-        <div class="nav-item active" onclick="switchTab('play', this)"><span class="nav-icon">🎮</span> Играть</div>
-        <div class="nav-item" onclick="switchTab('top', this)"><span class="nav-icon">🏆</span> Топ</div>
-        <div class="nav-item" onclick="switchTab('chests', this)"><span class="nav-icon">📦</span> Сундуки</div>
-        <div class="nav-item" onclick="switchTab('shop', this)"><span class="nav-icon">🛒</span> Магазин</div>
-        <div class="nav-item" onclick="switchTab('pocket', this)"><span class="nav-icon">💰</span> Карман</div>
-        <div class="nav-item" onclick="switchTab('profile', this)"><span class="nav-icon">👤</span> Профиль</div>
-        <!-- Задача 75: пункт есть в разметке, но у игроков скрыт (hidden в app.js). -->
-        <div class="nav-item" id="nav-admin" onclick="switchTab('admin', this)" hidden><span class="nav-icon">⚙️</span> Админ</div>
+        <div class="nav-item active" onclick="switchTab('play', this)" data-tab="play"><span class="nav-icon">🎮</span> Играть</div>
+        <div class="nav-item" onclick="switchTab('top', this)" data-tab="top"><span class="nav-icon">🏆</span> Топ</div>
+        <div class="nav-item" onclick="switchTab('chests', this)" data-tab="chests"><span class="nav-icon">📦</span> Сундуки</div>
+        <div class="nav-item" onclick="switchTab('shop', this)" data-tab="shop"><span class="nav-icon">🛒</span> Магазин</div>
+        <div class="nav-item" onclick="switchTab('pocket', this)" data-tab="pocket"><span class="nav-icon">💰</span> Карман</div>
+        <div class="nav-item" onclick="switchTab('profile', this)" data-tab="profile"><span class="nav-icon">👤</span> Профиль</div>
+    <!-- Задача 78: пункт «Админ» в нижнем меню убран — админка открывается
+         маленькой кнопкой ⚙️ рядом с ником в шапке (см. #admin-gear). -->
     </nav>
 
-    <script src="app.js?v=aura-77" defer></script>
+    <script src="app.js?v=aura-78" defer></script>
 </body>
 </html>
