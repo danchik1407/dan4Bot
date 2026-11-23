@@ -265,7 +265,10 @@ let passivePendingTimer = null;
 // пускает всех.
 function showMaintenance(options) {
     if (maintenanceActive) return;
+    const maintenanceOn = Boolean(options && options.maintenance);
     maintenanceActive = true;
+    serverMaintenance = maintenanceOn;
+    maintenanceMessage = (options && options.message) || '';
     canPlay = false;
     // Останавливаем всё, что могло успеть стартовать, и прячем игровой интерфейс.
     try { stopHockeyPolling(); } catch (e) {}
@@ -273,8 +276,9 @@ function showMaintenance(options) {
     try { document.querySelectorAll('.game-screen').forEach(screen => screen.classList.remove('active')); } catch (e) {}
     document.body.classList.add('maintenance');
     const screen = document.getElementById('maintenance-screen');
-    // Всегда «нет связи»: режима «техработы» в игре больше не существует.
-    const offline = true;
+    // Задача 71: два разных экрана. Техработы — это решение админа («скоро
+    // вернёмся»), отсутствие связи — проблема на нашей стороне (Render спит).
+    const offline = !maintenanceOn;
     if (screen) {
         screen.classList.add('active');
         screen.classList.toggle('offline', offline);
@@ -282,14 +286,27 @@ function showMaintenance(options) {
         // «не дозвонились» (Render спит / нет связи). Игрок не должен читать
         // «идёт обновление», когда проблема на его стороне.
         const title = document.getElementById('maint-title');
-        if (title) title.innerHTML = 'Нет связи<br>с сервером';
         const sub = document.getElementById('maint-sub');
-        if (sub) sub.innerHTML = 'Сервер не ответил — возможно, он просыпается.'
-            + '<br>Нажми «Проверить снова» через пару секунд.';
         const note = document.getElementById('maint-note');
-        if (note) note.textContent = 'Спасибо за терпение 💙';
+        const icon = screen.querySelector('.maint-icon');
+        if (maintenanceOn) {
+            if (title) title.innerHTML = 'Технические<br>работы';
+            if (sub) sub.innerHTML = 'Обновляем игру — скоро вернёмся.'
+                + '<br>Коины, сундуки и Love останутся на месте.';
+            if (note) note.textContent = 'Спасибо за терпение 💙';
+            if (icon) icon.textContent = '🛠️';
+        } else {
+            if (title) title.innerHTML = 'Нет связи<br>с сервером';
+            if (sub) sub.innerHTML = 'Сервер не ответил — возможно, он просыпается.'
+                + '<br>Нажми «Проверить снова» через пару секунд.';
+            if (note) note.textContent = 'Спасибо за терпение 💙';
+            if (icon) icon.textContent = '📡';
+        }
         const btn = screen.querySelector('.maint-btn');
-        if (btn) btn.onclick = () => { retryAccessFromMaintenance(); };
+        if (btn) {
+            btn.textContent = maintenanceOn ? 'Проверить снова' : 'Проверить снова';
+            btn.onclick = () => { retryAccessFromMaintenance(); };
+        }
     }
     // Заставку НЕ обрываем: приветственная анимация должна доиграть (минимум 1 с),
     // а экран техработ лежит под ней и просто проявляется, когда она гаснет.
@@ -320,10 +337,20 @@ function hideMaintenance() {
 // maintenance с сервера больше не влияют на вход: раньше достаточно было
 // старого флага в окружении Render, чтобы обычный игрок упёрся в заглушку.
 function resolveAccess(data) {
-    serverMaintenance = false;
-    maintenanceMessage = '';
-    canPlay = true;
+    // Задача 71: сервер говорит правду про техработы. Админ видит игру всегда
+    // (у него же тумблер), обычный игрок — экран «Технические работы».
+    const maintenanceOn = Boolean(data && (data.maintenance_active === true
+        || data.maintenance === true));
+    const adminHere = Boolean(isAdmin);
+    serverMaintenance = maintenanceOn;
+    maintenanceMessage = (data && data.maintenance_message) || '';
     accessKnown = true;
+    if (maintenanceOn && !adminHere) {
+        canPlay = false;
+        showMaintenance({ maintenance: true, message: maintenanceMessage });
+        return false;
+    }
+    canPlay = true;
     return true;
 }
 
@@ -633,6 +660,8 @@ function applyProfile(data) {
     profileFailure = '';
     profileRetryCount = 0;
     setSyncBanner('');
+    // Задача 71: тумблер техработ в профиле админа.
+    renderAdminMaintenanceCard(data);
     // Задача 67: профиль пришёл → пускаем сразу, без проверок «а админ ли».
     resolveAccess(data);
     hideMaintenance();
@@ -678,6 +707,63 @@ function scheduleProfileRetry(delay = 5000) {
         }
         scheduleProfileRetry(8000);
     }, delay);
+}
+
+// ================= ТЕХРАБОТЫ: ТУМБЛЕР АДМИНА (задача 71) =================
+// Карточка есть только у админа. Игрок просто видит экран «Технические работы»
+// (см. resolveAccess), а админ здесь же может открыть игру обратно — из
+// приложения, без деплоя.
+let maintToggleBusy = false;
+
+function renderAdminMaintenanceCard(data) {
+    const card = document.getElementById('admin-maint-card');
+    if (!card) return;
+    if (!isAdmin) { card.hidden = true; return; }
+    card.hidden = false;
+    const on = Boolean(data && (data.maintenance_active === true || serverMaintenance));
+    const state = document.getElementById('admin-maint-state');
+    const hint = document.getElementById('admin-maint-hint');
+    const btn = document.getElementById('admin-maint-btn');
+    if (state) {
+        state.textContent = on ? 'включены' : 'выключены';
+        state.classList.toggle('is-on', on);
+    }
+    if (hint) {
+        hint.textContent = on
+            ? 'Играют только админы. Игроки видят «Технические работы: скоро вернёмся».'
+            : 'Выключены — играют все. Включи, чтобы закрыть игру всем, кроме админов.';
+    }
+    if (btn) {
+        btn.textContent = on ? 'Выключить техработы' : 'Включить техработы';
+        btn.classList.toggle('is-on', on);
+    }
+}
+
+async function toggleMaintenance() {
+    if (maintToggleBusy) return;
+    maintToggleBusy = true;
+    const card = document.getElementById('admin-maint-card');
+    const btn = document.getElementById('admin-maint-btn');
+    const enabled = Boolean(card && card.querySelector('#admin-maint-state')
+        && document.getElementById('admin-maint-state').textContent !== 'включены');
+    if (btn) { btn.disabled = true; btn.textContent = 'Сохраняем…'; }
+    try {
+        const data = await apiPost('/api/admin/set_maintenance',
+            { initData: tg.initData, enabled });
+        serverMaintenance = Boolean(data && data.maintenance);
+        canPlay = true;
+        if (!serverMaintenance) hideMaintenance();
+        renderAdminMaintenanceCard({ maintenance_active: serverMaintenance });
+        tg.showAlert(serverMaintenance
+            ? '🛠️ Техработы включены. Игроки увидят экран «Технические работы».'
+            : '✅ Техработы выключены — игра снова открыта всем.');
+    } catch (e) {
+        tg.showAlert(e.message || 'Не удалось переключить техработы');
+        renderAdminMaintenanceCard({ maintenance_active: serverMaintenance });
+    } finally {
+        maintToggleBusy = false;
+        if (btn) btn.disabled = false;
+    }
 }
 
 async function loadUserData(options) {
@@ -1809,8 +1895,9 @@ function runChestRoulette({ isGold, winner }) {
 const CHEST_MAINTENANCE_ALERT = 'Сундуки сейчас недоступны. Попробуйте позже.';
 
 function chestAccessGranted() {
-    // canPlay после resolveAccess всегда true — заглушек «Технические работы» нет.
-    return true;
+    // Задача 71: во время техработ играть нельзя (кроме админа). Сервер всё
+    // равно ответит 403, но лучше не отправлять запрос вовсе.
+    return canPlay || isAdmin;
 }
 
 async function openChest(type) {
