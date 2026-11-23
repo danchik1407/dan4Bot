@@ -12,7 +12,7 @@
     <meta http-equiv="Pragma" content="no-cache">
     <meta http-equiv="Expires" content="0">
     <title>AURA GAME</title>
-    <link rel="stylesheet" href="style.css?v=aura-73">
+    <link rel="stylesheet" href="style.css?v=aura-74">
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
 </head>
 <body>
@@ -235,6 +235,22 @@
                 </div>
                 <h3 style="margin-top: 25px; margin-bottom: 10px; text-align: left;">🎒 Инвентарь</h3>
                 <div class="inventory-grid" id="inventory"></div>
+
+                <!-- Задача 74: «Достижения» — маленькие факты про самого игрока
+                     (сколько потратил, лучший занос, лучший апгрейд), а не про
+                     имущество: имущество живёт в «Кармане». Значения считает
+                     сервер (/api/profile_stats), клиент только рисует строки. -->
+                <h3 style="margin-top: 25px; margin-bottom: 10px; text-align: left;">📊 Достижения</h3>
+                <div class="profile-extra stats-card" id="achievements-card">
+                    <div class="extra-head">
+                        <span class="extra-title">📊 Твои игровые моменты</span>
+                        <span class="extra-value" id="ach-days">0 дн.</span>
+                    </div>
+                    <div class="achievements" id="achievements-list">
+                        <div class="ach-empty">Считаем…</div>
+                    </div>
+                    <div class="extra-hint" id="ach-hint">Цифры копятся с первого дня в приложении.</div>
+                </div>
 
                 <!-- Пассивный доход с капсул: ставки считает сервер, клиент только
                      показывает накопленное и кнопку «Забрать». -->
@@ -632,6 +648,6 @@
         <div class="nav-item" onclick="switchTab('profile', this)"><span class="nav-icon">👤</span> Профиль</div>
     </nav>
 
-    <script src="app.js?v=aura-73" defer></script>
+    <script src="app.js?v=aura-74" defer></script>
 </body>
 </html>
