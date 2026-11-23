@@ -410,6 +410,36 @@ main { padding: 0 16px; }
    перебивал браузерный [hidden], и надпись висела поверх профиля. */
 .soon-overlay[hidden], .profile-extra.is-soon .soon-overlay[hidden] { display: none !important; }
 
+/* ===== ИСТОРИЯ СТАВОК И ПОПОЛНЕНИЙ (задача 77) =====
+   Свёрнутая карточка: одна кнопка-заголовок. Открытая — список операций со
+   знаком и суммой; сумма не переносится и не наезжает на заголовок. */
+.history-card { padding: 0; overflow: hidden; }
+.history-toggle {
+    width: 100%; display: flex; align-items: center; justify-content: space-between;
+    gap: 10px; background: transparent; border: 0; color: #fff; cursor: pointer;
+    padding: 14px 16px; font-size: 14px; font-weight: 800; text-align: left;
+}
+.history-toggle-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.history-toggle-arrow { color: var(--accent); font-size: 14px; flex: 0 0 auto; }
+.history-list {
+    display: flex; flex-direction: column; gap: 6px;
+    padding: 0 12px 12px 12px; max-height: 340px; overflow-y: auto;
+}
+.history-row {
+    display: flex; align-items: center; justify-content: space-between; gap: 10px;
+    background: #141414; border: 1px solid #262626; border-radius: 10px;
+    padding: 8px 10px; min-width: 0;
+}
+.history-body { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.history-title {
+    font-size: 12.5px; font-weight: 700; color: #e8e8ea; line-height: 1.25;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.history-date { font-size: 10.5px; color: #7f858c; }
+.history-amount { font-size: 13px; font-weight: 800; white-space: nowrap; flex: 0 0 auto; }
+.history-amount.is-in { color: #7ee2a8; }
+.history-amount.is-out { color: #ff8a80; }
+
 /* ============ АДМИН-ВКЛАДКА (задача 75) ============
    Пункт меню и сама вкладка есть только у админа. Восемь пунктов в нижнем
    меню не влезают на узкий экран, поэтому у админа они чуть компактнее. */

@@ -17,7 +17,6 @@ from shop_catalog import SHOP_ITEMS, ShopPurchaseError, is_admin_id, parse_inven
     sold_out_items, STOCK_LIMITS_ENABLED
 import player_stats
 from love import (LOVE_ACTION_BONUS, LOVE_ICE_COST, action_progress_text,
-                  cooldown_from_setting,
                   love_cooldown_seconds,
                   RP_ACTIONS, SOLO_CURRENCY, claim_solo_stage_rewards,
                   claim_stage_rewards, public_stage as love_public_stage,
@@ -88,7 +87,7 @@ async def _http_json(url, method: str = "GET", params=None, payload=None, timeou
 
 # Номер сборки: по нему из /api/health видно, что на сервисе НЕ старый код.
 # Если после деплоя здесь прежнее значение — Render ещё не перезапустился.
-API_BUILD = "2026-10-27-task75-admin-tab"
+API_BUILD = "2026-10-27-task77-shared-cooldown-history"
 
 # Момент старта процесса. По нему видно, что сервис только что «проснулся»:
 # Render на бесплатном тарифе усыпляет Web Service через 15 минут без входящих
@@ -1113,6 +1112,23 @@ def stats_note(user_id, **deltas) -> None:
     try:
         asyncio.create_task(asyncio.to_thread(_write))
     except RuntimeError:      # нет цикла событий (скрипты, тесты)
+        _write()
+
+
+def ledger_note(user_id, kind: str, amount: int, title: str = "", meta=None) -> None:
+    """История ставок и пополнений для профиля (задача 77) — в фоне.
+
+    Пишем тем же способом, что и статистику: ответ игроку не ждёт базу, а
+    сломанная лента игру не ломает.
+    """
+    def _write():
+        try:
+            player_stats.add_ledger(supabase, user_id, kind, amount, title, meta)
+        except Exception:  # noqa: BLE001
+            logger.debug("история операций: запись не удалась", exc_info=True)
+    try:
+        asyncio.create_task(asyncio.to_thread(_write))
+    except RuntimeError:
         _write()
 
 
@@ -2456,6 +2472,10 @@ def _credit_arena_payout(entry: dict) -> str:
     if str(entry.get("kind") or "") != "refund":
         stats_note(entry["user_id"], coins_earned=int(entry["amount"]),
                    won_arena=int(entry["amount"]), best_arena_win=int(entry["amount"]))
+        ledger_note(entry["user_id"], "win", int(entry["amount"]), "🏒 Арена")
+    elif int(entry.get("amount") or 0) > 0:
+        # Возврат ставки после рестарта — не выигрыш, но деньги игрок получил.
+        ledger_note(entry["user_id"], "claim", int(entry["amount"]), "↩️ Возврат ставки")
     arena = str(entry["arena"])
     round_id = str(entry["round_id"])
     uid = int(entry["user_id"])
@@ -3457,6 +3477,7 @@ async def place_bet(data: PlaceBet):
     # Задача 74: ставка в арене + рекорд ставки для профиля.
     stats_note(user_id, coins_spent=data.amount, spent_arena=data.amount,
                best_arena_bet=data.amount)
+    ledger_note(user_id, "bet", data.amount, "🏒 Арена")
 
     if existing_player is not None:
         existing_player["bet"] += data.amount
@@ -3723,6 +3744,7 @@ async def crash_bet(data: CrashBet):
     # Задача 74: ставка в ракете + «самая большая ставка» для профиля.
     stats_note(user_id, coins_spent=data.amount, spent_crash=data.amount,
                best_crash_bet=data.amount)
+    ledger_note(user_id, "bet", data.amount, "🚀 Ракета")
     return {"success": True, "new_balance": current_coins - data.amount}
 
 
@@ -3754,6 +3776,7 @@ async def crash_cashout(data: CrashCashout):
     # сравнивает суммы, а не x2.1 против x3.0.
     stats_note(user_id, coins_earned=win_amount, won_crash=win_amount,
                best_crash_win=win_amount)
+    ledger_note(user_id, "win", win_amount, f"🚀 Ракета x{cashout_mult:g}")
     return {"success": True, "win_amount": win_amount, "mult": cashout_mult, "new_balance": new_coins}
 
 
@@ -3836,7 +3859,9 @@ async def mines_start(data: MinesStart):
     }
     # Задача 74: ставка в профиле. «Проиграно» считается в момент, когда игра
     # закончилась без выплаты (мина), см. mines_open.
-    stats_note(user_id, coins_spent=amount, spent_mines=amount, best_mines_bet=amount)
+    stats_note(user_id, coins_spent=amount, spent_mines=amount, best_mines_bet=amount,
+               mines_games=1)
+    ledger_note(user_id, "bet", amount, f"💣 Мины · {mines_count} мин")
     return {"success": True, "new_balance": coins, "coef": 1.0, "cashout": amount,
             "mines": mines_count, "bet": amount}
 
@@ -3921,6 +3946,7 @@ async def mines_cashout(data: MinesCashout):
         raise HTTPException(status_code=500, detail="Не удалось зачислить выигрыш")
     stats_note(user_id, coins_earned=win_amount, won_mines=win_amount,
                best_mines_win=win_amount)
+    ledger_note(user_id, "win", win_amount, "💣 Мины")
     return {"success": True, "win_amount": win_amount, "new_balance": coins,
             "coef": round(_mines_multiplier(game["mines"], len(game["opened"])), 2)}
 
@@ -4687,6 +4713,8 @@ async def claim_chest(auth: "ClaimChestRequest"):
         chest_won = reward_coins + UPGRADE_ITEM_PRICES.get(reward_item, 0) * reward_item_amount
         if chest_won:
             stats_note(user_id, coins_earned=chest_won, won_chests=chest_won)
+            ledger_note(user_id, "chest", chest_won,
+                        "🎁 " + ("Золотой сундук" if chest_type == "gold" else "Сундук"))
         print(f"СУНДУК: награда забрана из памяти user_id={user_id} "
               f"+{reward_coins} коинов, +{reward_keys} ключей, "
               f"капсула={reward_item or 'нет'} x{reward_item_amount}", flush=True)
@@ -4730,6 +4758,8 @@ async def claim_chest(auth: "ClaimChestRequest"):
     chest_won = reward_coins + UPGRADE_ITEM_PRICES.get(reward_item, 0) * reward_item_amount
     if chest_won:
         stats_note(user_id, coins_earned=chest_won, won_chests=chest_won)
+        ledger_note(user_id, "chest", chest_won,
+                    "🎁 " + ("Золотой сундук" if claim.get("chest_type") == "gold" else "Сундук"))
 
     print(f"СУНДУК: награда забрана user_id={user_id} +{reward_coins} коинов, "
           f"+{reward_keys} ключей, капсула={reward_item or 'нет'} x{reward_item_amount}",
@@ -4903,6 +4933,9 @@ async def buy_item(data: BuyItem):
     _bought_price = int((SHOP_ITEMS.get(data.item_id) or {}).get("price") or 0)
     if _bought_price > 0:
         stats_note(user_id, coins_spent=_bought_price, spent_shop=_bought_price)
+        item = SHOP_ITEMS.get(data.item_id) or {}
+        ledger_note(user_id, "buy", _bought_price,
+                    f"🛒 {item.get('short_name') or data.item_id}")
     if STOCK_LIMITS_ENABLED and not result.get("stock_ready", True):
         # Купили, но тираж не списан: говорим прямо, а не делаем вид, что всё хорошо.
         print(f"МАГАЗИН: ВНИМАНИЕ тираж не списан (stock_ready=false) item={data.item_id} — "
@@ -5421,9 +5454,11 @@ async def upgrade_action(data: UpgradeAction):
             else:
                 deltas["lost_games"] = stake_value
             stats_note(user_id, **deltas)
+            ledger_note(user_id, "bet", stake_value, f"⚗️ Апгрейд · {moment_text}")
             if won:
                 won_value = payout if target == "coin" else UPGRADE_ITEM_PRICES.get(target, 0)
                 stats_note(user_id, coins_earned=won_value, won_upgrade=won_value)
+                ledger_note(user_id, "win", won_value, f"⚗️ Апгрейд · {moment_text}")
                 stats_event(user_id, "upgrade", moment_text,
                             max(moment_from, won_value),
                             {"from": source, "amount": amount, "to": target,
@@ -6319,6 +6354,8 @@ def _passive_income_locked(data: PassiveIncomeRequest, uid):
     new_coins = award_coins(uid, accrued)
     if new_coins is None:
         raise HTTPException(status_code=503, detail="Не удалось начислить пассивный доход")
+    # Задача 77: забранная пассивка — тоже операция в истории профиля.
+    ledger_note(uid, "claim", accrued, "💤 Пассивный доход")
     # Сколько времени реально «съели» выданные коины, и что осталось в мелочи.
     # consumed_hours = (accrued - carry) / rate — время, за которое набежали
     # именно выданные коины; всё, что не влезло в целые, уходит в carry.
@@ -6717,11 +6754,9 @@ async def admin_set_setting(data: AdminSettingRequest):
     ok = game_setting_set(key, data.value)
     if not ok:
         raise HTTPException(status_code=503, detail="Не удалось сохранить настройку")
-    # Настройки кулдаунов читаются с кэшем в минуту — после записи сбрасываем
-    # его, иначе админ видит старое значение и думает, что не сохранилось.
     touched = {}
-    if key in ("love_cooldown_seconds", "love_cooldown_actions"):
-        _LOVE_COOLDOWN_CACHE.update({"value": {}, "at": 0.0})
+    # Задача 76: кулдаун РП не настраивается (5 часов, один на игрока), поэтому
+    # старые ключи `love_cooldown_*` просто игнорируются — чистить их не нужно.
     if key in ("maintenance", MAINTENANCE_SETTING_KEY):
         # Задача 71: тумблер техработ. Принимаем "1"/"0", "on"/"off", true/false.
         raw = data.value
@@ -6767,8 +6802,9 @@ async def admin_game_settings(data: UserAuth):
         "ok": True,
         "maintenance": maintenance_now(),
         "maintenance_message": MAINTENANCE_MESSAGE,
-        "love_cooldown_seconds": int(game_setting_float(
-            "love_cooldown_seconds", love_cooldown_seconds())),
+        # Задача 76: значение фиксированное, из базы не читается.
+        "love_cooldown_seconds": love_cooldown_seconds(),
+        "love_cooldown_note": "5 часов, общий для всех РП, не настраивается",
     }
 
 
@@ -6979,66 +7015,18 @@ def _love_solo_for(user_id) -> dict:
     }
 
 
-# Кулдаун награды за РП живёт в game_settings (его меняет админ-команда «кд» в
-# боте). Читаем с кешем на минуту: значение меняется редко, а любовь открывают
-# часто. Если база недоступна — берём значение из модуля love (там же дефолт).
-#
-# Задача 61: кулдаун у КАЖДОЙ команды свой. В базе два ключа:
-#   love_cooldown_seconds   — общее значение (его ставит `кд 5ч`);
-#   love_cooldown_actions   — JSON вида {"обнять": 18000, ...} (`кд обнять 5ч`).
-# Кеш поэтому словарный: action → секунды, плюс "*all" — общее значение.
-_LOVE_COOLDOWN_CACHE = {"value": {}, "at": 0.0}
-
-
+# Кулдаун награды за РП (задача 76): ОДИН на игрока и общий для всех команд —
+# 5 часов, не настраивается. Раньше значение читалось из game_settings и могло
+# быть своим у каждой команды; команда `кд` удалена, поэтому строки в базе
+# (`love_cooldown_seconds`, `love_cooldown_actions`) больше не читаются.
 def _love_cooldowns() -> dict:
-    """Все кулдауны: {"*all": секунды, "<команда>": секунды}. Кеш 60 секунд."""
-    now = time.time()
-    cached = _LOVE_COOLDOWN_CACHE.get("value")
-    if isinstance(cached, dict) and cached and \
-            now - float(_LOVE_COOLDOWN_CACHE.get("at") or 0) < 60:
-        return cached
-    values = {}
-    try:
-        res = (supabase.table("game_settings")
-               .select("key, value")
-               .in_("key", ["love_cooldown_seconds", "love_cooldown_actions"])
-               .execute())
-        for row in res.data or []:
-            key = str(row.get("key") or "")
-            raw = row.get("value")
-            if key == "love_cooldown_seconds":
-                # Задача 66: ноль в базе — остаток старых сборок, а не
-                # «кулдаун выключен». Осознанное выключение пишется словом "off".
-                seconds, explicit = cooldown_from_setting(raw, love_cooldown_seconds())
-                if explicit or seconds > 0:
-                    values["*all"] = seconds
-            elif key == "love_cooldown_actions":
-                try:
-                    data = json.loads(raw) if isinstance(raw, str) else (raw or {})
-                except Exception:  # noqa: BLE001 — битый JSON не должен ломать игру
-                    data = {}
-                if isinstance(data, dict):
-                    for name, seconds in data.items():
-                        try:
-                            values[str(name).strip().lower()] = max(0, int(seconds))
-                        except (TypeError, ValueError):
-                            continue
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("game_settings недоступна для кулдауна РП: %s", exc)
-    # Общее значение по умолчанию — из модуля love (там же 5 часов из задачи 61).
-    values.setdefault("*all", love_cooldown_seconds())
-    _LOVE_COOLDOWN_CACHE.update({"value": values, "at": now})
-    return values
+    """Совместимость с ответом Mini App: только общее значение."""
+    return {"*all": love_cooldown_seconds()}
 
 
 def _love_cooldown_seconds(action=None) -> int:
-    """Кулдаун конкретной команды (или общий, если action не задан)."""
-    values = _love_cooldowns()
-    if action:
-        key = str(action).strip().lower()
-        if key in values:
-            return int(values[key])
-    return int(values.get("*all", 0))
+    """Кулдаун РП в секундах. От команды не зависит (задача 76)."""
+    return love_cooldown_seconds(action)
 
 
 def love_state_for(user_id) -> dict:
@@ -7055,12 +7043,13 @@ def love_state_for(user_id) -> dict:
     if not row:
         return {"ok": True, "in_relationship": False, "available": True,
                 "stages": love_public_stages(), "action_bonus": LOVE_ACTION_BONUS,
-                # Задача 61: кулдаун у каждой команды свой, поэтому отдаём и
-                # общее значение, и карту по действиям (0 — без ограничения).
+                # Задача 76: кулдаун один на игрока (5 часов) и общий для всех
+                # команд — карта по действиям больше не нужна.
                 "cooldown_hours": round(_love_cooldown_seconds() / 3600, 1),
                 "cooldown_seconds": _love_cooldown_seconds(),
-                "cooldowns": {key: int(val) for key, val in _love_cooldowns().items()
-                              if key != "*all"},
+                # Задача 76: персональных кулдаунов нет — поле оставлено пустым
+                # для старых сборок Mini App.
+                "cooldowns": {},
                 "ice_cost": LOVE_ICE_COST, "rpc_actions": list(RP_ACTIONS),
                 **_love_solo_for(user_id)}
     score = _safe_int(row.get("love"), 0)
@@ -7086,8 +7075,8 @@ def love_state_for(user_id) -> dict:
         # Задача 61: своё значение у каждой команды + общее (cooldown_*).
         "cooldown_hours": round(_love_cooldown_seconds() / 3600, 1),
         "cooldown_seconds": _love_cooldown_seconds(),
-        "cooldowns": {key: int(val) for key, val in _love_cooldowns().items()
-                      if key != "*all"},
+        # Задача 76: персональных кулдаунов нет (КД общий на игрока).
+        "cooldowns": {},
         "ice_cost": LOVE_ICE_COST,
         "rpc_actions": list(RP_ACTIONS),
     }
@@ -7112,8 +7101,9 @@ async def love_state(data: UserAuth):
             if granted:
                 state["stage_up"] = True
                 # Задача 74: призы за этапы отношений — тоже «заработано».
-                stats_note(uid, coins_earned=sum(int(g.get("reward") or 0) for g in granted),
-                           won_love=sum(int(g.get("reward") or 0) for g in granted))
+                reward_total = sum(int(g.get("reward") or 0) for g in granted)
+                stats_note(uid, coins_earned=reward_total, won_love=reward_total)
+                ledger_note(uid, "reward", reward_total, "💗 Награда за уровень")
                 await _love_stage_dm({"user_a": uid}, granted)
         return state
     # Пара: та же страховка через общую таблицу наград.
@@ -7129,9 +7119,9 @@ async def love_state(data: UserAuth):
             # Задача 74: каждому партнёру — своя сумма приза в статистику.
             for partner_id in (_safe_int(row.get("user_a"), 0), _safe_int(row.get("user_b"), 0)):
                 if partner_id > 0:
-                    stats_note(partner_id,
-                               coins_earned=sum(int(g.get("reward") or 0) for g in granted),
-                               won_love=sum(int(g.get("reward") or 0) for g in granted))
+                    reward_total = sum(int(g.get("reward") or 0) for g in granted)
+                    stats_note(partner_id, coins_earned=reward_total, won_love=reward_total)
+                    ledger_note(partner_id, "reward", reward_total, "💗 Награда за уровень")
             await _love_stage_dm(row, granted)
     return state
 
@@ -7164,70 +7154,43 @@ async def _love_stage_dm(row, granted) -> None:
 # нулём и флагом ready=False — клиент покажет «—», а не выдуманное число.
 
 
-def _profile_stats_record(user_id, stat_row: dict, best_upgrade: dict | None,
-                          best_transfer: dict | None, first_seen) -> dict:
-    """Одна запись «Достижений» для клиента: подпись, значение и пояснение."""
+def _profile_stats_record(user_id, stat_row: dict, first_seen) -> dict:
+    """«Достижения» профиля: ровно то, что просил заказчик (задача 77).
+
+    Было 13 строк про деньги и рекорды — заказчик оставил четыре:
+      • сколько потрачено коинов за всё время,
+      • сколько сделано апгрейдов,
+      • сколько открыто сундуков,
+      • сколько сыграно каток в мины.
+    Всё остальное живёт в других карточках профиля и в «Кармане».
+    """
 
     def num(key):
         return _safe_int(stat_row.get(key), 0)
 
-    spent = num("coins_spent")
     rows = [
-        {"key": "spent", "icon": "💸", "label": "Потрачено всего",
-         "value": spent, "money": True,
+        {"key": "spent", "icon": "💸", "label": "Потрачено коинов",
+         "value": num("coins_spent"), "money": True,
          "hint": (f"Апгрейды {num('spent_upgrade')} · магазин {num('spent_shop')} · "
                   f"ракета {num('spent_crash')} · арена {num('spent_arena')} · "
-                  f"мины {num('spent_mines')}") if spent else "Пока ничего не потрачено"},
-        {"key": "earned", "icon": "🏆", "label": "Выиграно всего",
-         "value": num("coins_earned"), "money": True,
-         "hint": "Выигрыши в играх и призы за уровни"},
-        {"key": "lost", "icon": "🪦", "label": "Проиграно ставок",
-         "value": num("lost_games"), "money": True,
-         "hint": "Ставки, которые не вернулись"},
-        {"key": "best_crash", "icon": "🚀", "label": "Лучший занос в ракете",
-         "value": num("best_crash_win"), "money": True,
-         "hint": f"Самая крупная ставка: {num('best_crash_bet')}"},
-        {"key": "best_arena", "icon": "🏒", "label": "Лучшая ставка на арене",
-         "value": num("best_arena_win"), "money": True,
-         "hint": f"Самая крупная ставка: {num('best_arena_bet')}"},
-        {"key": "best_mines", "icon": "💣", "label": "Лучший занос в минах",
-         "value": num("best_mines_win"), "money": True,
-         "hint": f"Самая крупная ставка: {num('best_mines_bet')}"},
-        {"key": "best_dice", "icon": "🎲", "label": "Лучший выигрыш в кубах",
-         "value": num("best_dice_win"), "money": True,
-         "hint": f"Самая крупная ставка: {num('best_dice_bet')}"},
-        {"key": "upgrade", "icon": "⚗️", "label": "Лучший апгрейд",
-         "text": (best_upgrade or {}).get("title") or "",
-         "value": (best_upgrade or {}).get("amount") or 0, "money": True,
-         "hint": "Во что удалось превратить ставку"},
-        {"key": "upgrades", "icon": "🔁", "label": "Апгрейдов · удачных",
-         "text": f"{num('upgrades_total')} · {num('upgrades_won')}"
-                 if num("upgrades_total") else "",
-         "hint": "Сколько крутил и сколько зашло"},
-        {"key": "chests", "icon": "📦", "label": "Открыто сундуков",
+                  f"мины {num('spent_mines')}") if num("coins_spent") else "Пока ничего не потрачено"},
+        {"key": "upgrades", "icon": "🔁", "label": "Апгрейдов сделано",
+         "value": num("upgrades_total"), "count": True,
+         "hint": f"Удачных: {num('upgrades_won')}"},
+        {"key": "chests", "icon": "📦", "label": "Сундуков открыто",
          "value": num("chests_opened"), "count": True,
          "hint": f"Золотых: {num('golden_chests')}"},
-        {"key": "sent", "icon": "📤", "label": "Передал другим",
-         "value": num("sent_transfer"), "money": True,
-         "hint": f"Переводов: {num('sent_transfer_cnt')}"},
-        {"key": "got", "icon": "📥", "label": "Получил переводами",
-         "value": num("got_transfer"), "money": True, "hint": "От других игроков"},
-        {"key": "transfer", "icon": "🤝", "label": "Лучший перевод",
-         "text": (best_transfer or {}).get("title") or "",
-         "value": (best_transfer or {}).get("amount") or 0, "money": True,
-         "hint": "Кому и сколько отправил"},
+        {"key": "mines", "icon": "💣", "label": "Каток в мины",
+         "value": num("mines_games"), "count": True,
+         "hint": f"Выигрышей: {num('won_mines')}"},
     ]
     for row in rows:
         value = num_of(row.get("value"))
         row["value"] = value
-        if row.get("text"):
-            # Есть готовый текст («💊 Капсула x33 → 💎 Алмазная», «12 · 4») — он и
-            # показывается; число остаётся для сортировки и подсказок.
-            row["value_text"] = str(row["text"])
-        elif row.get("count"):
-            row["value_text"] = str(value) if value else "—"
-        else:
+        if row.get("money"):
             row["value_text"] = _coins_text(value)
+        else:
+            row["value_text"] = str(value) if value else "—"
     return {
         "ok": True,
         # ready=False — таблицы ещё нет (миграция не применена): клиент честно
@@ -7263,12 +7226,36 @@ async def profile_stats(data: UserAuth):
     uid = _auth_user_id(data.initData)
     require_play_access_uid(uid)
     stat_row = await asyncio.to_thread(player_stats.read_stats, supabase, uid)
-    best_upgrade = await asyncio.to_thread(player_stats.best_event, supabase, uid, "upgrade")
-    best_transfer = await asyncio.to_thread(player_stats.best_event, supabase, uid, "transfer")
     first_seen = _app_first_seen_get(uid)
-    payload = _profile_stats_record(uid, stat_row or {}, best_upgrade, best_transfer, first_seen)
+    payload = _profile_stats_record(uid, stat_row or {}, first_seen)
+    payload["history"] = _profile_history(uid)
     payload["migration"] = player_stats.MIGRATION_FILE
     return payload
+
+
+def _profile_history(user_id, limit: int = 30) -> list:
+    """История ставок и пополнений «всё в одном» (задача 77).
+
+    Одна строка = одна операция по кошельку. Знак и цвет считает клиент по
+    `sign`: минус — ставка/покупка/перевод другу, плюс — выигрыш/награда.
+    """
+    rows = player_stats.read_ledger(supabase, user_id, limit)
+    out = []
+    for row in rows:
+        kind = str(row.get("kind") or "")
+        amount = _safe_int(row.get("amount"), 0)
+        created = row.get("created_at")
+        out.append({
+            "id": _safe_int(row.get("id"), None),
+            "kind": kind,
+            "label": player_stats.LEDGER_LABELS.get(kind, "Операция"),
+            "title": row.get("title") or player_stats.LEDGER_LABELS.get(kind, ""),
+            "amount": amount,
+            "amount_text": _coins_text(amount),
+            "sign": "-" if kind in ("bet", "buy", "transfer_out") else "+",
+            "created_at": created.isoformat() if hasattr(created, "isoformat") else created,
+        })
+    return out
 
 
 @app.get("/api/global_top")

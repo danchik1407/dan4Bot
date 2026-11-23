@@ -62,6 +62,7 @@ create table if not exists public.player_stats (
     best_dice_win     bigint not null default 0,
     -- Счётчики.
     chests_opened     integer not null default 0,
+    mines_games       integer not null default 0,   -- сыграно каток в мины
     golden_chests     integer not null default 0,
     upgrades_total    integer not null default 0,
     upgrades_won      integer not null default 0,
@@ -146,6 +147,7 @@ begin
         sent_transfer_cnt  = sent_transfer_cnt + coalesce((d->>'sent_transfer_cnt')::integer, 0),
         got_transfer       = got_transfer + coalesce((d->>'got_transfer')::bigint, 0),
         chests_opened      = chests_opened + coalesce((d->>'chests_opened')::integer, 0),
+        mines_games        = mines_games + coalesce((d->>'mines_games')::integer, 0),
         golden_chests      = golden_chests + coalesce((d->>'golden_chests')::integer, 0),
         upgrades_total     = upgrades_total + coalesce((d->>'upgrades_total')::integer, 0),
         upgrades_won       = upgrades_won + coalesce((d->>'upgrades_won')::integer, 0),
@@ -165,5 +167,46 @@ begin
 end $$;
 
 grant execute on function public.player_stats_add(bigint, jsonb) to anon, authenticated, service_role;
+
+notify pgrst, 'reload schema';
+
+-- --- 4) История ставок и пополнений (задача 77) ------------------------------
+-- Заказчик: «внизу в профиле можно будет развернуть историю ставок и пополнений
+-- (все в одном)». Одна строка = одна операция по кошельку:
+--   bet           — ставка (ракета, арена, мины, кубы, апгрейд)
+--   win           — выигрыш
+--   claim         — забрал пассивку / награду
+--   buy           — покупка в магазине
+--   chest         — что выпало из сундука
+--   transfer_out  — перевод другому игроку
+--   transfer_in   — перевод от другого игрока
+--   reward        — приз за уровень отношений и прочие начисления
+create table if not exists public.player_ledger (
+    id         bigserial primary key,
+    user_id    bigint not null,
+    kind       text   not null,
+    amount     bigint not null default 0,      -- всегда положительная сумма
+    title      text   not null default '',     -- «🚀 Ракета», «💊 Капсула»…
+    meta       jsonb  not null default '{}'::jsonb,
+    created_at timestamptz not null default now()
+);
+
+create index if not exists player_ledger_user_idx
+    on public.player_ledger (user_id, id desc);
+
+alter table public.player_ledger enable row level security;
+drop policy if exists player_ledger_all on public.player_ledger;
+create policy player_ledger_all on public.player_ledger
+    for all to anon, authenticated, service_role
+    using (true) with check (true);
+
+-- Держим таблицу маленькой: на игрока 60 последних операций (профиль показывает 30).
+delete from public.player_ledger
+ where id in (
+    select id from (
+        select id, row_number() over (partition by user_id order by id desc) as rn
+          from public.player_ledger
+    ) ranked where rn > 60
+ );
 
 notify pgrst, 'reload schema';
