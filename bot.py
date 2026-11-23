@@ -27,6 +27,7 @@ from supabase import create_client, Client
 from mentions import clean_name, merge_names, parse_names
 from love import (
     LOVE_ACTION_BONUS,
+    claim_rewards_after_action,
     action_progress_text,
     LOVE_ACTION_COOLDOWN_DEFAULT,
     cooldown_from_setting,
@@ -34,6 +35,7 @@ from love import (
     SOLO_CURRENCY,
     add_solo_love,
     claim_stage_rewards,
+    claim_solo_stage_rewards,
     solo_saved,
     format_love_cooldown,
     love_cooldown_seconds,
@@ -3254,6 +3256,10 @@ async def cb_love_answer(callback: CallbackQuery):
     # не получает» быть не должно). Вызов оставлен для совместимости.
     await drop_solo_status(proposer_id)
     await drop_solo_status(target_id)
+    # Задача 84: перед вступлением в пару закрываем одиночные награды — иначе
+    # после смены ветки они бы «зависли» неподтверждёнными.
+    for member_id in (proposer_id, target_id):
+        await settle_solo_rewards(member_id)
     love_proposals.pop(target_id, None)
     await callback.message.edit_text(
         f"💗 <b>Теперь вы пара!</b>\n\n{_stage_text(0)}\n\n"
@@ -3262,6 +3268,57 @@ async def cb_love_answer(callback: CallbackQuery):
         f"Весь список: <code>все рп</code> · ваша пара: <code>любовь инфа</code>",
         parse_mode="HTML")
     await callback.answer("💗")
+
+
+async def settle_solo_rewards(user_id) -> list:
+    """Закрыть недоплаченные одиночные награды (задача 84).
+
+    Одиночный счёт больше не сгорает, но награды могли не дойти из-за сбоя —
+    здесь добираем их и говорим игроку, что пришло.
+    """
+    try:
+        score = await get_solo_love(user_id)
+        if int(score) <= 0:
+            return []
+        granted = await asyncio.to_thread(claim_solo_stage_rewards, supabase, user_id, int(score))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Одиночные награды игрока %s не выданы: %s", user_id, exc)
+        return []
+    granted = [item for item in (granted or []) if int(item.get("reward") or 0) > 0]
+    if granted:
+        try:
+            blocks = [celebration_text(stage, stage.get("reward"), solo=True,
+                                       balance=await _stage_brand_new_balance(user_id),
+                                       next_stage=_next_stage_public(stage))
+                      for stage in granted]
+            await bot.send_message(user_id, "\n\n".join(blocks), parse_mode="HTML")
+        except Exception as exc:  # noqa: BLE001 — игрок мог не писать боту
+            logger.info("Сообщение о одиночных наградах %s не ушло: %s", user_id, exc)
+    return granted
+
+
+async def settle_love_rewards_before_break(row) -> list:
+    """Выплатить паре ВСЁ, что недоплачено, ПЕРЕД удалением пары (задача 84).
+
+    Заказчик: «начисляй при повышении в любом случае — был в отношениях или
+    нет». Пара удаляется вместе со своим id, и после `-любовь` награда за уже
+    пройденный уровень терялась навсегда. Здесь сначала закрываем долг, а
+    потом уже рвём отношения.
+    """
+    if not row:
+        return []
+    try:
+        granted = await asyncio.to_thread(claim_stage_rewards, supabase, row)
+    except Exception as exc:  # noqa: BLE001 — разрыв важнее наград
+        logger.warning("Награды перед разрывом пары %s не выданы: %s", row.get("id"), exc)
+        return []
+    granted = [item for item in granted if int(item.get("reward") or 0) > 0]
+    if granted:
+        try:
+            await _notify_stage_rewards(row, None, granted)
+        except Exception as exc:  # noqa: BLE001
+            logger.info("Поздравление после разрыва не ушло: %s", exc)
+    return granted
 
 
 # Разрыв: `-любовь` (основная команда с задачи 44), плюс `-отны`, `-отн`,
@@ -3288,6 +3345,9 @@ async def cmd_love_break(message: Message):
             "💔 Ты пока ни с кем не в отношениях.\n\n"
             "Своя пара: <code>любовь инфа</code> · РП-команды: <code>все рп</code>",
             parse_mode="HTML")
+    # Задача 84: сначала закрываем все недоплаченные награды этой пары, и
+    # только потом удаляем строку — иначе приз «сгорал» вместе с парой.
+    paid_before_break = await settle_love_rewards_before_break(row)
     try:
         await asyncio.to_thread(lambda: supabase.table(RELATIONSHIPS_TABLE)
                                 .delete().eq("id", row["id"]).execute())
@@ -3298,11 +3358,18 @@ async def cmd_love_break(message: Message):
     love_proposals.pop(partner, None)
     love_proposals.pop(message.from_user.id, None)
     partner_mention = await _player_display(partner)
+    # Задача 84: честно говорим, что доплатили ИМЕННО этому игроку.
+    my_break_rewards = _granted_for(paid_before_break, message.from_user.id)
+    break_note = ""
+    if my_break_rewards:
+        break_note = ("\n💎 Доплатили за пройденные уровни: "
+                      f"+{_coins_fmt(sum(int(x.get('reward') or 0) for x in my_break_rewards))} коинов.")
     await message.answer(
         f"💔 <b>Отношения завершены.</b>\n\n"
         f"Вы с {partner_mention} снова свободны: статус снят у обоих, "
         f"накопленные Love сброшены.\n"
-        f"Заработанные награды остаются у вас — их никто не отбирает.\n\n"
+        f"Заработанные награды остаются у вас — их никто не отбирает."
+        f"{break_note}\n\n"
         f"Теперь можно копить <b>{SOLO_CURRENCY}</b> в одиночку "
         f"(<code>любовь инфа</code>) или начать новую историю: "
         f"<code>+любовь</code> ответом на сообщение.",
@@ -3474,6 +3541,25 @@ async def cmd_love_rewards(message: Message):
         return
     uid = message.from_user.id
     row = await get_relationship(uid)
+    # Задача 84: команда не просто отчёт — она САМА добирает всё, что не дошло
+    # («начисляй в любом случае»). Игроку не нужно ждать следующего РП.
+    caught_up = 0
+    if row:
+        try:
+            got = await asyncio.to_thread(claim_stage_rewards, supabase, row)
+            got = [x for x in got if int(x.get("reward") or 0) > 0]
+            caught_up = sum(int(x.get("reward") or 0) for x in _granted_for(got, uid))
+            if got:
+                await _notify_stage_rewards(row, uid, got)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Догон наград при команде «награды» не сработал: %s", exc)
+    else:
+        try:
+            score = await get_solo_love(uid)
+            caught_up = sum(int(x.get("reward") or 0)
+                            for x in await settle_solo_rewards(uid))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Догон одиночных наград не сработал: %s", exc)
 
     def _paid_pairs():
         res = (supabase.table(LOVE_MEMBER_REWARDS_TABLE).select("stage, relationship_id")
@@ -3496,6 +3582,9 @@ async def cmd_love_rewards(message: Message):
         solo_stages = []
 
     lines = ["💎 <b>ТВОИ НАГРАДЫ</b>", "━━━━━━━━━━━━━━━━━━━━"]
+    if caught_up > 0:
+        lines.append(f"🎁 Только что доплатили: <b>+{_coins_fmt(caught_up)}</b> коинов")
+        lines.append("")
     if row:
         # Только награды ЭТОЙ пары: уровни, полученные с бывшим партнёром,
         # в новую пару не переносятся (там всё начинается с нуля, и призы за
@@ -3824,12 +3913,26 @@ async def add_love_points(row, amount: int):
         except Exception as exc:  # noqa: BLE001
             logger.warning("Love не записался (%s): %s", list(payload), exc)
     if not saved:
-        # База отказала: не выдаём награды и не рисуем рост, которого нет.
-        return old_score, [], False
+        # База отказала: рост не рисуем. НО если этим действием пара перешла на
+        # новый уровень — награда всё равно положена (задача 84: «начисляй в
+        # любом случае при повышении»). Считаем уровень по максимуму из
+        # прошлого/нового счёта и платим; отметки не дадут заплатить дважды,
+        # когда следующий заход увидит настоящий счёт.
+        try:
+            granted = await asyncio.to_thread(claim_rewards_after_action, supabase, row,
+                                              old_score, new_score)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Награды за переход уровня (без записи счёта) не выданы: %s", exc)
+            granted = []
+        return old_score, [item for item in granted if int(item.get("reward") or 0) > 0], False
     row = dict(row)
     row["love"] = new_score
     try:
-        granted = await asyncio.to_thread(claim_stage_rewards, supabase, row)
+        # Задача 84: claim_rewards_after_action платит и при пересечении границы
+        # уровня (даже если запись счёта в базу «не подтвердилась»), и за старые
+        # долги — награда не может «не прийти» при повышении.
+        granted = await asyncio.to_thread(claim_rewards_after_action, supabase, row,
+                                          old_score, new_score)
     except Exception as exc:  # noqa: BLE001
         logger.warning("Награды за этап Love не выданы: %s", exc)
         granted = []
