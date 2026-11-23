@@ -1342,6 +1342,14 @@ body.maintenance { overflow: hidden; }
     font-size: 13px; font-weight: 800; color: #ffd60a; white-space: nowrap;
 }
 .topup-note { margin-top: 12px; font-size: 10.5px; color: #636366; line-height: 1.4; }
+/* Задача 85: ручная проверка доната — заметная, но не спорит с пакетами. */
+.topup-check {
+    display: block; width: 100%; margin-top: 12px; padding: 11px 12px;
+    border-radius: 14px; border: 1px solid rgba(255, 204, 0, 0.45);
+    background: rgba(255, 204, 0, 0.12); color: #ffd75e;
+    font-size: 13px; font-weight: 800; cursor: pointer;
+}
+.topup-check:active { transform: scale(0.985); }
 
 /* Алмаз в открытой клетке мин: SVG вместо эмодзи (у эмодзи на части
    устройств была синяя квадратная подложка). */

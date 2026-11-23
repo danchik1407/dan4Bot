@@ -4452,47 +4452,103 @@ def _stars_coins_by_amount_sync(stars: int) -> int:
     return 0
 
 
-def _credit_stars_payment_sync(charge_id: str, user_id: int, coins: int, stars: int) -> dict:
-    """Зачислить коины за Stars ровно один раз.
+def _stars_write_charge(charge_id: str, user_id: int, coins: int, stars: int) -> bool:
+    """Записать платёж в stars_payments. False — не смогли (деньги всё равно нужны).
+
+    Задача 85: колонки stars может не быть в старой базе — тогда пишем без неё
+    и без created_at, но запись всё равно должна пройти: по ней потом
+    проверяется «этот платёж уже зачислен».
+    """
+    payload = {"charge_id": str(charge_id), "user_id": int(user_id),
+               "coins": int(coins), "stars": int(stars)}
+    data = dict(payload)
+    for _ in range(4):
+        try:
+            supabase.table(STARS_PAYMENTS_TABLE).insert(data).execute()
+            return True
+        except Exception as exc:  # noqa: BLE001
+            column = _db_error_column(exc)
+            if column and column in data:
+                logger.warning("stars_payments: колонки «%s» нет — пишем без неё (%s)",
+                               column, exc)
+                data.pop(column, None)
+                continue
+            logger.error("stars_payments: платёж %s не записан: %s", charge_id, exc)
+            return False
+    return False
+
+
+def _credit_stars_payment_sync(charge_id: str, user_id: int, coins: int, stars: int,
+                               attempts: int = 5) -> dict:
+    """Зачислить коины за Stars ровно один раз — с повторами (задача 85).
 
     Возвращает словарь, а не bool (задача 80): игроку нужно сообщить и сумму
     пополнения, и новый баланс, а на повторный апдейт Telegram — не соврать,
     будто деньги пришли второй раз.
 
-    {"ok": True, "duplicate": False, "balance": 1234}  — начислено
-    {"ok": True, "duplicate": True,  "balance": 1234}  — уже было (повтор апдейта)
-    {"ok": False, "duplicate": False, "balance": None} — база не дала записать
+    Задача 85 («оплатил — и ничего, начисление задерживается»): раньше любая
+    ошибка базы (нет колонки, нет прав, таймаут Supabase) сразу возвращала
+    «не получилось», и игрок видел «напиши администратору». Теперь:
+      • начисление пробуем несколько раз (пауза 0.5–2 с: обычно это разовый
+        таймаут, а не поломка);
+      • после каждой попытки ПЕРЕЧИТЫВАЕМ баланс — деньги могли лечь, даже если
+        запрос вернул ошибку;
+      • запись в stars_payments (ключ идемпотентности) ставится ПОСЛЕДНЕЙ: если
+        она не удалась, повторный вызов (или сторож из API) зачислит платёж
+        снова, а не решит «уже оплачено» и промолчит;
+      • «уже зачислено» определяется сравнением баланса с ожидаемым, поэтому
+        деньги не задвоятся.
     """
-    try:
-        existing = (supabase.table(STARS_PAYMENTS_TABLE).select("charge_id")
-                    .eq("charge_id", charge_id).execute())
-        if existing.data:
-            row = None
-            try:
-                res = supabase.table("users").select("coins").eq("user_id", int(user_id)).execute()
-                row = _primary_user_row(res.data) if res.data else None
-            except Exception:  # noqa: BLE001
-                row = None
-            return {"ok": True, "duplicate": True,
-                    "balance": int(row.get("coins") or 0) if row else None}
-        supabase.table(STARS_PAYMENTS_TABLE).insert({
-            "charge_id": charge_id, "user_id": int(user_id),
-            "coins": int(coins), "stars": int(stars),
-        }).execute()
-    except Exception as e:
-        logger.error(f"stars_payments недоступна: {e}")
-        return {"ok": False, "duplicate": False, "balance": None}
-    try:
-        res = supabase.table("users").select("coins").eq("user_id", int(user_id)).execute()
-        if not res.data:
-            return {"ok": False, "duplicate": False, "balance": None}
-        _row = _primary_user_row(res.data)
-        new_coins = (int(_row.get("coins") or 0) if _row else 0) + int(coins)
-        supabase.table("users").update({"coins": new_coins}).eq("user_id", int(user_id)).execute()
-        return {"ok": True, "duplicate": False, "balance": new_coins}
-    except Exception as e:
-        logger.error(f"Не удалось начислить коины за Stars: {e}")
-        return {"ok": False, "duplicate": False, "balance": None}
+    uid = int(user_id)
+    coins = int(coins)
+    last_error = None
+    for attempt in range(1, max(1, attempts) + 1):
+        try:
+            existing = (supabase.table(STARS_PAYMENTS_TABLE).select("charge_id")
+                        .eq("charge_id", str(charge_id)).execute())
+            if existing.data:
+                row = _primary_user_row((supabase.table("users").select("coins")
+                                         .eq("user_id", uid).execute().data))
+                return {"ok": True, "duplicate": True,
+                        "balance": int(row.get("coins") or 0) if row else None}
+        except Exception as exc:  # noqa: BLE001 — база моргнула, пробуем дальше
+            last_error = exc
+        try:
+            res = supabase.table("users").select("coins").eq("user_id", uid).execute()
+            row = _primary_user_row(res.data) if res.data else None
+            if row is None:
+                # Строки игрока нет — создаём, иначе начислять некуда.
+                ok, _err = _sub_new_user_sync(uid)
+                if ok:
+                    res = supabase.table("users").select("coins").eq("user_id", uid).execute()
+                    row = _primary_user_row(res.data) if res.data else None
+            if row is None:
+                last_error = RuntimeError("нет строки игрока в users")
+                raise last_error
+            before = int(row.get("coins") or 0)
+            target = before + coins
+            (supabase.table("users").update({"coins": target})
+             .eq("user_id", uid).execute())
+            # Перечитываем: если update «прошёл молча», прибавки могло не быть.
+            row_after = _primary_user_row(
+                (supabase.table("users").select("coins").eq("user_id", uid).execute().data))
+            after = int((row_after or {}).get("coins") or 0)
+            if after < target:
+                last_error = RuntimeError(f"баланс не изменился ({before} → {after})")
+                raise last_error
+        except Exception as exc:  # noqa: BLE001
+            last_error = exc
+            logger.warning("Stars: платёж %s не зачислен (попытка %s/%s): %s",
+                           charge_id, attempt, attempts, exc)
+            if attempt < attempts:
+                time.sleep(min(2.0, 0.5 * attempt))
+            continue
+        # Деньги на балансе — только теперь фиксируем платёж.
+        _stars_write_charge(charge_id, uid, coins, stars)
+        return {"ok": True, "duplicate": False, "balance": after}
+    logger.error("Stars: платёж %s НЕ зачислен после %s попыток: %s",
+                 charge_id, attempts, last_error)
+    return {"ok": False, "duplicate": False, "balance": None}
 
 
 async def _notify_topup_via_api(message, coins: int, balance) -> None:
@@ -4567,8 +4623,14 @@ async def on_successful_payment(message: Message):
         await _notify_topup_via_api(message, coins, balance)
         await message.answer(text, parse_mode="HTML")
     else:
-        await message.answer("⭐ Оплата получена, но начисление задерживается. "
-                             "Напиши администратору — платёж сохранён.")
+        # Задача 85: даже здесь не пугаем игру «напиши админу» без дел. Ставим
+        # задачу на догон: платёж будет зачислен сам, в том числе если Telegram
+        # не прислал повторный апдейт (см. api.stars_pending_catchup).
+        logger.error("Stars: платёж %s (uid=%s, %s коинов) не зачислен сразу",
+                     payment.telegram_payment_charge_id, user_id, coins)
+        await message.answer(
+            "⭐ Оплата получена! Начисляем — это займёт до минуты, "
+            "коины придут сами, писать никому не нужно.")
 
 
 def _stars_stats_report_sync() -> str:

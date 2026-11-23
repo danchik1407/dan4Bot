@@ -1991,6 +1991,9 @@ async function openTopUp() {
     modal.classList.add('active');
     const list = document.getElementById('topup-list');
     if (list) list.innerHTML = '<div class="topup-loading">Загрузка…</div>';
+    // Задача 85: если игрок только что платил и коинов ещё нет — сами
+    // проверяем платёж на сервере, не заставляя его искать кнопку.
+    if (pendingStars > 0) setTimeout(() => { syncStarsPayment(0); }, 500);
     try {
         const res = await fetch(`${API_URL}/api/stars_packages`);
         const data = await res.json().catch(() => ({}));
@@ -2022,8 +2025,11 @@ async function buyCoinPackage(packageId, button) {
         if (tg.openInvoice) {
             tg.openInvoice(data.url, (status) => {
                 if (status === 'paid') {
-                    tg.showAlert('⭐ Оплата прошла! Коины придут в бот сообщением.');
-                    loadUserData().catch(() => {});
+                    // Задача 85: «оплатил и ничего» — сразу проверяем платёж на
+                    // сервере (он сверяется с Telegram и доначисляет), а не
+                    // просим игрока ждать сообщение в боте.
+                    tg.showAlert('⭐ Оплата прошла! Начисляем коины…');
+                    syncStarsPayment(0).then(() => loadUserData().catch(() => {}));
                 }
             });
         } else if (tg.openTelegramLink) {
@@ -2036,6 +2042,44 @@ async function buyCoinPackage(packageId, button) {
     } finally {
         topUpBusy = false;
         if (button) { button.disabled = false; button.innerHTML = label; }
+    }
+}
+
+// ================= ДОГОН ДОНАТА (задача 85) =================
+// Сервер сверяет операции Telegram Stars с базой и доначисляет всё, что не
+// зачислено. Клиент только просит проверить — деньги считает сервер.
+// pendingStars: сколько раз уже пробовали (5 попыток × 3 с — минута ожидания).
+let pendingStars = 0;
+
+async function syncStarsPayment(attempt) {
+    const current = Number(attempt) || 0;
+    try {
+        const data = await apiPost('/api/stars_catchup', {});
+        if (data && data.added > 0) {
+            tg.showAlert(`✅ Коины пришли: +${formatCoins(data.added)}\n💰 Баланс: ${formatCoins(data.balance)}`);
+            pendingStars = 0;
+            loadUserData().catch(() => {});
+            return true;
+        }
+        if (data && data.balance !== undefined) {
+            pendingStars = 0;
+            return false;
+        }
+    } catch (e) {
+        console.warn('stars_catchup', e);
+    }
+    if (current < 5) {
+        pendingStars = current + 1;
+        setTimeout(() => syncStarsPayment(current + 1), 3000);
+    }
+    return false;
+}
+
+// Кнопка «Где коины?» на экране пополнения: ручная проверка в один тап.
+async function checkStarPayment() {
+    const done = await syncStarsPayment(0);
+    if (!done) {
+        tg.showAlert('Платёж пока не виден. Если звёзды списались — коины придут сами в течение минуты.');
     }
 }
 

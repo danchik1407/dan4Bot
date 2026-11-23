@@ -88,7 +88,7 @@ async def _http_json(url, method: str = "GET", params=None, payload=None, timeou
 
 # Номер сборки: по нему из /api/health видно, что на сервисе НЕ старый код.
 # Если после деплоя здесь прежнее значение — Render ещё не перезапустился.
-API_BUILD = "2026-10-27-task84-rewards-always"
+API_BUILD = "2026-10-27-task85-stars-instant"
 
 # Момент старта процесса. По нему видно, что сервис только что «проснулся»:
 # Render на бесплатном тарифе усыпляет Web Service через 15 минут без входящих
@@ -550,6 +550,14 @@ async def health():
         # Диагностика схемы: админ открывает /api/db_audit (или пишет боту «бд»)
         # и видит, каких миграций/колонок не хватает, с готовым SQL.
         "db_audit": {"endpoint": "/api/db_audit", "bot_command": "бд"},
+        # Задача 85: жива ли сверка донатов со Telegram (getStarTransactions).
+        "stars_catchup": {
+            "last_sync_seconds_ago": (round(now_ts - _STAR_SYNC_STATE["at"], 1)
+                                      if _STAR_SYNC_STATE["at"] else None),
+            "checked": _STAR_SYNC_STATE["checked"],
+            "credited": _STAR_SYNC_STATE["credited"],
+            "error": _STAR_SYNC_STATE["error"],
+        },
         "shop_stock": {
             # Задача 19: лимиты включены — у каждой капсулы общий тираж.
             # false бывает только если в shop_catalog.py флаг выключили вручную.
@@ -604,6 +612,14 @@ async def health():
                 "premium": REFERRAL_REWARD_PREMIUM,
             },
             "stars_enabled": STARS_ENABLED,
+        # Задача 85: видно, что сверка донатов жива и когда была последняя.
+        "stars_catchup": {
+            "last_sync_seconds_ago": (round(time.time() - _STAR_SYNC_STATE["at"], 1)
+                                      if _STAR_SYNC_STATE["at"] else None),
+            "checked": _STAR_SYNC_STATE["checked"],
+            "credited": _STAR_SYNC_STATE["credited"],
+            "error": _STAR_SYNC_STATE["error"],
+        },
             "upgrade": _upgrade_economy_config(),
             # Задача 31: арен две и они идут параллельно; mode оставлен для совместимости.
             "arena_mode": _arena_mode(),
@@ -3052,6 +3068,9 @@ async def init_capsule_stock():
         logger.info("Сток капсул: %s", stock)
 
     asyncio.create_task(_prepare())
+    # Задача 85: сверка донатов с Telegram. Работает в фоне: если бот был занят,
+    # лежал или апдейт о платеже потерялся, коины всё равно придут сами.
+    asyncio.create_task(stars_catchup_loop())
 
 
 # === РАКЕТА (CRASH) ===
@@ -5817,23 +5836,37 @@ def _require_admin_api(init_data: str) -> int:
     return uid
 
 
-def award_coins(user_id, amount) -> Optional[int]:
+def award_coins(user_id, amount, attempts: int = 3) -> Optional[int]:
     """Начисление коинов на сервере: читаем актуальный баланс, пишем новый.
 
     Возвращает новый баланс или None, если запись не прошла. Все начисления
     (подписка, пассивка, рефералы, Stars) идут только через эту функцию —
     клиент не может прибавить себе коины запросом.
+
+    Задача 85: после записи баланс ПЕРЕЧИТЫВАЕТСЯ. Раньше успехом считался
+    сам факт, что `update` не бросил исключение, — а PostgREST может ответить
+    200 и ничего не изменить (RLS, несовпадение типа user_id, дубль строки).
+    Из-за этого донат «зачислился» в логе и не появился на балансе.
     """
     uid = _safe_int(user_id, None)
     if uid is None:
         return None
-    row = _db_user(uid)
-    if row is None:
-        return None
-    coins = _safe_int(row.get("coins"), 0) + int(amount)
-    if coins < 0:
-        coins = 0
-    return coins if _db_update_user(uid, coins=coins) else None
+    target = None
+    for attempt in range(max(1, attempts)):
+        row = _db_user(uid)
+        if row is None:
+            return None
+        target = _safe_int(row.get("coins"), 0) + int(amount)
+        if target < 0:
+            target = 0
+        if _db_update_user(uid, coins=target):
+            saved = _safe_int((_db_user(uid) or {}).get("coins"), 0)
+            if saved >= target:
+                return saved
+        logger.warning("award_coins: игрок %s не получил %s (ждали %s, попытка %s)",
+                       uid, amount, target, attempt + 1)
+        time.sleep(0.2 * (attempt + 1))
+    return None
 
 
 def friendly_telegram_error(description: str) -> str:
@@ -6773,6 +6806,36 @@ async def stars_notify(data: StarsNotifyRequest):
     return {"ok": True, "sent": bool(sent)}
 
 
+class StarsCatchupRequest(BaseModel):
+    """Ручной догон: «проверь мои донаты прямо сейчас» (игрок нажал «Где коины?»)."""
+    initData: str
+
+
+@app.post("/api/stars_catchup")
+async def stars_catchup(data: StarsCatchupRequest):
+    """Задача 85: не ждать фоновой сверки — проверить донаты немедленно.
+
+    Игрок открывает аппку/жмёт кнопку, если оплатил и коинов не видит. Сервис
+    сверяет операции Stars с базой и начисляет всё, что не зачислено; в ответ
+    отдаёт актуальный баланс и сколько доначислил.
+    """
+    uid = _auth_user_id(data.initData)
+    before = _safe_int((_db_user(uid) or {}).get("coins"), 0)
+    try:
+        result = await asyncio.to_thread(stars_sync_sync)
+    except Exception as exc:  # noqa: BLE001 — Telegram недоступен: честно скажем
+        logger.warning("stars_catchup не сработал: %s", exc)
+        raise HTTPException(status_code=503,
+                            detail="Не удалось проверить оплату, попробуйте через минуту") from exc
+    after = _safe_int((_db_user(uid) or {}).get("coins"), 0)
+    if after > before:
+        coins = after - before
+        await notify_topup_in_private(uid, coins, after)
+    return {"ok": True, "checked": int(result.get("checked") or 0),
+            "credited": int(result.get("credited") or 0),
+            "balance": after, "added": max(0, after - before)}
+
+
 @app.get("/api/stars_packages")
 async def stars_packages():
     # Витрина: у каждого пакета есть total с бонусом — клиент подсвечивает
@@ -6805,6 +6868,119 @@ def stars_credit(user_id, coins, charge_id, stars: int = 0) -> Optional[int]:
         logger.warning("stars_payments недоступна: %s", exc)
         return None
     return award_coins(uid, int(coins))
+
+
+# ==================== ДОГОН ОПЛАТ STARS (задача 85) ====================
+# «Оплатил — и ничего, начисление задерживается». Причина: начисление делал
+# ТОЛЬКО бот в обработчике successful_payment. Если бот в этот момент спал/
+# перезапускался, апдейт обрабатывался с опозданием (или терялся), а API о
+# платеже не знал вовсе — игрок видел «напиши администратору» и сидел без коинов.
+#
+# Теперь правду о платежах знает Telegram: getStarTransactions отдаёт все
+# успешные операции бота (это официальный метод Bot API для Stars). API
+# периодически сверяет их со своей таблицей stars_payments и досчитывает всё,
+# что не зачислено, — без участия человека и без повторного апдейта.
+STAR_TRANSACTIONS_TTL = 30.0        # как часто ходить в Telegram (сек)
+_STAR_SYNC_STATE = {"at": 0.0, "busy": False, "credited": 0, "checked": 0,
+                    "error": ""}
+
+
+def _stars_payment_package(amount: int):
+    """Пакет по сумме в звёздах (для восстановления суммы коинов)."""
+    stars = _safe_int(amount, 0)
+    package = next((p for p in STARS_PACKAGES if int(p["stars"]) == stars), None)
+    if package:
+        return package, stars_package_total(package)
+    return None, 0
+
+
+def _stars_transactions_sync() -> list:
+    """Последние операции Stars у бота (getStarTransactions)."""
+    token = _telegram_bot_token()
+    if not token:
+        return []
+    url = (f"{TELEGRAM_API_BASE}/bot{token}/getStarTransactions?"
+           + urllib.parse.urlencode({"limit": 100}))
+    payload = None
+    try:
+        with urllib.request.urlopen(url, timeout=15) as response:
+            payload = json.loads(response.read().decode("utf-8") or "{}")
+    except Exception as exc:  # noqa: BLE001 — сеть/Telegram: попробуем позже
+        raise RuntimeError(f"getStarTransactions недоступен: {exc}") from exc
+    if not isinstance(payload, dict) or not payload.get("ok"):
+        detail = (payload or {}).get("description") if isinstance(payload, dict) else ""
+        raise RuntimeError(detail or "getStarTransactions вернул ошибку")
+    result = payload.get("result") or {}
+    return result.get("transactions") or []
+
+
+def _stars_credit_transaction(tx: dict) -> dict:
+    """Доначислить одну операцию входящего платежа. Идемпотентно по charge_id."""
+    source = tx.get("source") or {}
+    if source.get("type") != "user":
+        return {"credited": False, "reason": "not_user"}
+    charge_id = str(tx.get("id") or "")
+    user_id = _safe_int(source.get("user_id"), None)
+    stars = _safe_int(tx.get("amount"), 0)
+    if not charge_id or user_id is None or stars <= 0:
+        return {"credited": False, "reason": "bad_transaction"}
+    _package, coins = _stars_payment_package(stars)
+    if coins <= 0:
+        return {"credited": False, "reason": "unknown_amount"}
+    try:
+        existing = (supabase.table(STARS_PAYMENTS_TABLE).select("charge_id")
+                    .eq("charge_id", charge_id).limit(1).execute())
+        if existing.data:
+            return {"credited": False, "reason": "already"}
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(f"stars_payments недоступна: {exc}") from exc
+    balance = award_coins(user_id, coins)
+    if balance is None:
+        raise RuntimeError("не удалось начислить коины")
+    try:
+        _insert_tolerant(STARS_PAYMENTS_TABLE, {
+            "charge_id": charge_id, "user_id": user_id, "coins": coins,
+            "stars": stars, "created_at": _now_iso(),
+        }, logger_prefix="STARS-CATCHUP: ")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("STARS-CATCHUP: платёж %s начислен, но не записан: %s",
+                       charge_id, exc)
+    logger.info("STARS-CATCHUP: игроку %s доначислено %s коинов (⭐%s, %s)",
+                user_id, coins, stars, charge_id)
+    return {"credited": True, "user_id": user_id, "coins": coins, "balance": balance,
+            "stars": stars}
+
+
+def stars_sync_sync() -> dict:
+    """Сверить операции Stars с базой и доначислить пропущенное."""
+    transactions = _stars_transactions_sync()
+    credited = checked = 0
+    for tx in transactions:
+        checked += 1
+        try:
+            outcome = _stars_credit_transaction(tx)
+        except Exception as exc:  # noqa: BLE001 — одна операция не рушит сверку
+            logger.warning("STARS-CATCHUP: операция не обработана (%s)", exc)
+            continue
+        if outcome.get("credited"):
+            credited += 1
+    return {"ok": True, "checked": checked, "credited": credited}
+
+
+async def stars_catchup_loop() -> None:
+    """Фоновая сверка: сразу после старта и дальше раз в полминуты."""
+    await asyncio.sleep(3)
+    while True:
+        try:
+            result = await asyncio.to_thread(stars_sync_sync)
+            _STAR_SYNC_STATE.update({"credited": int(result.get("credited") or 0),
+                                     "checked": int(result.get("checked") or 0),
+                                     "error": ""})
+        except Exception as exc:  # noqa: BLE001 — сервис не должен падать
+            _STAR_SYNC_STATE["error"] = str(exc)[:200]
+            logger.debug("STARS-CATCHUP: сверка не удалась: %s", exc)
+        _STAR_SYNC_STATE["at"] = time.time()
+        await asyncio.sleep(STAR_TRANSACTIONS_TTL)
 
 
 def _stars_periods(rows) -> dict:

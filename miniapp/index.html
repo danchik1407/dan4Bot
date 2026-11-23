@@ -12,7 +12,7 @@
     <meta http-equiv="Pragma" content="no-cache">
     <meta http-equiv="Expires" content="0">
     <title>AURA GAME</title>
-    <link rel="stylesheet" href="style.css?v=aura-84">
+    <link rel="stylesheet" href="style.css?v=aura-85">
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
 </head>
 <body>
@@ -85,8 +85,12 @@
                 <span class="topup-title">⭐ Пополнение</span>
                 <button class="topup-close" onclick="closeTopUp()" aria-label="Закрыть">✕</button>
             </div>
-            <div class="topup-sub">Коины за Telegram Stars. Придут в бота сразу после оплаты.</div>
+            <div class="topup-sub">Коины за Telegram Stars. Приходят сразу после оплаты.</div>
             <div class="topup-list" id="topup-list"><div class="topup-loading">Загрузка…</div></div>
+            <!-- Задача 85: оплатил, а коинов не видно — один тап на проверку. -->
+            <button class="topup-check" type="button" onclick="checkStarPayment()">
+                💰 Оплатил, но коинов нет? Проверить
+            </button>
             <div class="topup-note">Оплата в звёздах: 1 пакет = 1 счёт. Возврат — через поддержку Telegram.</div>
         </div>
     </div>
@@ -709,6 +713,6 @@
          маленькой кнопкой ⚙️ рядом с ником в шапке (см. #admin-gear). -->
     </nav>
 
-    <script src="app.js?v=aura-84" defer></script>
+    <script src="app.js?v=aura-85" defer></script>
 </body>
 </html>
