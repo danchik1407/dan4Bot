@@ -458,6 +458,11 @@ LOVE_MEMBER_REWARDS_TABLE = "love_stage_members"
 # применена, тогда работаем по старой схеме (иначе награды вообще перестали бы
 # выдаваться на базе без миграции).
 _MEMBER_TABLE_READY = None
+# Когда последний раз проверяли таблицу. Если её нет — перепроверяем раз в
+# минуту: человек может применить миграцию, пока бот уже работает, и ждать
+# рестарта Render он не должен.
+_MEMBER_TABLE_CHECKED_AT = 0.0
+_MEMBER_TABLE_RETRY = 60.0
 
 
 def paid_stages(supabase, relationship_id) -> set:
@@ -470,17 +475,30 @@ def paid_stages(supabase, relationship_id) -> set:
 
 
 def member_rewards_ready(supabase) -> bool:
-    """Есть ли таблица отметок по игрокам (миграция 20261204000000 применена)."""
-    global _MEMBER_TABLE_READY
-    if _MEMBER_TABLE_READY is not None:
-        return _MEMBER_TABLE_READY
+    """Есть ли таблица отметок по игрокам (миграция 20261204000000 применена).
+
+    Ответ кэшируется: True — навсегда, False — с перепроверкой раз в минуту
+    (миграцию могут применить, пока бот уже запущен, и игрок не должен ждать
+    рестарта сервиса, чтобы получить «догон» наград).
+    """
+    global _MEMBER_TABLE_READY, _MEMBER_TABLE_CHECKED_AT
+    now = time.time()
+    if _MEMBER_TABLE_READY is True:
+        return True
+    if _MEMBER_TABLE_READY is False and now - _MEMBER_TABLE_CHECKED_AT < _MEMBER_TABLE_RETRY:
+        return False
+    _MEMBER_TABLE_CHECKED_AT = now
     try:
         supabase.table(LOVE_MEMBER_REWARDS_TABLE).select("user_id").limit(1).execute()
+        if _MEMBER_TABLE_READY is not True:
+            logger.info("Таблица %s на месте — награды за уровни персональные.",
+                        LOVE_MEMBER_REWARDS_TABLE)
         _MEMBER_TABLE_READY = True
     except Exception as exc:  # noqa: BLE001 — таблицы нет, работаем по старой схеме
-        logger.warning("Таблицы %s нет (%s) — награды считаем по старой схеме; "
-                       "примените миграцию 20261204000000_love_rewards_per_player.sql",
-                       LOVE_MEMBER_REWARDS_TABLE, exc)
+        if _MEMBER_TABLE_READY is not True:
+            logger.warning("Таблицы %s нет (%s) — награды считаем по старой схеме; "
+                           "примените миграцию 20261204000000_love_rewards_per_player.sql",
+                           LOVE_MEMBER_REWARDS_TABLE, exc)
         _MEMBER_TABLE_READY = False
     return _MEMBER_TABLE_READY
 
