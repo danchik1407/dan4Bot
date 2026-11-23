@@ -1698,9 +1698,10 @@ async function loadLoveState() {
         renderLoveBadge();
         renderPocket();
         if (loveState && todayStageRewards(loveState)) {
-            // Этапы и награды — секретная механика: не раскрываем ни название,
-            // ни сумму, только мягко сообщаем, что стало теплее.
-            tg.showAlert('💗 Ваши отношения стали ещё крепче!');
+            // Задача 81: заказчик просил настоящее поздравление, а не «стало
+            // теплее»: уровень, название, награда на балансе и следующий уровень.
+            // Сумму следующего уровня сервер не присылает — только «нужно Love».
+            showStageCelebration(loveState.stage_rewards);
             await loadUserData().catch(() => {});
         }
     } catch (e) { console.warn('love_state', e); }
@@ -1792,6 +1793,45 @@ function renderAchievements() {
             ? 'Статистика начнёт копиться с этого захода — обнови приложение позже.'
             : 'Цифры копятся с первого дня в приложении и не сгорают.';
     }
+}
+
+// Задача 81: поздравление о новом уровне отношений в аппке.
+// Сервер уже начислил коины ОБОИМ партнёрам, здесь только текст.
+function stageCelebrationText(items) {
+    const list = Array.isArray(items) ? items : [];
+    if (!list.length) return '💗 ПОЗДРАВЛЯЕМ!\n\nВы перешли на новый уровень отношений — награда уже на балансе.';
+    return list.map(item => {
+        const lines = ['🎉 ПОЗДРАВЛЯЕМ!', '',
+            `Вы перешли на ${item.level} уровень отношений`];
+        if (item.title) lines.push(`💗 «${item.title}»`);
+        if (Number(item.reward) > 0) {
+            lines.push('');
+            if (item.solo) {
+                lines.push(`🎁 Награда: +${item.reward_text} коинов — уже на балансе`);
+            } else {
+                const partner = item.partner_name ? ` с ${item.partner_name}` : '';
+                lines.push(`🎁 Награда за новый уровень${partner}:`);
+                lines.push(`+${item.reward_text} коинов каждому — уже на балансе`);
+            }
+        }
+        if (item.balance != null) {
+            lines.push(`💰 Теперь на балансе: ${formatCoins(Number(item.balance))} коинов`);
+        }
+        if (item.next_level) {
+            lines.push('');
+            lines.push(`➡️ Следующий уровень — ${item.next_level}` +
+                (item.next_title ? ` «${item.next_title}»` : '') +
+                (Number(item.next_need) > 0 ? `, нужно ${formatCoins(Number(item.next_need))} Love❤️` : ''));
+        }
+        return lines.join('\n');
+    }).join('\n\n');
+}
+
+function showStageCelebration(items) {
+    const text = stageCelebrationText(items);
+    try { tg.HapticFeedback && tg.HapticFeedback.notificationOccurred('success'); } catch (e) {}
+    try { playSound('win'); } catch (e) {}
+    tg.showAlert(text);
 }
 
 function todayStageRewards(state) {
