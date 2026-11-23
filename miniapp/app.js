@@ -753,20 +753,50 @@ function scheduleProfileRetry(delay = 5000) {
 // (см. resolveAccess), а админ здесь же может открыть игру обратно — из
 // приложения, без деплоя.
 let maintToggleBusy = false;
+// Задача 78: вкладка, из которой открыли админку — туда и возвращает «← Назад».
+let adminReturnTab = 'play';
 
-// Задача 75: пункт «⚙️ Админ» в нижнем меню существует только у админа.
-// У игроков его нет даже в разметке на экране (hidden), поэтому «кнопку
-// техработ видят только админы» — это не уговор, а единственное состояние.
+// Задача 78 (заказчик): «вот тут должны быть кнопка админская маленькая, а не
+// в нижней» — админка переехала из нижнего меню в шапку: маленький кружок ⚙️
+// сразу справа от ника. У игроков кнопки нет ни в разметке на экране (hidden),
+// ни в обработчиках: «техработы видит только админ» остаётся единственным
+// состоянием. Пункт «⚙️ Админ» из нижнего меню удалён целиком — семь пунктов
+// там не влезали на узкий экран.
 function syncAdminNav() {
+    const gear = document.getElementById('admin-gear');
+    if (gear) gear.hidden = !isAdmin;
+    // Кнопка занимает место справа — уменьшаем отступ бейджа, иначе ник и
+    // шестерёнка наезжают друг на друга на узком экране (наложения запрещены).
+    const badge = gear && gear.closest ? gear.closest('.profile-badge') : null;
+    if (badge) badge.classList.toggle('has-gear', Boolean(isAdmin));
+    // Старые сборки могли держать пункт меню в DOM (index.html и app.js
+    // разъезжаются по кэшу Telegram) — прячем его, чтобы не «висел» в низах.
     const nav = document.getElementById('nav-admin');
+    if (nav) nav.hidden = true;
     const bottom = document.getElementById('main-nav');
-    // Задача 75 (заказчик): «кнопку техработ видно только админам». Поэтому
-    // пункт «⚙️ Админ» появляется строго у админа — и в разметке, и в меню.
-    if (nav) nav.hidden = !isAdmin;
-    // У админа пунктов семь — на узком экране им тесно, включаем компактный режим.
-    if (bottom) bottom.classList.toggle('has-admin', isAdmin);
+    if (bottom) bottom.classList.remove('has-admin');
     const tab = document.getElementById('tab-admin');
     if (tab && !isAdmin) tab.classList.remove('active');
+}
+
+// Открыть админку из шапки. Клик по кнопке не должен «проваливаться» никуда
+// ещё, поэтому гасим всплытие; не-админу честно отказываем внятной подсказкой,
+// а не молчаливым ничем.
+function openAdminPanel(event) {
+    if (event && event.stopPropagation) event.stopPropagation();
+    if (!isAdmin) { tg.showAlert('Админ-панель доступна только админу'); return; }
+    const current = document.querySelector('.tab.active');
+    const currentId = current && current.id ? current.id.replace('tab-', '') : '';
+    adminReturnTab = (currentId && currentId !== 'admin') ? currentId : 'play';
+    switchTab('admin', null);
+}
+
+// Задача 78: из админки надо уметь вернуться — пункта в нижнем меню больше нет,
+// поэтому в шапке вкладки есть «← Назад». Возвращаемся туда, откуда пришли
+// (обычно в профиль или на «Играть»), а не в пустоту.
+function closeAdminPanel() {
+    const back = adminReturnTab || 'play';
+    switchTab(back, null);
 }
 
 async function renderAdminPlayers() {
@@ -964,11 +994,17 @@ function switchTab(tabId, element) {
     document.querySelectorAll('.tab').forEach(tab => tab.classList.remove('active'));
     document.getElementById('tab-' + tabId).classList.add('active');
     document.querySelectorAll('.nav-item').forEach(nav => nav.classList.remove('active'));
+    // Задача 78: у админки пункта в меню больше нет, а программные переходы
+    // (открытие админки, «← Назад») приходят без element — ищем пункт по data-tab,
+    // чтобы подсветка не оставалась на прошлой вкладке.
+    if (!element) element = document.querySelector(`.nav-item[data-tab="${tabId}"]`);
     if (element) element.classList.add('active');
     // Задача 75: вкладка админа. Игрок до неё не дойдёт: пункт меню скрыт, а
     // прямой вызов из консоли возвращает на «Играть».
     if (tabId === 'admin') {
         if (!isAdmin) { switchTab('play'); return; }
+        // Задача 78: нижнего меню с «Админ» больше нет — активного пункта у
+        // вкладки нет, подсвечивать нечего (element === null).
         renderAdminMaintenanceCard({ maintenance_active: serverMaintenance });
         adminPlayers = [];
         renderAdminPlayers();

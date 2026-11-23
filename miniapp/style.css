@@ -440,13 +440,40 @@ main { padding: 0 16px; }
 .history-amount.is-in { color: #7ee2a8; }
 .history-amount.is-out { color: #ff8a80; }
 
-/* ============ АДМИН-ВКЛАДКА (задача 75) ============
-   Пункт меню и сама вкладка есть только у админа. Восемь пунктов в нижнем
-   меню не влезают на узкий экран, поэтому у админа они чуть компактнее. */
-#nav-admin[hidden] { display: none !important; }
-.bottom-nav.has-admin .nav-item { padding: 0 2px; }
-.bottom-nav.has-admin .nav-icon { font-size: 19px; }
-.bottom-nav.has-admin { gap: 2px; }
+/* ============ АДМИН-КНОПКА В ШАПКЕ (задача 78) ============
+   Заказчик: «вот тут должны быть кнопка админская маленькая, а не в нижней».
+   Маленький кружок ⚙️ прижат к правому краю бейджа с ником — на месте
+   нарисованного красного кружка на скриншоте. Игрокам кнопки нет вообще
+   (#admin-gear[hidden]), нижний пункт «Админ» удалён из меню. */
+#admin-gear[hidden] { display: none !important; }
+/* Возврат из админки: пункта в нижнем меню больше нет, поэтому «← Назад» есть
+   в шапке вкладки. Кнопка слева, заголовок по центру — ничего не наезжает. */
+.page-header-admin { display: flex; align-items: center; gap: 10px; }
+.page-header-admin h2 { flex: 1 1 auto; text-align: center; }
+.admin-back {
+    flex: 0 0 auto; margin: 0; padding: 6px 10px;
+    font-size: 13px; font-weight: 700; color: #9aa0a6;
+    background: #1c1c1c; border: 1px solid #2c2c2c; border-radius: 12px;
+}
+.admin-back:active { background: #242424; }
+.admin-gear {
+    flex: 0 0 auto; width: 22px; height: 22px; margin-left: 6px;
+    padding: 0; border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 11px; line-height: 1;
+    background: #2a2a2c; border: 1px solid #3a3a3d; color: #d8d8dc;
+    cursor: pointer; transition: transform 0.12s ease, background 0.15s ease;
+}
+.admin-gear:active { transform: scale(0.9); background: #343438; }
+/* Совсем узкие телефоны (360 px и уже): шестерёнка чуть меньше, ник по-прежнему
+   обрезается многоточием — наложений нет ни при каком имени. */
+@media (max-width: 360px) {
+    .admin-gear { width: 19px; height: 19px; font-size: 10px; margin-left: 4px; }
+    .profile-badge.has-gear { padding-right: 6px; }
+}
+/* С кнопкой бейдж получает чуть меньший правый отступ: ник и шестерёнка
+   не должны наезжать друг на друга даже при длинном имени. */
+.profile-badge.has-gear { padding-right: 8px; }
 .admin-players { display: flex; flex-direction: column; gap: 6px; margin-bottom: 10px; }
 
 /* ============ ДОСТИЖЕНИЯ ПРОФИЛЯ (задача 74) ============
