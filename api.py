@@ -88,7 +88,7 @@ async def _http_json(url, method: str = "GET", params=None, payload=None, timeou
 
 # Номер сборки: по нему из /api/health видно, что на сервисе НЕ старый код.
 # Если после деплоя здесь прежнее значение — Render ещё не перезапустился.
-API_BUILD = "2026-10-27-task85-stars-instant"
+API_BUILD = "2026-10-27-task86-arena-bets"
 
 # Момент старта процесса. По нему видно, что сервис только что «проснулся»:
 # Render на бесплатном тарифе усыпляет Web Service через 15 минут без входящих
@@ -3521,6 +3521,17 @@ async def place_bet(data: PlaceBet):
     if arena != "team":
         team = None                       # в обычной арене команд нет
 
+    # Задача 86: повтор запроса с тем же request_id не должен списывать деньги
+    # второй раз. Раньше клиент по таймауту (21 с) повторял ставку, и она
+    # проходила дважды — со стороны игрока это выглядело как «списали за раунд,
+    # в котором я не ставил».
+    idem_key = _idempotency_key(user_id, data.request_id, "place_bet")
+    cached = idempotency_lookup(idem_key)
+    if cached and cached.get("success"):
+        cached = dict(cached)
+        cached["idempotent_replay"] = True
+        return cached
+
     # Задача 42: у каждого котла свой раунд, поэтому и «ставки закрыты» — своё.
     arena_state_now = _tick_arena(arena, time.time())
     wait_duration = HOCKEY_TEAM_WAIT_DURATION if arena == "team" else HOCKEY_WAIT_DURATION
@@ -3557,32 +3568,65 @@ async def place_bet(data: PlaceBet):
     if current_coins < data.amount: raise HTTPException(status_code=400, detail="Not enough coins")
 
     new_coins = current_coins - data.amount
+
+    # Задача 86: сначала запись ставки в раунд, потом деньги.
+    #
+    # Раньше коины списывались ДО того, как ставка попадала в раунд, и сразу
+    # после списания стоял вызов ledger_note() — функции, удалённой вместе с
+    # историей ставок (задача 80). Любая ошибка на этом отрезке (NameError,
+    # снимок раунда, статистика) отдавала игроку 500: коины уже списаны, а
+    # ставки в раунде нет. Теперь наоборот — сначала ставка, затем списание,
+    # а при неудаче запись откатывается (см. _rollback_bet ниже).
+    name = user.get("username", user.get("first_name", f"id{user_id}"))
+    avatar = user.get("photo_url", "")
+    bet_before = int(existing_player["bet"]) if existing_player is not None else 0
+    player_row = None
+    if existing_player is not None:
+        existing_player["bet"] = bet_before + int(data.amount)
+    else:
+        player_color = "#007aff"
+        while any(p["color"] == player_color for p in _arena_players(arena)):
+            player_color = f"hsl({random.randint(0, 360)}, 80%, 50%)"
+        player_row = {
+            "id": user_id, "name": name, "avatar": avatar, "bet": int(data.amount),
+            "color": ARENA_TEAMS[team]["color"] if team else player_color,
+            "is_bot": False, "team": team, "arena": arena,
+        }
+        _arena_state(arena)["players"].append(player_row)
+
+    def _rollback_bet():
+        """Убрать ставку из раунда: деньги за неё списаны не будут."""
+        state = _arena_state(arena)
+        if existing_player is None:
+            players = state.get("players") or []
+            state["players"] = [p for p in players if p is not player_row]
+        elif existing_player in (state.get("players") or []):
+            existing_player["bet"] = bet_before
+        state["bank"] = sum(int(p.get("bet") or 0) for p in state.get("players") or [])
+        try:
+            _update_hockey_percentages(arena)
+            _save_arena_snapshot(arena)
+        except Exception:  # noqa: BLE001 — откат не должен падать сам
+            logger.debug("Арена %s: откат ставки не дописал снимок", arena)
+
     if not _write_primary_coins(user_id, new_coins):
-        raise HTTPException(status_code=500, detail="Не удалось списать ставку")
+        _rollback_bet()
+        raise HTTPException(status_code=500,
+                            detail="Ставка не принята: база не подтвердила списание. Попробуйте ещё раз")
+    # Ставка уже в раунде и деньги списаны — сразу фиксируем снимок, чтобы
+    # рестарт сервиса не оставил игрока без ставки (и не вернул её дважды).
+    _save_arena_snapshot(arena)
 
     # Задача 74: ставка в арене + рекорд ставки для профиля.
     stats_note(user_id, coins_spent=data.amount, spent_arena=data.amount,
                best_arena_bet=data.amount)
-    ledger_note(user_id, "bet", data.amount, "🏒 Арена")
-
-    if existing_player is not None:
-        existing_player["bet"] += data.amount
-    else:
-        name = user.get("username", user.get("first_name", f"id{user_id}"))
-        avatar = user.get("photo_url", "")
-        player_color = "#007aff"
-        while any(p["color"] == player_color for p in _arena_players(arena)):
-            player_color = f"hsl({random.randint(0, 360)}, 80%, 50%)"
-        existing_player = {
-            "id": user_id, "name": name, "avatar": avatar, "bet": data.amount,
-            "color": ARENA_TEAMS[team]["color"] if team else player_color,
-            "is_bot": False, "team": team, "arena": arena,
-        }
-        _arena_state(arena)["players"].append(existing_player)
 
     # One 10% chance per round when a human's accumulated bet reaches 1,000.
     arena_state_now = _arena_state(arena)
-    if existing_player["bet"] >= 1000 and not arena_state_now["whale_decided"]:
+    # Задача 86: запись игрока ищем заново — во время ставки воркер мог
+    # перевести котёл в новый раунд, и старая ссылка на строку уже не наша.
+    mine = next((p for p in _arena_players(arena) if p["id"] == user_id and not p.get("is_bot")), None)
+    if mine is not None and int(mine["bet"]) >= 1000 and not arena_state_now["whale_decided"]:
         arena_state_now["whale_decided"] = True
         arena_state_now["whale_join"] = random.random() < 0.10
         if arena_state_now["whale_join"]:
@@ -3591,9 +3635,13 @@ async def place_bet(data: PlaceBet):
     # The displayed bank and payout use the same full pot.
     arena_state_now["bank"] = sum(int(player["bet"]) for player in arena_state_now["players"])
     _update_hockey_percentages(arena)
-    return {"success": True, "new_balance": new_coins, "arena": arena,
-            "round_id": arena_state_now.get("round_id"),
-            "status": arena_state_now["status"]}
+    response = {"success": True, "new_balance": new_coins, "arena": arena,
+                "round_id": arena_state_now.get("round_id"),
+                "status": arena_state_now["status"]}
+    # Ключ храним вместе с ответом: повтор придёт с тем же new_balance, и клиент
+    # не подумает, что деньги ушли ещё раз.
+    idempotency_store(idem_key, user_id, "place_bet", response)
+    return response
 
 
 @app.post("/api/finish_hockey")

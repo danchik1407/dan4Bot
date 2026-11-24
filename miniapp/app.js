@@ -201,8 +201,11 @@ function requestId() {
 const API_POST_TIMEOUT = 21000;
 
 async function apiPost(path, payload, options) {
+    // Таймаут можно задать точечно (например, ставка в арене): длинное
+    // ожидание держит кнопку заблокированной, а игрок думает, что игра висит.
+    const timeoutMs = Number(options && options.timeout) > 0 ? Number(options.timeout) : API_POST_TIMEOUT;
     const controller = typeof AbortController === 'function' ? new AbortController() : null;
-    const timer = controller ? setTimeout(() => { try { controller.abort(); } catch (e) {} }, API_POST_TIMEOUT) : null;
+    const timer = controller ? setTimeout(() => { try { controller.abort(); } catch (e) {} }, timeoutMs) : null;
     const init = {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -213,16 +216,30 @@ async function apiPost(path, payload, options) {
     try {
         res = await fetch(`${API_URL}${path}`, init);
     } catch (e) {
-        const error = new Error((options && options.fallback)
-            || (e && e.name === 'AbortError' ? 'Сервер не ответил вовремя' : 'Ошибка соединения'));
+        // Задача 86: сетевая ошибка/таймаут — это НЕ «ставки закрыты».
+        // Раньше сюда подставлялся fallback вызывающего кода, и игрок читал
+        // «Ставки закрыты!», хотя сервер вообще не ответил.
+        const error = new Error((e && e.name === 'AbortError')
+            ? 'Сервер не ответил вовремя'
+            : 'Ошибка соединения');
         error.status = 0;
+        error.network = true;
         throw error;
     } finally {
         if (timer) clearTimeout(timer);
     }
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
-        const error = new Error((data && data.detail) || (options && options.fallback) || 'Ошибка сервера');
+        // Задача 86: 5xx без своего текста — это сбой сервера, а не «ставки
+        // закрыты». Раньше сюда подставлялся fallback вызывающего кода, и
+        // игрок видел неправду: сетевой сбой выглядел как закрытый раунд.
+        const serverText = (data && data.detail) ? String(data.detail) : '';
+        const fallbackText = (options && options.fallback) || '';
+        const text = serverText
+            || (res.status >= 500
+                ? `Сервер не принял запрос (${res.status}). Попробуйте ещё раз`
+                : (fallbackText || 'Ошибка сервера'));
+        const error = new Error(text);
         error.status = res.status;
         error.data = data;
         throw error;
@@ -4653,14 +4670,37 @@ async function placeHockeyBet(team) {
         // Арена ставки: командная (если нажата красная/синяя кнопка) или та,
         // что открыта. Котлы независимы, поэтому в одном раунде можно
         // поставить и в обычную, и в командную арену.
+        //
+        // Задача 86: request_id один на попытку ставки. По таймауту повторяем
+        // ТОТ ЖЕ запрос — сервер вернёт сохранённый ответ и деньги не спишет
+        // второй раз. Раньше каждый повтор получал новый id, и после
+        // «Сервер не ответил вовремя» игрок ставил снова — списывалось дважды.
         const payload = { amount: bet, request_id: requestId(), arena: team ? 'team' : arenaState.view };
         if (team) payload.team = team;
-        const data = await apiPost('/api/place_bet', payload, { fallback: "Ставки закрыты!" });
-        balance = data.new_balance; balanceKnown = true; updateUI(); playSound('click');
+        let data = null, lastError = null;
+        for (let attempt = 1; attempt <= 3; attempt++) {
+            try {
+                data = await apiPost('/api/place_bet', payload, { timeout: 8000 });
+                break;
+            } catch (e) {
+                lastError = e;
+                const retriable = e && (e.status === 0 || e.status >= 500);
+                if (!retriable || attempt === 3) break;
+                await new Promise(resolve => setTimeout(resolve, 350 * attempt));
+            }
+        }
+        if (!data) throw (lastError || new Error("Ошибка соединения"));
+        balance = Number(data.new_balance);
+        if (Number.isFinite(balance)) { balanceKnown = true; updateUI(); }
+        playSound('click');
         if (team) { arenaState.myTeam = team; updateArenaModeUI(arenaState.view, team); }
         pollHockeyState();
     } catch (e) {
-        tg.showAlert(e.message || "Ошибка соединения");
+        // Настоящая причина вместо «Ставки закрыты!» на любой сбой.
+        tg.showAlert(e && e.message ? e.message : "Ошибка соединения");
+        // Ставка могла дойти до сервера, а ответ — нет. Перечитываем профиль,
+        // чтобы на экране был настоящий баланс, а не догадка.
+        if (typeof loadUserData === 'function') loadUserData({ attempts: 1 }).catch(() => {});
     }
     isProcessing = false;
 }
