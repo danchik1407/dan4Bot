@@ -680,9 +680,6 @@ function applyProfile(data) {
         if (balance >= upgradeBalanceFloor && balance > limit) balance = limit;
     }
     keys = Number(data.keys) || 0;
-    // Задача 87: админ видит игры открытыми — он всегда может проверить фикс.
-    closedGames = (isAdmin || !Array.isArray(data.games_closed)) ? [] : data.games_closed.map(String);
-    if (typeof renderClosedGames === 'function') renderClosedGames();
     inventory = Array.isArray(data.inventory) ? data.inventory : [];
     lastChestTime = Number(data.last_chest) || 0;
     // Задача 43: «Дней в игре» — это дни с ПЕРВОГО ЗАХОДА В АППКУ.
@@ -718,6 +715,13 @@ function applyProfile(data) {
     }
     // Список ADMIN_IDS — главный источник; флаг сервера его подтверждает.
     isAdmin = isAdminId(user && user.id) || Boolean(data.is_admin);
+    // Задача 88: список закрытых игр ставим ПОСЛЕ определения isAdmin.
+    // Раньше это было на двадцать строк выше, и на первом профиле isAdmin ещё
+    // false — админу карточки помечались «выключено», а вход закрывался.
+    // Сервер и так не присылает закрытые игры админу, клиент лишь перепроверяет.
+    closedGames = (isAdmin || !Array.isArray(data.games_closed))
+        ? [] : data.games_closed.map(String);
+    if (typeof renderClosedGames === 'function') renderClosedGames();
     userDataLoaded = true;
     balanceKnown = true;
     profileFailure = '';

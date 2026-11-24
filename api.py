@@ -89,7 +89,7 @@ async def _http_json(url, method: str = "GET", params=None, payload=None, timeou
 
 # Номер сборки: по нему из /api/health видно, что на сервисе НЕ старый код.
 # Если после деплоя здесь прежнее значение — Render ещё не перезапустился.
-API_BUILD = "2026-10-27-task87-admin-panel"
+API_BUILD = "2026-10-27-task88-admin-always-plays"
 
 # Момент старта процесса. По нему видно, что сервис только что «проснулся»:
 # Render на бесплатном тарифе усыпляет Web Service через 15 минут без входящих
@@ -1626,12 +1626,25 @@ def _upgrade_economy_config() -> dict:
     }
 
 
-def _games_closed_public() -> list:
-    """Закрытые игры для клиента: список ключей + текст для игрока.
+def _games_closed_public(user_id=None) -> list:
+    """Закрытые игры для клиента. Для админа — ВСЕГДА пусто.
 
-    Админ видит игры открытыми (он всегда может зайти и проверить фикс), для
-    остальных закрытая игра помечается на карточке и не пускает внутрь.
+    Задача 88: заказчик — админ — не смог зайти в выключенную им же игру, хотя
+    «администраторы имеют доступ в любом случае». Причин было две, и обе здесь:
+
+    * клиент считал список до определения isAdmin (исправлено в app.js);
+    * сервер отдавал закрытые игры всем подряд, включая админа — теперь для
+      ADMIN_IDS список пустой, это источник правды, а не надежда на порядок
+      строк в applyProfile.
+
+    Для остальных закрытая игра помечается на карточке и не пускает внутрь.
     """
+    try:
+        uid = _safe_int(user_id, None)
+        if uid is not None and int(uid) in ADMIN_IDS:
+            return []
+    except Exception:  # noqa: BLE001 — мусор в id не повод ломать профиль
+        pass
     try:
         flags = game_flags.read_disabled(supabase)
     except Exception:  # noqa: BLE001 — настройки не прочитались: всё открыто
@@ -1707,7 +1720,7 @@ def _user_payload(row, is_admin, user_id=None):
         "economy": {"upgrade": _upgrade_economy_config()},
         # Задача 87: какие игры закрыты рубильниками. Клиент по этому полю
         # помечает карточки и не пускает в игру, не дожидаясь запроса ставки.
-        "games_closed": _games_closed_public(),
+        "games_closed": _games_closed_public(uid),
     }
 
 
