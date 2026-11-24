@@ -3192,6 +3192,72 @@ def _game_switch_sync(mode: str, disable: bool) -> bool:
     return ok
 
 
+# ================= АДМИН: НОВОГОДНИЙ ДИЗАЙН АППКИ (задача 89) =================
+# Заказчик: «сделай чтобы я мог переключить дизайн с обычного на новогодний по
+# кнопке в админ панели в апке и обратно» — переключатель есть в Mini App, а
+# здесь та же настройка доступна из чата, чтобы не открывать приложение.
+# Ключ `app_theme` в game_settings читает api.py (кэш 10 с) и отдаёт в /api/user.
+THEME_SETTING_KEY = "app_theme"
+
+
+def _theme_word_to_value(word: str) -> str:
+    text = str(word or "").strip().lower().replace("ё", "е")
+    if text in ("новогодний", "новогодний дизайн", "новый год", "новыйгод", "нг",
+                "newyear", "new_year", "ny", "вкл", "включить", "on"):
+        return "newyear"
+    if text in ("обычный", "обычный дизайн", "классический", "обычное",
+                "classic", "выкл", "выключить", "off"):
+        return "classic"
+    return ""
+
+
+@dp.message(F.text.func(lambda t: strip_prefix(t).lower().replace("ё", "е").startswith(
+    ("дизайн", "/дизайн", "!дизайн", "новогодний дизайн", "новогоднее оформление",
+     "оформление", "/оформление", "!оформление"))))
+async def cmd_theme_switch(message: Message):
+    """`дизайн` — показать, `дизайн новогодний` / `дизайн обычный` — переключить."""
+    if not message.from_user or message.from_user.is_bot:
+        return
+    if not is_admin(message.from_user.id):
+        return await message.answer("❌ Эта команда доступна только администраторам бота.")
+    raw = strip_prefix(message_text(message)).lower().replace("ё", "е").lstrip("!/").strip()
+    # «дизайн новогодний», «оформление выкл», «новогодний дизайн выкл» — отрезаем
+    # саму команду и смотрим на остаток: он и говорит, что включить.
+    target = raw
+    for prefix in ("новогодний дизайн", "новогоднее оформление", "дизайн", "оформление"):
+        if target.startswith(prefix):
+            target = target[len(prefix):].strip(" ,.:-")
+            break
+    current = await asyncio.to_thread(_setting_get_sync, THEME_SETTING_KEY) or "classic"
+    current_value = "newyear" if str(current).strip().lower() in ("newyear", "new_year", "ny", "1", "on") else "classic"
+    if not target:
+        state = "🎄 новогоднее" if current_value == "newyear" else "обычное"
+        return await message.answer(
+            f"Оформление аппки сейчас: <b>{state}</b>\n\n"
+            "Включить новогоднее: <code>дизайн новогодний</code>\n"
+            "Вернуть обычное: <code>дизайн обычный</code>\n\n"
+            "То же самое есть кнопкой в админ-панели приложения.",
+            parse_mode="HTML")
+    value = _theme_word_to_value(target)
+    if not value:
+        return await message.answer(
+            "Не понял оформление. Можно: <code>дизайн новогодний</code> "
+            "или <code>дизайн обычный</code>.", parse_mode="HTML")
+    ok = await asyncio.to_thread(_setting_set_sync, THEME_SETTING_KEY, value)
+    if not ok:
+        return await message.answer("❌ Не сохранилось — база не ответила. Попробуй ещё раз.")
+    logger.warning("Оформление аппки: %s (админ %s)", value, message.from_user.id)
+    if value == "newyear":
+        return await message.answer(
+            "🎄 <b>Новогоднее оформление включено.</b>\n\n"
+            "Гирлянда, ёлка, снег и подарки уже у всех игроков — приложение подхватит "
+            "в течение 10 секунд, перезаходить не нужно.\n\n"
+            "Вернуть обычный вид: <code>дизайн обычный</code>", parse_mode="HTML")
+    return await message.answer(
+        "✅ <b>Обычное оформление вернулось.</b> Новогодний декор убран у всех игроков.",
+        parse_mode="HTML")
+
+
 # ================= АДМИН: ТЕХРАБОТЫ (задача 71) =================
 # «Поставь всё на тех работы» — тумблер, а не деплой: `техработы вкл` закрывает
 # игру всем, кроме ADMIN_IDS (и в чате, и в Mini App), `техработы выкл` снова
