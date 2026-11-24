@@ -275,6 +275,9 @@ let loveState = null;
 let profileStats = null;
 // Задача 75: список игроков для админ-вкладки (обновляется при её открытии).
 let adminPlayers = [];
+// Задача 87: какие игры админ закрыл рубильниками (приходит в профиле).
+// Игроку карточка помечается «🛠️ выключено», и внутрь не пускаем.
+let closedGames = [];
 let profileStatsAt = 0;
 // Задача 79: 60 секунд — это и был баг «сыграл, а в профиле пусто»: игрок
 // открывал профиль сразу после игры, а в кэше лежал ответ ДО ставки. Теперь
@@ -677,6 +680,9 @@ function applyProfile(data) {
         if (balance >= upgradeBalanceFloor && balance > limit) balance = limit;
     }
     keys = Number(data.keys) || 0;
+    // Задача 87: админ видит игры открытыми — он всегда может проверить фикс.
+    closedGames = (isAdmin || !Array.isArray(data.games_closed)) ? [] : data.games_closed.map(String);
+    if (typeof renderClosedGames === 'function') renderClosedGames();
     inventory = Array.isArray(data.inventory) ? data.inventory : [];
     lastChestTime = Number(data.last_chest) || 0;
     // Задача 43: «Дней в игре» — это дни с ПЕРВОГО ЗАХОДА В АППКУ.
@@ -822,6 +828,15 @@ function closeAdminPanel() {
     switchTab(back, null);
 }
 
+// ================= АДМИН-ПАНЕЛЬ 2.0 (задача 87) =================
+// Заказчик: «сделать панель администрации более расширенной». Здесь:
+//   • топ-10 по балансу полными числами (раньше формат резал цифру в «1 234 5…»);
+//   • поиск игрока по @username/ID и его полная карточка (баланс, дни, игры,
+//     рефералы списком);
+//   • чёрная кнопка «Статистика бота» — раскрывается плашкой с цифрами;
+//   • «Настройки игр» — включить/выключить каждую игру отдельно.
+// Все данные — с сервера (/api/admin/*), клиент ничего не досчитывает.
+
 async function renderAdminPlayers() {
     const box = document.getElementById('admin-players');
     if (!box) return;
@@ -831,29 +846,330 @@ async function renderAdminPlayers() {
     }
     box.innerHTML = '<div class="ach-empty">Загрузка…</div>';
     try {
-        const res = await fetch(`${API_URL}/api/global_top`);
-        const payload = await res.json().catch(() => null);
-        const users = Array.isArray(payload) ? payload : [];
-        adminPlayers = users.slice(0, 10).map(u => ({
-            name: u.username || `id${u.user_id || ''}`,
-            coins: _safeCoins(u.coins),
+        const data = await apiPost('/api/admin/top', { initData: tg.initData });
+        const players = (data && Array.isArray(data.players)) ? data.players : [];
+        adminPlayers = players.map(player => ({
+            place: Number(player.place) || 0,
+            name: player.username || `id${player.user_id || ''}`,
+            user_id: player.user_id,
+            coins: _safeCoins(player.coins),
         }));
     } catch (e) {
         adminPlayers = [];
+        const note = document.getElementById('admin-top-note');
+        if (note) note.textContent = '';
+        box.innerHTML = `<div class="ach-empty">${escapeHtml(e && e.message ? e.message : 'Список игроков недоступен')}</div>`;
+        return;
     }
+    const note = document.getElementById('admin-top-note');
+    if (note) note.textContent = adminPlayers.length ? `${adminPlayers.length} игроков` : '';
     box.innerHTML = adminPlayers.length ? adminPlayersHtml()
-        : '<div class="ach-empty">Список игроков временно недоступен</div>';
+        : '<div class="ach-empty">Пока нет ни одного игрока</div>';
+}
+
+// Полное число с разрядами: formatCoins не режет и не округляет в «…».
+function adminFullCoins(value) {
+    return `${formatCoins(value)} коинов`;
 }
 
 function adminPlayersHtml() {
     return adminPlayers.map((player, index) => `
-        <div class="ach-row">
-            <span class="ach-icon">${index + 1}</span>
-            <span class="ach-body"><span class="ach-label">${escapeHtml(player.name)}</span></span>
-            <span class="ach-value">${formatCoins(player.coins)}</span>
+        <div class="admin-top-row">
+            <span class="admin-top-place">${player.place || index + 1}</span>
+            <span class="admin-top-body">
+                <span class="admin-top-name">${escapeHtml(player.name)}</span>
+                <span class="admin-top-coins">${escapeHtml(adminFullCoins(player.coins))}</span>
+            </span>
         </div>
     `).join('');
 }
+
+// ---------- Поиск игрока ----------
+let adminSearchBusy = false;
+let adminSearchResults = [];
+let adminOpenPlayerId = null;
+
+async function searchAdminPlayer() {
+    if (adminSearchBusy) return;
+    const input = document.getElementById('admin-search-input');
+    const box = document.getElementById('admin-search-results');
+    const card = document.getElementById('admin-player-card');
+    const query = String((input && input.value) || '').trim();
+    if (!query) {
+        if (box) { box.hidden = true; box.innerHTML = ''; }
+        if (card) { card.hidden = true; card.innerHTML = ''; }
+        tg.showAlert('Введи @username или ID игрока');
+        return;
+    }
+    adminSearchBusy = true;
+    const btn = document.getElementById('admin-search-btn');
+    if (btn) { btn.disabled = true; btn.textContent = 'Ищем…'; }
+    if (card) { card.hidden = true; card.innerHTML = ''; }
+    adminOpenPlayerId = null;
+    try {
+        const data = await apiPost('/api/admin/player', { initData: tg.initData, query });
+        adminSearchResults = (data && Array.isArray(data.found)) ? data.found : [];
+        if (box) {
+            box.hidden = false;
+            if (!adminSearchResults.length) {
+                box.innerHTML = '<div class="ach-empty">Такого игрока нет ни в аппке, ни в боте</div>';
+            } else {
+                box.innerHTML = adminSearchResults.map(player => `
+                    <div class="admin-search-hit" data-user-id="${escapeHtml(String(player.user_id))}"
+                         onclick="openAdminPlayerCard(${Number(player.user_id)})">
+                        <span>
+                            <span class="hit-name">@${escapeHtml(player.username || '')}</span>
+                            <span class="hit-open">${player.is_admin ? ' · админ' : ''} · открыть профиль</span>
+                        </span>
+                        <span class="hit-coins">${escapeHtml(adminFullCoins(_safeCoins(player.coins)))}</span>
+                    </div>
+                `).join('');
+            }
+        }
+        // Один результат — сразу открываем карточку, чтобы не жать дважды.
+        if (adminSearchResults.length === 1) {
+            openAdminPlayerCard(Number(adminSearchResults[0].user_id));
+        }
+    } catch (e) {
+        if (box) {
+            box.hidden = false;
+            box.innerHTML = `<div class="ach-empty">${escapeHtml(e && e.message ? e.message : 'Поиск не сработал')}</div>`;
+        }
+    } finally {
+        adminSearchBusy = false;
+        if (btn) { btn.disabled = false; btn.textContent = 'Найти'; }
+    }
+}
+
+function adminDateText(raw) {
+    if (!raw) return '—';
+    const stamp = Date.parse(raw);
+    if (!Number.isFinite(stamp)) return '—';
+    const date = new Date(stamp);
+    const day = String(date.getDate()).padStart(2, '0');
+    const month = String(date.getMonth() + 1).padStart(2, '0');
+    return `${day}.${month}.${date.getFullYear()}`;
+}
+
+function adminRefStatusText(status) {
+    const value = String(status || 'paid').toLowerCase();
+    if (value === 'paid') return 'награда выдана';
+    if (value === 'pending') return 'ждёт подтверждения';
+    return value;
+}
+
+function adminPlayerCardHtml(player) {
+    const rows = [
+        ['💰 Баланс', adminFullCoins(_safeCoins(player.coins))],
+        ['🔑 Ключи', formatCoins(_safeCoins(player.keys))],
+        ['📅 Дней в игре', `${Number(player.days_in_game) || 0} дн.`],
+        ['🆔 ID', String(player.user_id || '—')],
+        ['🎮 Игр сыграно', formatCoins(_safeCoins(player.games_played))],
+        ['🏆 Побед', formatCoins(_safeCoins(player.games_won))],
+        ['💸 Потрачено', adminFullCoins(_safeCoins(player.coins_spent))],
+        ['📈 Заработано', adminFullCoins(_safeCoins(player.coins_earned))],
+        ['🚀 Лучший занос', adminFullCoins(_safeCoins(player.best_win))],
+        ['👥 Приглашено', `${formatCoins(_safeCoins(player.referrals_count))} чел.`],
+        ['🎁 За рефералов', adminFullCoins(_safeCoins(player.referrals_reward))],
+        ['📥 Первый заход', adminDateText(player.first_seen)],
+    ];
+    const refs = Array.isArray(player.referrals) ? player.referrals : [];
+    const refsHtml = refs.length ? `
+        <div class="admin-refs">
+            <div class="admin-refs-title">👥 Рефералы (${refs.length})</div>
+            ${refs.map(ref => `
+                <div class="admin-ref-row">
+                    <span>@${escapeHtml(ref.username || ('id' + ref.user_id))}</span>
+                    <span class="ref-meta">${ref.in_app ? 'в аппке' : 'только бот'} · ${escapeHtml(adminRefStatusText(ref.status))}${Number(ref.reward) > 0 ? ' · +' + formatCoins(_safeCoins(ref.reward)) : ''}</span>
+                </div>
+            `).join('')}
+        </div>` : '<div class="admin-refs"><div class="admin-refs-title">👥 Рефералов пока нет</div></div>';
+    const badge = player.banned
+        ? '<span class="admin-player-badge is-banned">забанен</span>'
+        : (player.is_admin ? '<span class="admin-player-badge">админ</span>' : '');
+    return `
+        <div class="admin-player-head">
+            <span class="admin-player-name">@${escapeHtml(player.username || ('id' + player.user_id))}</span>
+            ${badge}
+        </div>
+        <div class="admin-player-rows">
+            ${rows.map(([label, value]) => `
+                <div class="admin-player-row">
+                    <span class="admin-player-label">${escapeHtml(label)}</span>
+                    <span class="admin-player-value">${escapeHtml(value)}</span>
+                </div>`).join('')}
+        </div>
+        ${refsHtml}
+    `;
+}
+
+async function openAdminPlayerCard(userId) {
+    const id = Number(userId);
+    if (!Number.isFinite(id) || id <= 0) return;
+    const card = document.getElementById('admin-player-card');
+    if (!card) return;
+    adminOpenPlayerId = id;
+    card.hidden = false;
+    card.innerHTML = '<div class="ach-empty">Открываем профиль…</div>';
+    try {
+        const data = await apiPost('/api/admin/player_card', { initData: tg.initData, user_id: id });
+        if (adminOpenPlayerId !== id) return;      // уже открыли другого
+        const player = data && data.player;
+        if (!player) { card.innerHTML = '<div class="ach-empty">Профиль не найден</div>'; return; }
+        card.innerHTML = adminPlayerCardHtml(player);
+    } catch (e) {
+        card.innerHTML = `<div class="ach-empty">${escapeHtml(e && e.message ? e.message : 'Профиль не открылся')}</div>`;
+    }
+}
+
+// ---------- Статистика бота ----------
+let adminBotStats = null;
+let adminBotStatsBusy = false;
+
+function adminStatValue(value) {
+    if (value === null || value === undefined) return '—';
+    return formatCoins(value);
+}
+
+function adminBotStatsHtml(stats) {
+    const rows = [
+        ['👥 Игроков всего', adminStatValue(stats.users)],
+        ['🆕 За 24 часа', adminStatValue(stats.new_24h)],
+        ['🗓 За 7 дней', adminStatValue(stats.new_7d)],
+        ['💰 Коинов в системе', adminStatValue(stats.coins_in_system)],
+        ['📊 Средний баланс', adminStatValue(stats.avg_balance)],
+        ['🥇 Топ-баланс', adminStatValue(stats.top_balance)],
+        ['🔑 Ключей в системе', adminStatValue(stats.keys_in_system)],
+        ['👥 Рефералов', adminStatValue(stats.referrals)],
+        ['✅ Рефералов с наградой', adminStatValue(stats.referrals_paid)],
+        ['🎁 Выплачено рефералам', adminStatValue(stats.referrals_reward)],
+        ['💗 Пар', adminStatValue(stats.pairs)],
+        ['💔 Одиноких', adminStatValue(stats.solo_love)],
+        ['⭐ Покупок за Stars', adminStatValue(stats.stars_payments)],
+        ['⭐ Звёзд всего', adminStatValue(stats.stars_total)],
+        ['🛠️ Апгрейдов', adminStatValue(stats.upgrade_spins)],
+        ['💵 Поставлено в апгрейде', adminStatValue(stats.upgrade_bets)],
+        ['💸 Выплачено в апгрейде', adminStatValue(stats.upgrade_paid)],
+        ['🚀 Раундов Ракеты', adminStatValue(stats.crash_rounds)],
+        ['🏒 Снимков арены', stats.arena_rounds_saved ? 'да' : 'нет'],
+    ];
+    return rows.map(([label, value]) => `
+        <div class="admin-player-row">
+            <span class="admin-player-label">${escapeHtml(label)}</span>
+            <span class="admin-player-value">${escapeHtml(value)}</span>
+        </div>
+    `).join('');
+}
+
+async function loadAdminBotStats(force) {
+    const body = document.getElementById('admin-botstats-body');
+    if (!body) return;
+    if (adminBotStats && !force) { body.innerHTML = adminBotStatsHtml(adminBotStats); return; }
+    body.innerHTML = '<div class="ach-empty">Считаем…</div>';
+    try {
+        const data = await apiPost('/api/admin/bot_stats', { initData: tg.initData });
+        adminBotStats = (data && data.stats) ? data.stats : null;
+        body.innerHTML = adminBotStats
+            ? adminBotStatsHtml(adminBotStats)
+            : '<div class="ach-empty">Статистика недоступна</div>';
+    } catch (e) {
+        body.innerHTML = `<div class="ach-empty">${escapeHtml(e && e.message ? e.message : 'Статистика недоступна')}</div>`;
+    }
+}
+
+function toggleAdminBotStats() {
+    const panel = document.getElementById('admin-botstats-panel');
+    const btn = document.getElementById('admin-botstats-btn');
+    if (!panel) return;
+    const open = panel.hidden;
+    panel.hidden = !open;
+    if (btn) btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+    if (open) loadAdminBotStats(true);
+}
+
+// ---------- Настройки игр (рубильники) ----------
+let adminGames = [];
+let adminGamesBusy = false;
+
+async function loadAdminGames(force) {
+    const list = document.getElementById('admin-games-list');
+    if (!list) return;
+    if (adminGames.length && !force) { renderAdminGames(); return; }
+    list.innerHTML = '<div class="ach-empty">Загрузка…</div>';
+    try {
+        const data = await apiPost('/api/admin/games', { initData: tg.initData });
+        adminGames = (data && Array.isArray(data.games)) ? data.games : [];
+    } catch (e) {
+        adminGames = [];
+        list.innerHTML = `<div class="ach-empty">${escapeHtml(e && e.message ? e.message : 'Настройки игр недоступны')}</div>`;
+        return;
+    }
+    renderAdminGames();
+}
+
+function renderAdminGames() {
+    const list = document.getElementById('admin-games-list');
+    if (!list) return;
+    if (!adminGames.length) {
+        list.innerHTML = '<div class="ach-empty">Список игр пуст</div>';
+        return;
+    }
+    list.innerHTML = adminGames.map(game => {
+        const off = Boolean(game.disabled);
+        return `
+            <div class="admin-game-row">
+                <span>
+                    <span class="admin-game-title">${escapeHtml(game.title || game.mode)}</span>
+                    <span class="admin-game-state${off ? ' is-off' : ''}">${off ? 'выключена для игроков' : 'включена'}</span>
+                </span>
+                <button class="admin-game-btn${off ? ' is-off' : ''}" type="button"
+                        data-mode="${escapeHtml(game.mode)}" data-disabled="${off ? '1' : '0'}"
+                        onclick="toggleAdminGame(this)">${off ? 'Включить' : 'Выключить'}</button>
+            </div>
+        `;
+    }).join('');
+}
+
+async function toggleAdminGame(button) {
+    if (!button || adminGamesBusy) return;
+    const mode = button.getAttribute('data-mode') || '';
+    const nowOff = button.getAttribute('data-disabled') === '1';
+    const wantDisabled = !nowOff;
+    const game = adminGames.find(item => item.mode === mode);
+    const title = (game && game.title) || mode;
+    adminGamesBusy = true;
+    const label = button.textContent;
+    button.disabled = true;
+    button.textContent = 'Сохраняем…';
+    try {
+        const data = await apiPost('/api/admin/set_game',
+            { initData: tg.initData, mode, disabled: wantDisabled });
+        const disabled = Boolean(data && data.disabled);
+        adminGames = adminGames.map(item => item.mode === mode
+            ? Object.assign({}, item, { disabled }) : item);
+        renderAdminGames();
+        tg.showAlert(disabled
+            ? `🛠️ ${title}: выключено для всех игроков.`
+            : `✅ ${title}: снова включено для всех.`);
+    } catch (e) {
+        tg.showAlert(e && e.message ? e.message : 'Не удалось переключить игру');
+        button.disabled = false;
+        button.textContent = label;
+    } finally {
+        adminGamesBusy = false;
+    }
+}
+
+function toggleAdminGames() {
+    const panel = document.getElementById('admin-games-panel');
+    const btn = document.getElementById('admin-games-btn');
+    if (!panel) return;
+    const open = panel.hidden;
+    panel.hidden = !open;
+    if (btn) btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+    if (open) loadAdminGames(true);
+}
+
 
 // ============ КД РП: КНОПКА АДМИНА (задача 79) ============
 // Заказчик: «сделай кнопку в админ панели в апке чтобы я мог переключать есть
@@ -1104,7 +1420,23 @@ function switchTab(tabId, element) {
         // Задача 79: состояние КД РП читаем с сервера (его же читает бот).
         loadAdminLoveCooldown();
         adminPlayers = [];
+        adminBotStats = null;
+        adminGames = [];
         renderAdminPlayers();
+        // Задача 87: плашки статистики бота и настроек игр открываются кнопками —
+        // при новом входе в панель прячем их, чтобы не тянуть лишние запросы.
+        const botPanel = document.getElementById('admin-botstats-panel');
+        if (botPanel) botPanel.hidden = true;
+        const botBtn = document.getElementById('admin-botstats-btn');
+        if (botBtn) botBtn.setAttribute('aria-expanded', 'false');
+        const gamesPanel = document.getElementById('admin-games-panel');
+        if (gamesPanel) gamesPanel.hidden = true;
+        const gamesBtn = document.getElementById('admin-games-btn');
+        if (gamesBtn) gamesBtn.setAttribute('aria-expanded', 'false');
+        const searchBox = document.getElementById('admin-search-results');
+        if (searchBox) { searchBox.hidden = true; searchBox.innerHTML = ''; }
+        const playerCard = document.getElementById('admin-player-card');
+        if (playerCard) { playerCard.hidden = true; playerCard.innerHTML = ''; }
         return;
     }
     if (tabId === 'top') { loadGlobalTop(); }
@@ -1134,9 +1466,74 @@ function switchTab(tabId, element) {
     }
 }
 
+// ================= ЗАКРЫТЫЕ ИГРЫ (задача 87) =================
+// Админ может выключить одну игру (или несколько) на время фикса бага.
+// Закрытая игра помечается на карточке и не открывается; ставка всё равно
+// проверится на сервере (там же рубильник), это только для понятности.
+const GAME_MODE_TITLES = {
+    mines: 'Мины', crash: 'Ракета', arena_normal: 'Арена',
+    arena_team: 'Арена', upgrade: 'Апгрейд', chests: 'Сундуки',
+    shop: 'Магазин', love: 'Love',
+};
+
+function gameModesFor(game) {
+    if (game === 'hockey') return ['arena_normal', 'arena_team'];
+    return [String(game || '')];
+}
+
+function gameClosed(game) {
+    const modes = gameModesFor(game);
+    return modes.some(mode => closedGames.indexOf(mode) >= 0);
+}
+
+function closedGameTitle(game) {
+    const modes = gameModesFor(game);
+    const mode = modes.find(item => closedGames.indexOf(item) >= 0) || modes[0];
+    return GAME_MODE_TITLES[mode] || 'Игра';
+}
+
+function closedGameMessage(game) {
+    return `🛠️ ${closedGameTitle(game)}: временно выключено. Скоро вернём — загляни позже.`;
+}
+
+// Помечаем карточки игр: закрытая — приглушённая и с плашкой «выключено».
+function renderClosedGames() {
+    ['mines', 'crash', 'hockey'].forEach(game => {
+        const card = document.querySelector(`.game-row[onclick="openGame('${game}')"]`);
+        if (!card) return;
+        const off = gameClosed(game);
+        card.classList.toggle('game-closed', off);
+        let badge = card.querySelector('.game-closed-badge');
+        if (off && !badge) {
+            badge = document.createElement('span');
+            badge.className = 'game-closed-badge';
+            badge.textContent = '🛠️ выключено';
+            card.appendChild(badge);
+        } else if (!off && badge) {
+            badge.remove();
+        }
+    });
+    const upgradeCard = document.getElementById('game-card-upgrade');
+    if (upgradeCard) {
+        const off = gameClosed('upgrade');
+        upgradeCard.classList.toggle('game-closed', off);
+        let badge = upgradeCard.querySelector('.game-closed-badge');
+        if (off && !badge) {
+            badge = document.createElement('span');
+            badge.className = 'game-closed-badge';
+            badge.textContent = '🛠️ выключено';
+            upgradeCard.appendChild(badge);
+        } else if (!off && badge) {
+            badge.remove();
+        }
+    }
+}
+
 function openGame(game) {
     // Техработы: игры не открываются, даже если экран кто-то «дожал» вручную.
     // Задача 67: игры открываются всем, canPlay здесь всегда true.
+    // Задача 87: выключенная админом игра тоже не открывается.
+    if (gameClosed(game)) return tg.showAlert(closedGameMessage(game));
     document.querySelectorAll('.winner-modal, .chest-win-modal').forEach(m => m.classList.remove('active'));
     document.getElementById('main-header').style.display = 'none';
     // Баннер подписки в игре не нужен: место занимает поле игры.
@@ -1786,7 +2183,12 @@ function renderAchievements() {
         const dbReady = !(profileStats && profileStats.db && profileStats.db.ready === false);
         warn.hidden = dbReady;
         if (!dbReady) {
-            warn.textContent = '⚠️ Статистика не пишется: примени миграцию Supabase (файл 20261203000000_stats_fix_and_love_cooldown_switch.sql).';
+            // Задача 87: игрок не должен читать имя SQL-файла — он его всё равно
+            // не применит. Честный текст: цифры копятся, но база ещё не готова.
+            // Админ видит точный файл миграции в панели (Настройки игр).
+            warn.textContent = isAdmin
+                ? '⚠️ Статистика не пишется: примени миграцию 20261207000000_admin_panel_and_stats_fix.sql (SQL Editor → Run).'
+                : '⚠️ Статистика пока копится не полностью — администратор уже в курсе.';
         }
     }
     const rows = achievementRows();
@@ -3741,6 +4143,8 @@ async function syncUpgradeBalanceFromLog() {
 }
 
 async function openUpgrade() {
+    // Задача 87: апгрейд могли выключить рубильником на время фикса.
+    if (gameClosed('upgrade')) { renderClosedGames(); return tg.showAlert(closedGameMessage('upgrade')); }
     // Задача 67: апгрейд открыт всем без исключений — админ-проверок больше нет.
     if (!upgradeAccessGranted()) {
         return tg.showAlert(accessBlockedText());

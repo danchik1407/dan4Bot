@@ -50,6 +50,7 @@ from love import (
 )
 from love import _coins_fmt
 import player_stats
+import game_flags
 from db_schema import audit as db_schema_audit, format_report as db_schema_report
 from shop_catalog import (
     DAILY_LIMITS_ENABLED,
@@ -481,6 +482,43 @@ PUBLIC_PREFIXES = (
     "разбан", "апбан", "список банов", "адм помощь", "адмпомощь",
 )
 
+# Задача 87: рубильники отдельных игр (game_settings). Читаем один раз на
+# апдейт через game_flags (у него свой кэш на 10 секунд).
+_GAME_FLAGS_BOT_CACHE = {"value": False, "at": 0.0}
+_GAME_FLAGS_BOT_TTL = 10.0
+
+
+def _game_flags_active() -> bool:
+    """Закрыта ли хотя бы одна игра (тогда в чате фильтруем игровые команды)."""
+    now = time.time()
+    if (now - float(_GAME_FLAGS_BOT_CACHE["at"] or 0)) < _GAME_FLAGS_BOT_TTL:
+        return bool(_GAME_FLAGS_BOT_CACHE["value"])
+    flags = game_flags.read_disabled(supabase)
+    value = any(bool(item) for item in flags.values())
+    _GAME_FLAGS_BOT_CACHE.update({"value": value, "at": now})
+    return value
+
+
+_GAME_COMMAND_PREFIXES = (
+    "кубы", "мины", "рулетка", "ракета", "арена", "капсул", "сундук", "сундуки",
+    "магазин", "апгрейд", "love", "любовь", "обнять", "поцеловать", "флирт",
+    "погладить", "свидание", "подарить", "жениться", "свести", "развести",
+    "+пополнить карман", "забрать", "промо", "+промокод",
+)
+
+
+def _is_game_command(message) -> bool:
+    """Игровая команда в чате? Нужна, чтобы закрытая игра не давала награду."""
+    if message is None:
+        return False
+    low = strip_prefix(message_text(message)).lower().replace("ё", "е").strip()
+    if not low:
+        return False
+    if low.startswith(("!", "/")):
+        low = low.lstrip("!/").strip()
+    return low.startswith(_GAME_COMMAND_PREFIXES)
+
+
 ADMINS_ONLY_BOT_MESSAGE = ("🛠️ <b>Технические работы</b>\n\n"
                            "Игра временно доступна только администраторам. "
                            "Скоро откроем для всех — спасибо за терпение 💙")
@@ -512,7 +550,22 @@ class AdminOnlyMiddleware(BaseMiddleware):
 
     def _allow(self, event) -> bool:
         if not (ADMINS_ONLY_BOT or maintenance_bot_enabled()):
-            return True
+            # Задача 87: техработы выключены, но отдельные игры могли закрыть
+            # рубильником — тогда в чате работает только админ и обычные
+            # разговоры (без игр). Так «закрыть одну игру» честно закрывает её
+            # и в боте, а не только в приложении.
+            try:
+                if not _game_flags_active():
+                    return True
+            except Exception:  # noqa: BLE001 — флаги не прочитались: играем
+                return True
+            actor = event.from_user if getattr(event, "from_user", None) else None
+            if actor is not None and is_admin(int(actor.id)):
+                return True
+            if isinstance(event, CallbackQuery):
+                return False
+            message = event if isinstance(event, Message) else getattr(event, "message", None)
+            return _is_game_command(message) is False
         actor = getattr(event, "from_user", None)
         if actor is None:
             # Пост в канале или служебный апдейт: команд там нет, а сообщения
@@ -3022,6 +3075,123 @@ async def _resolve_pair_member(token):
     return None, token
 
 
+# ================= АДМИН: РУБИЛЬНИКИ ИГР (задача 87) =================
+# Заказчик: «чтобы я мог отдельно временно закрывать какую-либо игру, может,
+# одну, может две сразу, может три, может все, и также их потом включать».
+# Команды:
+#   игры                  — что сейчас включено/выключено
+#   выключить игру мины   — закрыть одну игру (можно несколько через запятую)
+#   включить игру мины    — открыть обратно
+#   выключить игры все    — закрыть все игры сразу
+# Значение живёт в game_settings, поэтому его видит и Mini App: там те же
+# тумблеры в панели «Настройки игр».
+_GAME_ALIASES = {
+    "мины": "mines", "мина": "mines", "mines": "mines",
+    "ракета": "crash", "ракету": "crash", "crash": "crash", "краш": "crash",
+    "арена": "arena", "арену": "arena", "хоккей": "arena", "arena": "arena",
+    "арена обычная": "arena_normal", "обычная арена": "arena_normal",
+    "арена командная": "arena_team", "командная арена": "arena_team",
+    "апгрейд": "upgrade", "upgrade": "upgrade",
+    "сундуки": "chests", "сундук": "chests", "chests": "chests",
+    "магазин": "shop", "shop": "shop",
+    "love": "love", "любовь": "love", "рп": "love",
+}
+
+
+def _game_mode_from_word(word: str) -> str:
+    text = str(word or "").strip().lower().replace("ё", "е")
+    if text in _GAME_ALIASES:
+        return _GAME_ALIASES[text]
+    return text if text in game_flags.MODE_IDS else ""
+
+
+def _games_status_text() -> str:
+    flags = game_flags.summary(supabase)
+    lines = []
+    for mode, info in flags.items():
+        mark = "🔴 выключена" if info["disabled"] else "🟢 включена"
+        lines.append(f"{info['title']} — {mark}")
+    closed = [info["title"] for info in flags.values() if info["disabled"]]
+    head = ("🛠️ <b>Игры закрыты:</b> " + ", ".join(closed)) if closed else "✅ <b>Все игры открыты.</b>"
+    return (head + "\n\n" + "\n".join(lines) +
+            "\n\nЗакрыть: <code>выключить игру мины</code> (можно несколько через запятую)\n"
+            "Открыть: <code>включить игру мины</code> · всё сразу: <code>выключить игры все</code>")
+
+
+@dp.message(F.text.func(lambda t: strip_prefix(t).lower().replace("ё", "е") in
+                        ("игры", "!игры", "/игры", "игра", "!игра", "настройки игр",
+                         "!настройки игр", "статус игр")))
+async def cmd_games_status(message: Message):
+    if not message.from_user or message.from_user.is_bot:
+        return
+    if not is_admin(message.from_user.id):
+        return await message.answer("❌ Эта команда доступна только администраторам бота.")
+    return await message.answer(await asyncio.to_thread(_games_status_text), parse_mode="HTML")
+
+
+@dp.message(F.text.func(lambda t: strip_prefix(t).lower().replace("ё", "е").startswith(
+    ("выключить игру", "выключить игры", "!выключить игру", "/выключить игру",
+     "закрыть игру", "закрыть игры", "включить игру", "включить игры",
+     "!включить игру", "/включить игру", "открыть игру", "открыть игры"))))
+async def cmd_game_switch(message: Message):
+    if not message.from_user or message.from_user.is_bot:
+        return
+    if not is_admin(message.from_user.id):
+        return await message.answer("❌ Эта команда доступна только администраторам бота.")
+    raw = strip_prefix(message_text(message)).lower().replace("ё", "е")
+    raw = raw.lstrip("!/").strip()
+    disable = raw.startswith(("выключить", "закрыть"))
+    words = raw.split(" ", 2)
+    target = words[2].strip() if len(words) > 2 else ""
+    if target in ("все", "всё", "все игры", "всё сразу"):
+        modes = list(game_flags.MODE_IDS)
+    else:
+        parts = [part.strip() for part in re.split(r"[,/]| и ", target) if part.strip()]
+        modes = []
+        unknown = []
+        for part in parts:
+            mode = _game_mode_from_word(part)
+            if mode:
+                modes.append(mode)
+            else:
+                unknown.append(part)
+        if unknown:
+            return await message.answer(
+                "❌ Не понял игру: " + ", ".join(unknown) +
+                "\n\nМожно: мины, ракета, арена, апгрейд, сундуки, магазин, love.\n"
+                "Формат: <code>выключить игру мины</code>", parse_mode="HTML")
+    if not modes:
+        return await message.answer(
+            "Формат: <code>выключить игру мины</code> или <code>включить игру мины</code>.\n"
+            "Несколько сразу: <code>выключить игру мины, ракета</code>.\n"
+            "Все сразу: <code>выключить игры все</code>", parse_mode="HTML")
+    done, failed = [], []
+    for mode in modes:
+        ok = await asyncio.to_thread(_game_switch_sync, mode, disable)
+        (done if ok else failed).append(game_flags.TITLES.get(mode, mode))
+    _GAME_FLAGS_BOT_CACHE.update({"value": True if disable else False, "at": 0.0})
+    logger.warning("Игры %s (админ %s): %s",
+                   "ВЫКЛЮЧЕНЫ" if disable else "включены", message.from_user.id, ", ".join(done))
+    text = []
+    if done:
+        text.append(("🛠️ <b>Выключено:</b> " if disable else "✅ <b>Включено:</b> ") + ", ".join(done))
+        text.append("Игроки сразу видят, что режим закрыт — и в боте, и в приложении. "
+                    "Админ играет всегда.")
+    if failed:
+        text.append("❌ Не сохранилось: " + ", ".join(failed) + " — попробуй ещё раз.")
+    if not disable and done:
+        text.append("Открыть/закрыть другие: <code>игры</code>")
+    return await message.answer("\n\n".join(text), parse_mode="HTML")
+
+
+def _game_switch_sync(mode: str, disable: bool) -> bool:
+    keys = game_flags.keys_for(mode) or (mode,)
+    ok = True
+    for key in keys:
+        ok = game_flags.write_mode(supabase, key, disable) and ok
+    return ok
+
+
 # ================= АДМИН: ТЕХРАБОТЫ (задача 71) =================
 # «Поставь всё на тех работы» — тумблер, а не деплой: `техработы вкл` закрывает
 # игру всем, кроме ADMIN_IDS (и в чате, и в Mini App), `техработы выкл` снова
@@ -3069,6 +3239,7 @@ async def cmd_maintenance(message: Message):
         "Закрыть игру: <code>техработы вкл</code>", parse_mode="HTML")
 
 
+# ================= АДМИН: «СВЕСТИ ПАРУ» =================
 @dp.message(F.text.func(lambda t: strip_prefix(t).lower().replace("ё", "е").startswith(
     _PAIR_SET_PREFIXES)))
 async def cmd_pair_set(message: Message):
@@ -4132,6 +4303,10 @@ async def cmd_rp_action(message: Message):
     action, meta = rp_action_for(strip_prefix(message_text(message)))
     if not action:
         return
+    # Задача 87: «Love (РП)» можно закрыть рубильником — тогда действие не
+    # начисляет ни лав, ни коины. Админ проверяет фиксы как обычно.
+    if not is_admin(message.from_user.id) and game_flags.closed(supabase, "love"):
+        return await message.answer(game_flags.message("love"), parse_mode="HTML")
     actor_id = message.from_user.id
     target_id, target_name = await resolve_partner_target(message)
     row = await get_relationship(actor_id)
@@ -4347,6 +4522,13 @@ async def cmd_admin_panel(message: Message):
     if not message.from_user or not is_admin(message.from_user.id):
         # Не админ — молчим: команда скрытая, палить её незачем.
         return
+    # Задача 87: в панели видно, какие игры закрыты рубильниками — без этого
+    # админ не понимает, почему игроки жалуются на «выключено».
+    try:
+        flags = await asyncio.to_thread(game_flags.summary, supabase)
+        closed = [info["title"] for info in flags.values() if info["disabled"]]
+    except Exception:  # noqa: BLE001 — панель важнее списка
+        closed = []
     stats = await asyncio.to_thread(_admin_stats_sync)
     text = (
         "👑 <b>АДМИН-ПАНЕЛЬ</b>\n━━━━━━━━━━━━━━━━━━━━\n\n"
@@ -4355,9 +4537,13 @@ async def cmd_admin_panel(message: Message):
         f"🛠️ Апгрейдов: <b>{stats['spins']}</b> (поставлено {stats['bets']:,}, выплачено {stats['paid']:,})\n"
         f"🚀 Раундов Ракеты: <b>{stats['crash_rounds']}</b>\n"
         f"💗 Пар: <b>{stats['pairs']}</b> · 💔 Одиноких: <b>{stats['solo']}</b> · "
-        f"👥 Рефералов: <b>{stats['referrals']}</b>\n\n"
+        f"👥 Рефералов: <b>{stats['referrals']}</b>\n"
+        + (f"🔴 Выключены игры: <b>{', '.join(closed)}</b>\n" if closed else "🟢 Все игры включены\n")
+        + "\n"
         "🎛 Шанс апгрейда зафиксирован: <b>90 / X</b> (x1.75 → 51.43%). "
         "Крутить его нечем — что видит игрок, по тому и играем.\n\n"
+        "Игры: <code>игры</code>, <code>выключить игру мины</code>, "
+        "<code>включить игру мины</code>\n"
         "Команды: <code>+пополнить карман @user 500</code>, <code>!апбан @user причина</code>, "
         "<code>разбан @user</code>"
     )

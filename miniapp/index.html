@@ -12,7 +12,7 @@
     <meta http-equiv="Pragma" content="no-cache">
     <meta http-equiv="Expires" content="0">
     <title>AURA GAME</title>
-    <link rel="stylesheet" href="style.css?v=aura-86">
+    <link rel="stylesheet" href="style.css?v=aura-87">
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
 </head>
 <body>
@@ -65,7 +65,7 @@
             <span id="user-name">Загрузка...</span>
             <button class="admin-gear" id="admin-gear" type="button" hidden
                     onclick="openAdminPanel(event)" aria-label="Админ-панель"
-                    title="Админ-панель">⚙️</button>
+                    title="Админ-панель">👑</button>
         </div>
         <div class="balance-badge">
             <img class="coin-img" src="coin.png" alt="монета">
@@ -354,7 +354,7 @@
         <section id="tab-admin" class="tab">
             <div class="page-header page-header-admin">
                 <button class="back-btn admin-back" type="button" onclick="closeAdminPanel()">← Назад</button>
-                <h2>⚙️ Админ-панель</h2>
+                <h2>👑 Админ-панель</h2>
             </div>
 
             <div class="profile-extra admin-maint-card" id="admin-maint-card" hidden>
@@ -385,17 +385,56 @@
                         onclick="toggleLoveCooldown()">Выключить КД</button>
             </div>
 
-            <div class="profile-extra">
+            <!-- Задача 87: топ по балансу полными числами (никаких «1 234 5…»),
+                 ниже — поиск игрока и его полная карточка. -->
+            <div class="profile-extra admin-card">
                 <div class="extra-head">
-                    <span class="extra-title">👥 Игроки</span>
-                    <span class="extra-value">топ по балансу</span>
-                </div>
-                <div class="extra-hint">
-                    Точная статистика бота — командой <b>стата бота</b> в личке бота,
-                    схема базы — командой <b>бд</b>.
+                    <span class="extra-title">🏆 Топ-10 по балансу</span>
+                    <span class="extra-value" id="admin-top-note">…</span>
                 </div>
                 <div class="admin-players" id="admin-players">
                     <div class="ach-empty">Загрузка…</div>
+                </div>
+                <div class="admin-search">
+                    <input type="search" id="admin-search-input" class="admin-search-input"
+                           placeholder="@username или ID" autocomplete="off" autocapitalize="off"
+                           spellcheck="false" enterkeyhint="search"
+                           onkeydown="if (event.key === 'Enter') searchAdminPlayer()">
+                    <button class="admin-search-btn" type="button" id="admin-search-btn"
+                            onclick="searchAdminPlayer()">Найти</button>
+                </div>
+                <div class="admin-search-results" id="admin-search-results" hidden></div>
+                <div class="admin-player-card" id="admin-player-card" hidden></div>
+            </div>
+
+            <!-- Статистика бота: длинная «премиум» кнопка, по нажатию
+                 раскрывается плашка с цифрами (как `стата бота` в боте). -->
+            <button class="admin-premium-btn" type="button" id="admin-botstats-btn"
+                    onclick="toggleAdminBotStats()" aria-expanded="false">
+                <span class="admin-premium-title">📊 Статистика бота</span>
+                <span class="admin-premium-chevron" id="admin-botstats-chevron">›</span>
+            </button>
+            <div class="admin-collapse" id="admin-botstats-panel" hidden>
+                <div class="admin-collapse-inner" id="admin-botstats-body">
+                    <div class="ach-empty">Загрузка…</div>
+                </div>
+            </div>
+
+            <!-- Настройки игр: включить/выключить каждую игру отдельно. -->
+            <button class="admin-games-btn" type="button" id="admin-games-btn"
+                    onclick="toggleAdminGames()" aria-expanded="false">
+                <span class="admin-games-title">🎛 Настройки игр</span>
+                <span class="admin-games-chevron" id="admin-games-chevron">›</span>
+            </button>
+            <div class="admin-collapse" id="admin-games-panel" hidden>
+                <div class="admin-collapse-inner">
+                    <div class="extra-hint" id="admin-games-hint">
+                        Выключенная игра закрыта для всех игроков. Админ играет всегда —
+                        чтобы проверить фикс. Техработы выше закрывают всё сразу.
+                    </div>
+                    <div class="admin-games-list" id="admin-games-list">
+                        <div class="ach-empty">Загрузка…</div>
+                    </div>
                 </div>
             </div>
         </section>
@@ -713,6 +752,6 @@
          маленькой кнопкой ⚙️ рядом с ником в шапке (см. #admin-gear). -->
     </nav>
 
-    <script src="app.js?v=aura-86" defer></script>
+    <script src="app.js?v=aura-87" defer></script>
 </body>
 </html>
