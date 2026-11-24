@@ -1865,3 +1865,382 @@ body.maintenance { overflow: hidden; }
     padding: 3px 8px; border-radius: 8px;
     background: #3a1414; color: #ff8a80; white-space: nowrap;
 }
+
+/* ============================================================================
+   ЗАДАЧА 89. НОВОГОДНЕЕ ОФОРМЛЕНИЕ + «ЖИВАЯ» АДМИН-ПАНЕЛЬ
+   Заказчик: «приукрасить админ панель, чтобы не была сухой — яркой, красочной,
+   переливающиеся кнопки, анимация на нажатие (ёлочка, взрыв), звуки» и «сделай
+   новогодний дизайн для игроков, переключение кнопкой в админке».
+
+   Всё новогоднее висит на классе .ny у <html>: нет класса — нет ни снега, ни
+   гирлянд (обычная аппка выглядит ровно как раньше). Админка приукрашена
+   всегда, но снег/ёлки в ней есть только в новогоднем режиме.
+   Ничего не двигаем в раскладке: декор — fixed, z-index ниже интерфейса,
+   pointer-events: none, поэтому ни одна кнопка не перекрыта.
+   ========================================================================== */
+
+/* ---------- 1. Новогодняя палитра (цвет + лёгкий фон) ---------- */
+
+html.ny {
+    --ny-red: #e0233b;
+    --ny-green: #17a35a;
+    --ny-gold: #ffd76a;
+    --ny-ice: #bfe9ff;
+}
+
+html.ny body {
+    background:
+        radial-gradient(1200px 520px at 50% -18%, rgba(90, 40, 120, 0.55), transparent 70%),
+        radial-gradient(600px 380px at 8% 12%, rgba(20, 90, 120, 0.35), transparent 70%),
+        radial-gradient(520px 320px at 92% 20%, rgba(150, 30, 60, 0.32), transparent 70%),
+        linear-gradient(180deg, #071120 0%, #0a1424 42%, #0c1020 100%);
+    background-attachment: fixed;
+}
+html.ny .top-bar { background: rgba(8, 18, 32, 0.82); backdrop-filter: blur(10px); }
+html.ny .profile-badge { background: rgba(224, 35, 59, 0.16); border: 1px solid rgba(255, 215, 106, 0.35); }
+html.ny .balance-badge { background: linear-gradient(135deg, #12331f, #0d2a4a); border-color: rgba(127, 226, 168, 0.45); }
+html.ny .bottom-nav {
+    background: rgba(10, 22, 38, 0.92);
+    border-top: 1px solid rgba(255, 215, 106, 0.28);
+}
+html.ny .nav-item.active { color: var(--ny-gold); text-shadow: 0 0 10px rgba(255, 215, 106, 0.55); }
+html.ny .game-row,
+html.ny .profile-extra,
+html.ny .hero-card {
+    border-color: rgba(255, 215, 106, 0.22);
+    background-image: linear-gradient(120deg, rgba(23, 163, 90, 0.10), rgba(224, 35, 59, 0.08));
+}
+html.ny .card,
+html.ny .bet-input,
+html.ny .win-popup { border-color: rgba(255, 215, 106, 0.22); }
+/* Заголовки вкладок — с золотым отливом, как на новогодней открытке. */
+html.ny .page-header h2 {
+    background: linear-gradient(92deg, #ffd76a, #fff6dc 40%, #9ff0c0 70%, #ffd76a);
+    background-size: 260% 100%;
+    -webkit-background-clip: text; background-clip: text;
+    -webkit-text-fill-color: transparent;
+    animation: nyHoloText 6s linear infinite;
+}
+@keyframes nyHoloText { 0% { background-position: 0% 50%; } 100% { background-position: 260% 50%; } }
+
+/* ---------- 2. Гирлянда над шапкой ---------- */
+.ny-decor { display: none; }
+html.ny .ny-decor {
+    display: block; position: fixed; inset: 0;
+    pointer-events: none; z-index: 5; overflow: hidden;
+}
+.ny-garland {
+    position: absolute; top: 0; left: -4%; width: 108%; height: 46px;
+    background:
+        radial-gradient(circle at 4% 26px, #fff1a8 0 2px, transparent 3px),
+        radial-gradient(circle at 12% 34px, #7ce0ff 0 2px, transparent 3px),
+        radial-gradient(circle at 20% 28px, #ff8ba0 0 2px, transparent 3px),
+        radial-gradient(circle at 28% 36px, #c9a3ff 0 2px, transparent 3px),
+        radial-gradient(circle at 36% 26px, #9dffbe 0 2px, transparent 3px),
+        radial-gradient(circle at 44% 34px, #fff1a8 0 2px, transparent 3px),
+        radial-gradient(circle at 52% 28px, #7ce0ff 0 2px, transparent 3px),
+        radial-gradient(circle at 60% 36px, #ff8ba0 0 2px, transparent 3px),
+        radial-gradient(circle at 68% 26px, #c9a3ff 0 2px, transparent 3px),
+        radial-gradient(circle at 76% 34px, #9dffbe 0 2px, transparent 3px),
+        radial-gradient(circle at 84% 28px, #fff1a8 0 2px, transparent 3px),
+        radial-gradient(circle at 92% 36px, #7ce0ff 0 2px, transparent 3px),
+        repeating-linear-gradient(90deg, transparent 0 11px, rgba(255, 255, 255, 0.14) 11px 12px, transparent 12px 24px);
+    filter: drop-shadow(0 0 6px rgba(255, 240, 180, 0.5));
+    animation: nyTwinkle 2.6s ease-in-out infinite alternate;
+    -webkit-mask-image: linear-gradient(180deg, #000 0 24px, transparent 40px);
+    mask-image: linear-gradient(180deg, #000 0 24px, transparent 40px);
+}
+@keyframes nyTwinkle { from { opacity: 0.65; filter: drop-shadow(0 0 3px rgba(255, 240, 180, 0.35)); } to { opacity: 1; filter: drop-shadow(0 0 9px rgba(255, 240, 180, 0.7)); } }
+
+/* ---------- 3. Ёлка сбоку + снежный наст (без наложений на карточки) ----------
+   В новогоднем режиме у body увеличен нижний отступ (см. html.ny body), поэтому
+   ёлка и подарки стоят в пустой полосе над меню и НЕ перекрывают текст. */
+html.ny body { padding-bottom: 176px; }
+.ny-decor::after {
+    content: ''; position: absolute; left: 0; right: 0; bottom: 0; height: 168px;
+    background:
+        radial-gradient(120% 70px at 18% 100%, rgba(226, 242, 255, 0.5), transparent 70%),
+        radial-gradient(90% 60px at 62% 100%, rgba(198, 228, 255, 0.42), transparent 70%),
+        radial-gradient(80% 50px at 92% 100%, rgba(214, 236, 255, 0.38), transparent 70%);
+    pointer-events: none;
+}
+.ny-tree {
+    position: absolute; right: 6px; bottom: 76px; width: 56px; height: 92px;
+    opacity: 0.92;
+}
+.ny-tree-star {
+    position: absolute; left: 50%; top: -2px; transform: translateX(-50%);
+    font-size: 12px; line-height: 1; z-index: 2;
+    filter: drop-shadow(0 0 6px rgba(255, 216, 106, 0.9));
+    animation: nyStarPulse 2.4s ease-in-out infinite;
+}
+@keyframes nyStarPulse { 0%, 100% { transform: translateX(-50%) scale(1); opacity: 0.9; } 50% { transform: translateX(-50%) scale(1.18); opacity: 1; } }
+/* Три яруса — обычные CSS-треугольники: рисуются одинаково во всех WebView. */
+.ny-tree-body {
+    position: absolute; left: 50%; bottom: 8px; width: 0; height: 0;
+    transform: translateX(-50%);
+    border-left: 26px solid transparent; border-right: 26px solid transparent;
+    border-bottom: 40px solid #12874b;
+    filter: drop-shadow(0 5px 10px rgba(0, 0, 0, 0.45));
+}
+.ny-tree-body::before,
+.ny-tree-body::after { content: ''; position: absolute; width: 0; height: 0; }
+.ny-tree-body::before {
+    left: -21px; bottom: 22px;
+    border-left: 21px solid transparent; border-right: 21px solid transparent;
+    border-bottom: 34px solid #0f9a55;
+}
+.ny-tree-body::after {
+    left: -15px; bottom: 48px;
+    border-left: 15px solid transparent; border-right: 15px solid transparent;
+    border-bottom: 26px solid #14ab5f;
+}
+.ny-tree-lights { position: absolute; inset: 22px 6px 14px; z-index: 1; }
+.ny-tree-lights i {
+    position: absolute; width: 5px; height: 5px; border-radius: 50%;
+    background: #ffe89a; box-shadow: 0 0 8px rgba(255, 232, 154, 0.9);
+    animation: nyLights 2.2s ease-in-out infinite;
+}
+.ny-tree-lights i:nth-child(1) { left: 14%; top: 34%; }
+.ny-tree-lights i:nth-child(2) { left: 54%; top: 44%; background: #7ce0ff; box-shadow: 0 0 8px rgba(124, 224, 255, 0.9); animation-delay: 0.3s; }
+.ny-tree-lights i:nth-child(3) { left: 78%; top: 58%; background: #ff8ba0; box-shadow: 0 0 8px rgba(255, 139, 160, 0.9); animation-delay: 0.6s; }
+.ny-tree-lights i:nth-child(4) { left: 28%; top: 62%; animation-delay: 0.9s; }
+.ny-tree-lights i:nth-child(5) { left: 62%; top: 78%; background: #c9a3ff; box-shadow: 0 0 8px rgba(201, 163, 255, 0.9); animation-delay: 1.2s; }
+.ny-tree-lights i:nth-child(6) { left: 44%; top: 26%; background: #9dffbe; box-shadow: 0 0 8px rgba(157, 255, 190, 0.9); animation-delay: 1.5s; }
+@keyframes nyLights { 0%, 100% { opacity: 0.35; transform: scale(0.85); } 50% { opacity: 1; transform: scale(1.15); } }
+.ny-tree-trunk {
+    position: absolute; left: 50%; bottom: 0; width: 8px; height: 10px;
+    margin-left: -4px; border-radius: 2px; background: #5a3a17;
+}
+
+/* ---------- 4. Подарки внизу (над нижним меню, слева) ---------- */
+.ny-gifts {
+    position: absolute; left: 6px; bottom: 80px;
+    display: flex; align-items: flex-end; gap: 1px; opacity: 0.92;
+    filter: drop-shadow(0 4px 8px rgba(0, 0, 0, 0.5));
+}
+.ny-gift { font-size: 19px; line-height: 1; animation: nyGiftBob 3.6s ease-in-out infinite; }
+.ny-gift.g2 { font-size: 15px; animation-delay: 0.5s; }
+.ny-gift.g3 { font-size: 13px; animation-delay: 0.9s; }
+.ny-gift.g4 { font-size: 16px; animation-delay: 1.4s; }
+@keyframes nyGiftBob { 0%, 100% { transform: translateY(0) rotate(-1deg); } 50% { transform: translateY(-3px) rotate(1.5deg); } }
+
+/* ---------- 5. Снег ---------- */
+.ny-snow { position: absolute; inset: 0; z-index: 1; }
+.ny-flake {
+    position: absolute; top: -12px; color: #eaf7ff; opacity: 0.75;
+    font-size: 10px; line-height: 1; text-shadow: 0 0 6px rgba(255, 255, 255, 0.6);
+    animation-name: nyFall; animation-timing-function: linear; animation-iteration-count: infinite;
+}
+@keyframes nyFall {
+    0% { transform: translate3d(0, -20px, 0); }
+    50% { transform: translate3d(12px, 45vh, 0); }
+    100% { transform: translate3d(-8px, 100vh, 0); }
+}
+
+/* ---------- 6. Эффект нажатия: искры, ёлочки, сердечки ---------- */
+.fx-layer { position: fixed; inset: 0; pointer-events: none; z-index: 1300; }
+.fx-spark {
+    position: fixed; font-size: 15px; line-height: 1; will-change: transform, opacity;
+    animation: fxBurst 0.72s cubic-bezier(0.2, 0.7, 0.3, 1) forwards;
+    filter: drop-shadow(0 0 6px rgba(255, 230, 150, 0.55));
+}
+@keyframes fxBurst {
+    0% { transform: translate(-50%, -50%) scale(0.4) rotate(0deg); opacity: 1; }
+    100% { transform: translate(calc(-50% + var(--dx)), calc(-50% + var(--dy))) scale(1.1) rotate(var(--rot)); opacity: 0; }
+}
+/* «Ёлочка» на кнопке в новогоднем режиме: короткий прыжок и исчезновение. */
+.fx-tree {
+    position: fixed; font-size: 26px; line-height: 1; will-change: transform, opacity;
+    animation: fxTree 0.9s cubic-bezier(0.22, 1.2, 0.4, 1) forwards;
+    filter: drop-shadow(0 4px 10px rgba(0, 0, 0, 0.5));
+}
+@keyframes fxTree {
+    0% { transform: translate(-50%, -50%) scale(0.2) rotate(-16deg); opacity: 0; }
+    35% { transform: translate(-50%, -78%) scale(1.25) rotate(6deg); opacity: 1; }
+    100% { transform: translate(-50%, -180%) scale(0.9) rotate(-4deg); opacity: 0; }
+}
+/* Взрыв-вспышка: круг света под кнопкой. */
+.fx-ring {
+    position: fixed; width: 14px; height: 14px; margin: -7px 0 0 -7px; border-radius: 50%;
+    border: 2px solid rgba(255, 232, 154, 0.85);
+    animation: fxRing 0.55s ease-out forwards;
+}
+@keyframes fxRing {
+    0% { transform: scale(0.6); opacity: 0.95; }
+    100% { transform: scale(9); opacity: 0; }
+}
+
+/* ---------- 7. Звук: кнопка и «нажали» ---------- */
+.ny-sound-btn {
+    position: fixed; right: 10px; top: 58px; z-index: 1200;
+    width: 30px; height: 30px; padding: 0; border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 13px; cursor: pointer;
+    background: rgba(12, 24, 40, 0.82); color: #dfe9f5;
+    border: 1px solid rgba(255, 215, 106, 0.4);
+    backdrop-filter: blur(6px);
+}
+.ny-sound-btn[hidden] { display: none !important; }
+.ny-sound-btn:active { transform: scale(0.94); }
+
+/* ---------- 8. АДМИНКА: ярко и «дорого» ---------- */
+#tab-admin .page-header-admin h2 {
+    background: linear-gradient(92deg, #ffd76a, #fff 46%, #7ce0ff 72%, #ffd76a);
+    background-size: 260% 100%;
+    -webkit-background-clip: text; background-clip: text;
+    -webkit-text-fill-color: transparent;
+    animation: nyHoloText 7s linear infinite;
+    filter: drop-shadow(0 0 12px rgba(255, 215, 106, 0.28));
+}
+#tab-admin { position: relative; }
+#tab-admin::before {
+    content: '';
+    position: absolute; left: -16px; right: -16px; top: -18px; height: 220px;
+    background:
+        radial-gradient(420px 180px at 12% 0%, rgba(124, 224, 255, 0.16), transparent 70%),
+        radial-gradient(360px 160px at 88% 8%, rgba(255, 215, 106, 0.16), transparent 70%);
+    pointer-events: none; z-index: 0;
+}
+#tab-admin > * { position: relative; z-index: 1; }
+html.ny #tab-admin::before {
+    background:
+        radial-gradient(420px 180px at 12% 0%, rgba(23, 163, 90, 0.26), transparent 70%),
+        radial-gradient(360px 160px at 88% 8%, rgba(224, 35, 59, 0.24), transparent 70%),
+        radial-gradient(280px 140px at 50% 0%, rgba(255, 215, 106, 0.18), transparent 70%);
+}
+
+/* Карточки админки: тонкая цветная рамка + мягкий блик по верху. */
+#tab-admin .profile-extra {
+    border: 1px solid rgba(120, 140, 170, 0.28);
+    background:
+        linear-gradient(180deg, rgba(255, 255, 255, 0.045), rgba(255, 255, 255, 0) 46%),
+        linear-gradient(160deg, #191d24, #131519);
+    box-shadow: 0 8px 22px rgba(0, 0, 0, 0.35);
+}
+html.ny #tab-admin .profile-extra {
+    border-color: rgba(255, 215, 106, 0.26);
+    background:
+        linear-gradient(180deg, rgba(255, 255, 255, 0.05), rgba(255, 255, 255, 0) 46%),
+        linear-gradient(160deg, #10243a, #0d1a2b);
+}
+#tab-admin .profile-extra .extra-title { letter-spacing: 0.01em; }
+
+/* Все кнопки админки: перелив + отклик на нажатие + вспышка. */
+#tab-admin button {
+    transition: transform 0.12s ease, box-shadow 0.2s ease, filter 0.2s ease;
+}
+#tab-admin button:not([disabled]):active { transform: scale(0.96); }
+#tab-admin .admin-search-btn,
+#tab-admin .admin-theme-btn,
+#tab-admin .extra-btn,
+#tab-admin .admin-game-btn,
+#tab-admin .admin-premium-btn,
+#tab-admin .admin-games-btn {
+    background-size: 220% 100%;
+    animation: nyHoloBg 7s linear infinite;
+}
+@keyframes nyHoloBg { 0% { background-position: 0% 50%; } 100% { background-position: 220% 50%; } }
+
+/* «Золотая» кнопка поиска и кнопка оформления — с бликом, как у донатов. */
+#tab-admin .admin-search-btn,
+#tab-admin .admin-theme-btn:not(.is-ghost) {
+    position: relative; overflow: hidden;
+    background-image: linear-gradient(100deg, #ffd76a, #ffb02e 28%, #ffe9a8 46%, #ffb02e 66%, #ffd76a);
+    border: none; color: #251500; font-weight: 900;
+    box-shadow: 0 6px 16px rgba(255, 176, 46, 0.28), inset 0 1px 0 rgba(255, 255, 255, 0.55);
+}
+#tab-admin .admin-search-btn::after,
+#tab-admin .admin-theme-btn:not(.is-ghost)::after {
+    content: ''; position: absolute; top: -60%; left: -40%; width: 40%; height: 220%;
+    background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.65), transparent);
+    transform: rotate(16deg);
+    animation: refShine 3.6s ease-in-out infinite;
+    pointer-events: none;
+}
+#tab-admin .admin-theme-btn.is-ghost {
+    margin-top: 8px;
+    background-image: linear-gradient(100deg, #1f2733, #2a3546 50%, #1f2733);
+    border: 1px solid rgba(124, 224, 255, 0.28);
+    color: #cfe6f7;
+}
+html.ny #tab-admin .admin-theme-btn.is-ghost {
+    background-image: linear-gradient(100deg, #123024, #1b4a34 50%, #123024);
+    border-color: rgba(157, 255, 190, 0.32); color: #d8ffe6;
+}
+#tab-admin .admin-theme-btn { width: 100%; margin-top: 4px; }
+
+/* Радужная «премиум» кнопка статистики бота (задача 87 была чёрной). */
+#tab-admin .admin-premium-btn {
+    border: 1px solid transparent;
+    background-image:
+        linear-gradient(135deg, #17171a 0%, #0b0b0d 100%) padding-box,
+        linear-gradient(115deg, #ff5f6d, #ffc371, #47e891, #4facfe, #b06ab3, #ff5f6d) border-box;
+    background-size: 100% 100%, 300% 300%;
+    animation: topup-rainbow 6s linear infinite;
+}
+#tab-admin .admin-premium-btn .admin-premium-title {
+    background: linear-gradient(92deg, #ffd76a, #fff 45%, #7ce0ff 78%, #ffd76a);
+    background-size: 260% 100%;
+    -webkit-background-clip: text; background-clip: text;
+    -webkit-text-fill-color: transparent;
+    animation: nyHoloText 6.5s linear infinite;
+}
+#tab-admin .admin-games-btn {
+    border: 1px solid rgba(124, 224, 255, 0.3);
+    background-image: linear-gradient(100deg, #14202e, #1d3550 45%, #14202e);
+}
+html.ny #tab-admin .admin-games-btn {
+    border-color: rgba(23, 163, 90, 0.5);
+    background-image: linear-gradient(100deg, #0f2a1c, #1a4a30 45%, #0f2a1c);
+}
+
+/* Строки топа: подсветка топ-3 и живой баланс. */
+#tab-admin .admin-top-row { position: relative; overflow: hidden; }
+#tab-admin .admin-top-row:nth-child(1) {
+    border-color: rgba(255, 215, 106, 0.55);
+    background: linear-gradient(100deg, rgba(255, 215, 106, 0.16), #141414 55%);
+}
+#tab-admin .admin-top-row:nth-child(1) .admin-top-place { filter: drop-shadow(0 0 8px rgba(255, 215, 106, 0.7)); }
+#tab-admin .admin-top-row:nth-child(2) { border-color: rgba(200, 210, 225, 0.42); }
+#tab-admin .admin-top-row:nth-child(3) { border-color: rgba(214, 150, 92, 0.42); }
+#tab-admin .admin-top-row:active { transform: scale(0.99); }
+
+/* Тумблеры игр: включено — зелёный перелив, выключено — красный. */
+#tab-admin .admin-game-btn {
+    background-image: linear-gradient(100deg, #34c759, #7bf29b 50%, #34c759);
+    box-shadow: 0 4px 12px rgba(52, 199, 89, 0.28);
+}
+#tab-admin .admin-game-btn.is-off {
+    background-image: linear-gradient(100deg, #ff453a, #ff9a92 50%, #ff453a);
+    box-shadow: 0 4px 12px rgba(255, 69, 58, 0.3);
+}
+
+/* Карточки техработ/КД: цветовая полоска слева, чтобы читалось мгновенно. */
+#tab-admin .admin-maint-card { position: relative; overflow: hidden; }
+#tab-admin .admin-maint-card::before {
+    content: ''; position: absolute; left: 0; top: 0; bottom: 0; width: 4px;
+    background: linear-gradient(180deg, #ffd76a, #ff9a3c);
+}
+#tab-admin .admin-lovecd-card::before { background: linear-gradient(180deg, #ff7ab6, #ff4d8d); }
+
+/* ---------- 9. Скромнее и быстрее, если игрок просил меньше анимации ---------- */
+@media (prefers-reduced-motion: reduce) {
+    html.ny .ny-garland,
+    html.ny .ny-tree-star,
+    html.ny .ny-tree-lights i,
+    html.ny .ny-gift,
+    html.ny .page-header h2,
+    #tab-admin .page-header-admin h2,
+    #tab-admin .admin-premium-btn,
+    #tab-admin .admin-premium-btn .admin-premium-title,
+    #tab-admin .admin-search-btn::after,
+    #tab-admin .admin-theme-btn::after,
+    #tab-admin .admin-search-btn,
+    #tab-admin .admin-theme-btn,
+    #tab-admin .extra-btn,
+    #tab-admin .admin-game-btn,
+    #tab-admin .admin-games-btn { animation: none !important; }
+    .ny-flake { display: none; }
+    #tab-admin button:not([disabled]):active { transform: none; }
+}

@@ -722,6 +722,9 @@ function applyProfile(data) {
     closedGames = (isAdmin || !Array.isArray(data.games_closed))
         ? [] : data.games_closed.map(String);
     if (typeof renderClosedGames === 'function') renderClosedGames();
+    // Задача 89: новогоднее оформление приходит с сервера (theme) — админ
+    // включает его кнопкой в админке, видят все игроки.
+    applyTheme(data && data.theme, data && data.economy ? data.economy.theme : '');
     userDataLoaded = true;
     balanceKnown = true;
     profileFailure = '';
@@ -1423,6 +1426,8 @@ function switchTab(tabId, element) {
         renderAdminMaintenanceCard({ maintenance_active: serverMaintenance });
         // Задача 79: состояние КД РП читаем с сервера (его же читает бот).
         loadAdminLoveCooldown();
+        // Задача 89: какое оформление включено сейчас (кнопка в этой панели).
+        loadAdminTheme();
         adminPlayers = [];
         adminBotStats = null;
         adminGames = [];
@@ -6862,3 +6867,310 @@ document.addEventListener('DOMContentLoaded', async () => {
     // Отношения — для плашки в профиле.
     loadLoveState();
 });
+
+/* ==================== ЗАДАЧА 89: ОФОРМЛЕНИЕ И «ЖИВЫЕ» КНОПКИ ====================
+   Заказчик: «приукрась админ-панель, чтобы не была сухой — яркой, красочной,
+   переливающиеся кнопки, анимация на нажатие (ёлочка, взрыв), звуки» + «сделай
+   новогодний дизайн для игроков, переключать кнопкой в админке».
+   Что здесь:
+     • applyTheme() — ставит/снимает класс .ny на <html> (весь декор в CSS);
+     • снег — 18 снежинок, только в новогоднем режиме;
+     • искры/ёлочка/взрыв на нажатие ЛЮБОЙ кнопки (чистый DOM, без библиотек);
+     • звук — синтез через WebAudio (файлов не грузим, ничего не весит).
+   Эффекты не трогают логику: ни один обработчик не обёрнут и не заменён,
+   слушатели висят на фазе всплытия и ничего не отменяют.
+============================================================================ */
+const THEME_NEWYEAR = 'newyear';
+const THEME_CLASSIC = 'classic';
+let uiTheme = THEME_CLASSIC;
+let uiThemeBusy = false;
+let uiSoundOn = false;          // по умолчанию тихо: звук только если админ включил
+let uiFxBound = false;
+let soundPrefLoaded = false;
+let snowTimer = 0;
+
+function currentTheme() { return uiTheme; }
+
+// Тема: сервер — источник правды. Пустое/неизвестное значение = обычная тема.
+function applyTheme(theme, fallbackTheme) {
+    let value = String(theme || fallbackTheme || '').toLowerCase();
+    let next = (value === THEME_NEWYEAR || value === 'new_year' || value === 'ny')
+        ? THEME_NEWYEAR : THEME_CLASSIC;
+    uiTheme = next;
+    const root = document.documentElement;
+    if (root) {
+        root.classList.toggle('ny', next === THEME_NEWYEAR);
+        // Цвет статус-бара Telegram под фон темы (если API доступно).
+        try {
+            if (tg && tg.setHeaderColor) {
+                tg.setHeaderColor(next === THEME_NEWYEAR ? '#071120' : '#0f0f0f');
+            }
+        } catch (e) { /* старый клиент Telegram — не страшно */ }
+    }
+    if (next === THEME_NEWYEAR) startSnow(); else stopSnow();
+    renderAdminThemeCard(null);
+    syncSoundUi();
+}
+
+function startSnow() {
+    const host = document.getElementById('ny-snow');
+    if (!host || snowTimer) return;
+    const flakes = ['❄', '❅', '❆', '•'];
+    const build = () => {
+        if (currentTheme() !== THEME_NEWYEAR) return;
+        const alive = host.childElementCount;
+        if (alive >= 18) return;
+        const flake = document.createElement('span');
+        flake.className = 'ny-flake';
+        flake.textContent = flakes[Math.floor(Math.random() * flakes.length)];
+        flake.style.left = (Math.random() * 100).toFixed(2) + '%';
+        flake.style.fontSize = (8 + Math.random() * 8).toFixed(0) + 'px';
+        flake.style.animationDuration = (7 + Math.random() * 9).toFixed(1) + 's';
+        flake.style.animationDelay = (-Math.random() * 8).toFixed(1) + 's';
+        flake.style.opacity = (0.35 + Math.random() * 0.5).toFixed(2);
+        host.appendChild(flake);
+        // Снежинка живёт один цикл — потом убираем, иначе копятся десятками.
+        setTimeout(() => { if (flake.parentNode) flake.parentNode.removeChild(flake); },
+            9000 + Math.random() * 9000);
+    };
+    for (let i = 0; i < 12; i++) build();
+    snowTimer = setInterval(build, 1200);
+}
+
+function stopSnow() {
+    if (snowTimer) { clearInterval(snowTimer); snowTimer = 0; }
+    const host = document.getElementById('ny-snow');
+    if (host) host.innerHTML = '';
+}
+
+// ---------- Эффекты нажатия ----------
+function fxLayer() { return document.getElementById('fx-layer'); }
+
+function spawnFx(el, text, cls, dx, dy, rot) {
+    const layer = fxLayer();
+    if (!layer || !el) return;
+    const node = document.createElement('span');
+    node.className = cls;
+    node.textContent = text;
+    node.style.left = el.left + 'px';
+    node.style.top = el.top + 'px';
+    if (dx !== undefined) node.style.setProperty('--dx', dx + 'px');
+    if (dy !== undefined) node.style.setProperty('--dy', dy + 'px');
+    if (rot !== undefined) node.style.setProperty('--rot', rot + 'deg');
+    layer.appendChild(node);
+    setTimeout(() => { if (node.parentNode) node.parentNode.removeChild(node); }, 1100);
+}
+
+// Вспышка + искры вокруг точки нажатия. В новогоднем режиме — ещё и ёлочка.
+function burstAt(rect, options) {
+    const opts = options || {};
+    const center = { left: rect.left + rect.width / 2, top: rect.top + rect.height / 2 };
+    const newYear = currentTheme() === THEME_NEWYEAR;
+    const palette = newYear
+        ? ['✨', '❄', '⭐', '🌟', '🎊', '🍬']
+        : ['✨', '⭐', '💫', '🙌', '🎉'];
+    const count = opts.strong ? 10 : 6;
+    for (let i = 0; i < count; i++) {
+        const angle = (Math.PI * 2 * i) / count + (Math.random() - 0.5) * 0.6;
+        const dist = (opts.strong ? 46 : 30) + Math.random() * 26;
+        spawnFx(center,
+            palette[i % palette.length],
+            'fx-spark',
+            Math.cos(angle) * dist,
+            Math.sin(angle) * dist - 10,
+            (Math.random() * 180 - 90).toFixed(0));
+    }
+    spawnFx(center, '', 'fx-ring');
+    if (newYear) {
+        spawnFx({ left: center.left, top: center.top }, '🎄', 'fx-tree');
+    }
+    if (opts.strong) {
+        // «Взрыв» для главных действий: ещё один круг и снежная волна.
+        setTimeout(() => spawnFx(center, '', 'fx-ring'), 110);
+        playUiSound('burst');
+    }
+    playUiSound(opts.strong ? 'burst' : 'tap');
+}
+
+// Где эффект усиливаем: админские и «денежные» кнопки.
+function isStrongButton(el) {
+    if (!el || !el.closest) return false;
+    if (el.closest('#tab-admin')) return true;
+    return Boolean(el.closest('.topup-item, .action-btn, .plus-btn, .ref-invite-btn'));
+}
+
+function bindUiFx() {
+    if (uiFxBound) return;
+    uiFxBound = true;
+    document.addEventListener('pointerdown', (event) => {
+        const el = event.target && event.target.closest
+            ? event.target.closest('button, .game-row, .nav-item, .ref-invite-btn, .topup-item') : null;
+        if (!el || el.disabled) return;
+        // Свою вспышку показать успеваем до того, как элемент перерисуют.
+        let rect;
+        try { rect = el.getBoundingClientRect(); } catch (e) { return; }
+        if (!rect || (!rect.width && !rect.height)) return;
+        burstAt(rect, { strong: isStrongButton(el) });
+    }, { passive: true });
+}
+
+// ---------- Звук (WebAudio, без файлов) ----------
+let uiAudio = null;
+function uiAudioContext() {
+    if (uiAudio) return uiAudio;
+    const Ctor = window.AudioContext || window.webkitAudioContext;
+    if (!Ctor) return null;
+    try { uiAudio = new Ctor(); } catch (e) { uiAudio = null; }
+    return uiAudio;
+}
+
+function playUiTone(freq, start, duration, type, gainValue) {
+    const ctx = uiAudioContext();
+    if (!ctx) return;
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = type || 'triangle';
+    osc.frequency.value = freq;
+    gain.gain.setValueAtTime(0.0001, ctx.currentTime + start);
+    gain.gain.exponentialRampToValueAtTime(gainValue || 0.06, ctx.currentTime + start + 0.01);
+    gain.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + start + duration);
+    osc.connect(gain); gain.connect(ctx.destination);
+    osc.start(ctx.currentTime + start);
+    osc.stop(ctx.currentTime + start + duration + 0.02);
+}
+
+function playUiSound(kind) {
+    if (!uiSoundOn) return;
+    const ctx = uiAudioContext();
+    if (!ctx) return;
+    try {
+        if (ctx.state === 'suspended') ctx.resume();
+        if (kind === 'burst') {
+            // Короткая «новогодняя» арпеджио-вспышка: до-ми-соль-до.
+            [523.25, 659.25, 783.99, 1046.5].forEach((f, i) => playUiTone(f, i * 0.055, 0.18, 'triangle', 0.07));
+            playUiTone(1567.98, 0.24, 0.3, 'sine', 0.04);
+        } else if (kind === 'theme') {
+            // Переключение оформления: две ноты вверх или вниз.
+            const up = currentTheme() === THEME_NEWYEAR;
+            [up ? 587.33 : 440, up ? 880 : 329.63].forEach((f, i) =>
+                playUiTone(f, i * 0.09, 0.22, 'sine', 0.06));
+        } else {
+            playUiTone(880, 0, 0.09, 'triangle', 0.045);
+        }
+    } catch (e) { /* звук не должен ломать нажатие */ }
+}
+
+function syncSoundUi() {
+    const fixed = document.getElementById('ny-sound-btn');
+    if (fixed) {
+        fixed.hidden = !isAdmin;
+        fixed.textContent = uiSoundOn ? '🔊' : '🔇';
+        fixed.title = uiSoundOn ? 'Звук эффектов включён' : 'Звук эффектов выключен';
+    }
+    const card = document.getElementById('admin-theme-sound');
+    if (card) card.textContent = uiSoundOn ? '🔊 Звук эффектов: вкл' : '🔇 Звук эффектов: выкл';
+}
+
+function toggleUiSound() {
+    uiSoundOn = !uiSoundOn;
+    try { localStorage.setItem('aura_ui_sound', uiSoundOn ? '1' : '0'); } catch (e) {}
+    syncSoundUi();
+    if (uiSoundOn) playUiSound('theme');
+}
+
+// ---------- Карточка «Оформление аппки» в админ-панели ----------
+function renderAdminThemeCard(data) {
+    const card = document.getElementById('admin-theme-card');
+    if (!card) return;
+    if (!isAdmin) { card.hidden = true; return; }
+    card.hidden = false;
+    // Заказчик просил «звуки в кнопках»: админу они включены по умолчанию
+    // (при первом входе), но выключаются одним тапом и запоминаются. Игрокам
+    // клики озвучиваем только если они сами включат — не навязываем.
+    if (!soundPrefLoaded) {
+        soundPrefLoaded = true;
+        try {
+            if (localStorage.getItem('aura_ui_sound') === null) {
+                uiSoundOn = true;
+                localStorage.setItem('aura_ui_sound', '1');
+            }
+        } catch (e) { /* приватный режим — играем без запоминания */ }
+    }
+    if (data && data.theme) {
+        const value = String(data.theme).toLowerCase();
+        uiTheme = value === THEME_NEWYEAR ? THEME_NEWYEAR : THEME_CLASSIC;
+        const root = document.documentElement;
+        if (root) root.classList.toggle('ny', uiTheme === THEME_NEWYEAR);
+        if (uiTheme === THEME_NEWYEAR) startSnow(); else stopSnow();
+    }
+    const on = uiTheme === THEME_NEWYEAR;
+    const state = document.getElementById('admin-theme-state');
+    const hint = document.getElementById('admin-theme-hint');
+    const btn = document.getElementById('admin-theme-btn');
+    if (state) {
+        state.textContent = on ? '🎄 новогоднее' : 'обычное';
+        state.classList.toggle('is-on', on);
+    }
+    if (hint) {
+        hint.textContent = on
+            ? 'Сейчас у всех игроков новогодний вид: гирлянда, ёлка, снег и подарки. Нажми, чтобы вернуть обычное оформление.'
+            : 'Новогодний дизайн — гирлянды, ёлка, снег и подарки — включается сразу у всех игроков. Нажми ещё раз, чтобы вернуть обычный вид.';
+    }
+    if (btn) {
+        btn.textContent = on ? 'Вернуть обычный дизайн' : 'Включить новогодний дизайн';
+        btn.disabled = uiThemeBusy;
+    }
+    syncSoundUi();
+}
+
+async function loadAdminTheme() {
+    if (!isAdmin) return;
+    try {
+        const data = await apiPost('/api/admin/game_settings', { initData: tg.initData });
+        renderAdminThemeCard(data);
+    } catch (e) {
+        renderAdminThemeCard(null);      // сервер молчит — показываем последнее известное
+    }
+}
+
+async function toggleAdminTheme() {
+    if (!isAdmin) { tg.showAlert('Оформление переключает только админ'); return; }
+    if (uiThemeBusy) return;
+    uiThemeBusy = true;
+    const want = uiTheme === THEME_NEWYEAR ? THEME_CLASSIC : THEME_NEWYEAR;
+    const btn = document.getElementById('admin-theme-btn');
+    if (btn) { btn.disabled = true; btn.textContent = 'Сохраняем…'; }
+    try {
+        const data = await apiPost('/api/admin/set_theme',
+            { initData: tg.initData, theme: want });
+        uiTheme = (data && data.theme) ? String(data.theme) : want;
+        const root = document.documentElement;
+        if (root) root.classList.toggle('ny', uiTheme === THEME_NEWYEAR);
+        if (uiTheme === THEME_NEWYEAR) startSnow(); else stopSnow();
+        playUiSound('theme');
+        renderAdminThemeCard({ theme: uiTheme });
+        tg.showAlert(uiTheme === THEME_NEWYEAR
+            ? '🎄 Новогодний дизайн включён для всех игроков.'
+            : '✅ Обычный дизайн вернулся у всех игроков.');
+    } catch (e) {
+        tg.showAlert(e && e.message ? e.message : 'Не удалось переключить оформление');
+        renderAdminThemeCard(null);
+    } finally {
+        uiThemeBusy = false;
+        renderAdminThemeCard(null);
+    }
+}
+
+// Читаем сохранённую настройку звука и включаем эффекты (один раз).
+function initUiPolish() {
+    try { uiSoundOn = localStorage.getItem('aura_ui_sound') === '1'; } catch (e) { uiSoundOn = false; }
+    bindUiFx();
+    syncSoundUi();
+    applyTheme(document.documentElement.classList.contains('ny') ? THEME_NEWYEAR : THEME_CLASSIC, '');
+}
+
+if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', initUiPolish);
+} else {
+    initUiPolish();
+}

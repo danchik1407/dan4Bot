@@ -89,7 +89,7 @@ async def _http_json(url, method: str = "GET", params=None, payload=None, timeou
 
 # Номер сборки: по нему из /api/health видно, что на сервисе НЕ старый код.
 # Если после деплоя здесь прежнее значение — Render ещё не перезапустился.
-API_BUILD = "2026-10-27-task88-admin-always-plays"
+API_BUILD = "2026-10-27-task89-newyear-theme"
 
 # Момент старта процесса. По нему видно, что сервис только что «проснулся»:
 # Render на бесплатном тарифе усыпляет Web Service через 15 минут без входящих
@@ -753,6 +753,49 @@ def set_love_cooldown_enabled(enabled: bool) -> bool:
         game_setting_set(LOVE_COOLDOWN_SECONDS_KEY, "18000" if enabled else "off")
     except Exception:  # noqa: BLE001
         pass
+    _game_settings_cache.update({"at": 0.0, "values": {}})
+    return bool(ok)
+
+
+# Задача 89: новогоднее оформление аппки. Админ включает его кнопкой в
+# админ-панели — и оно включается у ВСЕХ игроков (как и рубильники игр).
+# Значение живёт в game_settings: строку читают и api (отдаёт в /api/user), и
+# бот (команда `новый год`), поэтому переключение видно сразу обоим сервисам.
+THEME_SETTING_KEY = "app_theme"
+THEME_NEWYEAR = "newyear"
+THEME_CLASSIC = "classic"
+_THEME_CACHE = {"value": THEME_CLASSIC, "at": 0.0}
+THEME_CACHE_TTL = 10.0
+
+
+def app_theme() -> str:
+    """Какое оформление сейчас у игроков: "classic" или "newyear".
+
+    Ошибка базы — считаем "classic": сломанная база не должна внезапно
+    перекрашивать приложение, обычная тема есть всегда.
+    """
+    now = time.time()
+    if (now - float(_THEME_CACHE["at"] or 0)) < THEME_CACHE_TTL:
+        return str(_THEME_CACHE["value"] or THEME_CLASSIC)
+    value = str(_THEME_CACHE["value"] or THEME_CLASSIC)
+    try:
+        raw = _load_game_settings().get(THEME_SETTING_KEY)
+        if raw is not None:
+            text = str(raw).strip().lower()
+            value = THEME_NEWYEAR if text in ("newyear", "new_year", "ny", "1", "on", "вкл") \
+                else THEME_CLASSIC
+    except Exception:  # noqa: BLE001 — не прочитали: остаёмся на обычной теме
+        pass
+    _THEME_CACHE.update({"value": value, "at": now})
+    return value
+
+
+def set_app_theme(theme: str) -> bool:
+    """Записать оформление. True — база приняла значение."""
+    theme = THEME_NEWYEAR if str(theme).strip().lower() in (
+        "newyear", "new_year", "ny", "1", "on", "вкл") else THEME_CLASSIC
+    ok = game_setting_set(THEME_SETTING_KEY, theme)
+    _THEME_CACHE.update({"value": theme, "at": time.time()})
     _game_settings_cache.update({"at": 0.0, "values": {}})
     return bool(ok)
 
@@ -1721,6 +1764,8 @@ def _user_payload(row, is_admin, user_id=None):
         # Задача 87: какие игры закрыты рубильниками. Клиент по этому полю
         # помечает карточки и не пускает в игру, не дожидаясь запроса ставки.
         "games_closed": _games_closed_public(uid),
+        # Задача 89: новогоднее оформление включается админом для всех игроков.
+        "theme": app_theme(),
     }
 
 
@@ -3224,6 +3269,12 @@ class AdminLoveCooldownRequest(BaseModel):
     """Задача 79: тумблер «КД РП включён / выключен» из админ-панели."""
     initData: str
     enabled: bool = False
+
+
+class AdminThemeRequest(BaseModel):
+    """Задача 89: переключение оформления аппки (обычное ↔ новогоднее)."""
+    initData: str
+    theme: str = "newyear"
 
 
 class UpdateBalance(BaseModel): initData: str; amount: int
@@ -7210,7 +7261,37 @@ async def admin_game_settings(data: UserAuth):
         "love_cooldown_full_seconds": love_cooldown_seconds(),
         "love_cooldown_note": ("включён — 5 часов на все РП" if enabled
                                else "выключен — РП без ожидания"),
+        # Задача 89: какое оформление сейчас включено для игроков.
+        "theme": app_theme(),
     }
+
+
+@app.post("/api/admin/set_theme")
+async def admin_set_theme(data: AdminThemeRequest):
+    """Задача 89: кнопка «🎄 Новогодний дизайн» в админ-панели.
+
+    Заказчик: «сделай чтобы я мог переключить дизайн с обычного на новогодний
+    по кнопке в админ панели в апке и обратно». Оформление общее для всех
+    игроков (это витрина, а не личная настройка), поэтому живёт в game_settings.
+    """
+    admin_id = _require_admin_api(data.initData)
+    theme = THEME_NEWYEAR if str(data.theme or "").strip().lower() in (
+        "newyear", "new_year", "ny", "1", "on", "вкл") else THEME_CLASSIC
+    if not set_app_theme(theme):
+        raise HTTPException(status_code=503,
+                            detail="Не удалось сохранить оформление — попробуйте ещё раз")
+    logger.warning("Оформление приложения: %s (админ %s)", theme, admin_id)
+    try:
+        supabase.table("admin_audit").insert({
+            "admin_id": int(admin_id), "action": "set_theme",
+            "detail": {"theme": theme}, "created_at": _now_iso(),
+        }).execute()
+    except Exception:  # noqa: BLE001 — журнал не должен мешать переключению
+        pass
+    return {"ok": True, "theme": theme,
+            "message": ("🎄 Новогоднее оформление включено для всех игроков"
+                        if theme == THEME_NEWYEAR
+                        else "Обычное оформление включено для всех игроков")}
 
 
 @app.post("/api/admin/set_love_cooldown")

@@ -12,7 +12,7 @@
     <meta http-equiv="Pragma" content="no-cache">
     <meta http-equiv="Expires" content="0">
     <title>AURA GAME</title>
-    <link rel="stylesheet" href="style.css?v=aura-88">
+    <link rel="stylesheet" href="style.css?v=aura-89">
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
 </head>
 <body>
@@ -22,6 +22,32 @@
         <div class="app-loader-bar"><div class="app-loader-bar-fill"></div></div>
         <div class="app-loader-text">Загружаем игру…</div>
     </div>
+
+    <!-- Задача 89: новогоднее оформление. Всё рисуется ТОЛЬКО когда на <html>
+         стоит класс .ny — админ включает его кнопкой в админ-панели (см.
+         applyTheme() в app.js). Пустые контейнеры ничего не весят и ни на что
+         не влияют в обычной теме. -->
+    <div id="ny-decor" class="ny-decor" aria-hidden="true">
+        <div class="ny-garland"></div>
+        <div class="ny-tree">
+            <div class="ny-tree-star">⭐</div>
+            <div class="ny-tree-body"></div>
+            <div class="ny-tree-lights"><i></i><i></i><i></i><i></i><i></i><i></i></div>
+            <div class="ny-tree-trunk"></div>
+        </div>
+        <div class="ny-gifts">
+            <span class="ny-gift g1">🎁</span>
+            <span class="ny-gift g2">🎁</span>
+            <span class="ny-gift g3">🎁</span>
+            <span class="ny-gift g4">🧦</span>
+        </div>
+        <div class="ny-snow" id="ny-snow"></div>
+    </div>
+    <!-- Сюда падают искры/ёлочки от нажатий кнопок (см. burstForElement). -->
+    <div id="fx-layer" class="fx-layer" aria-hidden="true"></div>
+    <!-- Кнопка «звук»: админские эффекты со звуком, у игроков по умолчанию тихо. -->
+    <button id="ny-sound-btn" class="ny-sound-btn" type="button" hidden
+            onclick="toggleUiSound()" aria-label="Звук">🔇</button>
 
     <!-- Задача 67: «Технических работ» для игроков больше нет — вход открыт всем.
          Этот экран остался только на случай «сервер не ответил» (Render спит или
@@ -383,6 +409,24 @@
                 </div>
                 <button class="extra-btn" id="admin-lovecd-btn" type="button"
                         onclick="toggleLoveCooldown()">Выключить КД</button>
+            </div>
+
+            <!-- Задача 89: переключение оформления всей аппки. Кнопка одна —
+                 «включить новогоднее / вернуть обычное», состояние читается с
+                 сервера (/api/admin/game_settings → theme). -->
+            <div class="profile-extra admin-card admin-theme-card" id="admin-theme-card" hidden>
+                <div class="extra-head">
+                    <span class="extra-title">🎄 Оформление аппки</span>
+                    <span class="extra-value" id="admin-theme-state">обычное</span>
+                </div>
+                <div class="extra-hint" id="admin-theme-hint">
+                    Новогодний дизайн — гирлянды, ёлка, снег и подарки — включается
+                    сразу у всех игроков. Нажми ещё раз, чтобы вернуть обычный вид.
+                </div>
+                <button class="extra-btn admin-theme-btn" id="admin-theme-btn" type="button"
+                        onclick="toggleAdminTheme()">Включить новогодний дизайн</button>
+                <button class="extra-btn admin-theme-btn is-ghost" type="button"
+                        id="admin-theme-sound" onclick="toggleUiSound()">Звук эффектов: выкл</button>
             </div>
 
             <!-- Задача 87: топ по балансу полными числами (никаких «1 234 5…»),
@@ -752,6 +796,6 @@
          маленькой кнопкой ⚙️ рядом с ником в шапке (см. #admin-gear). -->
     </nav>
 
-    <script src="app.js?v=aura-88" defer></script>
+    <script src="app.js?v=aura-89" defer></script>
 </body>
 </html>
