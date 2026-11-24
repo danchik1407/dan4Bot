@@ -16,6 +16,7 @@ from shop_catalog import SHOP_ITEMS, ShopPurchaseError, is_admin_id, parse_inven
     serialize_shop_items, missing_stock_rows, shop_stock_snapshot, stock_diagnostics, \
     sold_out_items, STOCK_LIMITS_ENABLED
 import player_stats
+import game_flags
 from love import (LOVE_ACTION_BONUS, LOVE_ICE_COST, action_progress_text,
                   love_cooldown_seconds,
                   RP_ACTIONS, SOLO_CURRENCY, claim_solo_stage_rewards,
@@ -88,7 +89,7 @@ async def _http_json(url, method: str = "GET", params=None, payload=None, timeou
 
 # Номер сборки: по нему из /api/health видно, что на сервисе НЕ старый код.
 # Если после деплоя здесь прежнее значение — Render ещё не перезапустился.
-API_BUILD = "2026-10-27-task86-arena-bets"
+API_BUILD = "2026-10-27-task87-admin-panel"
 
 # Момент старта процесса. По нему видно, что сервис только что «проснулся»:
 # Render на бесплатном тарифе усыпляет Web Service через 15 минут без входящих
@@ -1625,6 +1626,19 @@ def _upgrade_economy_config() -> dict:
     }
 
 
+def _games_closed_public() -> list:
+    """Закрытые игры для клиента: список ключей + текст для игрока.
+
+    Админ видит игры открытыми (он всегда может зайти и проверить фикс), для
+    остальных закрытая игра помечается на карточке и не пускает внутрь.
+    """
+    try:
+        flags = game_flags.read_disabled(supabase)
+    except Exception:  # noqa: BLE001 — настройки не прочитались: всё открыто
+        return []
+    return [mode for mode in game_flags.MODE_IDS if flags.get(mode)]
+
+
 def _user_payload(row, is_admin, user_id=None):
     """Единый ответ профиля: любые NULL/строки из базы приводим к нормальным типам."""
     # Первый заход в аппку: если отметки ещё нет — это как раз он.
@@ -1691,6 +1705,9 @@ def _user_payload(row, is_admin, user_id=None):
             "message": ADMIN_ONLY_MESSAGE if app_closed_now() else "",
         },
         "economy": {"upgrade": _upgrade_economy_config()},
+        # Задача 87: какие игры закрыты рубильниками. Клиент по этому полю
+        # помечает карточки и не пускает в игру, не дожидаясь запроса ставки.
+        "games_closed": _games_closed_public(),
     }
 
 
@@ -3520,6 +3537,9 @@ async def place_bet(data: PlaceBet):
         raise HTTPException(status_code=400, detail="Неизвестная арена")
     if arena != "team":
         team = None                       # в обычной арене команд нет
+    # Задача 87: рубильник арены. Проверяем до списания: закрытая арена не
+    # принимает ставку и не тратит коины.
+    require_game_open("arena_team" if arena == "team" else "arena_normal", user_id)
 
     # Задача 86: повтор запроса с тем же request_id не должен списывать деньги
     # второй раз. Раньше клиент по таймауту (21 с) повторял ставку, и она
@@ -3851,7 +3871,7 @@ async def crash_bet(data: CrashBet):
 
     if data.amount <= 0:
         raise HTTPException(status_code=400, detail="Ставка должна быть больше нуля")
-
+    require_game_open("crash", user_id)   # задача 87: рубильник «Ракеты»
     if crash_state["status"] != "waiting": raise HTTPException(status_code=400,
                                                                detail="Ставки принимаются только в фазе ожидания")
 
@@ -3961,6 +3981,7 @@ async def mines_start(data: MinesStart):
         mines_count = int(data.mines)
     except (TypeError, ValueError):
         raise HTTPException(status_code=400, detail="Некорректная ставка")
+    require_game_open("mines", user_id)   # задача 87: рубильник «Мин»
     if amount < MINES_MIN_BET:
         raise HTTPException(status_code=400, detail=f"Минимальная ставка {MINES_MIN_BET} коинов")
     if mines_count < 1 or mines_count > MINES_MAX_COUNT:
@@ -4660,6 +4681,8 @@ async def open_chest(auth: OpenChestRequest):
     check_ban(user_id)
 
     chest_type = (auth.chest_type or "normal").strip().lower()
+    # Задача 87: рубильник «Сундуков». Проверяем до траты ключа и кулдауна.
+    require_game_open("chests", user_id)
 
     # Идемпотентность: повторный запрос с тем же ключом вернёт уже открытый
     # сундук, а не потратит второй ключ/кулдаун.
@@ -5032,6 +5055,7 @@ async def buy_item(data: BuyItem):
     require_play_access(user)  # техработы: во время них играют только админы
     user_id = int(user["id"])
     check_ban(str(user_id))
+    require_game_open("shop", user_id)     # задача 87: рубильник «Магазина»
     if data.item_id not in SHOP_ITEMS:
         raise HTTPException(status_code=400, detail="Неизвестный предмет магазина")
 
@@ -5440,6 +5464,7 @@ async def upgrade_action(data: UpgradeAction):
         raise HTTPException(status_code=403, detail=UPGRADE_ADMIN_ONLY_MESSAGE)
 
     check_ban(str(user_id))
+    require_game_open("upgrade", user_id)  # задача 87: рубильник «Апгрейда»
 
     # Идемпотентность: повторная отправка того же апгрейда не спишет ставку снова.
     idem_key = _idempotency_key(user_id, data.request_id, "upgrade")
@@ -5875,6 +5900,27 @@ def _auth_user_id(init_data: str) -> int:
         raise HTTPException(status_code=400, detail="Некорректный id пользователя")
     check_ban(str(uid))
     return uid
+
+
+GAME_FLAGS_HINT = ("🛠️ Игра временно выключена админом. "
+                    "Скоро включим — загляни позже.")
+
+
+def require_game_open(mode: str, user_id=None) -> None:
+    """Задача 87: рубильник одной игры (админ играет всегда).
+
+    Проверяем ДО списания денег: закрытая игра не должна ни принимать ставку,
+    ни тратить ключ. Админу режим открыт — иначе он не сможет проверить фикс.
+    """
+    uid = _safe_int(user_id, None)
+    if uid is not None and int(uid) in ADMIN_IDS:
+        return
+    try:
+        closed = game_flags.closed(supabase, mode)
+    except Exception:  # noqa: BLE001 — настройки не прочитались: играем
+        return
+    if closed:
+        raise HTTPException(status_code=403, detail=game_flags.message(mode))
 
 
 def _require_admin_api(init_data: str) -> int:
@@ -7245,6 +7291,344 @@ def _admin_stats_sync(init_data: str):
     return {"ok": True, **stats}
 
 
+# ---------- Задача 87: админ-панель в Mini App ----------
+# Заказчик: «сделать панель администрации более расширенной» — топ с полными
+# числами, поиск игрока и его полный профиль, статистика бота и рубильники
+# каждой игры отдельно. Всё это читает /api/admin/*, доступ — ADMIN_IDS.
+# Задача 87: актуальная миграция админ-панели и статистики.
+ADMIN_MIGRATION_FILE = "supabase/migrations/20261207000000_admin_panel_and_stats_fix.sql"
+ADMIN_TOP_LIMIT = 10
+ADMIN_SEARCH_RESULTS = 5
+
+
+class AdminPlayerSearch(BaseModel):
+    initData: str
+    query: str = ""
+
+
+class AdminGameFlagRequest(BaseModel):
+    initData: str
+    mode: str
+    disabled: bool = True
+
+
+def _admin_username(row) -> str:
+    name = str((row or {}).get("username") or "").strip().lstrip("@")
+    return name or f"id{(row or {}).get('user_id')}"
+
+
+def _admin_user_card(user_id, coins=None) -> dict:
+    """Полный профиль игрока для админки: баланс, дни в игре, рефералы и т.д.
+
+    Все числа — из тех же таблиц, что видит сам игрок, никаких «примерно».
+    Недоступная таблица просто пропускается: карточка не должна падать.
+    """
+    uid = _safe_int(user_id, None)
+    row = None
+    if uid is not None:
+        try:
+            row = _db_user(uid)
+        except Exception:  # noqa: BLE001 — база не ответила: покажем что знаем
+            row = None
+    if row is None and uid is None:
+        return None
+    coins_now = _safe_int((row or {}).get("coins"), 0) if row else _safe_int(coins, 0)
+    card = {
+        "user_id": uid,
+        "username": _admin_username(row) if row else f"id{uid}",
+        "coins": coins_now,
+        "keys": _safe_int((row or {}).get("keys"), 0),
+        "in_team": False,
+        "is_admin": bool(uid is not None and int(uid) in ADMIN_IDS),
+        "banned": False,
+        "created_at": None,
+        "first_seen": None,
+        "days_in_game": 0,
+        "games_played": 0,
+        "games_won": 0,
+        "lost_games": 0,
+        "coins_spent": 0,
+        "coins_earned": 0,
+        "best_win": 0,
+        "referrals_count": 0,
+        "referrals_reward": 0,
+        "referrals": [],
+        "love": None,
+    }
+    try:
+        first_seen = _app_first_seen_get(uid) if uid is not None else None
+        created_raw = (row or {}).get("created_at")
+        created_ts = _parse_timestamp(created_raw)
+        start = _earliest_stamp(created_ts, first_seen)
+        card["created_at"] = _iso_from_timestamp(created_ts) if created_ts else None
+        card["first_seen"] = _iso_from_timestamp(first_seen) if first_seen else None
+        card["days_in_game"] = _days_in_game(created_raw) if start is None else max(
+            0, int((time.time() - float(start)) // 86400))
+    except Exception:  # noqa: BLE001
+        pass
+    # Статистика игры: те же счётчики, что в профиле игрока (задача 74).
+    try:
+        stats = player_stats.read_stats(supabase, uid) or {}
+        card["games_played"] = _safe_int(stats.get("games_played"), 0)
+        card["games_won"] = _safe_int(stats.get("games_won"), 0)
+        card["lost_games"] = _safe_int(stats.get("lost_games"), 0)
+        card["coins_spent"] = _safe_int(stats.get("coins_spent"), 0)
+        card["coins_earned"] = _safe_int(stats.get("coins_earned"), 0)
+        best = [_safe_int(stats.get(key), 0) for key in
+                ("best_crash_win", "best_arena_win", "best_mines_win",
+                 "best_dice_win", "best_upgrade_win")]
+        card["best_win"] = max(best or [0])
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        if uid is not None:
+            rows = (supabase.table("bans").select("user_id")
+                    .eq("user_id", uid).limit(1).execute().data or [])
+            card["banned"] = bool(rows)
+    except Exception:  # noqa: BLE001
+        pass
+    # Рефералы: сколько пригласил и кто именно (после подтверждения — «оплачен»).
+    try:
+        if uid is not None:
+            rows = (supabase.table(REFERRALS_TABLE).select("*")
+                    .eq("referrer_id", uid).order("created_at", desc=True).limit(50).execute().data or [])
+            invited = []
+            for ref in rows:
+                friend_id = _safe_int(ref.get("referred_id"), None)
+                friend = None
+                if friend_id is not None:
+                    try:
+                        friend = _db_user(friend_id)
+                    except Exception:  # noqa: BLE001
+                        friend = None
+                invited.append({
+                    "user_id": friend_id,
+                    "username": _admin_username(friend) if friend else f"id{friend_id}",
+                    # «в аппке» — есть строка в users; иначе приглашён в бота, а
+                    # аппку ещё не открыл.
+                    "in_app": bool(friend),
+                    "reward": _safe_int(ref.get("reward"), 0),
+                    "status": ref.get("status") or "paid",
+                    "created_at": ref.get("created_at") or None,
+                })
+            card["referrals_count"] = len(rows)
+            card["referrals_reward"] = sum(_safe_int(row.get("reward"), 0) for row in rows)
+            card["referrals"] = invited
+    except Exception:  # noqa: BLE001 — таблицы нет: остаётся ноль
+        pass
+    return card
+
+
+def _admin_top_sync(limit: int = ADMIN_TOP_LIMIT) -> list:
+    """Топ по балансу: полные числа (никаких «1 234 567...» с тремя точками)."""
+    rows = (supabase.table("users").select("user_id, username, coins")
+            .order("coins", desc=True).limit(max(limit * 4, 40)).execute().data or [])
+    best = {}
+    for row in rows:
+        uid = _safe_int(row.get("user_id"), None)
+        if uid is None or uid in ADMIN_IDS:
+            continue
+        # Старые дубли профиля: у одного user_id несколько строк, берём максимум.
+        coins = _safe_int(row.get("coins"), 0)
+        if uid in best and best[uid]["coins"] >= coins:
+            continue
+        best[uid] = {"user_id": uid, "username": _admin_username(row), "coins": coins}
+    ordered = sorted(best.values(), key=lambda item: -item["coins"])
+    for index, item in enumerate(ordered, start=1):
+        item["place"] = index
+    return ordered[:max(1, int(limit))]
+
+
+def _admin_search_sync(query: str) -> list:
+    """Поиск аккаунта по @username, username или id. Возвращает короткие карточки."""
+    text = str(query or "").strip().lstrip("@")
+    if not text:
+        return []
+    found = {}
+    uid = _safe_int(text, None)
+    rows = []
+    if uid is not None:
+        try:
+            rows = _find_user_rows(uid)
+        except Exception:  # noqa: BLE001
+            rows = []
+    if not rows:
+        # Точное совпадение важнее частичного: сначала eq, потом ilike.
+        try:
+            rows = (supabase.table("users").select("user_id, username, coins")
+                    .eq("username", text).limit(ADMIN_SEARCH_RESULTS).execute().data or [])
+        except Exception:  # noqa: BLE001
+            rows = []
+    if not rows:
+        try:
+            rows = (supabase.table("users").select("user_id, username, coins")
+                    .ilike("username", f"%{text}%").limit(ADMIN_SEARCH_RESULTS).execute().data or [])
+        except Exception:  # noqa: BLE001
+            rows = []
+    for row in rows:
+        rid = _safe_int(row.get("user_id"), None)
+        if rid is None or rid in found:
+            continue
+        found[rid] = {"user_id": rid, "username": _admin_username(row),
+                      "coins": _safe_int(row.get("coins"), 0),
+                      "is_admin": rid in ADMIN_IDS}
+    return list(found.values())[:ADMIN_SEARCH_RESULTS]
+
+
+def _admin_bot_stats_sync() -> dict:
+    """«Стата бота» одной карточкой: сколько людей, коинов, рефералов и т.д.
+
+    Считаем только тем, что реально есть в базе; недоступная таблица — честный
+    None в поле, а не выдуманный ноль.
+    """
+    data = {"users": None, "coins_in_system": None, "new_24h": None, "new_7d": None,
+            "referrals": None, "referrals_paid": None, "referrals_reward": None,
+            "pairs": None, "solo_love": None, "stars_payments": None, "stars_total": None,
+            "keys_in_system": None, "arena_rounds_saved": None, "crash_rounds": None,
+            "upgrade_spins": None, "upgrade_bets": None, "upgrade_paid": None,
+            "top_balance": None, "avg_balance": None}
+    try:
+        users = supabase.table("users").select("user_id, coins, keys, created_at").execute().data or []
+        unique = {}
+        for row in users:
+            uid = _safe_int(row.get("user_id"), None)
+            if uid is None:
+                continue
+            coins = _safe_int(row.get("coins"), 0)
+            if uid in unique and _safe_int(unique[uid].get("coins"), 0) >= coins:
+                continue
+            unique[uid] = row
+        coins_list = [_safe_int(row.get("coins"), 0) for row in unique.values()]
+        data["users"] = len(unique)
+        data["coins_in_system"] = sum(coins_list)
+        data["keys_in_system"] = sum(_safe_int(row.get("keys"), 0) for row in unique.values())
+        data["top_balance"] = max(coins_list) if coins_list else 0
+        data["avg_balance"] = int(sum(coins_list) / len(coins_list)) if coins_list else 0
+        now = time.time()
+        ages = []
+        for row in unique.values():
+            stamp = _parse_timestamp(row.get("created_at"))
+            if stamp:
+                ages.append(now - float(stamp))
+        data["new_24h"] = sum(1 for age in ages if age <= 86400)
+        data["new_7d"] = sum(1 for age in ages if age <= 7 * 86400)
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        rows = supabase.table(REFERRALS_TABLE).select("reward, status").execute().data or []
+        data["referrals"] = len(rows)
+        data["referrals_paid"] = sum(1 for row in rows if (row.get("status") or "paid") == "paid")
+        data["referrals_reward"] = sum(_safe_int(row.get("reward"), 0) for row in rows)
+    except Exception:  # noqa: BLE001
+        pass
+    for key, table, column in (("pairs", "relationships", "id"), ("solo_love", "solo_love", "user_id"),
+                               ("crash_rounds", "crash_history", "round_id")):
+        try:
+            data[key] = len(supabase.table(table).select(column).execute().data or [])
+        except Exception:  # noqa: BLE001
+            pass
+    try:
+        rows = supabase.table(STARS_PAYMENTS_TABLE).select("stars, coins").execute().data or []
+        data["stars_payments"] = len(rows)
+        data["stars_total"] = sum(_safe_int(row.get("stars"), 0) for row in rows)
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        log = supabase.table("upgrade_log").select("amount_from, win_amount, item_from").execute().data or []
+        data["upgrade_spins"] = len(log)
+        data["upgrade_bets"] = sum(_safe_int(row.get("amount_from"), 0)
+                                   * UPGRADE_ITEM_PRICES.get(row.get("item_from"), 1) for row in log)
+        data["upgrade_paid"] = sum(_safe_int(row.get("win_amount"), 0) for row in log)
+    except Exception:  # noqa: BLE001
+        pass
+    data["arena_rounds_saved"] = _arena_rounds_available()
+    return data
+
+
+def _admin_games_sync() -> dict:
+    """Состояние рубильников + то, что админке нужно знать про миграцию."""
+    flags = game_flags.summary(supabase)
+    return {
+        "games": [{"mode": mode, "title": info["title"], "disabled": info["disabled"]}
+                  for mode, info in flags.items()],
+        "maintenance": maintenance_now(),
+        "love_cooldown_enabled": love_cooldown_enabled(),
+        "stats_db": player_stats.health(supabase),
+        # Задача 87: игроку больше не показываем имя файла миграции — просим
+        # написать админу, а точный текст миграции есть в админ-панели.
+        "stats_migration": ADMIN_MIGRATION_FILE,
+    }
+
+
+@app.post("/api/admin/top")
+async def admin_top(data: UserAuth):
+    _require_admin_api(data.initData)
+    return {"ok": True, "players": await asyncio.to_thread(_admin_top_sync)}
+
+
+@app.post("/api/admin/player")
+async def admin_player(data: AdminPlayerSearch):
+    """Поиск игрока и его полный профиль: /api/admin/player с query."""
+    _require_admin_api(data.initData)
+    found = await asyncio.to_thread(_admin_search_sync, data.query)
+    return {"ok": True, "found": found}
+
+
+class AdminPlayerCardRequest(BaseModel):
+    initData: str
+    user_id: int
+
+
+@app.post("/api/admin/player_card")
+async def admin_player_card(data: AdminPlayerCardRequest):
+    """Полная карточка игрока по user_id (кнопка «Открыть» в результатах поиска)."""
+    _require_admin_api(data.initData)
+    card = await asyncio.to_thread(_admin_user_card, data.user_id)
+    if card is None:
+        raise HTTPException(status_code=404, detail="Игрок не найден")
+    return {"ok": True, "player": card}
+
+
+@app.post("/api/admin/bot_stats")
+async def admin_bot_stats(data: UserAuth):
+    """Та же статистика, что команда `стата бота`, но в аппке."""
+    _require_admin_api(data.initData)
+    return {"ok": True, "stats": await asyncio.to_thread(_admin_bot_stats_sync)}
+
+
+@app.post("/api/admin/games")
+async def admin_games(data: UserAuth):
+    """Список игр и их рубильники (задача 87)."""
+    _require_admin_api(data.initData)
+    return {"ok": True, **await asyncio.to_thread(_admin_games_sync)}
+
+
+@app.post("/api/admin/set_game")
+async def admin_set_game(data: AdminGameFlagRequest):
+    """Включить/выключить одну игру для всех игроков."""
+    admin_id = _require_admin_api(data.initData)
+    mode = str(data.mode or "").strip().lower()
+    if mode not in game_flags.MODE_IDS:
+        raise HTTPException(status_code=400, detail="Неизвестная игра")
+    if not game_flags.write_mode(supabase, mode, bool(data.disabled),
+                                 cache_reset=lambda: _game_settings_cache.update({"at": 0.0, "values": {}})):
+        raise HTTPException(status_code=503,
+                            detail="Не удалось сохранить — попробуйте ещё раз")
+    logger.warning("Игра %s %s (админ %s)", mode,
+                   "ВЫКЛЮЧЕНА" if data.disabled else "включена", admin_id)
+    # Журнал админа: через сутки видно, кто закрыл игру и когда (миграция
+    # 20261207000000). Не записалось — переключение всё равно состоялось.
+    try:
+        supabase.table("admin_audit").insert({
+            "admin_id": int(admin_id), "action": "set_game",
+            "detail": {"mode": mode, "disabled": bool(data.disabled)},
+            "created_at": _now_iso(),
+        }).execute()
+    except Exception:  # noqa: BLE001
+        pass
+    return {"ok": True, "mode": mode, "disabled": bool(data.disabled),
+            "title": game_flags.TITLES.get(mode, mode)}
+
 
 # ==================== ОТНОШЕНИЯ (ЛЮБОВЬ) ====================
 # Таблицы: relationships (одна строка на пару) и love_stage_rewards (какие
@@ -7705,7 +8089,8 @@ async def profile_stats(data: UserAuth):
     payload = _profile_stats_record(uid, stat_row or {}, first_seen)
     # Задача 80: история ставок и пополнений удалена — в ответе её больше нет.
     # Пополнение приходит игроку отдельным сообщением в личку с ботом.
-    payload["migration"] = player_stats.FIX_MIGRATION_FILE
+    # Задача 87: актуальный файл — тот, что чинит и статистику, и админ-панель.
+    payload["migration"] = ADMIN_MIGRATION_FILE
     # Задача 79: честный ответ «статистика не применяется / включена».
     # Раньше игрок видел пустые достижения и не мог понять, что дело в базе.
     db_state = await asyncio.to_thread(player_stats.health, supabase)
@@ -7719,8 +8104,13 @@ async def profile_stats(data: UserAuth):
         "mines_games": bool(db_state.get("mines_games")),
     }
     if not payload["db"]["ready"]:
-        payload["hint"] = ("Статистика не запишется: в Supabase не применена миграция "
-                           + player_stats.FIX_MIGRATION_FILE)
+        # Игроку не показываем имена SQL-файлов: он всё равно не может их
+        # применить. Достаточно честного «напиши админу», а точный файл виден
+        # в админ-панели (поле migration) и в тексте миграции в чате.
+        payload["hint"] = ("Статистика пока не записывается — напиши администратору, "
+                           "он включит её в пару минут.")
+        logger.warning("СТАТИСТИКА: не применена миграция %s (reason=%s)",
+                       ADMIN_MIGRATION_FILE, payload["db"].get("reason") or "нет ответа")
     return payload
 
 

@@ -1712,3 +1712,156 @@ body.maintenance { overflow: hidden; }
     line-height: 14px;
 }
 .bet-hint:not(.active) { visibility: hidden; }
+
+/* ============ АДМИН-ПАНЕЛЬ 2.0 (задача 87) ============
+   Заказчик: «панель администрации сделать более расширенной»: корона вместо
+   шестерёнки, топ-10 полными числами, поиск игрока с полной карточкой,
+   чёрная «премиум» кнопка статистики бота и настройки игр (рубильники).
+   Правило прежнее: никаких наложений — всё колонкой, длинные числа переносятся. */
+.admin-card { margin-bottom: 12px; }
+/* Значение в шапке топ-10: полное число, без обрезки многоточием. */
+.admin-card .extra-value { white-space: normal; text-align: right; }
+
+.admin-top-row {
+    display: grid; grid-template-columns: 26px minmax(0, 1fr); gap: 8px;
+    align-items: center; padding: 8px 10px;
+    background: #141414; border: 1px solid #262626; border-radius: 10px;
+}
+.admin-top-place {
+    font-size: 12px; font-weight: 900; color: #ffcc00; text-align: center;
+}
+.admin-top-name {
+    font-size: 13px; font-weight: 700; color: #e8e8ea; min-width: 0;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+/* Баланс — отдельной строкой под ником: полное число с разрядами помещается
+   на любой ширине и ничего не обрезает. */
+.admin-top-coins {
+    display: block; margin-top: 2px;
+    font-size: 13px; font-weight: 900; color: #34c759;
+    font-variant-numeric: tabular-nums;
+}
+
+.admin-search { display: flex; gap: 8px; margin-top: 10px; }
+.admin-search-input {
+    flex: 1 1 auto; min-width: 0; padding: 10px 12px;
+    background: #141414; border: 1px solid #2c2c2c; border-radius: 12px;
+    color: #e8e8ea; font-size: 14px;
+}
+.admin-search-input:focus { outline: none; border-color: #4a4a4a; background: #181818; }
+.admin-search-btn {
+    flex: 0 0 auto; padding: 10px 14px; border-radius: 12px;
+    background: #ffcc00; color: #111; border: none;
+    font-size: 13px; font-weight: 800; cursor: pointer;
+}
+.admin-search-btn:active { transform: scale(0.97); }
+.admin-search-btn[disabled] { opacity: 0.6; }
+.admin-search-results { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
+.admin-search-hit {
+    display: flex; align-items: center; justify-content: space-between; gap: 10px;
+    background: #141414; border: 1px solid #262626; border-radius: 12px;
+    padding: 10px 12px; cursor: pointer;
+}
+.admin-search-hit:active { background: #1c1c1c; }
+.admin-search-hit .hit-name { font-size: 13px; font-weight: 700; color: #e8e8ea; }
+.admin-search-hit .hit-coins { font-size: 13px; font-weight: 900; color: #34c759; }
+.admin-search-hit .hit-open { font-size: 11px; color: #7f858c; }
+
+/* Карточка игрока: подпись слева, значение справа; значения не обрезаются. */
+.admin-player-card {
+    margin-top: 10px; padding: 10px 12px;
+    background: #121212; border: 1px solid #2c2c2c; border-radius: 14px;
+}
+.admin-player-head {
+    display: flex; align-items: baseline; justify-content: space-between; gap: 8px;
+    margin-bottom: 8px;
+}
+.admin-player-name { font-size: 15px; font-weight: 900; color: #fff; overflow-wrap: anywhere; }
+.admin-player-badge {
+    font-size: 10px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.04em;
+    padding: 3px 8px; border-radius: 8px; background: #2a2a2c; color: #ffcc00;
+}
+.admin-player-badge.is-banned { background: #3a1414; color: #ff6b6b; }
+.admin-player-rows { display: flex; flex-direction: column; gap: 4px; }
+.admin-player-row {
+    display: flex; align-items: baseline; justify-content: space-between; gap: 10px;
+    padding: 5px 0; border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+}
+.admin-player-row:last-child { border-bottom: none; }
+.admin-player-label { font-size: 12px; color: #9aa0a6; }
+.admin-player-value {
+    font-size: 13px; font-weight: 800; color: #e8e8ea; text-align: right;
+    font-variant-numeric: tabular-nums; overflow-wrap: anywhere;
+}
+.admin-refs { margin-top: 8px; }
+.admin-refs-title { font-size: 12px; font-weight: 800; color: #b9c2cf; margin-bottom: 6px; }
+.admin-ref-row {
+    display: flex; align-items: baseline; justify-content: space-between; gap: 8px;
+    padding: 4px 0; font-size: 12px; color: #d0d0d4;
+}
+.admin-ref-row .ref-meta { color: #7f858c; font-size: 11px; }
+
+/* Чёрная «премиум» кнопка статистики бота: длинная, на всю ширину. */
+.admin-premium-btn,
+.admin-games-btn {
+    width: 100%; display: flex; align-items: center; justify-content: space-between;
+    gap: 10px; padding: 16px 18px; margin-bottom: 10px;
+    border-radius: 16px; cursor: pointer; font-family: inherit;
+}
+.admin-premium-btn {
+    background: linear-gradient(135deg, #17171a 0%, #0b0b0d 100%);
+    border: 1px solid #3a3a3f;
+    box-shadow: 0 6px 18px rgba(0, 0, 0, 0.45), inset 0 1px 0 rgba(255, 255, 255, 0.06);
+}
+.admin-premium-title {
+    font-size: 15px; font-weight: 900; letter-spacing: 0.02em;
+    color: #f2f2f5;
+}
+.admin-premium-chevron,
+.admin-games-chevron {
+    font-size: 18px; font-weight: 900; color: #8a8a90;
+    transition: transform 0.18s ease;
+}
+.admin-premium-btn[aria-expanded="true"] .admin-premium-chevron,
+.admin-games-btn[aria-expanded="true"] .admin-games-chevron { transform: rotate(90deg); }
+.admin-premium-btn:active { background: #101012; }
+
+.admin-games-btn {
+    background: #1c1c1e; border: 1px solid #2f2f33;
+}
+.admin-games-title { font-size: 14px; font-weight: 900; color: #e8e8ea; }
+.admin-games-btn:active { background: #232326; }
+
+/* Сворачиваемая плашка (не «модалка»): раскрывается под кнопкой. */
+.admin-collapse {
+    overflow: hidden; margin: -4px 0 12px;
+    background: #101011; border: 1px solid #232326; border-radius: 14px;
+}
+.admin-collapse[hidden] { display: none !important; }
+.admin-collapse-inner { padding: 12px; display: flex; flex-direction: column; gap: 6px; }
+
+.admin-game-row {
+    display: flex; align-items: center; justify-content: space-between; gap: 10px;
+    padding: 10px 12px; background: #141414; border: 1px solid #262626; border-radius: 12px;
+}
+.admin-game-title { font-size: 13px; font-weight: 700; color: #e8e8ea; min-width: 0; }
+.admin-game-state { font-size: 11px; color: #7f858c; margin-top: 2px; }
+.admin-game-state.is-off { color: #ff6b6b; font-weight: 700; }
+.admin-game-btn {
+    flex: 0 0 auto; padding: 8px 12px; border-radius: 10px; border: none;
+    font-size: 12px; font-weight: 800; cursor: pointer; font-family: inherit;
+    background: #34c759; color: #06210f;
+}
+.admin-game-btn.is-off { background: #ff453a; color: #fff; }
+.admin-game-btn[disabled] { opacity: 0.6; }
+
+/* Задача 87: закрытая админом игра. Карточка приглушена, справа плашка —
+   игрок сразу видит, почему игра не открывается, и не жмёт в пустоту. */
+.game-row.game-closed { opacity: 0.55; }
+.game-row.game-closed .game-chevron { display: none; }
+.game-closed-badge {
+    flex: 0 0 auto; margin-left: auto; margin-right: 6px;
+    font-size: 10px; font-weight: 800; letter-spacing: 0.02em;
+    padding: 3px 8px; border-radius: 8px;
+    background: #3a1414; color: #ff8a80; white-space: nowrap;
+}
