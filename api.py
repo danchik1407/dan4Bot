@@ -89,7 +89,7 @@ async def _http_json(url, method: str = "GET", params=None, payload=None, timeou
 
 # Номер сборки: по нему из /api/health видно, что на сервисе НЕ старый код.
 # Если после деплоя здесь прежнее значение — Render ещё не перезапустился.
-API_BUILD = "2026-10-27-task93-board-and-review"
+API_BUILD = "2026-10-27-task93b-review-fixes"
 
 # Момент старта процесса. По нему видно, что сервис только что «проснулся»:
 # Render на бесплатном тарифе усыпляет Web Service через 15 минут без входящих
@@ -768,6 +768,7 @@ def set_love_cooldown_enabled(enabled: bool) -> bool:
 BOARD_TABLE = "newyear_board"
 BOARD_RPC = "newyear_board_add"
 BOARD_HEALTH_RPC = "newyear_board_health"
+BOARD_SELFTEST_RPC = "newyear_board_selftest"
 # Финиш акции: 19 декабря 2026, 21:00 МСК (UTC+3) = 18:00 UTC.
 BOARD_DEADLINE_ISO = "2026-12-19T18:00:00+00:00"
 BOARD_DEADLINE_MSK = "19 декабря 2026, 21:00 МСК"
@@ -805,6 +806,14 @@ def board_prize_for_place(place) -> int:
     return BOARD_PRIZES[idx]
 
 
+_BOARD_LAST_ERROR = {"text": ""}
+
+
+def board_last_error() -> str:
+    """Последняя причина, по которой запись в таблицу не удалась (для админки)."""
+    return _BOARD_LAST_ERROR["text"]
+
+
 def board_add(uid, games: int = 0, passive: int = 0, win: bool = False) -> bool:
     """Записать доход в таблицу. False — не сохранилось (не ошибка игры)."""
     target = _safe_int(uid, None)
@@ -822,6 +831,7 @@ def board_add(uid, games: int = 0, passive: int = 0, win: bool = False) -> bool:
                                  "p_passive": passive, "p_win": bool(win)}).execute()
         return True
     except Exception as exc:  # noqa: BLE001 — нет миграции: игра важнее таблицы
+        _BOARD_LAST_ERROR["text"] = str(exc)[:200]
         if not _BOARD_WARNED["once"]:
             logger.warning("Лидерборд: newyear_board_add недоступна (%s) — проверьте "
                            "миграцию 20261209000000_newyear_leaderboard.sql", exc)
@@ -855,17 +865,59 @@ def board_rows(limit: int = 21) -> list:
     return rows
 
 
-def board_health() -> dict:
+def _rpc_payload(name: str) -> dict:
+    """Первый элемент/объект из ответа RPC (supabase отдаёт список)."""
+    data = supabase.rpc(name, {}).execute().data
+    if isinstance(data, list) and data:
+        data = data[0]
+    return data if isinstance(data, dict) else {}
+
+
+_BOARD_HEALTH_CACHE = {"value": None, "at": 0.0}
+BOARD_HEALTH_TTL = 60.0
+
+
+def board_health(force: bool = False) -> dict:
+    """Есть ли таблица (дёшево, с кэшем 60 с — экран опрашивает её каждые 15 с)."""
+    now = time.time()
+    cached = _BOARD_HEALTH_CACHE["value"]
+    if cached and not force and (now - _BOARD_HEALTH_CACHE["at"]) < BOARD_HEALTH_TTL:
+        return cached
     try:
-        res = supabase.rpc(BOARD_HEALTH_RPC, {}).execute()
-        data = res.data
-        if isinstance(data, list) and data:
-            data = data[0]
-        if isinstance(data, dict) and data:
-            return {"ok": bool(data.get("ok")), "reason": ""}
+        data = _rpc_payload(BOARD_HEALTH_RPC)
+        if not data:
+            result = {"ok": False, "reason": "health вернул пустоту"}
+        elif not data.get("ok"):
+            result = {"ok": False, "reason": "таблицы newyear_board нет"}
+        else:
+            result = {"ok": True, "reason": "", "version": data.get("version", "")}
     except Exception as exc:  # noqa: BLE001
-        return {"ok": False, "reason": str(exc)[:160]}
-    return {"ok": False, "reason": "health вернул пустоту"}
+        result = {"ok": False, "reason": f"нет миграции: {str(exc)[:140]}"}
+    _BOARD_HEALTH_CACHE.update({"value": result, "at": now})
+    return result
+
+
+def board_write_check() -> dict:
+    """Полная проверка «таблица реально пишется» — только по запросу админа.
+
+    Мало проверить, что таблица существует: опаснее случай, когда SELECT
+    разрешён, а INSERT — нет (нет RLS-политики). Тогда экран навсегда пустой,
+    а причина видна только в логе сервиса. newyear_board_selftest пишет и сразу
+    удаляет строку user_id = 0, поэтому рейтинг не портит.
+    """
+    base = board_health(force=True)
+    if not base.get("ok"):
+        return base
+    try:
+        probe = _rpc_payload(BOARD_SELFTEST_RPC)
+    except Exception as exc:  # noqa: BLE001 — миграция без selftest
+        return {**base, "write": None, "reason": "selftest недоступен",
+                "hint": "примените миграцию 20261209000000_newyear_leaderboard.sql заново"}
+    if probe.get("ok"):
+        return {**base, "write": True, "write_ok": True}
+    return {"ok": False, "write": False, "write_ok": False,
+            "reason": f"запись запрещена: {str(probe.get('error') or '')[:140]}",
+            "hint": "у public.newyear_board нет прав INSERT для service_role"}
 
 
 # ==================== СНЕЖИНКИ (задача 90) ====================
@@ -8527,6 +8579,9 @@ async def newyear_board_public(limit: int = 21):
             "grow": "Играй в разные режимы и скупай капсулы — доход идёт постоянно.",
         },
         "db": await asyncio.to_thread(board_health),
+        # Если запись уже падала — показываем причину админу (текстом в лог и в
+        # /api/admin/board_check, игроку это поле просто не выводится).
+        "last_error": board_last_error(),
     }
 
 
@@ -8553,6 +8608,42 @@ async def newyear_board_me(data: UserAuth):
         "deadline_msk": BOARD_DEADLINE_MSK,
         "seconds_left": max(0, int(board_deadline_ts() - time.time())),
         "finished": board_is_finished(),
+    }
+
+
+@app.post("/api/admin/board_check")
+async def admin_board_check(data: UserAuth):
+    """Задача 93: проверка лидерборда из админки — «работает или нет и почему».
+
+    Заказчик: «саму работу лидерборда надо будет сейчас проверить». Возвращаем
+    всё, что нужно, чтобы понять причину без серверных логов:
+      * таблица/функция на месте (health),
+      * пробная запись проходит (selftest, строка-проба сразу удаляется),
+      * сколько игроков уже в таблице и топ-3,
+      * последняя ошибка записи, если она была.
+    """
+    _require_admin_api(data.initData)
+    health = await asyncio.to_thread(board_write_check)
+    rows = await asyncio.to_thread(board_rows, 500)
+    top = []
+    for row in rows[:3]:
+        uid = _safe_int(row.get("user_id"), 0)
+        top.append({"user_id": uid, "username": _username_by_id(uid) if uid else "",
+                    "earned": _safe_int(row.get("earned"), 0)})
+    return {
+        "ok": bool(health.get("ok")),
+        "health": health,
+        "players": len(rows),
+        "top": top,
+        "last_error": board_last_error(),
+        "deadline": BOARD_DEADLINE_ISO,
+        "deadline_msk": BOARD_DEADLINE_MSK,
+        "seconds_left": max(0, int(board_deadline_ts() - time.time())),
+        "finished": board_is_finished(),
+        "prizes": list(BOARD_PRIZES),
+        "message": ("✅ Лидерборд работает: таблица есть, запись проходит"
+                    if health.get("ok") and health.get("write_ok", True)
+                    else "⚠️ Лидерборд не работает: " + str(health.get("reason") or "неизвестно")),
     }
 
 

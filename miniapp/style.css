@@ -45,7 +45,15 @@ body { background: var(--bg); color: var(--text); padding-bottom: 90px; overflow
 /* Шапка не растягивается: бейдж занимает ровно свою ширину, а длинный ник
    обрезается многоточием, не выдавливая баланс за край экрана. */
 .profile-badge { display: flex; align-items: center; background: var(--card); padding: 6px 16px 6px 6px; border-radius: 20px; min-width: 0; flex: 0 1 auto; width: max-content; max-width: 100%; overflow: hidden; }
-.profile-badge img { width: 28px; height: 28px; border-radius: 50%; margin-right: 8px; }
+/* Задача 93: круг аватара — на обёртке (overflow: hidden), поэтому украшения
+   (шапка) могут вылезать за круг, не растягивая фото в квадрат. Раньше круг
+   висел на самой картинке: как только бейджу разрешили overflow, фотография
+   вылезла квадратом. */
+.profile-badge .badge-avatar {
+    position: relative; flex: 0 0 auto; width: 28px; height: 28px;
+    margin-right: 8px; border-radius: 50%; display: inline-block;
+}
+.profile-badge img { width: 28px; height: 28px; border-radius: 50%; display: block; object-fit: cover; }
 .profile-badge span { font-weight: 700; font-size: 15px; font-style: italic; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .balance-badge { display: flex; align-items: center; flex: 0 0 auto; background: #1a2b4c; border: 1px solid #2a4b8c; padding: 6px 6px 6px 12px; border-radius: 20px; }
 .balance-badge #user-balance { white-space: nowrap; font-variant-numeric: tabular-nums; }
@@ -2818,21 +2826,9 @@ html.ny .shop-item::before {
 
 /* ---------- 8. ПРОФИЛЬ: шапка Деда Мороза на аватарке и «2027» ---------- */
 html.ny .profile-badge { position: relative; overflow: visible; }
-html.ny .profile-badge::before {
-    content: ''; position: absolute; left: 2px; top: -10px; width: 34px; height: 20px;
-    z-index: 3; pointer-events: none;
-    background: linear-gradient(180deg, #e0233b 0 58%, #ffffff 58% 100%);
-    border-radius: 18px 18px 6px 6px;
-    box-shadow: 0 2px 8px rgba(224, 35, 59, 0.45);
-    transform: rotate(-12deg);
-}
-html.ny .profile-badge::after {
-    content: '2027';
-    position: absolute; left: 38px; top: -12px; z-index: 3;
-    font-size: 9px; font-weight: 900; letter-spacing: 1px; color: #ffe6a3;
-    text-shadow: 0 0 8px rgba(255, 215, 106, 0.8);
-    pointer-events: none;
-}
+/* Задача 93: CSS-«колпак» удалён — в шапке и в профиле рисуются присланные
+   картинки (.ny-hat и .ny-ears в разметке). */
+html.ny .profile-badge::after { content: none; }   /* «2027» наезжало на ник */
 /* Бенгальская искра у аватарки — маленькая, чтобы не мешать нику. */
 html.ny .profile-badge img {
     box-shadow: 0 0 0 2px rgba(255, 215, 106, 0.75), 0 0 12px rgba(255, 215, 106, 0.45);
@@ -2888,12 +2884,26 @@ html.ny .ny-board { position: relative; overflow: hidden; padding: 10px 8px 14px
    градиентами, чтобы не тянуть лишние файлы). */
 html.ny .ny-board-head { position: relative; text-align: center; padding: 14px 44px 10px; }
 html.ny .ny-board-bows { position: absolute; inset: 0; pointer-events: none; }
+/* Банты с еловыми ветками — вырезаны из референса заказчика (скрин 4),
+   поэтому выглядят как на макете, а не как эмодзи. Полупрозрачность у края
+   даёт маска в самой картинке (ny_bow.png). */
 html.ny .ny-bow {
-    position: absolute; top: 0; font-size: 22px; filter: drop-shadow(0 2px 6px rgba(0,0,0,0.45));
-    opacity: 0.95;
+    position: absolute; top: -6px; width: 92px; height: 98px;
+    background: url('ny_bow.png') no-repeat center / contain;
+    filter: drop-shadow(0 2px 8px rgba(0, 0, 0, 0.45));
+    opacity: 0.98;
 }
-html.ny .ny-bow.bow-l { left: 2px; transform: rotate(-18deg); }
-html.ny .ny-bow.bow-r { right: 2px; transform: rotate(18deg) scaleX(-1); }
+html.ny .ny-bow.bow-l { left: -10px; }
+html.ny .ny-bow.bow-r { right: -10px; transform: scaleX(-1); }
+/* Ветка под бантом тянется вдоль верхней кромки — как на референсе. */
+html.ny .ny-board-head::after {
+    content: ''; position: absolute; left: 40px; right: 40px; top: 2px; height: 26px;
+    background:
+        radial-gradient(20% 60% at 50% 40%, rgba(46, 122, 92, 0.5) 0 60%, transparent 72%),
+        radial-gradient(14% 46% at 20% 50%, rgba(46, 122, 92, 0.45) 0 60%, transparent 72%),
+        radial-gradient(14% 46% at 80% 50%, rgba(46, 122, 92, 0.45) 0 60%, transparent 72%);
+    pointer-events: none; opacity: 0.75;
+}
 /* Ветки со снегом под бантами. */
 html.ny .ny-board-head::before {
     content: ''; position: absolute; left: -12px; right: -12px; top: -6px; height: 54px;
@@ -2989,19 +2999,29 @@ html.ny .ny-board-prize.no-prize .ny-board-gift { display: none; }
    на шапку». Теперь рисуем PNG заказчика (длинный кончик + белый помпон),
    фон у него вырезан, поэтому размер и.position подобраны под аватарку 28 px
    и под большой аватар в профиле 80 px. */
+/* Аватар в шапке — КРУГЛЫЙ (заказчик: «почему мои аватарка квадратная?»).
+   Круг держит обёртка .badge-avatar (overflow: hidden), а не картинка:
+   тогда шапка может вылезать за край, а фото остаётся круглым. */
+html.ny .profile-badge .badge-avatar { overflow: hidden; border-radius: 50%; }
 html.ny .profile-badge img#user-avatar {
-    overflow: visible;
+    border-radius: 50% !important;
+    object-fit: cover;
+    display: block;
     box-shadow: 0 0 0 2px rgba(255, 215, 106, 0.55);
 }
-/* Колпак в шапке: поверх аватарки, чуть наискось, кончик уходит вправо. */
-html.ny .profile-badge::before {
-    content: '';
-    position: absolute; left: 0; top: -12px; width: 30px; height: 28px;
+/* Шапка Деда Мороза (присланная картинка) — сдвинута ВПРАВО, как просил
+   заказчик: сидит на макушке аватарки, кончик с помпоном уходит вправо. */
+html.ny .ny-hat {
+    display: none;
+    position: absolute; left: 8px; top: -12px; width: 26px; height: 24px;
     background: url('santa_hat.png') no-repeat center / contain;
-    z-index: 4; pointer-events: none;
-    transform: rotate(-12deg);
-    filter: drop-shadow(0 2px 5px rgba(0, 0, 0, 0.55));
+    pointer-events: none; z-index: 4;
+    transform: rotate(-6deg);
+    filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.6));
 }
+html.ny .ny-hat { display: block; }
+/* Бейдж не обрезает шапку сверху, но ник по-прежнему в одну строку. */
+html.ny .profile-badge { overflow: visible; }
 /* Надпись «2027» из прошлой версии в шапке больше не нужна — она наезжала
    на ник. В профиле (большая аватарка) она осталась. */
 html.ny .profile-badge::after { content: none; }
@@ -3215,18 +3235,22 @@ html.ny .up-circle { box-shadow: none !important; }
 html.ny .up-circle-ring { box-shadow: 0 0 26px rgba(23, 163, 90, 0.28) !important; }
 html.ny .up-arrow-wrap { border-radius: 50%; }
 
-/* ---------- 9. ПРОФИЛЬ: ЗАЯЧЬИ УШКИ НА АВАТАРКЕ (п.9 ревью) ----------
-   Заказчик: «на аватарку в профиле — присланные пушистые ушки». Картинка
-   bunny_ears.png, фон вырезан; ушки сидят на верхнем краю аватарки. */
-html.ny .profile-avatar-large,
-html.ny .profile-avatar-large.ny-ears { position: relative; overflow: visible; }
-html.ny .profile-avatar-large::after {
-    content: '';
-    position: absolute; left: 50%; top: -26px; width: 62px; height: 46px;
-    margin-left: -31px;
+/* ---------- 9. ПРОФИЛЬ: ЗАЯЧЬИ УШКИ «ОБХВАТОМ» (п.9 + доработка) ----------
+   Заказчик: «эта штука должна обхватить аватарку, кружочек, именно одели, а не
+   вставить её» + прислал ту же картинку в кружке. Поэтому bunny_ears.png — это
+   обруч с ушами: снизу он повторяет окружность аватарки, сверху торчат уши.
+   Картинка 681×962 при диаметре обруча 681 = ровно 100 % ширины аватарки,
+   поэтому она кладётся по центру: обруч ложится по краю, уши уходят вверх,
+   лицо остаётся открытым. Не «вставляем» отдельный элемент поверх лица. */
+html.ny .profile-avatar-large { position: relative; overflow: visible; }
+html.ny .ny-ears { display: none; }
+html.ny .ny-ears {
+    display: block; position: absolute; left: 50%; bottom: -2px;
+    width: 80px; height: 113px;        /* 80 × (962 / 681) = 113 */
+    margin-left: -40px;
     background: url('bunny_ears.png') no-repeat center bottom / contain;
-    z-index: 2; pointer-events: none;
-    filter: drop-shadow(0 3px 6px rgba(0, 0, 0, 0.45));
+    pointer-events: none; z-index: 4;
+    filter: drop-shadow(0 2px 6px rgba(0, 0, 0, 0.45));
 }
 html.ny .profile-avatar-large img { border-radius: 50%; }
 
@@ -3299,3 +3323,71 @@ html.ny .loader-santa { animation: loaderSanta 2.2s ease-in-out infinite; }
     html.ny .ny-fireworks i { animation: none !important; }
     html.ny .app-loader .loader-ny::after { display: none; }
 }
+
+/* ==========================================================================
+   ЗАДАЧА 93 (доработка по второму ревью заказчика)
+   1) аватарка в шапке снова КРУГЛАЯ (круг — на обёртке, фото не квадрат);
+   2) шапка Деда Мороза сдвинута вправо и сидит на макушке;
+   3) заячьи ушки «обхватывают» аватарку в профиле (обруч, а не вставка);
+   4) у таймера убрана подпись «до финиша», он тикает с первой секунды;
+   5) по бокам шапки лидерборда — присланные банты с ветками (референс);
+   6) строки таблицы — как в макете: место, ник, «заработано: N KOI», приз.
+   ========================================================================== */
+
+/* ---------- 1–2. Аватарка и шапка в верхней панели ---------- */
+html.ny .profile-badge .badge-avatar {
+    position: relative; overflow: hidden; border-radius: 50%;
+    width: 28px; height: 28px; flex: 0 0 auto; margin-right: 8px;
+    box-shadow: 0 0 0 2px rgba(255, 215, 106, 0.55);
+}
+html.ny .profile-badge .badge-avatar img,
+html.ny .profile-badge img#user-avatar {
+    width: 28px; height: 28px; border-radius: 50% !important;
+    object-fit: cover; display: block;
+    /* Круг режем и clip-path'ом: если фото пришло неквадратным (обычное дело
+       у Telegram), оно всё равно заполнит круг, а не станет «квадратом». */
+    clip-path: circle(50% at 50% 50%);
+}
+/* Шапка: чуть правее центра аватарки (просьба заказчика), кончик с помпоном
+   уходит вправо; снизу колпак «садится» на край круга. */
+html.ny .ny-hat {
+    position: absolute; left: 9px; top: -11px; width: 25px; height: 23px;
+    background: url('santa_hat.png') no-repeat center / contain;
+    transform: rotate(-4deg);
+    filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.6));
+    pointer-events: none; z-index: 4;
+}
+
+/* ---------- 3. Заячьи ушки в профиле: обруч вокруг аватарки ---------- */
+html.ny .profile-avatar-large { position: relative; overflow: visible; }
+html.ny .ny-ears {
+    position: absolute; left: 50%; bottom: -2px;
+    width: 80px; height: 113px; margin-left: -40px;
+    background: url('bunny_ears.png') no-repeat center bottom / contain;
+    pointer-events: none; z-index: 4;
+    filter: drop-shadow(0 3px 6px rgba(0, 0, 0, 0.5));
+}
+
+/* ---------- 4–5. Лидерборд: таймер без подписи, банты по бокам ---------- */
+html.ny .ny-board-sub { display: none; }
+html.ny .ny-board-timer .ny-t-d { color: #ffd75e; }
+html.ny .ny-board-timer .ny-t-h,
+html.ny .ny-board-timer .ny-t-m,
+html.ny .ny-board-timer .ny-t-s { color: #9fe6ff; }
+html.ny .ny-board-head { padding: 16px 44px 8px; }
+html.ny .ny-board-bows { position: absolute; inset: 0; pointer-events: none; z-index: 2; }
+html.ny .ny-bow {
+    position: absolute; top: -10px; width: 96px; height: 102px;
+    background: url('ny_bow.png') no-repeat center / contain;
+    filter: drop-shadow(0 2px 8px rgba(0, 0, 0, 0.45));
+}
+html.ny .ny-bow.bow-l { left: -12px; }
+html.ny .ny-bow.bow-r { right: -12px; transform: scaleX(-1); }
+
+/* ---------- 6. Строки таблицы как в макете ---------- */
+html.ny .ny-board-earned { color: rgba(196, 220, 244, 0.85); }
+html.ny .ny-board-earned b { color: #ffffff; font-weight: 800; }
+html.ny .ny-board-place { font-size: 16px; color: #eaf3ff; }
+html.ny .ny-board-row.top-1 .ny-board-place,
+html.ny .ny-board-row.top-2 .ny-board-place,
+html.ny .ny-board-row.top-3 .ny-board-place { color: #ffd75e; }

@@ -1469,6 +1469,7 @@ function switchTab(tabId, element) {
         // Задача 93: в новогоднем режиме вместо топа по балансу — лидерборд
         // «кто больше заработал» (чистый доход). Обычный топ остаётся в classic.
         loadNewYearBoard();
+        startBoardAutoRefresh();   // «обновляется в реальном времени»
         loadGlobalTop();
     }
     if (tabId === 'shop') {
@@ -1745,34 +1746,54 @@ const BOARD_API = `${API_URL}`;
 let boardTimerTick = null;
 let boardData = null;
 let boardBusy = false;
+let boardSignature = '';       // «отпечаток» строк: чтобы не перерисовывать зря
 
-function boardDeadlineLeftText(seconds) {
+function boardDeadlineParts(seconds) {
     const left = Math.max(0, Math.floor(Number(seconds) || 0));
-    const d = Math.floor(left / 86400);
-    const h = Math.floor((left % 86400) / 3600);
-    const m = Math.floor((left % 3600) / 60);
-    const sec = left % 60;
-    return `${d}д ${String(h).padStart(2, '0')}ч ${String(m).padStart(2, '0')}м ${String(sec).padStart(2, '0')}с`;
+    return {
+        d: Math.floor(left / 86400),
+        h: Math.floor((left % 86400) / 3600),
+        m: Math.floor((left % 3600) / 60),
+        s: left % 60,
+    };
 }
 
+function boardDeadlineLeftText(seconds) {
+    const p = boardDeadlineParts(seconds);
+    return `${p.d}д ${String(p.h).padStart(2, '0')}ч ${String(p.m).padStart(2, '0')}м ${String(p.s).padStart(2, '0')}с`;
+}
+
+// Таймер как на референсе: дни белым-золотым, часы/секунды — ледяным голубым.
+// Разметка та же строка, поэтому textContent остаётся «24д 07ч 32м 14с».
+function boardDeadlineLeftHtml(seconds) {
+    const p = boardDeadlineParts(seconds);
+    const pad = (n) => String(n).padStart(2, '0');
+    return `<span class="ny-t-d">${p.d}д</span> `
+        + `<span class="ny-t-h">${pad(p.h)}ч</span> `
+        + `<span class="ny-t-m">${pad(p.m)}м</span> `
+        + `<span class="ny-t-s">${pad(p.s)}с</span>`;
+}
+
+// Как на макете: единица измерения — «KOI» текстом (в макете нет картинки
+// монеты), приз — таблетка с подарочком, ниже 20-го места — «Без приза».
 function boardPrizeText(prize) {
-    return prize > 0 ? `${formatCoins(prize)} ${COIN_IMG}` : 'Без приза';
+    return prize > 0 ? `${formatCoins(prize)} KOI` : 'Без приза';
 }
 
 function boardRowHtml(p) {
     const place = _safeCoinNumber(p.place);
-    const medal = place === 1 ? '🥇' : place === 2 ? '🥈' : place === 3 ? '🥉' : String(place);
     const cls = place <= 3 ? `ny-board-row top-${place}` : 'ny-board-row';
     const earned = formatCoins(_safeCoinNumber(p.earned));
+    const prize = _safeCoinNumber(p.prize);
     return `
         <div class="${cls}">
-            <span class="ny-board-place">${place === 1 ? '<span class="ny-board-crown">👑</span>' : ''}${medal}</span>
+            <span class="ny-board-place">${place === 1 ? '<span class="ny-board-crown">👑</span>' : ''}${place}</span>
             <span class="ny-board-player">
                 <span class="ny-board-name">${escapeHtml(shortName(p.username || 'Игрок'))}</span>
-                <span class="ny-board-earned">заработано: ${earned} ${COIN_IMG}</span>
+                <span class="ny-board-earned">заработано: <b>${earned} KOI</b></span>
             </span>
-            <span class="ny-board-prize${p.prize > 0 ? '' : ' no-prize'}">
-                <span class="ny-board-gift">🎁</span>${boardPrizeText(_safeCoinNumber(p.prize))}
+            <span class="ny-board-prize${prize > 0 ? '' : ' no-prize'}">
+                <span class="ny-board-gift">🎁</span>${boardPrizeText(prize)}
             </span>
         </div>`;
 }
@@ -1799,23 +1820,39 @@ function renderNewYearBoard(data) {
         return;
     }
     boardData = data;
-    if (timer) timer.textContent = boardDeadlineLeftText(data.seconds_left);
-    if (sub) sub.textContent = data.finished ? 'финиш пройден' : 'до финиша · 19 декабря, 21:00 МСК';
+    // Подписи «до финиша · …» больше нет (просьба заказчика), но таймер тикает.
+    if (sub) sub.hidden = true;
+    startBoardTimer(Number(data.seconds_left) || 0);
     const rows = Array.isArray(data.players) ? data.players : [];
     if (!rows.length) {
         list.innerHTML = '<p class="lb-empty">Пока никто не заработал — будь первым</p>';
         return;
     }
     list.innerHTML = rows.map(boardRowHtml).join('');
-    // Тикаем таймер сами, чтобы не дёргать сервер каждую секунду.
-    if (boardTimerTick) clearInterval(boardTimerTick);
-    let left = Number(data.seconds_left) || 0;
-    boardTimerTick = setInterval(() => {
+}
+
+// Таймер лидерборда: тикает КАЖДУЮ секунду с первого показа и не ждёт
+// перерисовки списка. Заказчик: «таймер пусть начинает тикать уже».
+// Считаем от данных сервера (seconds_left), а не от Date на телефоне: у игрока
+// часы могут врать, а финиш должен быть одним для всех.
+function startBoardTimer(secondsLeft) {
+    if (boardTimerTick) { clearInterval(boardTimerTick); boardTimerTick = null; }
+    let left = Math.max(0, Math.floor(Number(secondsLeft) || 0));
+    const paint = () => {
         const el = document.getElementById('ny-board-timer');
-        if (!el) { clearInterval(boardTimerTick); boardTimerTick = null; return; }
+        if (!el) return false;
+        el.innerHTML = boardDeadlineLeftHtml(left);
+        return true;
+    };
+    paint();
+    boardTimerTick = setInterval(() => {
         left = Math.max(0, left - 1);
-        el.textContent = boardDeadlineLeftText(left);
-        if (left <= 0) { clearInterval(boardTimerTick); boardTimerTick = null; loadNewYearBoard(); }
+        if (!paint()) { clearInterval(boardTimerTick); boardTimerTick = null; return; }
+        if (left <= 0) {
+            clearInterval(boardTimerTick); boardTimerTick = null;
+            // Финиш: перечитываем таблицу (сервер уже отдаёт finished).
+            loadNewYearBoard();
+        }
     }, 1000);
 }
 
@@ -1832,12 +1869,38 @@ async function loadNewYearBoard() {
         const res = await fetch(`${BOARD_API}/api/newyear_board?limit=21`);
         const payload = await res.json().catch(() => null);
         if (!res.ok || !payload) throw new Error((payload && payload.detail) || 'Лидерборд недоступен');
+        const signature = JSON.stringify((payload.players || []).map(p => [p.place, p.user_id, p.earned]));
+        if (boardData && signature === boardSignature) {
+            // Ничего не изменилось — только обновляем оставшееся время
+            // (иначе список мигал бы каждые 15 секунд).
+            startBoardTimer(Number(payload.seconds_left) || 0);
+            return;
+        }
+        boardSignature = signature;
         renderNewYearBoard(payload);
     } catch (e) {
         renderNewYearBoard({ ok: false });
+        // Таблица недоступна — не оставляем экран мёртвым: пробуем снова.
+        setTimeout(() => { if (currentTheme() === THEME_NEWYEAR) loadNewYearBoard(); }, 15000);
     } finally {
         boardBusy = false;
     }
+}
+
+// «Обновляется в реальном времени»: пока открыта вкладка «Топ» и включён
+// новогодний режим — перечитываем таблицу раз в 15 секунд (без мигания:
+// список перерисовывается только когда данные реально изменились).
+let boardRefreshTick = null;
+const BOARD_REFRESH_MS = 15000;
+
+function startBoardAutoRefresh() {
+    if (boardRefreshTick) clearInterval(boardRefreshTick);
+    boardRefreshTick = setInterval(() => {
+        if (currentTheme() !== THEME_NEWYEAR) return;
+        const tab = document.getElementById('tab-top');
+        if (!tab || !tab.classList.contains('active')) return;
+        loadNewYearBoard();
+    }, BOARD_REFRESH_MS);
 }
 
 function toggleBoardHelp() {
@@ -7056,6 +7119,7 @@ function applyTheme(theme, fallbackTheme) {
             ? 'Наряжаем ёлку…' : 'Загружаем игру…';
     }
     renderAdminThemeCard(null);
+    renderAdminBoardCard();
     syncSoundUi();
     // Задача 93: лидерборд живёт только в новогоднем режиме — при переключении
     // темы сразу показываем/прячем его, не дожидаясь нового входа на вкладку.
@@ -7066,7 +7130,7 @@ function applyTheme(theme, fallbackTheme) {
             const nyNow = next === THEME_NEWYEAR;
             if (box) box.hidden = !nyNow;
             if (classic) classic.hidden = nyNow;
-            if (nyNow) loadNewYearBoard();
+            if (nyNow) { loadNewYearBoard(); startBoardAutoRefresh(); }
         }
     } catch (e) { /* декор не должен ломать вход */ }
 }
@@ -7239,6 +7303,67 @@ function toggleUiSound() {
     try { localStorage.setItem('aura_ui_sound', uiSoundOn ? '1' : '0'); } catch (e) {}
     syncSoundUi();
     if (uiSoundOn) playUiSound('theme');
+}
+
+// ---------- Задача 93: проверка лидерборда из админ-панели ----------
+// Заказчик: «саму работу лидерборда надо будет сейчас проверить». Кнопка
+// спрашивает сервер (/api/admin/board_check): есть ли таблица, проходит ли
+// НАСТОЯЩАЯ пробная запись, сколько игроков уже в таблице и сколько осталось
+// до финиша. Причина сбоя выводится текстом — серверные логи не нужны.
+function renderAdminBoardCard() {
+    const card = document.getElementById('admin-board-card');
+    if (!card) return;
+    card.hidden = !isAdmin;
+}
+
+function adminBoardRowsHtml(data) {
+    const h = data.health || {};
+    const rows = [
+        ['Таблица', h.ok ? 'есть' : 'НЕТ'],
+        ['Запись в таблицу', h.write_ok === true ? 'проходит' : (h.write === false ? 'ЗАПРЕЩЕНА' : 'не проверялась')],
+        ['Игроков в таблице', formatCoins(_safeCoins(data.players))],
+        ['До финиша', boardDeadlineLeftText(data.seconds_left)],
+        ['Финиш', data.finished ? 'уже прошёл' : '19 декабря, 21:00 МСК'],
+    ];
+    if (Array.isArray(data.top) && data.top.length) {
+        data.top.forEach((p, i) => {
+            rows.push([`#${i + 1} ${p.username || ('id' + p.user_id)}`,
+                `${formatCoins(_safeCoins(p.earned))} KOI`]);
+        });
+    }
+    if (data.last_error) rows.push(['Последняя ошибка', String(data.last_error)]);
+    if (h.hint) rows.push(['Подсказка', String(h.hint)]);
+    return rows.map(([label, value]) => `
+        <div class="admin-player-row">
+            <span class="admin-player-label">${escapeHtml(label)}</span>
+            <span class="admin-player-value">${escapeHtml(value)}</span>
+        </div>`).join('');
+}
+
+async function checkAdminBoard() {
+    if (!isAdmin) { tg.showAlert('Проверка доступна только админу'); return; }
+    const btn = document.getElementById('admin-board-btn');
+    const state = document.getElementById('admin-board-state');
+    const hint = document.getElementById('admin-board-hint');
+    const rows = document.getElementById('admin-board-rows');
+    if (btn) { btn.disabled = true; btn.textContent = 'Проверяем…'; }
+    try {
+        const data = await apiPost('/api/admin/board_check', { initData: tg.initData });
+        if (state) {
+            state.textContent = data.ok ? '✅ работает' : '⚠️ сбой';
+            state.classList.toggle('is-on', !!data.ok);
+        }
+        if (hint) hint.textContent = data.message || 'Проверка выполнена';
+        if (rows) {
+            rows.hidden = false;
+            rows.innerHTML = adminBoardRowsHtml(data || {});
+        }
+    } catch (e) {
+        if (state) state.textContent = '⚠️ сбой';
+        if (hint) hint.textContent = e && e.message ? e.message : 'Проверка не удалась';
+    } finally {
+        if (btn) { btn.disabled = false; btn.textContent = 'Проверить лидерборд'; }
+    }
 }
 
 // ---------- Карточка «Оформление аппки» в админ-панели ----------

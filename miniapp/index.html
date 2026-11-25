@@ -12,7 +12,7 @@
     <meta http-equiv="Pragma" content="no-cache">
     <meta http-equiv="Expires" content="0">
     <title>AURA GAME</title>
-    <link rel="stylesheet" href="style.css?v=aura-93">
+    <link rel="stylesheet" href="style.css?v=aura-93b">
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
 </head>
 <body>
@@ -99,7 +99,16 @@
              а не в нижней»). Игрокам она не показывается: hidden, а полный
              контроль — в syncAdminNav(). -->
         <div class="profile-badge">
-            <img id="user-avatar" src="avatar_placeholder.svg" alt="Avatar">
+            <!-- Задача 93 (доработка): круглый аватар + украшения ОТДЕЛЬНЫМИ
+                 слоями. Раньше круг делался на самой картинке и ломался
+                 (фото становилось квадратом), потому что бейджу пришлось
+                 разрешить overflow, чтобы шапка вылезала за край. Теперь
+                 круг — обёртка .badge-avatar с overflow: hidden, а шапка
+                 (.ny-hat) и заячьи ушки (.ny-ears) лежат поверх неё. -->
+            <span class="badge-avatar">
+                <img id="user-avatar" src="avatar_placeholder.svg" alt="Avatar">
+                <span class="ny-hat" aria-hidden="true"></span>
+            </span>
             <span id="user-name">Загрузка...</span>
             <button class="admin-gear" id="admin-gear" type="button" hidden
                     onclick="openAdminPanel(event)" aria-label="Админ-панель"
@@ -198,13 +207,17 @@
         <section id="tab-top" class="tab">
             <div class="ny-board" id="ny-board" hidden>
                 <div class="ny-board-head">
+                    <!-- Банты с еловыми ветками по бокам — как на референсе
+                         заказчика (скрин 4): вырезаны из его же картинки. -->
                     <div class="ny-board-bows" aria-hidden="true">
-                        <span class="ny-bow bow-l">🎀</span>
-                        <span class="ny-bow bow-r">🎀</span>
+                        <span class="ny-bow bow-l"></span>
+                        <span class="ny-bow bow-r"></span>
                     </div>
                     <h2 class="ny-board-title">🏆 Лидерборд</h2>
+                    <!-- Заказчик: «надпись до финиша бла-бла убери, таймер пусть
+                         начинает тикать уже». Подписи под таймером больше нет:
+                         он тикает с первой секунды (см. loadNewYearBoard в app.js). -->
                     <div class="ny-board-timer" id="ny-board-timer">—</div>
-                    <div class="ny-board-sub" id="ny-board-sub">до финиша</div>
                     <button class="ny-board-help" type="button" id="ny-board-help"
                             onclick="toggleBoardHelp()" aria-label="Правила">?</button>
                 </div>
@@ -333,7 +346,12 @@
                     <span class="love-badge-line">💚 <b id="profile-love-free-text">Свободен</b></span>
                     <span class="love-badge-status" id="profile-love-free-stage"></span>
                 </div>
-                <div class="profile-avatar-large"><img id="profile-avatar-large" src="avatar_placeholder.svg" alt="Avatar"></div>
+                <div class="profile-avatar-large">
+                    <img id="profile-avatar-large" src="avatar_placeholder.svg" alt="Avatar">
+                    <!-- Заячьи ушки (присланная картинка): обруч-обхват вокруг
+                         аватарки + пушистые уши сверху. -->
+                    <span class="ny-ears" aria-hidden="true"></span>
+                </div>
                 <h2 class="profile-name" id="profile-name">Загрузка...</h2>
                 <div class="stats-row">
                     <div class="stat-box"><span class="stat-icon"><img class="coin-img" src="coin.png" alt="монета"></span><span class="stat-value" id="profile-coins">…</span><span class="stat-label">Баланс</span></div>
@@ -494,6 +512,23 @@
                         onclick="toggleAdminTheme()">Включить новогодний дизайн</button>
                 <button class="extra-btn admin-theme-btn is-ghost" type="button"
                         id="admin-theme-sound" onclick="toggleUiSound()">Звук эффектов: выкл</button>
+            </div>
+
+            <!-- Задача 93: проверка новогоднего лидерборда. Заказчик: «саму
+                 работу лидерборда надо будет сейчас проверить» — кнопка
+                 показывает, есть ли таблица, проходит ли настоящая запись и
+                 кто уже в таблице. Ошибку видно текстом, без серверных логов. -->
+            <div class="profile-extra admin-card" id="admin-board-card" hidden>
+                <div class="extra-head">
+                    <span class="extra-title">🏆 Лидерборд: проверка</span>
+                    <span class="extra-value" id="admin-board-state">—</span>
+                </div>
+                <div class="extra-hint" id="admin-board-hint">
+                    Проверяет таблицу лидерборда и делает пробную запись.
+                </div>
+                <button class="extra-btn admin-theme-btn" type="button"
+                        id="admin-board-btn" onclick="checkAdminBoard()">Проверить лидерборд</button>
+                <div class="admin-player-rows" id="admin-board-rows" hidden></div>
             </div>
 
             <!-- Задача 87: топ по балансу полными числами (никаких «1 234 5…»),
@@ -867,6 +902,6 @@
          маленькой кнопкой ⚙️ рядом с ником в шапке (см. #admin-gear). -->
     </nav>
 
-    <script src="app.js?v=aura-93" defer></script>
+    <script src="app.js?v=aura-93b" defer></script>
 </body>
 </html>
