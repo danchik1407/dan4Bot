@@ -98,4 +98,30 @@ $$;
 grant execute on function public.newyear_board_health() to anon, authenticated, service_role;
 grant select, insert, update on public.newyear_board to anon, authenticated, service_role;
 
+-- ---------------------------------------------------------------------------
+-- Самопроверка «таблица реально пишется». Нужна, потому что отсутствие
+-- RLS-политики для service_role ловится не при создании, а в момент записи:
+-- экран при этом остаётся пустым, и причину видно только в логе. Функция
+-- пишет одну строку user_id = 0 (нулевой Telegram ID не бывает) и сразу
+-- удаляет её, поэтому рейтинг она не портит.
+-- ---------------------------------------------------------------------------
+create or replace function public.newyear_board_selftest()
+returns jsonb
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+    insert into public.newyear_board (user_id, earned, earned_games, earned_passive, wins, updated_at)
+    values (0, 0, 0, 0, 0, now())
+    on conflict (user_id) do update set updated_at = now();
+    delete from public.newyear_board where user_id = 0;
+    return jsonb_build_object('ok', true, 'version', '20261209000000');
+exception when others then
+    return jsonb_build_object('ok', false, 'error', sqlerrm);
+end;
+$$;
+
+grant execute on function public.newyear_board_selftest() to anon, authenticated, service_role;
+
 notify pgrst, 'reload schema';
