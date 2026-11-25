@@ -296,8 +296,11 @@ let passivePendingTimer = null;
 // как только сервер ответил. Доступ по-прежнему решает сервер, но он теперь
 // пускает всех.
 function showMaintenance(options) {
-    if (maintenanceActive) return;
+    // Задача 94: экран может ПОМЕНЯТЬСЯ. Раньше второй вызов игнорировался, и
+    // если первым успевало всплыть «нет связи», то настоящие техработы с
+    // сервера уже не показывались — игрок оставался с неправильным текстом.
     const maintenanceOn = Boolean(options && options.maintenance);
+    if (maintenanceActive && maintenanceOn === serverMaintenance) return;
     maintenanceActive = true;
     serverMaintenance = maintenanceOn;
     maintenanceMessage = (options && options.message) || '';
@@ -327,12 +330,26 @@ function showMaintenance(options) {
                 + '<br>Коины, сундуки и Love останутся на месте.';
             if (note) note.textContent = 'Спасибо за терпение 💙';
             if (icon) icon.textContent = '🛠️';
+        } else if (options && Number(options.status) >= 500) {
+            // Сервер ОТВЕТИЛ, но с ошибкой (чаще всего лежит база). Не пишем
+            // «сервер не ответил» — это неправда, и игрок идёт перезагружать
+            // телефон. Говорим как есть.
+            if (title) title.innerHTML = 'Сервер<br>не в порядке';
+            if (sub) sub.innerHTML = `Сервер ответил ошибкой ${Number(options.status)} — `
+                + 'данные не дошли.<br>Пробуем снова автоматически.';
+            if (note) note.textContent = 'Твои коины никуда не денутся 💙';
+            if (icon) icon.textContent = '🛠️';
         } else {
             if (title) title.innerHTML = 'Нет связи<br>с сервером';
             if (sub) sub.innerHTML = 'Сервер не ответил — возможно, он просыпается.'
                 + '<br>Нажми «Проверить снова» через пару секунд.';
             if (note) note.textContent = 'Спасибо за терпение 💙';
             if (icon) icon.textContent = '📡';
+        }
+        // Техработы: текст просил заказчик — по-человечески и без «Нет связи».
+        if (maintenanceOn && sub) {
+            sub.innerHTML = 'Идёт обновление игры — скоро вернёмся.'
+                + '<br>Баланс, сундуки и Love останутся на месте.';
         }
         const btn = screen.querySelector('.maint-btn');
         if (btn) {
@@ -343,6 +360,31 @@ function showMaintenance(options) {
     // Заставку НЕ обрываем: приветственная анимация должна доиграть (минимум 1 с),
     // а экран техработ лежит под ней и просто проявляется, когда она гаснет.
     try { hideLoader(); } catch (e) {}
+}
+
+// Что на самом деле происходит: техработы (сервер отвечает) или сервер не
+// отвечает/база недоступна. Возвращает {maintenance, message, status, detail}.
+// Ничего не решает — только объясняет причину, чтобы экран не врал.
+async function probeMaintenanceReason() {
+    try {
+        const res = await fetch(`${API_URL}/api/health`, { cache: 'no-store' });
+        if (!res.ok) {
+            return { maintenance: false, status: res.status,
+                     detail: `Сервер ответил ошибкой ${res.status}` };
+        }
+        const data = await res.json().catch(() => null);
+        if (!data) return { maintenance: false, detail: 'Пустой ответ /api/health' };
+        const maintenanceOn = data.maintenance === true || data.maintenance_active === true;
+        return {
+            maintenance: maintenanceOn,
+            message: data.maintenance_message || '',
+            // База может лежать отдельно от сервера — это тоже настоящая причина.
+            dbOk: data.db !== false && data.supabase !== false,
+            detail: maintenanceOn ? 'сервер сообщает о техработах' : 'сервер на связи',
+        };
+    } catch (e) {
+        return { maintenance: false, detail: 'Сервер не отвечает' };
+    }
 }
 
 // «Проверить снова»: перезапрос профиля без перезагрузки страницы — так
@@ -788,8 +830,9 @@ function scheduleProfileRetry(delay = 5000) {
         // Задача 65: профиль доехал после «Нет связи с сервером» — снимаем
         // заглушку сами, игроку не нужно жать «Проверить снова».
         if (ok) {
-            // Задача 67: профиль пришёл → заглушка снимается всегда.
-            hideMaintenance();
+            // Задача 94: профиль пришёл, но сервер может сообщать «техработы» —
+            // тогда resolveAccess() уже показал нужный экран, не снимаем его.
+            if (!maintenanceActive) hideMaintenance();
             try { updateUI(); } catch (e) {}
             try { checkChestCooldown(); } catch (e) {}
             return;
@@ -1387,6 +1430,15 @@ async function loadUserData(options) {
         balanceKnown = userDataLoaded;
         updateUI();
         const reason = await diagnoseProfile();
+        // Задача 94: если сервер прямо сказал «техработы», не пишем игроку
+        // «Баланс не загрузился» — показываем экран техработ с честным текстом.
+        const why = await probeMaintenanceReason();
+        if (why && why.maintenance) {
+            canPlay = false;
+            showMaintenance({ maintenance: true, message: why.message });
+            scheduleProfileRetry(8000);
+            return false;
+        }
         const hint = reason && reason !== '' ? ` — ${reason}` : '';
         setSyncBanner(`Баланс не загрузился: ${lastError}${hint}`);
         scheduleProfileRetry();
@@ -7033,8 +7085,19 @@ document.addEventListener('DOMContentLoaded', async () => {
     // Задача 67: заглушка «Технические работы» больше не показывается никогда —
     // остался только честный экран «нет связи», если сервер не ответил.
     if (!accessKnown) {
-        showMaintenance({ offline: true });
-        // Автоповтор: как только сервер проснётся, экран уберём сами.
+        // Задача 94 (ревью: «вместо техработ какая-то фигня»). Причин две:
+        //   1) админ включил техработы — тогда сервер ОТВЕТИЛ и сам сказал
+        //      «maintenance» (это видно по /api/health);
+        //   2) сервер не отвечает вовсе (Render спит / нет сети).
+        // Раньше в обоих случаях показывали «Нет связи с сервером» — игрок при
+        // включённых техработах читал неправду. Теперь причину спрашиваем у
+        // сервера и пишем ту, что есть на самом деле.
+        const probe = await probeMaintenanceReason();
+        showMaintenance(probe && probe.maintenance
+            ? { maintenance: true, message: probe.message }
+            : { offline: true, status: probe && probe.status });
+        // Автоповтор: как только сервер проснётся (или техработы выключат),
+        // экран уберём сами.
         scheduleProfileRetry(4000);
     }
     // Апгрейд: синхронизация поля ввода, ползунка и быстрых кнопок.
