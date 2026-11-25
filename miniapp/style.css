@@ -3011,17 +3011,6 @@ html.ny .profile-badge img#user-avatar {
     display: block;
     box-shadow: 0 0 0 2px rgba(255, 215, 106, 0.55);
 }
-/* Шапка Деда Мороза (присланная картинка) — сдвинута ВПРАВО, как просил
-   заказчик: сидит на макушке аватарки, кончик с помпоном уходит вправо. */
-html.ny .ny-hat {
-    display: none;
-    position: absolute; left: 8px; top: -12px; width: 26px; height: 24px;
-    background: url('santa_hat.png') no-repeat center / contain;
-    pointer-events: none; z-index: 4;
-    transform: rotate(-6deg);
-    filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.6));
-}
-html.ny .ny-hat { display: block; }
 /* Бейдж не обрезает шапку сверху, но ник по-прежнему в одну строку. */
 html.ny .profile-badge { overflow: visible; }
 /* Надпись «2027» из прошлой версии в шапке больше не нужна — она наезжала
@@ -3245,16 +3234,7 @@ html.ny .up-arrow-wrap { border-radius: 50%; }
    поэтому она кладётся по центру: обруч ложится по краю, уши уходят вверх,
    лицо остаётся открытым. Не «вставляем» отдельный элемент поверх лица. */
 html.ny .profile-avatar-large { position: relative; overflow: visible; }
-html.ny .ny-ears { display: none; }
-html.ny .ny-ears {
-    display: block; position: absolute; left: 50%; bottom: -2px;
-    width: 80px; height: 113px;        /* 80 × (962 / 681) = 113 */
-    margin-left: -40px;
-    background: url('bunny_ears.png') no-repeat center bottom / contain;
-    pointer-events: none; z-index: 4;
-    filter: drop-shadow(0 2px 6px rgba(0, 0, 0, 0.45));
-}
-html.ny .profile-avatar-large img { border-radius: 50%; }
+html.ny .profile-avatar-large img { border-radius: 50%; clip-path: circle(50% at 50% 50%); }
 
 /* ---------- 10. ЗАГРУЗКА АППКИ — НОВОГОДНЯЯ (п.1 ревью) ----------
    Заказчик: «анимация загрузки не изменилась — сделай новогоднюю».
@@ -3357,6 +3337,7 @@ html.ny .profile-badge img#user-avatar {
 /* Шапка: сдвинута ВПРАВО (просьба заказчика), помпон уходит вправо-вниз.
    Высота 27 px при аватарке 28 px: колпак «сидит» на макушке и заметен. */
 html.ny .ny-hat {
+    display: block; margin: 0;
     position: absolute; left: 7px; top: -14px; width: 26px; height: 27px;
     background: url('santa_hat.png') no-repeat center / contain;
     transform: rotate(-4deg);
@@ -3377,6 +3358,7 @@ html.ny .ny-ears {
        аватарки диаметром 80 px, и прижимаем центр обруча к центру аватарки.
        Отсюда left: 0 и top: -33px: обруч ложится по краю круга, уши торчат
        вверх (как «одели ободок»), лицо остаётся открытым. */
+    display: block; margin: 0;
     position: absolute; left: 0; top: -33px;
     width: 80px; height: 113px;
     background: url('bunny_ears.png') no-repeat left top / 100% 100%;
