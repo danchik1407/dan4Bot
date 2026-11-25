@@ -49,9 +49,23 @@ begin
 end;
 $$;
 
-grant execute on function public.snowflakes_add(bigint, integer)
-    to anon, authenticated, service_role;
-
-grant select, insert, update on public.snowflakes to anon, authenticated, service_role;
+-- Гранты. В Supabase роли anon/authenticated/service_role есть всегда, но
+-- миграцию может прогнать и обычный PostgreSQL (локальные тесты, другой хост) —
+-- там этих ролей нет, и `grant ... to anon` падает с «role does not exist».
+-- Поэтому выдаём права только тем ролям, которые реально существуют.
+do $$
+declare
+    r text;
+begin
+    foreach r in array array['anon', 'authenticated', 'service_role'] loop
+        if exists (select 1 from pg_roles where rolname = r) then
+            execute format(
+                'grant execute on function public.snowflakes_add(bigint, integer) to %I', r);
+            execute format(
+                'grant select, insert, update on public.snowflakes to %I', r);
+        end if;
+    end loop;
+end
+$$;
 
 notify pgrst, 'reload schema';
