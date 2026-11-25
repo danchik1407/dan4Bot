@@ -3235,6 +3235,9 @@ html.ny .up-arrow-wrap { border-radius: 50%; }
    лицо остаётся открытым. Не «вставляем» отдельный элемент поверх лица. */
 html.ny .profile-avatar-large { position: relative; overflow: visible; }
 html.ny .profile-avatar-large img { border-radius: 50%; clip-path: circle(50% at 50% 50%); }
+/* Рамку круга заказчик назвал «какая-то синяя линия» — в НГ-теме она светлая,
+   чтобы не спорила с белыми ушками. */
+html.ny .profile-avatar-large { border-color: rgba(255, 255, 255, 0.55); }
 
 /* ---------- 10. ЗАГРУЗКА АППКИ — НОВОГОДНЯЯ (п.1 ревью) ----------
    Заказчик: «анимация загрузки не изменилась — сделай новогоднюю».
@@ -3356,14 +3359,30 @@ html.ny .ny-hat {
    уменьшения в браузере нет — раньше PNG 684×961 сжимался в 8.5 раза, и ободок
    толщиной 1–2 px рассыпался в рваную голубую пилу. Синяя рамка акцента под
    белым обручем больше не нужна: она и давала «синий край». */
-html.ny .profile-avatar-large { position: relative; overflow: visible; border-color: transparent; }
+/* Задача 97 (ТЗ дословно): «фото на белом фоне, вставь его, никаких теней и
+   других хреней — просто ушки сверху, аватарку не порти». Поэтому:
+     * картинка заказчика кладётся КАК ЕСТЬ (только убран белый фон), без
+       дорисованных ободков, без drop-shadow — ни одной тени;
+     * аватарка не тронута: тот же круг, та же светлая рамка, лицо не закрыто;
+     * ушки стоят сверху, обруч повторяет верх круга и доходит до его краёв.
+   Картинка 160×120 (2x для чёткости), в CSS ставится 80×60. */
+html.ny .profile-avatar-large { position: relative; overflow: visible; }
+/* ТЗ: «текст «Свободен» или «В отношениях» смести чуть выше, чтобы ушки не
+   закрывали буквы». Ушки торчат на 49 px выше аватарки — значит над аватаркой
+   нужен запас, и плашка уезжает вверх вместе с ним. Ничего не наезжает. */
+html.ny .profile-card-pro { padding-top: 30px; }
+html.ny .profile-card-pro .love-badge { position: relative; z-index: 7; margin-bottom: 8px; }
+html.ny .profile-avatar-large { margin-top: 34px; }
+
 html.ny .ny-ears {
     display: block; margin: 0;
-    position: absolute; left: -2px; top: -38px;   /* (80−84)/2 и 80−118 */
-    width: 84px; height: 118px;
-    background: url('bunny_ears.png') no-repeat left top / 84px 118px;
+    /* Обруч в присланном фото — пологая дуга (радиус ≈ 48 px при ширине 80),
+       поэтому её макушка ставится на 4 px выше верха аватарки: обруч «сидит»
+       на голове, а его кончики уходят к краям круга — как на фото. */
+    position: absolute; left: 0; top: -41px;
+    width: 80px; height: 60px;
+    background: url('bunny_ears.png') no-repeat center / 80px 60px;
     pointer-events: none; z-index: 4;
-    filter: drop-shadow(0 2px 5px rgba(0, 0, 0, 0.55));
 }
 
 /* ---------- 4–5. Лидерборд: таймер без подписи, банты по бокам ---------- */

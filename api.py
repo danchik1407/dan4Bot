@@ -89,7 +89,7 @@ async def _http_json(url, method: str = "GET", params=None, payload=None, timeou
 
 # Номер сборки: по нему из /api/health видно, что на сервисе НЕ старый код.
 # Если после деплоя здесь прежнее значение — Render ещё не перезапустился.
-API_BUILD = "2026-10-27-task95-ears-round"
+API_BUILD = "2026-10-27-task97-ears-and-snow"
 
 # Момент старта процесса. По нему видно, что сервис только что «проснулся»:
 # Render на бесплатном тарифе усыпляет Web Service через 15 минут без входящих
@@ -932,19 +932,24 @@ def board_write_check() -> dict:
 # Храним одну строку на игрока в snowflakes (user_id primary key). Нет таблицы
 # или база ругнулась — играем дальше, счётчик просто не сохраняется (max 0).
 SNOWFLAKES_TABLE = "snowflakes"
+SNOWFLAKES_ADD_RPC = "snowflakes_add"   # атомарное прибавление (задача 96)
 SNOWFLAKE_MAX_PER_CATCH = 5      # больше за одно нажатие не начислим (антифлуд)
 _SNOW_CACHE: dict = {}           # user_id -> (value, at)
 SNOW_CACHE_TTL = 20.0
 
 
-def snowflakes_count(user_id) -> int:
-    """Сколько снежинок у игрока. Ошибка базы — 0, игра не должна падать."""
+def snowflakes_count(user_id, fresh: bool = False) -> int:
+    """Сколько снежинок у игрока. Ошибка базы — 0, игра не должна падать.
+
+    fresh=True — читать базу, минуя кэш. Нужно при начислении: кэш на 20 секунд
+    отдавал устаревшее число, и запись затирала накопленное (задача 96).
+    """
     uid = _safe_int(user_id, None)
     if uid is None:
         return 0
     now = time.time()
     cached = _SNOW_CACHE.get(int(uid))
-    if cached and (now - cached[1]) < SNOW_CACHE_TTL:
+    if not fresh and cached and (now - cached[1]) < SNOW_CACHE_TTL:
         return int(cached[0])
     value = int(cached[0]) if cached else 0
     try:
@@ -962,19 +967,44 @@ def snowflakes_add(user_id, amount) -> dict:
     """Прибавить пойманные снежинки.
 
     Возвращает {"count": итог у игрока, "saved": записалось ли в базу,
-    "added": сколько приняли}. Задача 92: раньше при отсутствующей таблице
-    функция молча возвращала ПРЕЖНЕЕ число, клиент верил серверу и откатывал
-    счётчик — выглядело как «ловлю, а в кармане не растёт». Теперь клиент по
-    флагу `saved` понимает, что начисление не сохранилось, и оставляет свой
-    счётчик, а не затирает его нулём.
+    "added": сколько приняли, "stored": сколько РЕАЛЬНО в базе}.
+
+    Задача 96 — «перезагружаю, баланс обнуляется». Причина была в том, что
+    итог считался от КЭША (`current = snowflakes_count(uid)`, кэш на 20 с):
+    если в базе уже 40, а кэш помнил 0, то 0 + 5 = 5 — и запись ЗАТИРАЛА
+    накопленное, а не прибавляла. Теперь число берём атомарно из базы через
+    RPC `snowflakes_add` (count = count + p_amount) и читаем обратно реальное
+    `stored`. Если функции нет (миграция не применена) — старый путь, но с
+    чтением актуального значения и без доверия кэшу.
     """
     uid = _safe_int(user_id, None)
     if uid is None:
-        return {"count": 0, "saved": False, "added": 0}
+        return {"count": 0, "saved": False, "added": 0, "stored": 0}
     add = max(0, min(SNOWFLAKE_MAX_PER_CATCH, _safe_int(amount, 0)))
     if not add:
-        return {"count": snowflakes_count(uid), "saved": True, "added": 0}
-    current = snowflakes_count(uid)
+        value = snowflakes_count(uid, fresh=True)
+        return {"count": value, "saved": True, "added": 0, "stored": value}
+
+    # 1) Атомарное прибавление в базе (нет гонок и нет «затирания» кэшем).
+    try:
+        rows = supabase.rpc(SNOWFLAKES_ADD_RPC, {
+            "p_user_id": int(uid), "p_amount": int(add)}).execute().data or []
+        if rows:
+            value = _safe_int(rows[0].get("count") if isinstance(rows[0], dict)
+                              else rows[0], None)
+        else:
+            value = None
+        if value is not None:
+            _SNOW_CACHE[int(uid)] = (int(value), time.time())
+            return {"count": int(value), "saved": True, "added": add,
+                    "stored": int(value)}
+    except Exception:  # noqa: BLE001 — функции нет: работаем по-старому
+        logger.debug("снежинки: RPC %s недоступна (user_id=%s)",
+                     SNOWFLAKES_ADD_RPC, uid, exc_info=True)
+
+    # 2) Запасной путь без RPC: читаем актуальное ЗНАЧЕНИЕ ИЗ БАЗЫ (не из кэша)
+    #    и пишем сумму. Кэш здесь не источник истины — именно он и обнулял.
+    current = snowflakes_count(uid, fresh=True)
     total = current + add
     try:
         supabase.table(SNOWFLAKES_TABLE).upsert(
@@ -983,8 +1013,8 @@ def snowflakes_add(user_id, amount) -> dict:
         _SNOW_CACHE[int(uid)] = (total, time.time())
     except Exception:  # noqa: BLE001 — нет миграции: не ломаем игру
         logger.debug("снежинки не записались (user_id=%s)", uid, exc_info=True)
-        return {"count": current, "saved": False, "added": 0}
-    return {"count": total, "saved": True, "added": add}
+        return {"count": current, "saved": False, "added": 0, "stored": current}
+    return {"count": total, "saved": True, "added": add, "stored": total}
 
 
 def _username_by_id(user_id) -> str:
@@ -8523,6 +8553,10 @@ async def snowflakes_catch(data: SnowCatchRequest):
     result = await asyncio.to_thread(snowflakes_add, uid, data.amount)
     return {"ok": True, "snowflakes": int(result.get("count") or 0),
             "added": int(result.get("added") or 0),
+            # Задача 96: сколько реально лежит в базе. По этому числу клиент
+            # понимает, что записалось, и не откатывается в ноль.
+            "stored": int(result.get("stored") if result.get("stored") is not None
+                          else result.get("count") or 0),
             # Задача 92: false — база не приняла (нет миграции). Клиент в этом
             # случае НЕ затирает свой счётчик, а продолжает копить локально.
             "saved": bool(result.get("saved"))}
