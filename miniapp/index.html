@@ -12,7 +12,7 @@
     <meta http-equiv="Pragma" content="no-cache">
     <meta http-equiv="Expires" content="0">
     <title>AURA GAME</title>
-    <link rel="stylesheet" href="style.css?v=aura-89">
+    <link rel="stylesheet" href="style.css?v=aura-90">
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
 </head>
 <body>
@@ -21,6 +21,14 @@
         <div class="app-loader-logo">AURA<span>GAME</span></div>
         <div class="app-loader-bar"><div class="app-loader-bar-fill"></div></div>
         <div class="app-loader-text">Загружаем игру…</div>
+        <!-- Задача 90: новогодняя заставка (видна только в .ny). -->
+        <div class="loader-ny" aria-hidden="true">
+            <span class="loader-tree">🎄</span>
+            <span class="loader-snow s1">❄</span>
+            <span class="loader-snow s2">❅</span>
+            <span class="loader-snow s3">❆</span>
+            <span class="loader-snow s4">❄</span>
+        </div>
     </div>
 
     <!-- Задача 89: новогоднее оформление. Всё рисуется ТОЛЬКО когда на <html>
@@ -193,6 +201,13 @@
                     <!-- Задача 70: если не хочется смотреть прокрут — сразу награда. -->
                     <button class="roulette-skip" id="roulette-skip" onclick="skipChestAnimation()">Skip</button>
                 </div>
+                <!-- Задача 90: над рулеткой слева направо летят сани Деда Мороза
+                     с подарками. Чистая анимация, на награду не влияет. -->
+                <div class="ny-santa" id="ny-santa" aria-hidden="true">
+                    <span class="ny-santa-deer">🦌</span>
+                    <span class="ny-santa-sled">🛷</span>
+                    <span class="ny-santa-gift">🎁</span>
+                </div>
                 <div class="roulette-window">
                     <div class="roulette-track" id="roulette-track"></div>
                     <div class="roulette-marker" aria-hidden="true"></div>
@@ -236,10 +251,20 @@
                     <span class="pocket-label">🔑 Ключи</span>
                     <span class="pocket-value" id="pocket-keys">0</span>
                 </div>
+                <!-- Задача 90: пойманные снежинки. Только украшение и повод
+                     похвастаться — их нельзя передавать, обменивать и тратить. -->
+                <div class="pocket-row pocket-snow-row">
+                    <span class="pocket-label">❄️ Снежинки</span>
+                    <span class="pocket-value pocket-snow-value" id="pocket-snowflakes">0</span>
+                </div>
                 <div class="pocket-row" id="pocket-love-row" hidden>
                     <span class="pocket-label" id="pocket-love-label">❤️ Love</span>
                     <span class="pocket-value" id="pocket-love">0</span>
                 </div>
+            </div>
+            <div class="pocket-snow-hint" id="pocket-snow-hint">
+                Лови снежинки в приложении — они летят сверху. Это просто коллекция:
+                их нельзя передать, обменять или потратить.
             </div>
             <h3 class="pocket-title">🎒 Инвентарь</h3>
             <div class="inventory-grid" id="pocket-inventory">
@@ -796,6 +821,6 @@
          маленькой кнопкой ⚙️ рядом с ником в шапке (см. #admin-gear). -->
     </nav>
 
-    <script src="app.js?v=aura-89" defer></script>
+    <script src="app.js?v=aura-90" defer></script>
 </body>
 </html>

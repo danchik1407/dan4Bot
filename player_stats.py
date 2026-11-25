@@ -172,11 +172,52 @@ def health(supabase_client) -> dict:
         data = res.data
         if isinstance(data, list) and data:
             data = data[0]
-        if isinstance(data, dict):
-            return data
+        if isinstance(data, dict) and data:
+            return norm_health(data)
         return {"ok": False, "reason": "health rpc вернул пустоту"}
     except Exception as exc:  # noqa: BLE001
-        return {"ok": False, "reason": str(exc)[:200]}
+        # Задача 90: старая версия функции (до миграции 20261207000000) отвечает
+        # только {"ok": true} без полей — раньше это уже считалось «всё хорошо»,
+        # но при первом же рассинхроне схемы вылезала жёлтая плашка «статистика
+        # не пишется», хотя цифры считались. Теперь «не прочитали health» — это
+        # НЕ повод пугать игрока: пусть решает health_uncertain().
+        return {"ok": False, "reason": str(exc)[:200], "unknown": True}
+
+
+# Задача 90: какие поля health обязателен, чтобы честно сказать «всё пишется».
+HEALTH_KEYS = ("stats_table", "rpc", "mines_games", "events_amount", "admin_audit")
+UNKNOWN_HEALTH = {"ok": False, "reason": "", "unknown": True}
+
+
+def norm_health(data: dict) -> dict:
+    """Привести ответ health к полному виду.
+
+    Функция в базе могла быть создана старой миграцией: тогда части полей нет.
+    Отсутствие поля — не ошибка: считаем его «неизвестным» и не пугаем игрока.
+    """
+    out = dict(data)
+    if "ok" not in out:
+        out["ok"] = bool(out.get("stats_table")) or bool(out.get("rpc"))
+    out["unknown"] = False
+    return out
+
+
+def health_uncertain(first: dict, second: dict) -> bool:
+    """Показывать ли игроку «статистика не пишется».
+
+    Правило задачи 90 (заказчик: «миграции есть, стата считается, но иногда
+    вылезает эта хрень»): предупреждаем ТОЛЬКО если база дважды подряд уверенно
+    сказала «не готово». Один сбойный или неполный ответ health — молчим:
+    счётчики при этом всё равно пишутся (stats_note/add_stats живут отдельно).
+    """
+    if not isinstance(first, dict) or not isinstance(second, dict):
+        return False
+    for state in (first, second):
+        if state.get("unknown"):
+            return False
+        if state.get("ok"):
+            return False
+    return True
 
 
 def best_event(supabase_client, user_id, kind: str) -> dict | None:

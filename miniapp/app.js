@@ -617,6 +617,13 @@ function renderPocket() {
             value.innerHTML = coinAmount(loveAmount);
         }
     }
+    // Задача 90: снежинки — декор. Число живёт в переменной snowflakes
+    // (из профиля /api/user → поле snowflakes, дальше — из ловли).
+    const snowEl = document.getElementById('pocket-snowflakes');
+    if (snowEl) {
+        const count = Math.max(0, Number(snowflakes) || 0);
+        snowEl.innerHTML = `${count} <span class="pocket-snow-icon">❄️</span>`;
+    }
     const grid = document.getElementById('pocket-inventory');
     if (grid) grid.innerHTML = inventoryGridHtml();
 }
@@ -725,6 +732,12 @@ function applyProfile(data) {
     // Задача 89: новогоднее оформление приходит с сервера (theme) — админ
     // включает его кнопкой в админке, видят все игроки.
     applyTheme(data && data.theme, data && data.economy ? data.economy.theme : '');
+    // Задача 90: счётчик снежинок приходит в профиле и живёт в кармане.
+    if (data && Number.isFinite(Number(data.snowflakes))) {
+        snowflakes = Math.max(0, Number(data.snowflakes));
+        renderPocket();
+        updateSnowBadge();
+    }
     userDataLoaded = true;
     balanceKnown = true;
     profileFailure = '';
@@ -1446,6 +1459,9 @@ function switchTab(tabId, element) {
         if (searchBox) { searchBox.hidden = true; searchBox.innerHTML = ''; }
         const playerCard = document.getElementById('admin-player-card');
         if (playerCard) { playerCard.hidden = true; playerCard.innerHTML = ''; }
+        // Задача 90: в админке снежинки не ловятся — убираем уже летящие сразу,
+        // не дожидаясь следующего тика таймера.
+        if (typeof clearCatchFlakes === 'function') clearCatchFlakes();
         return;
     }
     if (tabId === 'top') { loadGlobalTop(); }
@@ -6887,6 +6903,7 @@ let uiThemeBusy = false;
 let uiSoundOn = false;          // по умолчанию тихо: звук только если админ включил
 let uiFxBound = false;
 let soundPrefLoaded = false;
+let snowflakes = 0;          // задача 90: пойманные снежинки (только декор)
 let snowTimer = 0;
 
 function currentTheme() { return uiTheme; }
@@ -6907,7 +6924,14 @@ function applyTheme(theme, fallbackTheme) {
             }
         } catch (e) { /* старый клиент Telegram — не страшно */ }
     }
-    if (next === THEME_NEWYEAR) startSnow(); else stopSnow();
+    if (next === THEME_NEWYEAR) { startSnow(); startSnowScene(); }
+    else { stopSnow(); stopSnowScene(); }
+    // Задача 90: новогодний вайб и на заставке входа.
+    const loaderText = document.querySelector('.app-loader-text');
+    if (loaderText) {
+        loaderText.textContent = next === THEME_NEWYEAR
+            ? 'Наряжаем ёлку…' : 'Загружаем игру…';
+    }
     renderAdminThemeCard(null);
     syncSoundUi();
 }
@@ -7049,6 +7073,10 @@ function playUiSound(kind) {
             // Короткая «новогодняя» арпеджио-вспышка: до-ми-соль-до.
             [523.25, 659.25, 783.99, 1046.5].forEach((f, i) => playUiTone(f, i * 0.055, 0.18, 'triangle', 0.07));
             playUiTone(1567.98, 0.24, 0.3, 'sine', 0.04);
+        } else if (kind === 'snow') {
+            // Лёгкий «хруст»: две очень короткие высокие ноты.
+            playUiTone(1760, 0, 0.07, 'sine', 0.03);
+            playUiTone(2349, 0.05, 0.1, 'sine', 0.025);
         } else if (kind === 'theme') {
             // Переключение оформления: две ноты вверх или вниз.
             const up = currentTheme() === THEME_NEWYEAR;
@@ -7167,6 +7195,195 @@ function initUiPolish() {
     bindUiFx();
     syncSoundUi();
     applyTheme(document.documentElement.classList.contains('ny') ? THEME_NEWYEAR : THEME_CLASSIC, '');
+}
+
+
+
+/* ====================================================================
+   ЗАДАЧА 90: ЛОВЛЯ СНЕЖИНОК (только декор) + «петарда» при клике
+   Заказчик: «снежинки медленно падают сверху, нажимаешь — разлетается как
+   петарда, если долетела до низа — растаяла. В кармане раздел Снежинки: 0❄️.
+   Передавать/покупать/обменивать нельзя — просто коллекция».
+   Ничего не блокирует: слой с pointer-events:none, ловится только сама
+   снежинка (у неё pointer-events:auto). Админ-панель не трогаем — она
+   остаётся без падающих снежинок (просьба заказчика).
+==================================================================== */
+const SNOW_CATCH_MAX = 5;              // больше за одно нажатие база не примет
+const SNOW_SPAWN_MIN_MS = 1400;        // частота появления (примерно раз в 1.5–3 с)
+const SNOW_SPAWN_MAX_MS = 3200;
+const SNOW_MAX_ON_SCREEN = 9;
+const SNOW_FALL_MIN_MS = 9000;         // медленно: 9–16 секунд до низа
+const SNOW_FALL_MAX_MS = 16000;
+let snowSceneTimer = 0;
+let snowCatchQueue = 0;                // сколько поймано, но ещё не отправлено
+let snowFlushTimer = 0;
+let snowSceneBound = false;
+
+function snowLayer() {
+    let layer = document.getElementById('ny-catch-layer');
+    if (layer) return layer;
+    layer = document.createElement('div');
+    layer.id = 'ny-catch-layer';
+    layer.className = 'ny-catch-layer';
+    layer.setAttribute('aria-hidden', 'false');
+    document.body.appendChild(layer);
+    return layer;
+}
+
+// Админка — единственное место, где снежинки не ловим (просьба заказчика).
+function snowCatchingAllowed() {
+    if (currentTheme() !== THEME_NEWYEAR) return false;
+    const active = document.querySelector('.tab.active');
+    if (active && active.id === 'tab-admin') return false;
+    if (document.body.classList.contains('maintenance')) return false;
+    return true;
+}
+
+function spawnCatchFlake() {
+    if (!snowCatchingAllowed()) return;
+    const layer = snowLayer();
+    if (!layer || layer.childElementCount >= SNOW_MAX_ON_SCREEN) return;
+    const flake = document.createElement('button');
+    flake.type = 'button';
+    flake.className = 'ny-catch-flake';
+    flake.textContent = ['❄', '❅', '❆'][Math.floor(Math.random() * 3)];
+    const size = 18 + Math.round(Math.random() * 10);
+    const fallMs = SNOW_FALL_MIN_MS + Math.random() * (SNOW_FALL_MAX_MS - SNOW_FALL_MIN_MS);
+    flake.style.left = (4 + Math.random() * 88).toFixed(2) + '%';
+    flake.style.fontSize = size + 'px';
+    flake.style.animationDuration = (fallMs / 1000).toFixed(1) + 's';
+    flake.style.setProperty('--sway', (Math.random() * 30 - 15).toFixed(0) + 'px');
+    flake.setAttribute('aria-label', 'Снежинка');
+    // Долетела до низа — «растаяла» и просто исчезает, ничего не начисляя.
+    const melt = setTimeout(() => { if (flake.parentNode) flake.parentNode.removeChild(flake); }, fallMs);
+    flake.addEventListener('animationend', () => {
+        clearTimeout(melt);
+        if (flake.parentNode) flake.parentNode.removeChild(flake);
+    });
+    flake.addEventListener('click', (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        clearTimeout(melt);
+        const box = flake.getBoundingClientRect();
+        if (flake.parentNode) flake.parentNode.removeChild(flake);
+        snowflakeFirework(box.left + box.width / 2, box.top + box.height / 2);
+        playUiSound('snow');
+        catchSnowflake(1);
+    });
+    layer.appendChild(flake);
+}
+
+// «Петарда»: снежинка разлетается на мелкие частицы по всему экрану.
+function snowflakeFirework(x, y) {
+    const layer = fxLayer();
+    if (!layer) return;
+    const parts = ['❄', '❅', '•', '❆', '✦'];
+    const count = 16;
+    for (let i = 0; i < count; i++) {
+        const node = document.createElement('span');
+        node.className = 'fx-spark fx-frost';
+        node.textContent = parts[i % parts.length];
+        node.style.left = x + 'px';
+        node.style.top = y + 'px';
+        const angle = (Math.PI * 2 * i) / count + Math.random() * 0.5;
+        const distance = 70 + Math.random() * 120;
+        node.style.setProperty('--dx', (Math.cos(angle) * distance).toFixed(0) + 'px');
+        node.style.setProperty('--dy', (Math.sin(angle) * distance).toFixed(0) + 'px');
+        node.style.setProperty('--rot', (Math.random() * 360 - 180).toFixed(0) + 'deg');
+        node.style.fontSize = (10 + Math.random() * 10).toFixed(0) + 'px';
+        layer.appendChild(node);
+        setTimeout(() => { if (node.parentNode) node.parentNode.removeChild(node); }, 900);
+    }
+    const ring = document.createElement('span');
+    ring.className = 'fx-ring fx-frost-ring';
+    ring.style.left = x + 'px';
+    ring.style.top = y + 'px';
+    layer.appendChild(ring);
+    setTimeout(() => { if (ring.parentNode) ring.parentNode.removeChild(ring); }, 700);
+}
+
+// Счётчик: сразу показываем в кармане, а на сервер шлём пачкой (раз в 2 с).
+function catchSnowflake(amount) {
+    const add = Math.max(1, Math.min(SNOW_CATCH_MAX, Number(amount) || 1));
+    snowflakes += add;
+    renderPocket();
+    updateSnowBadge();
+    snowCatchQueue = Math.min(SNOW_CATCH_MAX, snowCatchQueue + add);
+    if (snowFlushTimer) return;
+    snowFlushTimer = setTimeout(flushSnowflakes, 2000);
+}
+
+async function flushSnowflakes() {
+    snowFlushTimer = 0;
+    const amount = snowCatchQueue;
+    if (!amount) return;
+    snowCatchQueue = 0;
+    try {
+        const data = await apiPost('/api/snowflakes/catch',
+            { initData: tg.initData, amount });
+        if (data && Number.isFinite(Number(data.snowflakes))) {
+            snowflakes = Math.max(0, Number(data.snowflakes));
+            renderPocket();
+            updateSnowBadge();
+        }
+    } catch (e) {
+        // Сервер не принял — возвращаем «оптимистичные» снежинки назад, чтобы
+        // счётчик в кармане не врал. Сами снежинки — декор, игра не страдает.
+        snowflakes = Math.max(0, snowflakes - amount);
+        renderPocket();
+        updateSnowBadge();
+    }
+}
+
+// Маленький бейдж в шапке: сколько уже поймано (только в новогоднем режиме).
+function updateSnowBadge() {
+    let badge = document.getElementById('snow-badge');
+    const show = currentTheme() === THEME_NEWYEAR && snowflakes > 0 && isAdmin !== null;
+    if (!show) { if (badge) badge.hidden = true; return; }
+    if (!badge) {
+        badge = document.createElement('span');
+        badge.id = 'snow-badge';
+        badge.className = 'snow-badge';
+        const header = document.getElementById('main-header');
+        if (!header) return;
+        header.appendChild(badge);
+    }
+    badge.hidden = false;
+    badge.textContent = `❄ ${snowflakes}`;
+    badge.title = 'Поймано снежинок';
+}
+
+function clearCatchFlakes() {
+    const layer = document.getElementById('ny-catch-layer');
+    if (layer) layer.innerHTML = '';
+}
+
+function stopSnowScene() {
+    if (snowSceneTimer) { clearInterval(snowSceneTimer); snowSceneTimer = 0; }
+    const layer = document.getElementById('ny-catch-layer');
+    if (layer) layer.innerHTML = '';
+    const badge = document.getElementById('snow-badge');
+    if (badge) badge.hidden = true;
+}
+
+function startSnowScene() {
+    if (snowSceneTimer) return;
+    if (!snowCatchingAllowed()) return;
+    // Первые снежинки появляются не мгновенно — чтобы не мешать первому экрану.
+    setTimeout(spawnCatchFlake, 900);
+    snowSceneTimer = setInterval(() => {
+        if (!snowCatchingAllowed()) { clearCatchFlakes(); return; }
+        spawnCatchFlake();
+        if (Math.random() < 0.35) spawnCatchFlake();
+    }, (SNOW_SPAWN_MIN_MS + SNOW_SPAWN_MAX_MS) / 2);
+    if (!snowSceneBound) {
+        snowSceneBound = true;
+        // Переключили вкладку (например, в админку) — убираем снежинки с экрана.
+        document.addEventListener('click', () => setTimeout(() => {
+            if (!snowCatchingAllowed()) clearCatchFlakes();
+        }, 60), { passive: true });
+    }
+    updateSnowBadge();
 }
 
 if (document.readyState === 'loading') {
