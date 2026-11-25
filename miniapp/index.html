@@ -12,7 +12,7 @@
     <meta http-equiv="Pragma" content="no-cache">
     <meta http-equiv="Expires" content="0">
     <title>AURA GAME</title>
-    <link rel="stylesheet" href="style.css?v=aura-92">
+    <link rel="stylesheet" href="style.css?v=aura-93">
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
 </head>
 <body>
@@ -44,6 +44,9 @@
             <div class="ny-tree-lights"><i></i><i></i><i></i><i></i><i></i><i></i></div>
             <div class="ny-tree-trunk"></div>
         </div>
+        <!-- Задача 93: постоянные фейерверки на фоне (просьба заказчика);
+             только в новогодней теме, pointer-events: none. -->
+        <div class="ny-fireworks" aria-hidden="true"><i></i><i></i><i></i></div>
         <div class="ny-gifts">
             <span class="ny-gift g1">🎁</span>
             <span class="ny-gift g2">🎁</span>
@@ -187,9 +190,47 @@
 
         <!-- Топ игроков: без таймеров, призов и кнопок «?» — только список.
              Строка: место | имя | баланс (💎). -->
+        <!-- Задача 93: новогодний лидерборд «кто больше заработал».
+             Макет заказчика: шапка с короной, таймер до финиша (19 декабря
+             21:00 МСК), строки с местом/ником/заработанным и призом справа,
+             «?» с правилами. Показывается только в новогоднем режиме; в
+             обычном остаётся прежний топ по балансу. -->
         <section id="tab-top" class="tab">
-            <div class="page-header"><h2>🏆 Топ игроков</h2></div>
-            <div class="leaderboard" id="global-top-list"><p class="lb-empty">Загрузка…</p></div>
+            <div class="ny-board" id="ny-board" hidden>
+                <div class="ny-board-head">
+                    <div class="ny-board-bows" aria-hidden="true">
+                        <span class="ny-bow bow-l">🎀</span>
+                        <span class="ny-bow bow-r">🎀</span>
+                    </div>
+                    <h2 class="ny-board-title">🏆 Лидерборд</h2>
+                    <div class="ny-board-timer" id="ny-board-timer">—</div>
+                    <div class="ny-board-sub" id="ny-board-sub">до финиша</div>
+                    <button class="ny-board-help" type="button" id="ny-board-help"
+                            onclick="toggleBoardHelp()" aria-label="Правила">?</button>
+                </div>
+                <div class="ny-board-help-panel" id="ny-board-help-panel" hidden>
+                    <b>🏆 Лидерборд</b>
+                    <p>Таблица игроков по заработанным коинам. Обновляется в реальном
+                       времени, финиш — 19 декабря в 21:00 (МСК), до него идёт отсчёт.</p>
+                    <b>Что засчитывается:</b>
+                    <p><b>Победы в играх</b> — твоя ставка не учитывается. Пример:
+                       поставил 500, выиграл банк 2000 — в таблицу идёт 1500, а не 2000.
+                       Проиграл — просто потерял коины, в таблицу ничего не идёт.</p>
+                    <p><b>Доход с капсул</b> — тоже капает в таблицу.</p>
+                    <b>Как расти:</b>
+                    <p>Играй в разные режимы и скупай капсулы — пассивный доход идёт
+                       постоянно.</p>
+                </div>
+                <div class="ny-board-list" id="ny-board-list">
+                    <p class="lb-empty">Загрузка…</p>
+                </div>
+            </div>
+
+            <!-- Обычный топ (в новогоднем режиме скрыт — вместо него лидерборд). -->
+            <div id="classic-top">
+                <div class="page-header"><h2>🏆 Топ игроков</h2></div>
+                <div class="leaderboard" id="global-top-list"><p class="lb-empty">Загрузка…</p></div>
+            </div>
         </section>
 
         <section id="tab-chests" class="tab">
@@ -570,6 +611,10 @@
             <!-- КОМАНДНАЯ АРЕНА: круг, сектора — доли ставок команд (красные/синие). -->
             <div class="hockey-arena arena-circle" id="hockey-arena" hidden>
                 <div class="arena-pie" id="arena-pie"></div>
+                <!-- Задача 93: разметка льда (круги вбрасывания и «квадратики»)
+                     — отдельным слоем ПОД игроками: сектора непрозрачные, фоном
+                     их не «просветить», а слоем ниже они не мешают кликам. -->
+                <div class="arena-ice-marks" aria-hidden="true"></div>
                 <div class="arena-ring" aria-hidden="true"></div>
                 <!-- Указатель-стрелка: крутится и плавно останавливается на выигрышном секторе. -->
                 <div class="arena-pointer" id="arena-pointer" aria-hidden="true">
@@ -822,6 +867,6 @@
          маленькой кнопкой ⚙️ рядом с ником в шапке (см. #admin-gear). -->
     </nav>
 
-    <script src="app.js?v=aura-92" defer></script>
+    <script src="app.js?v=aura-93" defer></script>
 </body>
 </html>
