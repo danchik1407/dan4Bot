@@ -89,7 +89,7 @@ async def _http_json(url, method: str = "GET", params=None, payload=None, timeou
 
 # Номер сборки: по нему из /api/health видно, что на сервисе НЕ старый код.
 # Если после деплоя здесь прежнее значение — Render ещё не перезапустился.
-API_BUILD = "2026-10-27-task89-newyear-theme"
+API_BUILD = "2026-10-27-task90-snowflakes"
 
 # Момент старта процесса. По нему видно, что сервис только что «проснулся»:
 # Render на бесплатном тарифе усыпляет Web Service через 15 минут без входящих
@@ -755,6 +755,98 @@ def set_love_cooldown_enabled(enabled: bool) -> bool:
         pass
     _game_settings_cache.update({"at": 0.0, "values": {}})
     return bool(ok)
+
+
+# ==================== СНЕЖИНКИ (задача 90) ====================
+# Заказчик: «снежинки падают сверху вниз, ловишь — разлетаются, и в кармане
+# раздел Снежинки: 0❄️» и «для красоты: нельзя передавать, покупать, обменивать».
+# Это чистая декорация: счётчик только растёт и НИ на что не влияет.
+# Храним одну строку на игрока в snowflakes (user_id primary key). Нет таблицы
+# или база ругнулась — играем дальше, счётчик просто не сохраняется (max 0).
+SNOWFLAKES_TABLE = "snowflakes"
+SNOWFLAKE_MAX_PER_CATCH = 5      # больше за одно нажатие не начислим (антифлуд)
+_SNOW_CACHE: dict = {}           # user_id -> (value, at)
+SNOW_CACHE_TTL = 20.0
+
+
+def snowflakes_count(user_id) -> int:
+    """Сколько снежинок у игрока. Ошибка базы — 0, игра не должна падать."""
+    uid = _safe_int(user_id, None)
+    if uid is None:
+        return 0
+    now = time.time()
+    cached = _SNOW_CACHE.get(int(uid))
+    if cached and (now - cached[1]) < SNOW_CACHE_TTL:
+        return int(cached[0])
+    value = int(cached[0]) if cached else 0
+    try:
+        rows = (supabase.table(SNOWFLAKES_TABLE).select("count")
+                .eq("user_id", int(uid)).limit(1).execute().data) or []
+        if rows:
+            value = _safe_int(rows[0].get("count"), 0)
+    except Exception:  # noqa: BLE001 — таблицы нет: просто ноль
+        pass
+    _SNOW_CACHE[int(uid)] = (value, now)
+    return value
+
+
+def snowflakes_add(user_id, amount) -> int:
+    """Прибавить пойманные снежинки и вернуть новый итог.
+
+    Счётчик декоративный, поэтому гонки не страшны: пишем «прочитал + прибавил»,
+    а если база отказала — возвращаем прежнее число, а не ошибку.
+    """
+    uid = _safe_int(user_id, None)
+    if uid is None:
+        return 0
+    add = max(0, min(SNOWFLAKE_MAX_PER_CATCH, _safe_int(amount, 0)))
+    if not add:
+        return snowflakes_count(uid)
+    current = snowflakes_count(uid)
+    total = current + add
+    try:
+        supabase.table(SNOWFLAKES_TABLE).upsert(
+            {"user_id": int(uid), "count": int(total),
+             "updated_at": _now_iso()}, on_conflict="user_id").execute()
+        _SNOW_CACHE[int(uid)] = (total, time.time())
+    except Exception:  # noqa: BLE001 — нет миграции: не ломаем игру
+        logger.debug("снежинки не записались (user_id=%s)", uid, exc_info=True)
+        return current
+    return total
+
+
+def _username_by_id(user_id) -> str:
+    """Юзернейм для топа снежинок. Нет строки/колонки — пустая строка."""
+    uid = _safe_int(user_id, None)
+    if uid is None:
+        return ""
+    try:
+        rows = (supabase.table("users").select("username")
+                .eq("user_id", int(uid)).limit(1).execute().data) or []
+    except Exception:  # noqa: BLE001
+        return ""
+    if not rows:
+        return ""
+    name = rows[0].get("username")
+    return str(name).strip() if name else ""
+
+
+def snowflakes_top(limit: int = 10) -> list:
+    """Топ по собранным снежинкам — «потом показывать, кто сколько насобирал»."""
+    try:
+        rows = (supabase.table(SNOWFLAKES_TABLE).select("user_id, count")
+                .order("count", desc=True).limit(max(1, int(limit))).execute().data) or []
+    except Exception:  # noqa: BLE001
+        return []
+    out = []
+    for place, row in enumerate(rows, start=1):
+        uid = _safe_int(row.get("user_id"), 0)
+        if not uid or uid in ADMIN_IDS:
+            continue
+        out.append({"place": place, "user_id": uid,
+                    "username": _username_by_id(uid),
+                    "count": _safe_int(row.get("count"), 0)})
+    return out[:limit]
 
 
 # Задача 89: новогоднее оформление аппки. Админ включает его кнопкой в
@@ -1766,6 +1858,8 @@ def _user_payload(row, is_admin, user_id=None):
         "games_closed": _games_closed_public(uid),
         # Задача 89: новогоднее оформление включается админом для всех игроков.
         "theme": app_theme(),
+        # Задача 90: пойманные снежинки — чистая декорация (см. snowflakes_add).
+        "snowflakes": snowflakes_count(uid) if uid is not None else 0,
     }
 
 
@@ -8188,8 +8282,23 @@ async def profile_stats(data: UserAuth):
     # Задача 79: честный ответ «статистика не применяется / включена».
     # Раньше игрок видел пустые достижения и не мог понять, что дело в базе.
     db_state = await asyncio.to_thread(player_stats.health, supabase)
+    # Задача 90: «миграции есть, стата считается, но иногда вылезает плашка».
+    # health — отдельная функция в базе, и её ответ мог быть неполным/сбойным.
+    # Требуем ДВА подряд уверенных «не готово», иначе молчим: пугать игрока
+    # жёлтым баннером из-за одного кривого ответа нельзя.
+    bad_confirmed = False
+    if not db_state.get("ok"):
+        confirm = await asyncio.to_thread(player_stats.health, supabase)
+        if confirm.get("ok"):
+            db_state = confirm            # вторая проверка прошла — всё в порядке
+        else:
+            # Оба ответа плохие: пугаем ТОЛЬКО если оба уверенные (не «не смогли
+            # прочитать»). Иначе цифры считаются, а плашка врала бы.
+            bad_confirmed = player_stats.health_uncertain(db_state, confirm)
     payload["db"] = {
-        "ready": bool(db_state.get("ok")),
+        # ready=False ровно тогда, когда база дважды подряд сказала «не готово».
+        "ready": bool(db_state.get("ok")) or not bad_confirmed,
+        "confirmed": bad_confirmed,
         "reason": db_state.get("reason") or "",
         "version": db_state.get("version") or "",
         "stats_table": bool(db_state.get("stats_table")),
@@ -8206,6 +8315,30 @@ async def profile_stats(data: UserAuth):
         logger.warning("СТАТИСТИКА: не применена миграция %s (reason=%s)",
                        ADMIN_MIGRATION_FILE, payload["db"].get("reason") or "нет ответа")
     return payload
+
+
+# ==================== СНЕЖИНКИ: ЛОВЛЯ И ТОП (задача 90) ====================
+class SnowCatchRequest(BaseModel):
+    """Игрок поймал снежинку: сколько штук (обычно 1, максимум 5)."""
+    initData: str
+    amount: int = 1
+
+
+@app.post("/api/snowflakes/catch")
+async def snowflakes_catch(data: SnowCatchRequest):
+    """Поймал снежинку — она в кармане. Только декор, ничего не покупает."""
+    uid = _auth_user_id(data.initData)
+    require_play_access_uid(uid)
+    total = await asyncio.to_thread(snowflakes_add, uid, data.amount)
+    return {"ok": True, "snowflakes": total,
+            "added": max(0, min(SNOWFLAKE_MAX_PER_CATCH, _safe_int(data.amount, 0)))}
+
+
+@app.get("/api/snowflakes/top")
+async def snowflakes_leaderboard(limit: int = 10):
+    """Кто сколько насобирал — витрина, как просил заказчик."""
+    limit = max(1, min(50, _safe_int(limit, 10)))
+    return {"ok": True, "players": await asyncio.to_thread(snowflakes_top, limit)}
 
 
 @app.get("/api/global_top")
