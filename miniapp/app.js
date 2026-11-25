@@ -2702,6 +2702,13 @@ function runChestRoulette({ isGold, winner }) {
 
         container.classList.remove('hit');
         container.classList.add('spinning');
+        // Задача 92: фигурка Деда Мороза едет один проход за прокрут — сбрасываем
+        // анимацию, иначе повторная прокрутка её не перезапустит.
+        const santa = document.getElementById('ny-santa-img') ||
+            container.querySelector('.ny-santa-img');
+        if (santa) { santa.style.animation = 'none'; void santa.offsetWidth; santa.style.animation = ''; }
+        // Золотой сундук — Дед Мороз крупнее и с золотым свечением (только вид).
+        if (container && container.classList) container.classList.toggle('is-gold', Boolean(isGold));
         container.style.display = 'block';
         const caption = document.getElementById('roulette-caption');
         if (caption) caption.textContent = 'Открываем сундук…';
@@ -7205,13 +7212,17 @@ function initUiPolish() {
    остаётся без падающих снежинок (просьба заказчика).
 ==================================================================== */
 const SNOW_CATCH_MAX = 5;              // больше за одно нажатие база не примет
-const SNOW_SPAWN_MIN_MS = 1400;        // частота появления (примерно раз в 1.5–3 с)
-const SNOW_SPAWN_MAX_MS = 3200;
-const SNOW_MAX_ON_SCREEN = 9;
-const SNOW_FALL_MIN_MS = 9000;         // медленно: 9–16 секунд до низа
-const SNOW_FALL_MAX_MS = 16000;
+// Задача 92: заказчик просил «одна-две снежинки раз в 30 секунд, а не 50 за
+// десять секунд». Раньше спавн шёл каждые ~2.3 с плюс двойной шанс — на экране
+// было до 9 штук одновременно. Теперь волна раз в 30 секунд: 1–2 снежинки,
+// и на экране одновременно не больше двух.
+const SNOW_WAVE_MS = 30000;
+const SNOW_MAX_ON_SCREEN = 2;
+const SNOW_FALL_MIN_MS = 12000;        // медленно: 12–18 секунд до низа
+const SNOW_FALL_MAX_MS = 18000;
 let snowSceneTimer = 0;
 let snowCatchQueue = 0;                // сколько поймано, но ещё не отправлено
+let snowflakeSaveWarned = false;       // база не принимает снежинки (нет миграции)
 let snowFlushTimer = 0;
 let snowSceneBound = false;
 
@@ -7306,7 +7317,7 @@ function catchSnowflake(amount) {
     updateSnowBadge();
     snowCatchQueue = Math.min(SNOW_CATCH_MAX, snowCatchQueue + add);
     if (snowFlushTimer) return;
-    snowFlushTimer = setTimeout(flushSnowflakes, 2000);
+    snowFlushTimer = setTimeout(flushSnowflakes, 900);
 }
 
 async function flushSnowflakes() {
@@ -7317,10 +7328,15 @@ async function flushSnowflakes() {
     try {
         const data = await apiPost('/api/snowflakes/catch',
             { initData: tg.initData, amount });
-        if (data && Number.isFinite(Number(data.snowflakes))) {
+        // Задача 92: если сервер не записал (нет миграции), НЕ затираем счётчик
+        // его числом — иначе пойманное «пропадало» из кармана. Локально копим,
+        // а игрок видит, что ловля работает.
+        if (data && data.saved !== false && Number.isFinite(Number(data.snowflakes))) {
             snowflakes = Math.max(0, Number(data.snowflakes));
             renderPocket();
             updateSnowBadge();
+        } else if (data && data.saved === false) {
+            snowflakeSaveWarned = true;
         }
     } catch (e) {
         // Сервер не принял — возвращаем «оптимистичные» снежинки назад, чтобы
@@ -7365,13 +7381,19 @@ function stopSnowScene() {
 function startSnowScene() {
     if (snowSceneTimer) return;
     if (!snowCatchingAllowed()) return;
-    // Первые снежинки появляются не мгновенно — чтобы не мешать первому экрану.
-    setTimeout(spawnCatchFlake, 900);
-    snowSceneTimer = setInterval(() => {
+    // Волна: 1–2 снежинки, потом пауза 30 секунд. Первая — почти сразу, чтобы
+    // игрок понял, что их можно ловить.
+    const spawnWave = () => {
         if (!snowCatchingAllowed()) { clearCatchFlakes(); return; }
         spawnCatchFlake();
-        if (Math.random() < 0.35) spawnCatchFlake();
-    }, (SNOW_SPAWN_MIN_MS + SNOW_SPAWN_MAX_MS) / 2);
+        if (Math.random() < 0.5) {
+            // Вторая — чуть позже и рядом, «следом за первой».
+            setTimeout(() => { if (snowCatchingAllowed()) spawnCatchFlake(); },
+                1200 + Math.random() * 1800);
+        }
+    };
+    setTimeout(spawnWave, 2500);
+    snowSceneTimer = setInterval(spawnWave, SNOW_WAVE_MS);
     if (!snowSceneBound) {
         snowSceneBound = true;
         // Переключили вкладку (например, в админку) — убираем снежинки с экрана.
