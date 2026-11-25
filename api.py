@@ -89,7 +89,7 @@ async def _http_json(url, method: str = "GET", params=None, payload=None, timeou
 
 # Номер сборки: по нему из /api/health видно, что на сервисе НЕ старый код.
 # Если после деплоя здесь прежнее значение — Render ещё не перезапустился.
-API_BUILD = "2026-10-27-task90-snowflakes"
+API_BUILD = "2026-10-27-task91-passive-no-limits"
 
 # Момент старта процесса. По нему видно, что сервис только что «проснулся»:
 # Render на бесплатном тарифе усыпляет Web Service через 15 минут без входящих
@@ -604,9 +604,11 @@ async def health():
             "channel": f"@{CHANNEL_USERNAME}",
             "passive_rates": PASSIVE_INCOME_RATES,
             "passive_max_hours": PASSIVE_INCOME_MAX_HOURS,
-            # Пассивка идёт всегда (апка закрыта — копится), ночью по МСК вдвое меньше.
+            # Пассивка идёт всегда и без лимитов (задача 91): копится и офлайн.
+            # Задача 91: ночь больше не влияет на доход (multiplier 1.0).
             "passive_night": {"multiplier": PASSIVE_NIGHT_MULTIPLIER,
-                              "from": PASSIVE_NIGHT_START_HOUR, "to": PASSIVE_NIGHT_END_HOUR},
+                              "from": PASSIVE_NIGHT_START_HOUR, "to": PASSIVE_NIGHT_END_HOUR,
+                              "disabled": True},
             "referral_rewards": {
                 "base": REFERRAL_REWARD_BASE,
                 "nft2": REFERRAL_REWARD_NFT2,
@@ -948,19 +950,21 @@ PASSIVE_INCOME_RATES = {
     "diamond": 20.0,
     "galactic": 50.0,
 }
-# Максимум накопления: если игрок не заходил неделю, «проценты» за 168 часов
-# не капают — иначе один заход давал бы миллионы.
-PASSIVE_INCOME_MAX_HOURS = 24.0
+# Задача 91 (заказчик): «должно капать без лимитов 24/7 даже когда ты офлайн и
+# у тебя апка и тг закрыты». Поэтому потолка накопления больше НЕТ: сколько
+# времени прошло — столько и начислено, хоть месяц. Ночного понижения (было
+# 50 % с 22:00 до 08:00 МСК) тоже больше нет — час всегда стоит полную ставку.
+# 0.0 здесь означает «не ограничиваем»; поле осталось в ответах для старых
+# сборок клиента/бота, которые его читают.
+PASSIVE_INCOME_MAX_HOURS = 0.0
 PASSIVE_INCOME_MIN_HOURS = 1.0 / 60.0     # меньше минуты не считаем (шум)
 PASSIVE_INCOME_TABLE = "passive_income"
 
-# Пассивка капает ВСЕГДА, даже когда Mini App закрыт: сервер считает доход по
-# прошедшему времени от отметки last_at, а игрок забирает накопленное при
-# следующем заходе (в том числе за несколько дней — в пределах MAX_HOURS).
-# Ночь (22:00–08:00 по Москве) идёт вдвое дешевле: за эти часы капает 50 %.
+# Ночь больше не влияет на доход (задача 91). Константы оставлены, чтобы старые
+# клиенты и ответы API не падали: множители теперь всегда 1.0.
 PASSIVE_NIGHT_START_HOUR = 22
 PASSIVE_NIGHT_END_HOUR = 8
-PASSIVE_NIGHT_MULTIPLIER = 0.5
+PASSIVE_NIGHT_MULTIPLIER = 1.0
 PASSIVE_DAY_MULTIPLIER = 1.0
 MSK_OFFSET_SECONDS = 3 * 3600            # Москва — UTC+3, круглый год
 DAY_SECONDS = 86400.0
@@ -1838,8 +1842,10 @@ def _user_payload(row, is_admin, user_id=None):
         "passive_rates": PASSIVE_INCOME_RATES,
         "passive_max_hours": PASSIVE_INCOME_MAX_HOURS,
         # Пассивка идёт всегда (апка закрыта — копится), ночью по МСК вдвое меньше.
+        # Задача 91: ночной скидки нет — поле оставлено, disabled для клиента.
         "passive_night": {"multiplier": PASSIVE_NIGHT_MULTIPLIER,
-                          "from": PASSIVE_NIGHT_START_HOUR, "to": PASSIVE_NIGHT_END_HOUR},
+                          "from": PASSIVE_NIGHT_START_HOUR, "to": PASSIVE_NIGHT_END_HOUR,
+                          "disabled": True},
         # Задача 42: «сколько уже накопил» прямо в профиле, чтобы карточка
         # показывала накопленное, а не только ставку в час.
         "passive_pending": _passive_pending_public(uid),
@@ -6385,51 +6391,33 @@ def _iso_from_timestamp(stamp: float) -> str:
 
 
 def _passive_multiplier_at(stamp: float) -> float:
-    """Множитель ставки в конкретную секунду: ночью по МСК — 0.5, днём — 1.0."""
+    """Множитель ставки. Задача 91: всегда 1.0 — ночных скидок больше нет."""
     msk_hour = ((float(stamp) + MSK_OFFSET_SECONDS) % DAY_SECONDS) / 3600.0
     is_night = (msk_hour >= PASSIVE_NIGHT_START_HOUR) or (msk_hour < PASSIVE_NIGHT_END_HOUR)
     return PASSIVE_NIGHT_MULTIPLIER if is_night else PASSIVE_DAY_MULTIPLIER
 
 
 def _passive_split_hours(start: float, end: float) -> tuple:
-    """Разбивает интервал на «день/ночь» и считает (реальные, оплачиваемые) часы.
+    """Сколько часов прошло между отметками. Задача 91: без ночных скидок.
 
-    Возвращает (real_hours, effective_hours), где effective_hours — реальные
-    часы, умноженные на ночную ставку. Так ночь с 22 до 8 даёт ровно вдвое
-    меньше, а интервал, попадающий на границу, считается честно по кускам.
+    Раньше интервал разбивался на «день/ночь» и ночь шла вдвое дешевле, а
+    вызывающий код ещё и обрезал окно 24 часами. Заказчик: «должно капать без
+    лимитов 24 на 7 даже когда ты офлайн» — поэтому здесь ровно прошедшие часы:
+    (реальные, оплачиваемые) совпадают. Функция оставлена с прежней подписью,
+    чтобы не переписывать всех вызывающих.
     """
-    start, end = float(start), float(end)
-    real_hours = max(0.0, (end - start) / 3600.0)
-    if real_hours <= 0:
-        return 0.0, 0.0
-
-    effective = 0.0
-    cursor = start
-    while cursor < end - 1e-6:
-        # Ближайшая граница «ночь → день» или «день → ночь» по МСК.
-        msk_now = (cursor + MSK_OFFSET_SECONDS) % DAY_SECONDS
-        hour = msk_now / 3600.0
-        night = (hour >= PASSIVE_NIGHT_START_HOUR) or (hour < PASSIVE_NIGHT_END_HOUR)
-        if night:
-            # До 08:00, если мы уже после 22:00 — значит до конца суток.
-            next_boundary = (PASSIVE_NIGHT_END_HOUR * 3600.0) if hour < PASSIVE_NIGHT_END_HOUR \
-                else DAY_SECONDS
-        else:
-            next_boundary = PASSIVE_NIGHT_START_HOUR * 3600.0
-        available = DAY_SECONDS - msk_now
-        step = min(end - cursor, max(1e-6, next_boundary - msk_now), available)
-        multiplier = PASSIVE_NIGHT_MULTIPLIER if night else PASSIVE_DAY_MULTIPLIER
-        effective += step / 3600.0 * multiplier
-        cursor += step
-    return real_hours, round(effective, 6)
+    real_hours = max(0.0, (float(end) - float(start)) / 3600.0)
+    return real_hours, real_hours
 
 
 def _passive_preview(start: float, now: float) -> dict:
-    """Сколько уже накапало (для карточки пассивки), без начисления."""
-    window_end = min(float(now), float(start) + PASSIVE_INCOME_MAX_HOURS * 3600.0)
-    real_hours, effective_hours = _passive_split_hours(start, window_end)
+    """Сколько уже накапало (для карточки пассивки), без начисления.
+
+    Задача 91: потолка нет — считаем всё прошедшее время, сколько бы его ни было.
+    """
+    real_hours, effective_hours = _passive_split_hours(start, now)
     return {"real_hours": round(real_hours, 3), "hours": round(effective_hours, 3),
-            "capped": (now - start) / 3600.0 >= PASSIVE_INCOME_MAX_HOURS}
+            "capped": False}
 
 
 def _passive_start_counter(user_id, rate: float) -> None:
@@ -6501,14 +6489,14 @@ def _passive_pending_sync(user_id) -> dict:
         result["since"] = now
         return result
 
-    window_end = min(now, float(last) + PASSIVE_INCOME_MAX_HOURS * 3600.0)
-    real_hours, hours = _passive_split_hours(float(last), window_end)
+    # Задача 91: окно НЕ обрезаем — офлайн может длиться сколько угодно.
+    real_hours, hours = _passive_split_hours(float(last), now)
     result.update({
         "pending": round(rate * hours + carry_ahead, 3),
         "hours": round(hours, 3),
         "real_hours": round(real_hours, 3),
-        "capped": (now - float(last)) / 3600.0 >= PASSIVE_INCOME_MAX_HOURS,
-        "night": _passive_multiplier_at(now) == PASSIVE_NIGHT_MULTIPLIER,
+        "capped": False,
+        "night": False,
         "since": float(last),
     })
     return result
@@ -6521,8 +6509,8 @@ async def _passive_pending(user_id) -> dict:
 def _passive_pending_public(user_id) -> dict:
     """Компактный блок «сколько накопил» для ответа /api/user.
 
-    Отдельно от полного _passive_pending_sync: клиенту нужны только сумма,
-    ставка и признак «упёрлись в 24 часа».
+    Отдельно от полного _passive_pending_sync: клиенту нужны только сумма и
+    ставка (задача 91: потолка больше нет, capped всегда False).
     """
     if user_id is None:
         return {"amount": 0.0, "whole": 0, "rate": 0.0, "hours": 0.0,
@@ -6624,9 +6612,11 @@ def _passive_lock(uid):
 async def passive_income(data: PassiveIncomeRequest):
     """Пассивный доход с капсул: начисляется сервером по фактическому инвентарю.
 
-    Формула: сумма(кол-во капсул * ставка в час) * прошедшие часы, но не больше
-    24 часов за один заход. Начисление идемпотентно по времени: как только
-    коины выданы, отметка last_at сдвигается ровно на «оплаченные» часы.
+    Формула (задача 91): сумма(кол-во капсул * ставка в час) * ВСЕ прошедшие
+    часы — без потолка в 24 часа и без ночных скидок. Накопление идёт 24/7,
+    даже когда и аппка, и Telegram закрыты: сервер считает по last_at.
+    Начисление идемпотентно по времени: как только коины выданы, отметка
+    last_at сдвигается ровно на «оплаченные» часы.
     Задача 56: параллельные запросы выполняются по очереди (см. _passive_lock).
     """
     uid = _auth_user_id(data.initData)
@@ -6657,25 +6647,24 @@ def _passive_income_locked(data: PassiveIncomeRequest, uid):
         return {"ok": True, "accrued": 0, "rate": rate, "hours": 0.0, "real_hours": 0.0,
                 "breakdown": breakdown, "new_balance": _safe_int(row.get("coins"), 0),
                 "degraded": degraded,
-                "night": _passive_multiplier_at(now) == PASSIVE_NIGHT_MULTIPLIER,
+                "night": False,
                 "night_multiplier": PASSIVE_NIGHT_MULTIPLIER,
-                "night_window": f"{PASSIVE_NIGHT_START_HOUR:02d}:00–"
-                                f"{PASSIVE_NIGHT_END_HOUR:02d}:00 МСК",
+                "night_window": "",
                 "detail": "Пассивный доход запущен — накопление идёт и при закрытой аппке"}
 
-    # За один заход считаем не больше PASSIVE_INCOME_MAX_HOURS, но накопленное
-    # НЕ сгорает: отметка сдвигается только на оплаченные часы, поэтому
-    # следующий заход доберёт остаток. Пока Mini App закрыт — доход копится.
-    window_end = min(now, float(last) + PASSIVE_INCOME_MAX_HOURS * 3600.0)
+    # Задача 91: никакого потолка и никаких ночных скидок. Считаем ровно всё
+    # прошедшее с прошлого забора время — офлайн хоть неделю, всё накапает.
+    # Отметка двигается только на оплаченные часы (недобранное остаётся).
+    window_end = now
     real_hours, hours = _passive_split_hours(float(last), window_end)
-    night_now = _passive_multiplier_at(now) == PASSIVE_NIGHT_MULTIPLIER
+    night_now = False
     carry = _passive_carry_get(uid)          # мелочь с прошлого раза
     entitled = rate * hours + carry          # и её тоже отдаём
     accrued = int(entitled)                  # дробные коины копим, а не теряем
     coins_now = _safe_int(row.get("coins"), 0)
-    night_info = {"night": night_now, "night_multiplier": PASSIVE_NIGHT_MULTIPLIER,
-                  "night_window": f"{PASSIVE_NIGHT_START_HOUR:02d}:00–"
-                                  f"{PASSIVE_NIGHT_END_HOUR:02d}:00 МСК"}
+    # Задача 91: ночного понижения нет — поля оставлены для старых клиентов.
+    night_info = {"night": False, "night_multiplier": PASSIVE_NIGHT_MULTIPLIER,
+                  "night_window": ""}
     if accrued < 1 or rate <= 0:
         # Ничего не выдаём, отметку НЕ двигаем: копим дальше (в том числе мелочь).
         # Задача 44: отметку кладём в память, чтобы следующий заход (даже при

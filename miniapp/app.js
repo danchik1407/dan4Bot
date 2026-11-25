@@ -260,9 +260,10 @@ let maintenanceMessage = '';         // текст с сервера (если �
 
 // ================= НОВАЯ ЭКОНОМИКА (задача 25) =================
 let passiveRates = { capsule: 0.1, uniq_capsule: 0.5, ruby: 5, diamond: 20, galactic: 50 };
-// Задача 32: доход копится всегда (даже когда аппка закрыта), а ночью по МСК
-// (22:00–08:00) капает вдвое меньше. Числа — с сервера (/api/user → passive_night).
-let passiveNight = { multiplier: 0.5, from: 22, to: 8 };
+// Задача 32/91: доход копится всегда (даже когда аппка и Telegram закрыты) и
+// БЕЗ лимитов: потолка в 24 часа и ночной скидки больше нет — час стоит полную
+// ставку. Поле оставлено для совместимости (сервер присылает disabled: true).
+let passiveNight = { multiplier: 1, from: 22, to: 8, disabled: true };
 let passiveTimer = null;
 // Задача 42: сколько пассивки уже накопилось (с дробной частью). Приходит из
 // /api/user → passive_pending и обновляется после «Забрать».
@@ -1835,9 +1836,7 @@ function renderPassivePending() {
     const amount = Number(passivePending.amount || 0);
     el.innerHTML = `${formatPassiveAmount(amount)} ${COIN_IMG}`;
     el.classList.toggle('zero', amount < 1);
-    el.title = passivePending.capped
-        ? 'Накоплено максимум за 24 часа — забери, дальше счёт пойдёт заново'
-        : 'Столько уже накапало — жми «Забрать»';
+    el.title = 'Столько уже накапало — жми «Забрать». Копится 24/7, даже когда приложение закрыто';
 }
 
 function renderPassiveCard() {
@@ -1855,12 +1854,10 @@ function renderPassiveCard() {
     rateEl.innerHTML = `${rate.toFixed(1)} ${COIN_IMG} / час`;
     renderPassivePending();
     if (hintEl) {
-        const nightFrom = String(passiveNight.from || 22).padStart(2, '0');
-        const nightTo = String(passiveNight.to || 8).padStart(2, '0');
-        const nightNote = passivePending.night ? ' Сейчас ночь — капает вдвое меньше.' : '';
+        // Задача 91: доход идёт 24/7 без лимитов и ночных скидок.
         hintEl.textContent = rate > 0
-            ? `Твой инвентарь приносит ${rate.toFixed(1)} коинов каждый час. Доход копится, даже когда аппка закрыта `
-              + `(ночью ${nightFrom}:00–${nightTo}:00 МСК — вдвое меньше).${nightNote}`
+            ? `Твой инвентарь приносит ${rate.toFixed(1)} коинов каждый час. Доход копится 24/7, `
+              + 'даже когда приложение и Telegram закрыты — и за любой офлайн, без потолка.'
             : 'Купи капсулы — они приносят коины каждый час, даже когда аппка закрыта.';
         // «Что мешает забрать» — прямо в подсказке, чтобы кнопка не выглядела сломанной.
         const whole = Number(passivePending.whole || 0);
@@ -1890,8 +1887,7 @@ async function claimPassiveIncome(options) {
         if (data.accrued > 0) {
             playSound('coin');
             if (!silent) {
-                const nightNote = data.night ? '\n🌙 Сейчас ночь — капает вдвое меньше (22:00–08:00 МСК).' : '';
-                tg.showAlert(`💤 Пассивный доход: +${data.accrued} коинов${nightNote}`);
+                tg.showAlert(`💤 Пассивный доход: +${data.accrued} коинов за всё прошедшее время`);
             }
             balance = Number(data.new_balance) || balance;
             balanceKnown = true;
