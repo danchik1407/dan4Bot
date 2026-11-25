@@ -212,6 +212,10 @@ async function apiPost(path, payload, options) {
         body: JSON.stringify(Object.assign({ initData: tg.initData }, payload || {})),
     };
     if (controller) init.signal = controller.signal;
+    // Задача 96: keepalive — запрос должен успеть уйти, даже если приложение
+    // закрывают (иначе пойманные снежинки терялись). Ставится точечно, только
+    // для маленьких служебных запросов.
+    if (options && options.keepalive) init.keepalive = true;
     let res;
     try {
         res = await fetch(`${API_URL}${path}`, init);
@@ -776,8 +780,11 @@ function applyProfile(data) {
     // включает его кнопкой в админке, видят все игроки.
     applyTheme(data && data.theme, data && data.economy ? data.economy.theme : '');
     // Задача 90: счётчик снежинок приходит в профиле и живёт в кармане.
+    // Задача 96: прибавляем то, что ещё не улетело на сервер (очередь после
+    // перезагрузки), иначе профиль затирал неотправленное серверным числом —
+    // именно это и выглядело как «перезагрузил, снежинки обнулились».
     if (data && Number.isFinite(Number(data.snowflakes))) {
-        snowflakes = Math.max(0, Number(data.snowflakes));
+        snowflakes = Math.max(0, Number(data.snowflakes)) + snowCatchQueue;
         renderPocket();
         updateSnowBadge();
     }
@@ -7052,6 +7059,9 @@ function startLoaderClock() {
 // ================= СТАРТ =================
 document.addEventListener('DOMContentLoaded', async () => {
     startLoaderClock();
+    // Задача 96: неотправленные снежинки переживают перезагрузку — браузер
+    // может закрыть вкладку раньше, чем уйдёт пачка. Поднимаем её до профиля.
+    try { restoreSnowPending(); } catch (e) {}
     // Карточку Апгрейда запираем/отпираем сразу по списку ADMIN_IDS, не дожидаясь
     // профиля: иначе админ видел серую карточку до ответа сервера.
     updateUpgradeAccess();
@@ -7541,9 +7551,16 @@ const SNOW_MAX_ON_SCREEN = 2;
 const SNOW_FALL_MIN_MS = 12000;        // медленно: 12–18 секунд до низа
 const SNOW_FALL_MAX_MS = 18000;
 let snowSceneTimer = 0;
+// Задача 96: очередь НЕ режем по 5. Раньше `Math.min(SNOW_CATCH_MAX, ...)`
+// молча выбрасывала пойманное сверх пяти за пачку, а сама пачка терялась, если
+// закрыть приложение — игрок видел «было 12, после перезагрузки 0».
+const SNOW_QUEUE_MAX = 500;            // предохранитель от бесконечной очереди
+const SNOW_PENDING_KEY = 'aura_snow_pending';
 let snowCatchQueue = 0;                // сколько поймано, но ещё не отправлено
 let snowflakeSaveWarned = false;       // база не принимает снежинки (нет миграции)
 let snowFlushTimer = 0;
+let snowFlushBusy = false;
+let snowStorageBound = false;
 let snowSceneBound = false;
 
 function snowLayer() {
@@ -7629,42 +7646,113 @@ function snowflakeFirework(x, y) {
     setTimeout(() => { if (ring.parentNode) ring.parentNode.removeChild(ring); }, 700);
 }
 
-// Счётчик: сразу показываем в кармане, а на сервер шлём пачкой (раз в 2 с).
+// Сколько снежинок ждёт отправки на сервер (переживает перезагрузку).
+function snowPendingLoad() {
+    try {
+        const v = Math.max(0, Number(localStorage.getItem(SNOW_PENDING_KEY)) || 0);
+        return Number.isFinite(v) ? v : 0;
+    } catch (e) { return 0; }
+}
+
+function snowPendingSave(value) {
+    try { localStorage.setItem(SNOW_PENDING_KEY, String(Math.max(0, value | 0))); } catch (e) {}
+}
+
+// Показываем в кармане «что на сервере + что ещё не улетело». Так счётчик не
+// прыгает вниз, пока пачка в пути (задача 96: «перезагружаю — обнуляется»).
+function renderSnowCount() {
+    renderPocket();
+    updateSnowBadge();
+}
+
 function catchSnowflake(amount) {
     const add = Math.max(1, Math.min(SNOW_CATCH_MAX, Number(amount) || 1));
     snowflakes += add;
-    renderPocket();
-    updateSnowBadge();
-    snowCatchQueue = Math.min(SNOW_CATCH_MAX, snowCatchQueue + add);
+    renderSnowCount();
+    snowCatchQueue = Math.min(SNOW_QUEUE_MAX, snowCatchQueue + add);
+    snowPendingSave(snowCatchQueue);
     if (snowFlushTimer) return;
     snowFlushTimer = setTimeout(flushSnowflakes, 900);
 }
 
-async function flushSnowflakes() {
+// Отправка пачки. ВАЖНО (задача 96): очередь снимаем ДО запроса и НЕ обнуляем
+// счётчик на экране; при сбое возвращаем пачку обратно, чтобы после перезагрузки
+// не оказалось нуля. На keepalive — чтобы успеть при закрытии приложения.
+async function flushSnowflakes(useKeepalive = false) {
     snowFlushTimer = 0;
+    if (snowFlushBusy) return;
     const amount = snowCatchQueue;
-    if (!amount) return;
+    if (!amount) { snowPendingSave(0); return; }
+    snowFlushBusy = true;
     snowCatchQueue = 0;
+    snowPendingSave(0);
+    let left = amount;              // сколько ещё не подтвердил сервер
+    let stored = null;              // последнее подтверждённое число из базы
     try {
-        const data = await apiPost('/api/snowflakes/catch',
-            { initData: tg.initData, amount });
-        // Задача 92: если сервер не записал (нет миграции), НЕ затираем счётчик
-        // его числом — иначе пойманное «пропадало» из кармана. Локально копим,
-        // а игрок видит, что ловля работает.
-        if (data && data.saved !== false && Number.isFinite(Number(data.snowflakes))) {
-            snowflakes = Math.max(0, Number(data.snowflakes));
-            renderPocket();
-            updateSnowBadge();
-        } else if (data && data.saved === false) {
-            snowflakeSaveWarned = true;
+        // Задача 96: сервер принимает максимум 5 за запрос (антифлуд). Раньше
+        // вся пачка уходила одним запросом, сервер молча срезал её до 5 —
+        // и остаток пропадал. Шлём частями, пока сервер не подтвердит всё.
+        while (left > 0) {
+            const chunk = Math.min(SNOW_CATCH_MAX, left);
+            const data = await apiPost('/api/snowflakes/catch',
+                { initData: tg.initData, amount: chunk },
+                useKeepalive ? { keepalive: true, timeout: 4000 } : undefined);
+            if (!data || data.saved === false) {
+                // База не приняла (нет миграции) — копим локально, не теряем.
+                snowflakeSaveWarned = true;
+                break;
+            }
+            left -= chunk;
+            const got = Number.isFinite(Number(data.stored))
+                ? Number(data.stored) : Number(data.snowflakes);
+            if (Number.isFinite(got)) stored = Math.max(0, got);
+            if (useKeepalive) break;    // при закрытии успеваем только один запрос
         }
     } catch (e) {
-        // Сервер не принял — возвращаем «оптимистичные» снежинки назад, чтобы
-        // счётчик в кармане не врал. Сами снежинки — декор, игра не страдает.
-        snowflakes = Math.max(0, snowflakes - amount);
-        renderPocket();
-        updateSnowBadge();
+        // Сервер недоступен: остаток возвращаем в очередь (переживёт перезагрузку).
+    } finally {
+        if (left > 0) {
+            snowCatchQueue = Math.min(SNOW_QUEUE_MAX, snowCatchQueue + left);
+            snowPendingSave(snowCatchQueue);
+        }
+        // На экране: подтверждённое базой + то, что ещё в пути. Если не
+        // подтвердилось НИЧЕГО, счётчик не трогаем — он уже содержит пойманное
+        // (иначе пойманное считалось бы дважды: было 10 + 2 = 12, и ещё +2).
+        if (stored !== null) snowflakes = stored + snowCatchQueue;
+        renderSnowCount();
+        snowFlushBusy = false;
     }
+}
+
+// Закрытие/сворачивание приложения: досылаем неотправленное сразу.
+// Без этого пойманные снежинки жили только в памяти вкладки и после
+// перезагрузки исчезали — ровно то, на что жаловался заказчик.
+function bindSnowStorageFlush() {
+    if (snowStorageBound) return;
+    snowStorageBound = true;
+    const flushNow = () => {
+        if (snowCatchQueue > 0) {
+            if (snowFlushTimer) { clearTimeout(snowFlushTimer); snowFlushTimer = 0; }
+            flushSnowflakes(true);
+        }
+    };
+    document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'hidden') flushNow();
+    });
+    window.addEventListener('pagehide', flushNow);
+    window.addEventListener('beforeunload', flushNow);
+}
+
+// На старте: если прошлая сессия не успела отправить пачку — досылаем её и
+// показываем «сервер + неотправленное», чтобы число не мигало вниз.
+function restoreSnowPending() {
+    const pending = snowPendingLoad();
+    if (!pending) return 0;
+    snowCatchQueue = Math.min(SNOW_QUEUE_MAX, pending);
+    snowflakes += snowCatchQueue;
+    renderSnowCount();
+    setTimeout(() => flushSnowflakes(), 1200);
+    return snowCatchQueue;
 }
 
 // Маленький бейдж в шапке: сколько уже поймано (только в новогоднем режиме).
@@ -7723,6 +7811,11 @@ function startSnowScene() {
     }
     updateSnowBadge();
 }
+
+// Задача 96: подписка на закрытие/сворачивание — сразу, не дожидаясь темы.
+// Иначе, если приложение закрыли до инициализации, неотправленная пачка
+// оставалась только в памяти вкладки.
+bindSnowStorageFlush();
 
 if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', initUiPolish);
