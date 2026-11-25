@@ -2963,6 +2963,18 @@ html.ny .ny-board-row.top-1 {
 html.ny .ny-board-row.top-2 { border-color: rgba(206, 216, 232, 0.7); }
 html.ny .ny-board-row.top-3 { border-color: rgba(205, 127, 61, 0.75); }
 
+/* Своя строка: видно даже там, где игрока нет в публичном топе (админ). */
+html.ny .ny-board-row.is-me {
+    border-color: rgba(120, 205, 255, 0.85);
+    background: linear-gradient(90deg, rgba(20, 62, 104, 0.95) 0%, rgba(12, 34, 60, 0.95) 100%);
+    box-shadow: 0 0 12px rgba(110, 200, 255, 0.22);
+}
+html.ny .ny-board-you {
+    display: inline-block; padding: 1px 7px; border-radius: 9px;
+    font-size: 11px; font-weight: 800; letter-spacing: 0.04em;
+    color: #07141f; background: linear-gradient(180deg, #9fdcff 0%, #63b8f5 100%);
+}
+
 html.ny .ny-board-place {
     position: relative; flex: 0 0 34px; text-align: center;
     font-weight: 800; font-size: 15px; color: #e8f3ff;

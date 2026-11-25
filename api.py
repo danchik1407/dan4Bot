@@ -89,7 +89,7 @@ async def _http_json(url, method: str = "GET", params=None, payload=None, timeou
 
 # Номер сборки: по нему из /api/health видно, что на сервисе НЕ старый код.
 # Если после деплоя здесь прежнее значение — Render ещё не перезапустился.
-API_BUILD = "2026-10-27-task98-ears-flush"
+API_BUILD = "2026-10-27-task99-board-write-fix"
 
 # Момент старта процесса. По нему видно, что сервис только что «проснулся»:
 # Render на бесплатном тарифе усыпляет Web Service через 15 минут без входящих
@@ -812,11 +812,61 @@ def board_prize_for_place(place) -> int:
 
 
 _BOARD_LAST_ERROR = {"text": ""}
+# Чем пишем: "rpc" — атомарная функция, "table" — резервный путь без неё.
+_BOARD_MODE = {"mode": "rpc", "since": 0.0}
+# Счётчики записи: админка показывает, что запись реально проходит.
+_BOARD_STAT = {"ok": 0, "fail": 0, "last_ok_at": 0.0, "last_fail_at": 0.0}
 
 
 def board_last_error() -> str:
     """Последняя причина, по которой запись в таблицу не удалась (для админки)."""
     return _BOARD_LAST_ERROR["text"]
+
+
+def board_write_mode() -> str:
+    """'rpc' — атомарная функция на месте, 'table' — пишем напрямую в таблицу."""
+    return _BOARD_MODE["mode"]
+
+
+def _board_rpc_missing(exc) -> bool:
+    """Ошибка означает «функции нет», а не «база недоступна».
+
+    PostgREST отвечает PGRST202 «Could not find the function ... in the schema
+    cache» — это ровно случай «миграцию применили не полностью» (таблица есть,
+    функции нет). Тогда пишем в таблицу напрямую, чтобы лидерборд не молчал.
+    """
+    text = str(exc).lower()
+    return any(marker in text for marker in (
+        "pgrst202", "could not find the function", "does not exist",
+        "schema cache", "newyear_board_add",
+    ))
+
+
+def _board_table_write(uid: int, games: int, passive: int, win: bool) -> bool:
+    """Резервная запись БЕЗ функции newyear_board_add.
+
+    Читаем строку, прибавляем и пишем обратно (upsert). Атомарности RPC тут
+    нет — зато лидерборд работает, даже если функцию не создали. Ошибку
+    возвращаем наружу, чтобы админка показала её текстом.
+    """
+    try:
+        rows = (supabase.table(BOARD_TABLE)
+                .select("earned, earned_games, earned_passive, wins")
+                .eq("user_id", int(uid)).limit(1).execute().data) or []
+        current = rows[0] if rows else {}
+        payload = {
+            "user_id": int(uid),
+            "earned": _safe_int(current.get("earned"), 0) + games + passive,
+            "earned_games": _safe_int(current.get("earned_games"), 0) + games,
+            "earned_passive": _safe_int(current.get("earned_passive"), 0) + passive,
+            "wins": _safe_int(current.get("wins"), 0) + (1 if win else 0),
+            "updated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        }
+        supabase.table(BOARD_TABLE).upsert(payload, on_conflict="user_id").execute()
+        return True
+    except Exception as exc:  # noqa: BLE001
+        _BOARD_LAST_ERROR["text"] = str(exc)[:200]
+        return False
 
 
 def board_add(uid, games: int = 0, passive: int = 0, win: bool = False) -> bool:
@@ -831,15 +881,34 @@ def board_add(uid, games: int = 0, passive: int = 0, win: bool = False) -> bool:
     if board_is_finished():
         # Финиш прошёл — таблица заморожена, доначислять некуда.
         return False
+    args = {"p_user_id": int(target), "p_games": games,
+            "p_passive": passive, "p_win": bool(win)}
     try:
-        supabase.rpc(BOARD_RPC, {"p_user_id": int(target), "p_games": games,
-                                 "p_passive": passive, "p_win": bool(win)}).execute()
+        supabase.rpc(BOARD_RPC, args).execute()
+        if _BOARD_MODE["mode"] != "rpc":
+            logger.info("Лидерборд: снова пишем через %s (функция на месте)", BOARD_RPC)
+        _BOARD_MODE.update({"mode": "rpc", "since": time.time()})
+        _BOARD_STAT["ok"] += 1
+        _BOARD_STAT["last_ok_at"] = time.time()
+        _BOARD_LAST_ERROR["text"] = ""
         return True
     except Exception as exc:  # noqa: BLE001 — нет миграции: игра важнее таблицы
         _BOARD_LAST_ERROR["text"] = str(exc)[:200]
+        # Функции нет (миграция применена частично) — пишем в таблицу напрямую.
+        if _board_rpc_missing(exc) and _board_table_write(int(target), games, passive, win):
+            if _BOARD_MODE["mode"] != "table":
+                logger.warning("Лидерборд: %s недоступна (%s) — пишем напрямую в %s. "
+                               "Примените полную миграцию, чтобы вернуть атомарность.",
+                               BOARD_RPC, str(exc)[:120], BOARD_TABLE)
+                _BOARD_MODE.update({"mode": "table", "since": time.time()})
+            _BOARD_STAT["ok"] += 1
+            _BOARD_STAT["last_ok_at"] = time.time()
+            return True
+        _BOARD_STAT["fail"] += 1
+        _BOARD_STAT["last_fail_at"] = time.time()
         if not _BOARD_WARNED["once"]:
-            logger.warning("Лидерборд: newyear_board_add недоступна (%s) — проверьте "
-                           "миграцию 20261209000000_newyear_leaderboard.sql", exc)
+            logger.warning("Лидерборд: запись не прошла (%s) — проверьте миграцию "
+                           "newyear_board_full.sql", exc)
             _BOARD_WARNED["once"] = True
         return False
 
@@ -8570,39 +8639,100 @@ async def snowflakes_leaderboard(limit: int = 10):
 
 
 # ==================== НОВОГОДНИЙ ЛИДЕРБОРД: ЭНДПОИНТЫ (задача 93) ====================
+def _board_row_player(row: dict, place: int) -> dict:
+    """Строка таблицы → то, что рисует экран. place уже пересчитан после
+    фильтрации админов (нумерация до фильтра сдвигала все места и призы)."""
+    uid = _safe_int(row.get("user_id"), 0)
+    return {
+        "place": place,
+        "user_id": uid,
+        "username": _username_by_id(uid),
+        "earned": _safe_int(row.get("earned"), 0),
+        "earned_games": _safe_int(row.get("earned_games"), 0),
+        "earned_passive": _safe_int(row.get("earned_passive"), 0),
+        "wins": _safe_int(row.get("wins"), 0),
+        "prize": board_prize_for_place(place) if place <= len(BOARD_PRIZES) else 0,
+        "is_me": False,
+    }
+
+
+def _board_me_uid(init_data: str):
+    """user_id из initData, если он передан и валиден. Иначе None.
+
+    Экран «Топ» публичный, поэтому подпись проверяем мягко: неверная не ломает
+    загрузку таблицы, просто не подсвечивает «это ты».
+    """
+    text = (init_data or "").strip()
+    if not text:
+        return None
+    try:
+        user = verify_telegram_data(text)
+    except Exception:  # noqa: BLE001
+        return None
+    return _safe_int((user or {}).get("id"), None)
+
+
 @app.get("/api/newyear_board")
-async def newyear_board_public(limit: int = 21):
+async def newyear_board_public(limit: int = 21, init: str = ""):
     """Таблица «кто больше заработал» — публичная, без авторизации.
 
     Отдаём всё, что нужно экрану: время до финиша, призы по местам, строки с
-    ником и аватаркой, а также 10 строк вокруг самого игрока (если он передал
-    initData) — чтобы он видел себя, даже когда до топ-21 далеко.
+    ником и аватаркой. Если игрок передал initData (`init`), возвращаем ещё и
+    его собственное место (`me`) — в том числе когда он админ и в публичный
+    список не попадает: заказчик проверяет акцию своим аккаунтом, и раньше его
+    результат просто не показывался («лидерборд ничего не засчитывает»).
     """
     limit = max(5, min(50, _safe_int(limit, 21)))
     now = time.time()
     deadline = board_deadline_ts()
     left = max(0.0, deadline - now)
     rows = await asyncio.to_thread(board_rows, 200)
-    players = []
-    for place, row in enumerate(rows, start=1):
+    me_uid = _board_me_uid(init)
+    # Сначала фильтруем (мёртвые строки и админов), потом нумеруем места —
+    # иначе у всех сдвигались места и призы.
+    visible = []
+    hidden_me = None
+    for row in rows:
         uid = _safe_int(row.get("user_id"), 0)
-        if not uid or uid in ADMIN_IDS:
+        if not uid:
             continue
-        players.append({
-            "place": place,
-            "user_id": uid,
-            "username": _username_by_id(uid),
-            "earned": _safe_int(row.get("earned"), 0),
-            "earned_games": _safe_int(row.get("earned_games"), 0),
-            "earned_passive": _safe_int(row.get("earned_passive"), 0),
-            "wins": _safe_int(row.get("wins"), 0),
-            "prize": board_prize_for_place(place) if place <= len(BOARD_PRIZES) else 0,
-            "is_me": False,
-        })
+        if uid in ADMIN_IDS:
+            if me_uid is not None and uid == me_uid:
+                hidden_me = row
+            continue
+        visible.append(row)
+    players = [_board_row_player(row, i) for i, row in enumerate(visible, start=1)]
+    me = None
+    if me_uid is not None:
+        mine = next((p for p in players if p["user_id"] == me_uid), None)
+        if mine is not None:
+            mine["is_me"] = True
+            me = dict(mine)
+        elif hidden_me is not None:
+            # Свой результат вне публичного списка (админ) — показываем отдельно.
+            me = {
+                "place": 0,
+                "user_id": me_uid,
+                "username": _username_by_id(me_uid),
+                "earned": _safe_int(hidden_me.get("earned"), 0),
+                "earned_games": _safe_int(hidden_me.get("earned_games"), 0),
+                "earned_passive": _safe_int(hidden_me.get("earned_passive"), 0),
+                "wins": _safe_int(hidden_me.get("wins"), 0),
+                "prize": 0,
+                "is_me": True,
+                "hidden": True,
+            }
+        else:
+            # Ещё не заработал — покажем честный ноль, а не пустоту.
+            me = {"place": 0, "user_id": me_uid,
+                  "username": _username_by_id(me_uid), "earned": 0,
+                  "earned_games": 0, "earned_passive": 0, "wins": 0,
+                  "prize": 0, "is_me": True, "hidden": False}
     return {
         "ok": True,
         "title": "🏆 Лидерборд",
         "players": players[:limit],
+        "me": me,
         "total_players": len(players),
         "deadline": BOARD_DEADLINE_ISO,
         "deadline_msk": BOARD_DEADLINE_MSK,
@@ -8618,6 +8748,11 @@ async def newyear_board_public(limit: int = 21):
             "grow": "Играй в разные режимы и скупай капсулы — доход идёт постоянно.",
         },
         "db": await asyncio.to_thread(board_health),
+        # Чем и как идёт запись: rpc/table + счётчики. Нужно админке, игроку
+        # это поле не выводится.
+        "write_mode": board_write_mode(),
+        "writes_ok": _BOARD_STAT["ok"],
+        "writes_fail": _BOARD_STAT["fail"],
         # Если запись уже падала — показываем причину админу (текстом в лог и в
         # /api/admin/board_check, игроку это поле просто не выводится).
         "last_error": board_last_error(),
@@ -8672,6 +8807,10 @@ async def admin_board_check(data: UserAuth):
     return {
         "ok": bool(health.get("ok")),
         "health": health,
+        "write_mode": board_write_mode(),
+        "writes_ok": _BOARD_STAT["ok"],
+        "writes_fail": _BOARD_STAT["fail"],
+        "last_ok_at": _BOARD_STAT["last_ok_at"],
         "players": len(rows),
         "top": top,
         "last_error": board_last_error(),
@@ -8683,6 +8822,64 @@ async def admin_board_check(data: UserAuth):
         "message": ("✅ Лидерборд работает: таблица есть, запись проходит"
                     if health.get("ok") and health.get("write_ok", True)
                     else "⚠️ Лидерборд не работает: " + str(health.get("reason") or "неизвестно")),
+    }
+
+
+@app.post("/api/admin/board_probe")
+async def admin_board_probe(data: UserAuth):
+    """Задача 99: «нажми — и видно, засчитывается или нет».
+
+    Пишем +1 коин самому админу через ТОТ ЖЕ путь, что и победа
+    (board_add → RPC или таблица), читаем значение обратно и возвращаем
+    исходное. Ничего не портит: строка восстанавливается, а у админа она и
+    так не попадает в публичный список.
+    """
+    uid = _require_admin_api(data.initData)
+    before_rows = await asyncio.to_thread(
+        lambda: (supabase.table(BOARD_TABLE)
+                 .select("earned, earned_games, earned_passive, wins")
+                 .eq("user_id", int(uid)).limit(1).execute().data) or [])
+    before = before_rows[0] if before_rows else None
+    saved = await asyncio.to_thread(board_add, uid, 1, 0, False)
+    after_rows = await asyncio.to_thread(
+        lambda: (supabase.table(BOARD_TABLE)
+                 .select("earned, earned_games, earned_passive, wins")
+                 .eq("user_id", int(uid)).limit(1).execute().data) or [])
+    after = after_rows[0] if after_rows else None
+    before_earned = _safe_int((before or {}).get("earned"), 0)
+    after_earned = _safe_int((after or {}).get("earned"), 0)
+    landed = bool(saved) and after is not None and after_earned == before_earned + 1
+    # Откат: возвращаем ровно то, что было (или убираем пробную строку).
+    restored = True
+    try:
+        if before is None:
+            # Строки не было — пробную убираем совсем, чтобы не висела с нулями.
+            if after is not None:
+                (supabase.table(BOARD_TABLE).delete()
+                 .eq("user_id", int(uid)).execute())
+        else:
+            (supabase.table(BOARD_TABLE).update({
+                "earned": _safe_int(before.get("earned"), 0),
+                "earned_games": _safe_int(before.get("earned_games"), 0),
+                "earned_passive": _safe_int(before.get("earned_passive"), 0),
+                "wins": _safe_int(before.get("wins"), 0),
+            }).eq("user_id", int(uid)).execute())
+    except Exception as exc:  # noqa: BLE001 — откат не должен ронять проверку
+        restored = False
+        logger.warning("Лидерборд: пробную прибавку не удалось откатить: %s", exc)
+    return {
+        "ok": landed,
+        "write_mode": board_write_mode(),
+        "before": before_earned,
+        "after": after_earned,
+        "restored": restored,
+        "last_error": board_last_error(),
+        "message": ("✅ Запись в лидерборд проходит: +1 засчитан (и откачен обратно)"
+                    if landed else
+                    "⚠️ Запись не проходит: " + (board_last_error() or "неизвестная причина")),
+        "hint": ("" if landed else
+                 "Примените supabase/migrations/20261211000000_newyear_board_full.sql "
+                 "в SQL Editor Supabase — он создаёт таблицу и функцию заново."),
     }
 
 

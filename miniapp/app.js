@@ -1841,18 +1841,24 @@ function boardPrizeText(prize) {
 
 function boardRowHtml(p) {
     const place = _safeCoinNumber(p.place);
-    const cls = place <= 3 ? `ny-board-row top-${place}` : 'ny-board-row';
+    const mine = Boolean(p && p.is_me);
+    const cls = (place > 0 && place <= 3 ? `ny-board-row top-${place}` : 'ny-board-row')
+        + (mine ? ' is-me' : '');
     const earned = formatCoins(_safeCoinNumber(p.earned));
     const prize = _safeCoinNumber(p.prize);
+    // Своя строка без места (админ вне публичного списка) — вместо цифры «Ты».
+    const placeHtml = place > 0
+        ? `${place === 1 ? '<span class="ny-board-crown">👑</span>' : ''}${place}`
+        : '<span class="ny-board-you">Ты</span>';
     return `
         <div class="${cls}">
-            <span class="ny-board-place">${place === 1 ? '<span class="ny-board-crown">👑</span>' : ''}${place}</span>
+            <span class="ny-board-place">${placeHtml}</span>
             <span class="ny-board-player">
                 <span class="ny-board-name">${escapeHtml(shortName(p.username || 'Игрок'))}</span>
                 <span class="ny-board-earned">заработано: <b>${earned} KOI</b></span>
             </span>
             <span class="ny-board-prize${prize > 0 ? '' : ' no-prize'}">
-                <span class="ny-board-gift">🎁</span>${boardPrizeText(prize)}
+                <span class="ny-board-gift">🎁</span>${prize > 0 ? boardPrizeText(prize) : '—'}
             </span>
         </div>`;
 }
@@ -1882,9 +1888,18 @@ function renderNewYearBoard(data) {
     // Подписи «до финиша · …» больше нет (просьба заказчика), но таймер тикает.
     if (sub) sub.hidden = true;
     startBoardTimer(Number(data.seconds_left) || 0);
-    const rows = Array.isArray(data.players) ? data.players : [];
+    const rows = (Array.isArray(data.players) ? data.players : []).slice();
+    // Свою строку показываем всегда: если игрока нет в видимом топе (или он
+    // админ и в публичный список не попадает) — добавляем её отдельной строкой.
+    const me = data.me || null;
+    const mineVisible = me ? rows.some(p => Number(p.user_id) === Number(me.user_id)) : false;
+    if (me && !mineVisible) rows.push(Object.assign({}, me, { place: 0, pinned: true }));
+    const dbBroken = data.db && data.db.ok === false;
     if (!rows.length) {
-        list.innerHTML = '<p class="lb-empty">Пока никто не заработал — будь первым</p>';
+        // Не «будь первым», а честная причина: пустая таблица из-за базы.
+        list.innerHTML = dbBroken
+            ? '<p class="lb-empty">Лидерборд временно недоступен — результаты не сохраняются</p>'
+            : '<p class="lb-empty">Пока никто не заработал — будь первым</p>';
         return;
     }
     list.innerHTML = rows.map(boardRowHtml).join('');
@@ -1925,10 +1940,16 @@ async function loadNewYearBoard() {
     if (!ny || boardBusy) return;
     boardBusy = true;
     try {
-        const res = await fetch(`${BOARD_API}/api/newyear_board?limit=21`);
+        // init передаём, чтобы сервер вернул и своё место: раньше результат
+        // админа (а заказчик проверяет аккаунтом из ADMIN_IDS) не показывался.
+        const init = (tg && tg.initData) ? `&init=${encodeURIComponent(tg.initData)}` : '';
+        const res = await fetch(`${BOARD_API}/api/newyear_board?limit=21${init}`);
         const payload = await res.json().catch(() => null);
         if (!res.ok || !payload) throw new Error((payload && payload.detail) || 'Лидерборд недоступен');
-        const signature = JSON.stringify((payload.players || []).map(p => [p.place, p.user_id, p.earned]));
+        const signature = JSON.stringify([
+            (payload.players || []).map(p => [p.place, p.user_id, p.earned]),
+            payload.me ? [payload.me.place, payload.me.earned, payload.me.hidden ? 1 : 0] : null,
+        ]);
         if (boardData && signature === boardSignature) {
             // Ничего не изменилось — только обновляем оставшееся время
             // (иначе список мигал бы каждые 15 секунд).
@@ -7394,6 +7415,8 @@ function adminBoardRowsHtml(data) {
     const rows = [
         ['Таблица', h.ok ? 'есть' : 'НЕТ'],
         ['Запись в таблицу', h.write_ok === true ? 'проходит' : (h.write === false ? 'ЗАПРЕЩЕНА' : 'не проверялась')],
+        ['Режим записи', data.write_mode === 'table' ? 'таблица (функции нет)' : 'атомарная функция'],
+        ['Записей ок / сбоев', `${formatCoins(_safeCoins(data.writes_ok))} / ${formatCoins(_safeCoins(data.writes_fail))}`],
         ['Игроков в таблице', formatCoins(_safeCoins(data.players))],
         ['До финиша', boardDeadlineLeftText(data.seconds_left)],
         ['Финиш', data.finished ? 'уже прошёл' : '19 декабря, 21:00 МСК'],
@@ -7436,6 +7459,50 @@ async function checkAdminBoard() {
         if (hint) hint.textContent = e && e.message ? e.message : 'Проверка не удалась';
     } finally {
         if (btn) { btn.disabled = false; btn.textContent = 'Проверить лидерборд'; }
+    }
+}
+
+// Задача 99: «лидерборд ничего не засчитывает» — проверка настоящим числом.
+// Кнопка просит сервер начислить +1 самому админу тем же путём, что и победа
+// (board_add), и сразу откатить. В ответе «было → стало» и причина сбоя,
+// поэтому видно разницу между «не работает база» и «победы не доходят».
+async function probeAdminBoard() {
+    if (!isAdmin) { tg.showAlert('Проверка доступна только админу'); return; }
+    const btn = document.getElementById('admin-board-probe-btn');
+    const state = document.getElementById('admin-board-state');
+    const hint = document.getElementById('admin-board-hint');
+    const rows = document.getElementById('admin-board-rows');
+    if (btn) { btn.disabled = true; btn.textContent = 'Начисляем…'; }
+    try {
+        const data = await apiPost('/api/admin/board_probe', { initData: tg.initData });
+        if (state) {
+            state.textContent = data.ok ? '✅ засчитывается' : '⚠️ не засчитывается';
+            state.classList.toggle('is-on', !!data.ok);
+        }
+        if (hint) hint.textContent = data.message || 'Проверка выполнена';
+        if (rows) {
+            rows.hidden = false;
+            const list = [
+                ['Режим записи', data.write_mode === 'table' ? 'таблица (функции нет)' : 'атомарная функция'],
+                ['Было', `${formatCoins(_safeCoins(data.before))} KOI`],
+                ['Стало после +1', `${formatCoins(_safeCoins(data.after))} KOI`],
+                ['Проба откачена', data.restored ? 'да' : 'НЕТ — проверьте таблицу'],
+            ];
+            if (data.last_error) list.push(['Ошибка', String(data.last_error)]);
+            if (data.hint) list.push(['Что делать', String(data.hint)]);
+            rows.innerHTML = list.map(([label, value]) => `
+                <div class="admin-player-row">
+                    <span class="admin-player-label">${escapeHtml(label)}</span>
+                    <span class="admin-player-value">${escapeHtml(value)}</span>
+                </div>`).join('');
+        }
+        // Таблица могла измениться — перерисовываем экран топа.
+        loadNewYearBoard();
+    } catch (e) {
+        if (state) state.textContent = '⚠️ не засчитывается';
+        if (hint) hint.textContent = e && e.message ? e.message : 'Проверка не удалась';
+    } finally {
+        if (btn) { btn.disabled = false; btn.textContent = 'Засчитать мне +1 (проверка)'; }
     }
 }
 
