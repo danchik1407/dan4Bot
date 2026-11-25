@@ -89,7 +89,7 @@ async def _http_json(url, method: str = "GET", params=None, payload=None, timeou
 
 # Номер сборки: по нему из /api/health видно, что на сервисе НЕ старый код.
 # Если после деплоя здесь прежнее значение — Render ещё не перезапустился.
-API_BUILD = "2026-10-27-task91-passive-no-limits"
+API_BUILD = "2026-10-27-task92-ny-visual-fixes"
 
 # Момент старта процесса. По нему видно, что сервис только что «проснулся»:
 # Render на бесплатном тарифе усыпляет Web Service через 15 минут без входящих
@@ -792,18 +792,22 @@ def snowflakes_count(user_id) -> int:
     return value
 
 
-def snowflakes_add(user_id, amount) -> int:
-    """Прибавить пойманные снежинки и вернуть новый итог.
+def snowflakes_add(user_id, amount) -> dict:
+    """Прибавить пойманные снежинки.
 
-    Счётчик декоративный, поэтому гонки не страшны: пишем «прочитал + прибавил»,
-    а если база отказала — возвращаем прежнее число, а не ошибку.
+    Возвращает {"count": итог у игрока, "saved": записалось ли в базу,
+    "added": сколько приняли}. Задача 92: раньше при отсутствующей таблице
+    функция молча возвращала ПРЕЖНЕЕ число, клиент верил серверу и откатывал
+    счётчик — выглядело как «ловлю, а в кармане не растёт». Теперь клиент по
+    флагу `saved` понимает, что начисление не сохранилось, и оставляет свой
+    счётчик, а не затирает его нулём.
     """
     uid = _safe_int(user_id, None)
     if uid is None:
-        return 0
+        return {"count": 0, "saved": False, "added": 0}
     add = max(0, min(SNOWFLAKE_MAX_PER_CATCH, _safe_int(amount, 0)))
     if not add:
-        return snowflakes_count(uid)
+        return {"count": snowflakes_count(uid), "saved": True, "added": 0}
     current = snowflakes_count(uid)
     total = current + add
     try:
@@ -813,8 +817,8 @@ def snowflakes_add(user_id, amount) -> int:
         _SNOW_CACHE[int(uid)] = (total, time.time())
     except Exception:  # noqa: BLE001 — нет миграции: не ломаем игру
         logger.debug("снежинки не записались (user_id=%s)", uid, exc_info=True)
-        return current
-    return total
+        return {"count": current, "saved": False, "added": 0}
+    return {"count": total, "saved": True, "added": add}
 
 
 def _username_by_id(user_id) -> str:
@@ -8318,9 +8322,12 @@ async def snowflakes_catch(data: SnowCatchRequest):
     """Поймал снежинку — она в кармане. Только декор, ничего не покупает."""
     uid = _auth_user_id(data.initData)
     require_play_access_uid(uid)
-    total = await asyncio.to_thread(snowflakes_add, uid, data.amount)
-    return {"ok": True, "snowflakes": total,
-            "added": max(0, min(SNOWFLAKE_MAX_PER_CATCH, _safe_int(data.amount, 0)))}
+    result = await asyncio.to_thread(snowflakes_add, uid, data.amount)
+    return {"ok": True, "snowflakes": int(result.get("count") or 0),
+            "added": int(result.get("added") or 0),
+            # Задача 92: false — база не приняла (нет миграции). Клиент в этом
+            # случае НЕ затирает свой счётчик, а продолжает копить локально.
+            "saved": bool(result.get("saved"))}
 
 
 @app.get("/api/snowflakes/top")

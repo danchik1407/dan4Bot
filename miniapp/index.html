@@ -12,7 +12,7 @@
     <meta http-equiv="Pragma" content="no-cache">
     <meta http-equiv="Expires" content="0">
     <title>AURA GAME</title>
-    <link rel="stylesheet" href="style.css?v=aura-91">
+    <link rel="stylesheet" href="style.css?v=aura-92">
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
 </head>
 <body>
@@ -23,6 +23,7 @@
         <div class="app-loader-text">Загружаем игру…</div>
         <!-- Задача 90: новогодняя заставка (видна только в .ny). -->
         <div class="loader-ny" aria-hidden="true">
+            <img class="loader-santa" src="santa_sack.png" alt="" loading="eager">
             <span class="loader-tree">🎄</span>
             <span class="loader-snow s1">❄</span>
             <span class="loader-snow s2">❅</span>
@@ -201,12 +202,11 @@
                     <!-- Задача 70: если не хочется смотреть прокрут — сразу награда. -->
                     <button class="roulette-skip" id="roulette-skip" onclick="skipChestAnimation()">Skip</button>
                 </div>
-                <!-- Задача 90: над рулеткой слева направо летят сани Деда Мороза
-                     с подарками. Чистая анимация, на награду не влияет. -->
+                <!-- Задача 92: над рулеткой едет фигурка Деда Мороза с мешком
+                     (картинка заказчика). Только слева направо, один проход на
+                     прокрут сундука; на награду не влияет. -->
                 <div class="ny-santa" id="ny-santa" aria-hidden="true">
-                    <span class="ny-santa-deer">🦌</span>
-                    <span class="ny-santa-sled">🛷</span>
-                    <span class="ny-santa-gift">🎁</span>
+                    <img class="ny-santa-img" src="santa_sack.png" alt="" loading="lazy">
                 </div>
                 <div class="roulette-window">
                     <div class="roulette-track" id="roulette-track"></div>
@@ -822,6 +822,6 @@
          маленькой кнопкой ⚙️ рядом с ником в шапке (см. #admin-gear). -->
     </nav>
 
-    <script src="app.js?v=aura-91" defer></script>
+    <script src="app.js?v=aura-92" defer></script>
 </body>
 </html>
