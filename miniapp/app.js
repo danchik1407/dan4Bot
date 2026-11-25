@@ -1838,10 +1838,27 @@ function boardDeadlineLeftHtml(seconds) {
         + `<span class="ny-t-s">${pad(p.s)}с</span>`;
 }
 
-// Как на макете: единица измерения — «KOI» текстом (в макете нет картинки
-// монеты), приз — таблетка с подарочком, ниже 20-го места — «Без приза».
+// Задача 101: заказчик попросил называть валюту словами — не «KOI», а
+// «коины». Склоняем по-русски: 1 коин, 2 коина, 5 коинов (и 11 коинов тоже).
+// Сама монета/иконка не менялась — только текст.
+function coinWord(value) {
+    const n = Math.abs(Math.floor(Number(value) || 0)) % 100;
+    const last = n % 10;
+    if (n >= 11 && n <= 14) return 'коинов';
+    if (last === 1) return 'коин';
+    if (last >= 2 && last <= 4) return 'коина';
+    return 'коинов';
+}
+
+// «100 000 коинов» одним куском — чтобы не собирать строку в каждом месте.
+function coinLabel(value) {
+    const n = _safeCoinNumber(value);
+    return `${formatCoins(n)} ${coinWord(n)}`;
+}
+
+// Как на макете: приз — таблетка с подарочком, ниже 20-го места — «Без приза».
 function boardPrizeText(prize) {
-    return prize > 0 ? `${formatCoins(prize)} KOI` : 'Без приза';
+    return prize > 0 ? coinLabel(prize) : 'Без приза';
 }
 
 function boardRowHtml(p) {
@@ -1849,8 +1866,12 @@ function boardRowHtml(p) {
     const mine = Boolean(p && p.is_me);
     const cls = (place > 0 && place <= 3 ? `ny-board-row top-${place}` : 'ny-board-row')
         + (mine ? ' is-me' : '');
-    const earned = formatCoins(_safeCoinNumber(p.earned));
+    const earnedCoins = _safeCoinNumber(p.earned);
+    const earned = `${formatCoins(earnedCoins)} ${coinWord(earnedCoins)}`;
     const prize = _safeCoinNumber(p.prize);
+    // Своя строка без места — приза у неё нет, поэтому «—». Обычные места
+    // ниже 20-го показывают «Без приза» (это текст макета, не пустота).
+    const prizeText = p && p.pinned ? '—' : boardPrizeText(prize);
     // Своя строка без места (админ вне публичного списка) — вместо цифры «Ты».
     const placeHtml = place > 0
         ? `${place === 1 ? '<span class="ny-board-crown">👑</span>' : ''}${place}`
@@ -1860,10 +1881,10 @@ function boardRowHtml(p) {
             <span class="ny-board-place">${placeHtml}</span>
             <span class="ny-board-player">
                 <span class="ny-board-name">${escapeHtml(shortName(p.username || 'Игрок'))}</span>
-                <span class="ny-board-earned">заработано: <b>${earned} KOI</b></span>
+                <span class="ny-board-earned">заработано: <b>${earned}</b></span>
             </span>
             <span class="ny-board-prize${prize > 0 ? '' : ' no-prize'}">
-                <span class="ny-board-gift">🎁</span>${prize > 0 ? boardPrizeText(prize) : '—'}
+                <span class="ny-board-gift">🎁</span>${prizeText}
             </span>
         </div>`;
 }
@@ -7429,7 +7450,7 @@ function adminBoardRowsHtml(data) {
     if (Array.isArray(data.top) && data.top.length) {
         data.top.forEach((p, i) => {
             rows.push([`#${i + 1} ${p.username || ('id' + p.user_id)}`,
-                `${formatCoins(_safeCoins(p.earned))} KOI`]);
+                coinLabel(_safeCoins(p.earned))]);
         });
     }
     if (data.last_error) rows.push(['Последняя ошибка', String(data.last_error)]);
@@ -7489,8 +7510,8 @@ async function probeAdminBoard() {
             rows.hidden = false;
             const list = [
                 ['Режим записи', data.write_mode === 'table' ? 'таблица (функции нет)' : 'атомарная функция'],
-                ['Было', `${formatCoins(_safeCoins(data.before))} KOI`],
-                ['Стало после +1', `${formatCoins(_safeCoins(data.after))} KOI`],
+                ['Было', coinLabel(_safeCoins(data.before))],
+                ['Стало после +1', coinLabel(_safeCoins(data.after))],
                 ['Проба откачена', data.restored ? 'да' : 'НЕТ — проверьте таблицу'],
             ];
             if (data.last_error) list.push(['Ошибка', String(data.last_error)]);
