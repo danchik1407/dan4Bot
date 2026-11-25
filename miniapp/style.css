@@ -2947,10 +2947,17 @@ html.ny .ny-board-help-panel p { margin: 4px 0 8px; }
 html.ny .ny-board-help-panel p:last-child { margin-bottom: 0; }
 
 /* ---------- Строки таблицы ---------- */
-html.ny .ny-board-list { display: flex; flex-direction: column; gap: 7px; padding: 0 6px; }
+/* Задача 100: «обрезается кол-во коинов с телефона». Причина была не в
+   вёрстке строки, а в украшениях: ёлка (z-index 5) и снежный вал
+   (html.ny body::after, 168 px, z-index 4) висят ПОВЕРХ контента, поэтому
+   накрывали приз в нижних строках. На вкладке «Топ» они теперь не мешают
+   (правило ниже), а строки стали чуть компактнее — на телефон влезает
+   больше мест без прокрутки. */
+html.ny .ny-board-list { display: flex; flex-direction: column; gap: 6px; padding: 0 4px; }
 html.ny .ny-board-row {
-    display: flex; align-items: center; gap: 8px;
-    padding: 8px 10px; border-radius: 14px;
+    display: flex; align-items: center; gap: 6px;
+    padding: 7px 9px; border-radius: 14px;
+    min-width: 0;
     background: linear-gradient(90deg, rgba(18, 48, 82, 0.92) 0%, rgba(12, 32, 58, 0.92) 100%);
     border: 1px solid rgba(96, 160, 220, 0.28);
     box-shadow: inset 0 1px 0 rgba(180, 225, 255, 0.08);
@@ -2976,8 +2983,8 @@ html.ny .ny-board-you {
 }
 
 html.ny .ny-board-place {
-    position: relative; flex: 0 0 34px; text-align: center;
-    font-weight: 800; font-size: 15px; color: #e8f3ff;
+    position: relative; flex: 0 0 30px; text-align: center;
+    font-weight: 800; font-size: 14px; color: #e8f3ff;
 }
 html.ny .ny-board-crown {
     position: absolute; top: -13px; left: 50%; transform: translateX(-50%);
@@ -2990,14 +2997,18 @@ html.ny .ny-board-name {
 }
 html.ny .ny-board-earned {
     font-size: 11px; color: rgba(190, 220, 250, 0.8); margin-top: 1px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 html.ny .ny-board-earned .coin-img { width: 0.95em; height: 0.95em; margin-left: 1px; }
 html.ny .ny-board-prize {
-    flex: 0 0 auto; display: inline-flex; align-items: center; gap: 3px;
-    padding: 4px 9px; border-radius: 999px; font-size: 11.5px; font-weight: 700;
+    /* Ширина закреплена: призы не «пляшут» по строкам, а «100 000 KOI»
+       всегда целиком — раньше плашку сжимало на узких экранах. */
+    flex: 0 0 auto; display: inline-flex; align-items: center; justify-content: center;
+    gap: 3px; min-width: 104px;
+    padding: 4px 8px; border-radius: 999px; font-size: 11px; font-weight: 700;
     color: #2a1a00; background: linear-gradient(180deg, #ffe08a 0%, #f5b93c 100%);
     box-shadow: 0 2px 8px rgba(0,0,0,0.35);
-    white-space: nowrap;
+    white-space: nowrap; font-variant-numeric: tabular-nums;
 }
 html.ny .ny-board-prize .coin-img { width: 0.95em; height: 0.95em; }
 html.ny .ny-board-prize.no-prize {
@@ -3005,6 +3016,29 @@ html.ny .ny-board-prize.no-prize {
     font-weight: 600; box-shadow: none;
 }
 html.ny .ny-board-prize.no-prize .ny-board-gift { display: none; }
+
+/* На вкладке «Топ» украшения не должны накрывать таблицу: ёлка и подарки
+   (fixed, z-index выше контента) и снежный вал внизу закрывали призы в
+   нижних строках. Снегопад (#ny-snow) и гирлянда остаются — они не мешают. */
+html.ny body.ny-top .ny-tree,
+html.ny body.ny-top .ny-gifts { opacity: 0; visibility: hidden; }
+html.ny body.ny-top::after { opacity: 0; }
+/* Снежного вала на этой вкладке нет, поэтому и запас под ним (176 px) не
+   нужен: оставляем ровно высоту нижнего меню, чтобы последняя строка
+   таблицы дочитывалась, а под ней не было пустой дыры. */
+html.ny body.ny-top { padding-bottom: 96px; }
+
+/* Узкие телефоны (iPhone SE и подобные): строки ещё компактнее, чтобы
+   «100 000 KOI» и ник влезали без обрезки. */
+@media (max-width: 380px) {
+    html.ny .ny-board-row { padding: 6px 8px; gap: 5px; }
+    html.ny .ny-board-place { flex-basis: 26px; font-size: 13px; }
+    html.ny .ny-board-name { font-size: 12.5px; }
+    html.ny .ny-board-earned { font-size: 10.5px; }
+    html.ny .ny-board-prize { min-width: 92px; font-size: 10.5px; padding: 4px 7px; gap: 2px; }
+    html.ny .ny-board { padding: 8px 6px 10px; }
+    html.ny .ny-board-list { padding: 0 2px; }
+}
 
 /* ---------- 2. ШАПКА ДЕДА МОРОЗА — присланная картинка (п.2 ревью) ----------
    Было: CSS-«колпак» из двух полос (красной и белой) — заказчик: «не похожа

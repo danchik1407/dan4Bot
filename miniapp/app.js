@@ -1484,6 +1484,11 @@ function switchTab(tabId, element) {
     const popup = document.getElementById('win-popup'); if (popup) popup.classList.remove('show');
     document.querySelectorAll('.tab').forEach(tab => tab.classList.remove('active'));
     document.getElementById('tab-' + tabId).classList.add('active');
+    // Задача 100: на вкладке «Топ» фиксированные украшения (ёлка, подарки,
+    // снежный вал) ложились ПОВЕРХ таблицы и закрывали цифры призов —
+    // «обрезается кол-во коинов». На этой вкладке их прячем (CSS html.ny
+    // body.ny-top), на остальных всё остаётся как было.
+    if (document.body) document.body.classList.toggle('ny-top', tabId === 'top');
     document.querySelectorAll('.nav-item').forEach(nav => nav.classList.remove('active'));
     // Задача 78: у админки пункта в меню больше нет, а программные переходы
     // (открытие админки, «← Назад») приходят без element — ищем пункт по data-tab,
