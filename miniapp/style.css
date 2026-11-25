@@ -3000,9 +3000,11 @@ html.ny .ny-board-prize.no-prize .ny-board-gift { display: none; }
    фон у него вырезан, поэтому размер и.position подобраны под аватарку 28 px
    и под большой аватар в профиле 80 px. */
 /* Аватар в шапке — КРУГЛЫЙ (заказчик: «почему мои аватарка квадратная?»).
-   Круг держит обёртка .badge-avatar (overflow: hidden), а не картинка:
+   Круг держит сама картинка (обёртка не режет — иначе срежется шапка):
    тогда шапка может вылезать за край, а фото остаётся круглым. */
-html.ny .profile-badge .badge-avatar { overflow: hidden; border-radius: 50%; }
+/* Задача 94: обёртка НЕ режет — иначе обрезается шапка, которая выходит за
+   верхний край аватарки («где шапка» из ревью). Круг держит сама картинка. */
+html.ny .profile-badge .badge-avatar { overflow: visible; border-radius: 50%; }
 html.ny .profile-badge img#user-avatar {
     border-radius: 50% !important;
     object-fit: cover;
@@ -3335,8 +3337,12 @@ html.ny .loader-santa { animation: loaderSanta 2.2s ease-in-out infinite; }
    ========================================================================== */
 
 /* ---------- 1–2. Аватарка и шапка в верхней панели ---------- */
+/* ВАЖНО (разбор третьего ревью: «где шапка»). Раньше тут стоял
+   `overflow: hidden`, и шапка, которая выходит за верхний край аватарки,
+   просто обрезалась — её не было видно. Круг теперь режет ТОЛЬКО картинка
+   (border-radius + clip-path), а обёртка пропускает украшения наружу. */
 html.ny .profile-badge .badge-avatar {
-    position: relative; overflow: hidden; border-radius: 50%;
+    position: relative; overflow: visible; border-radius: 50%;
     width: 28px; height: 28px; flex: 0 0 auto; margin-right: 8px;
     box-shadow: 0 0 0 2px rgba(255, 215, 106, 0.55);
 }
@@ -3348,22 +3354,32 @@ html.ny .profile-badge img#user-avatar {
        у Telegram), оно всё равно заполнит круг, а не станет «квадратом». */
     clip-path: circle(50% at 50% 50%);
 }
-/* Шапка: чуть правее центра аватарки (просьба заказчика), кончик с помпоном
-   уходит вправо; снизу колпак «садится» на край круга. */
+/* Шапка: сдвинута ВПРАВО (просьба заказчика), помпон уходит вправо-вниз.
+   Высота 27 px при аватарке 28 px: колпак «сидит» на макушке и заметен. */
 html.ny .ny-hat {
-    position: absolute; left: 9px; top: -11px; width: 25px; height: 23px;
+    position: absolute; left: 7px; top: -14px; width: 26px; height: 27px;
     background: url('santa_hat.png') no-repeat center / contain;
     transform: rotate(-4deg);
     filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.6));
-    pointer-events: none; z-index: 4;
+    pointer-events: none; z-index: 6;
 }
 
-/* ---------- 3. Заячьи ушки в профиле: обруч вокруг аватарки ---------- */
+/* ---------- 3. Заячьи ушки в профиле: обруч вокруг аватарки ----------
+   Разбор третьего ревью: заказчик увидел ЧЁРНЫЙ КРУГ вместо лица. Причина —
+   в присланной картинке центр круга залит чёрным, и мы тащили его вместе с
+   обручем. Теперь PNG собран так: внутри круга ПРОЗРАЧНО, остались только
+   пушистый ободок и уши (плюс убрана синяя обводка кружка). Поэтому картинку
+   кладём ровно на аватарку: ободок ложится по её краю, лицо видно. */
 html.ny .profile-avatar-large { position: relative; overflow: visible; }
 html.ny .ny-ears {
-    position: absolute; left: 50%; bottom: -2px;
-    width: 80px; height: 113px; margin-left: -40px;
-    background: url('bunny_ears.png') no-repeat center bottom / contain;
+    /* Геометрия присланного кружка: картинка 684×961, центр обруча (341.5,
+       620.5), радиус 341.5. Масштабируем так, чтобы обруч совпал с кругом
+       аватарки диаметром 80 px, и прижимаем центр обруча к центру аватарки.
+       Отсюда left: 0 и top: -33px: обруч ложится по краю круга, уши торчат
+       вверх (как «одели ободок»), лицо остаётся открытым. */
+    position: absolute; left: 0; top: -33px;
+    width: 80px; height: 113px;
+    background: url('bunny_ears.png') no-repeat left top / 100% 100%;
     pointer-events: none; z-index: 4;
     filter: drop-shadow(0 3px 6px rgba(0, 0, 0, 0.5));
 }

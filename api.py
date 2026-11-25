@@ -89,7 +89,7 @@ async def _http_json(url, method: str = "GET", params=None, payload=None, timeou
 
 # Номер сборки: по нему из /api/health видно, что на сервисе НЕ старый код.
 # Если после деплоя здесь прежнее значение — Render ещё не перезапустился.
-API_BUILD = "2026-10-27-task93b-review-fixes"
+API_BUILD = "2026-10-27-task94-review3-fixes"
 
 # Момент старта процесса. По нему видно, что сервис только что «проснулся»:
 # Render на бесплатном тарифе усыпляет Web Service через 15 минут без входящих
@@ -591,7 +591,12 @@ async def health():
             },
         },
         # Оба рубильника объявлены ниже по файлу, но к моменту запроса уже есть.
+        # Задача 94: клиент по этим полям понимает, что показать — техработы или
+        # «нет связи». Раньше здесь не было maintenance_active/message, и при
+        # включённых техработах игрок читал неправду «Сервер не ответил».
         "maintenance": MAINTENANCE_MODE or app_closed_now(),
+        "maintenance_active": app_closed_now(),
+        "maintenance_message": MAINTENANCE_MESSAGE if app_closed_now() else "",
         # Доступ: пока игра закрыта (app_closed), Mini App открывают только админы.
         "access": {
             "admin_only_app": app_closed_now(),
