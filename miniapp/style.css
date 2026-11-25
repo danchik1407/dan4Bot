@@ -2844,3 +2844,458 @@ html.ny .profile-badge img {
     html.ny .up-arrow::after,
     html.ny .crash-field::after { animation: none !important; }
 }
+
+/* ==========================================================================
+   ЗАДАЧА 93. НОВОГОДНИЙ ЛИДЕРБОРД + ПРАВКИ ВИЗУАЛА ПО РЕВЬЮ ЗАКАЗЧИКА
+   1) лидерборд по скрину: «звёздное» небо, банты по углам, золотой таймер,
+      круглая «?», медаль/корона у места, приз-«подарок» справа;
+   2) шапка Деда Мороза — присланная картинка (длинный кончик + помпон);
+   3) убран остаток «чёрной линии» сверху;
+   4) сугробы вместо белой линии + подарки/носки видимы;
+   5) постоянные фейерверки на фоне;
+   6) арена обведена по периметру, хоккейные круги/линии, шайба — картинка;
+   7) клюшка — настоящая хоккейная (крюк с обмоткой), а не «палка с красным»;
+   8) апгрейд — без квадрата вокруг круга;
+   9) заячьи ушки на аватарке в профиле;
+   10) загрузка аппки — новогодняя.
+   Все правила — только под html.ny: обычная тема не меняется.
+   ========================================================================== */
+
+/* ---------- 1. Лидерборд: фон, шапка, таймер, «?» ---------- */
+html.ny #tab-top,
+html.ny .ny-board {
+    /* тёмно-синее «звёздное» небо макета заказчика: два слоя мелких звёзд
+       + мягкое свечение сверху, без внешних картинок */
+    --ny-board-bg:
+        radial-gradient(120% 80% at 50% -10%, rgba(120, 190, 255, 0.22) 0%, transparent 60%),
+        radial-gradient(1.6px 1.6px at 12% 18%, #ffffff 50%, transparent 51%),
+        radial-gradient(1.4px 1.4px at 28% 44%, #dff0ff 50%, transparent 51%),
+        radial-gradient(1.8px 1.8px at 46% 12%, #ffffff 50%, transparent 51%),
+        radial-gradient(1.3px 1.3px at 64% 36%, #eaf6ff 50%, transparent 51%),
+        radial-gradient(1.7px 1.7px at 82% 20%, #ffffff 50%, transparent 51%),
+        radial-gradient(1.2px 1.2px at 92% 52%, #d9ecff 50%, transparent 51%),
+        radial-gradient(1.5px 1.5px at 6% 62%, #ffffff 50%, transparent 51%),
+        radial-gradient(1.3px 1.3px at 38% 74%, #e6f4ff 50%, transparent 51%),
+        radial-gradient(1.6px 1.6px at 72% 86%, #ffffff 50%, transparent 51%),
+        linear-gradient(180deg, #071a33 0%, #08213d 45%, #061428 100%);
+    background: var(--ny-board-bg);
+    border-radius: 18px;
+}
+
+html.ny .ny-board { position: relative; overflow: hidden; padding: 10px 8px 14px; }
+
+/* Банты по верхним углам — как на макете (ёлочные ветки со снегом рисуем
+   градиентами, чтобы не тянуть лишние файлы). */
+html.ny .ny-board-head { position: relative; text-align: center; padding: 14px 44px 10px; }
+html.ny .ny-board-bows { position: absolute; inset: 0; pointer-events: none; }
+html.ny .ny-bow {
+    position: absolute; top: 0; font-size: 22px; filter: drop-shadow(0 2px 6px rgba(0,0,0,0.45));
+    opacity: 0.95;
+}
+html.ny .ny-bow.bow-l { left: 2px; transform: rotate(-18deg); }
+html.ny .ny-bow.bow-r { right: 2px; transform: rotate(18deg) scaleX(-1); }
+/* Ветки со снегом под бантами. */
+html.ny .ny-board-head::before {
+    content: ''; position: absolute; left: -12px; right: -12px; top: -6px; height: 54px;
+    background:
+        radial-gradient(30% 60% at 4% 40%, rgba(46, 122, 92, 0.55) 0 60%, transparent 70%),
+        radial-gradient(26% 52% at 96% 40%, rgba(46, 122, 92, 0.55) 0 60%, transparent 70%),
+        radial-gradient(18% 26% at 8% 22%, rgba(255,255,255,0.75) 0 60%, transparent 70%),
+        radial-gradient(16% 24% at 92% 22%, rgba(255,255,255,0.75) 0 60%, transparent 70%);
+    pointer-events: none; opacity: 0.9;
+}
+
+html.ny .ny-board-title {
+    margin: 0; font-size: 20px; letter-spacing: 1.2px; text-transform: uppercase;
+    color: #ffffff;
+    text-shadow: 0 0 12px rgba(120, 200, 255, 0.55), 0 2px 4px rgba(0,0,0,0.6);
+}
+html.ny .ny-board-timer {
+    margin-top: 6px; font-weight: 800; font-size: 18px; letter-spacing: 1px;
+    color: #ffd75e;
+    text-shadow: 0 0 14px rgba(255, 190, 60, 0.55), 0 2px 3px rgba(0,0,0,0.6);
+}
+html.ny .ny-board-sub { margin-top: 2px; font-size: 11px; color: rgba(215, 235, 255, 0.7); }
+
+/* Круглая «?» в правом верхнем углу макета. */
+html.ny .ny-board-help {
+    position: absolute; top: 10px; right: 8px; width: 30px; height: 30px; padding: 0;
+    border-radius: 50%; border: 1px solid rgba(150, 210, 255, 0.65);
+    background: radial-gradient(circle at 30% 25%, rgba(140, 205, 255, 0.55), rgba(10, 32, 58, 0.9));
+    color: #eaf6ff; font-weight: 800; font-size: 15px; line-height: 1; cursor: pointer;
+    box-shadow: 0 0 12px rgba(110, 190, 255, 0.35);
+}
+html.ny .ny-board-help:active { transform: scale(0.94); }
+
+html.ny .ny-board-help-panel {
+    margin: 4px 8px 10px; padding: 12px 14px; border-radius: 14px;
+    background: rgba(6, 22, 42, 0.92); border: 1px solid rgba(120, 190, 255, 0.35);
+    color: #dcebfa; font-size: 12.5px; line-height: 1.5;
+}
+html.ny .ny-board-help-panel b { color: #ffd75e; }
+html.ny .ny-board-help-panel p { margin: 4px 0 8px; }
+html.ny .ny-board-help-panel p:last-child { margin-bottom: 0; }
+
+/* ---------- Строки таблицы ---------- */
+html.ny .ny-board-list { display: flex; flex-direction: column; gap: 7px; padding: 0 6px; }
+html.ny .ny-board-row {
+    display: flex; align-items: center; gap: 8px;
+    padding: 8px 10px; border-radius: 14px;
+    background: linear-gradient(90deg, rgba(18, 48, 82, 0.92) 0%, rgba(12, 32, 58, 0.92) 100%);
+    border: 1px solid rgba(96, 160, 220, 0.28);
+    box-shadow: inset 0 1px 0 rgba(180, 225, 255, 0.08);
+}
+html.ny .ny-board-row.top-1 {
+    border-color: rgba(255, 208, 88, 0.85);
+    background: linear-gradient(90deg, rgba(84, 60, 16, 0.92) 0%, rgba(16, 34, 58, 0.92) 100%);
+    box-shadow: 0 0 14px rgba(255, 200, 70, 0.25);
+}
+html.ny .ny-board-row.top-2 { border-color: rgba(206, 216, 232, 0.7); }
+html.ny .ny-board-row.top-3 { border-color: rgba(205, 127, 61, 0.75); }
+
+html.ny .ny-board-place {
+    position: relative; flex: 0 0 34px; text-align: center;
+    font-weight: 800; font-size: 15px; color: #e8f3ff;
+}
+html.ny .ny-board-crown {
+    position: absolute; top: -13px; left: 50%; transform: translateX(-50%);
+    font-size: 13px; filter: drop-shadow(0 2px 3px rgba(0,0,0,0.5));
+}
+html.ny .ny-board-player { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; }
+html.ny .ny-board-name {
+    font-weight: 700; font-size: 13.5px; color: #ffffff;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+html.ny .ny-board-earned {
+    font-size: 11px; color: rgba(190, 220, 250, 0.8); margin-top: 1px;
+}
+html.ny .ny-board-earned .coin-img { width: 0.95em; height: 0.95em; margin-left: 1px; }
+html.ny .ny-board-prize {
+    flex: 0 0 auto; display: inline-flex; align-items: center; gap: 3px;
+    padding: 4px 9px; border-radius: 999px; font-size: 11.5px; font-weight: 700;
+    color: #2a1a00; background: linear-gradient(180deg, #ffe08a 0%, #f5b93c 100%);
+    box-shadow: 0 2px 8px rgba(0,0,0,0.35);
+    white-space: nowrap;
+}
+html.ny .ny-board-prize .coin-img { width: 0.95em; height: 0.95em; }
+html.ny .ny-board-prize.no-prize {
+    color: rgba(200, 220, 240, 0.7); background: rgba(255, 255, 255, 0.08);
+    font-weight: 600; box-shadow: none;
+}
+html.ny .ny-board-prize.no-prize .ny-board-gift { display: none; }
+
+/* ---------- 2. ШАПКА ДЕДА МОРОЗА — присланная картинка (п.2 ревью) ----------
+   Было: CSS-«колпак» из двух полос (красной и белой) — заказчик: «не похожа
+   на шапку». Теперь рисуем PNG заказчика (длинный кончик + белый помпон),
+   фон у него вырезан, поэтому размер и.position подобраны под аватарку 28 px
+   и под большой аватар в профиле 80 px. */
+html.ny .profile-badge img#user-avatar {
+    overflow: visible;
+    box-shadow: 0 0 0 2px rgba(255, 215, 106, 0.55);
+}
+/* Колпак в шапке: поверх аватарки, чуть наискось, кончик уходит вправо. */
+html.ny .profile-badge::before {
+    content: '';
+    position: absolute; left: 0; top: -12px; width: 30px; height: 28px;
+    background: url('santa_hat.png') no-repeat center / contain;
+    z-index: 4; pointer-events: none;
+    transform: rotate(-12deg);
+    filter: drop-shadow(0 2px 5px rgba(0, 0, 0, 0.55));
+}
+/* Надпись «2027» из прошлой версии в шапке больше не нужна — она наезжала
+   на ник. В профиле (большая аватарка) она осталась. */
+html.ny .profile-badge::after { content: none; }
+
+/* ---------- 3. «ЧЁРНАЯ ЛИНИЯ» СВЕРХУ (п.3 ревью) ----------
+   Заказчик: «сверху остался кусок чёрной линии». Это границы/тени sticky-
+   шапки, баннера подписки и полосы вкладки: убираем все линии у верхнего
+   края, оставляя только фон. */
+html.ny .top-bar,
+html.ny #main-header,
+html.ny .sub-banner,
+html.ny .maintenance-screen { border-top: none !important; }
+html.ny #main-header::before,
+html.ny #main-header::after { display: none !important; }
+
+/* ---------- 4. СУГРОБЫ ВМЕСТО БЕЛОЙ ЛИНИИ + ВИДНЫЕ ПОДАРКИ (п.4) ----------
+   Было: белая полоса-«наст» и полупрозрачные подарки/носки, которые на ней
+   терялись. Теперь — мини-горки (несколько слоёв «шапок» снега) и полностью
+   непрозрачные подарки поверх сугробов. */
+html.ny body::after {
+    content: '';
+    position: fixed; left: -6vw; right: -6vw; bottom: 0; height: 168px;
+    z-index: 4; pointer-events: none;
+    background:
+        radial-gradient(54% 40px at 8% 100%, #ffffff 0 66%, transparent 72%),
+        radial-gradient(46% 32px at 27% 100%, #f2fbff 0 66%, transparent 72%),
+        radial-gradient(58% 48px at 48% 100%, #ffffff 0 66%, transparent 72%),
+        radial-gradient(44% 30px at 68% 100%, #f1faff 0 66%, transparent 72%),
+        radial-gradient(50% 42px at 88% 100%, #ffffff 0 66%, transparent 72%),
+        linear-gradient(180deg, transparent 0 62%, #eaf7ff 62% 100%);
+    filter: drop-shadow(0 -8px 18px rgba(160, 220, 255, 0.35));
+    opacity: 0.97;
+}
+/* Под нижним меню — «снежный вал» из бугров (а не тонкая полоска). */
+html.ny .bottom-nav { border-top: none !important; }
+html.ny .bottom-nav::before {
+    content: '';
+    position: absolute; left: -6%; right: -6%; bottom: 100%; height: 34px;
+    background:
+        radial-gradient(42% 26px at 6% 100%, #ffffff 0 62%, transparent 70%),
+        radial-gradient(38% 22px at 24% 100%, #f4fcff 0 62%, transparent 70%),
+        radial-gradient(46% 30px at 50% 100%, #ffffff 0 62%, transparent 70%),
+        radial-gradient(38% 22px at 74% 100%, #f4fcff 0 62%, transparent 70%),
+        radial-gradient(42% 26px at 94% 100%, #ffffff 0 62%, transparent 70%);
+    pointer-events: none;
+}
+/* Подарки и носки: плотные, крупнее, стоят НА сугробе. */
+html.ny .ny-gifts {
+    z-index: 6; opacity: 1; bottom: 96px; gap: 4px;
+    filter: drop-shadow(0 4px 6px rgba(0, 0, 0, 0.55));
+}
+html.ny .ny-gift { opacity: 1; font-size: 24px; }
+html.ny .ny-gift.g2 { font-size: 20px; }
+html.ny .ny-gift.g3 { font-size: 18px; }
+html.ny .ny-gift.g4 { font-size: 22px; }
+
+/* ---------- 5. ПОСТОЯННЫЕ ФЕЙЕРВЕРКИ НА ФОНЕ (п.5 ревью) ----------
+   Заказчик: ракета — нормально, «можно добавить постоянные фейерверки на
+   фоне». Три вспышки по углам, медленные и далёкие, поверх них — снег;
+   pointer-events: none, поэтому ни одна кнопка не перекрыта. */
+html.ny .ny-decor .ny-fireworks { display: none; }
+html.ny .ny-decor .ny-fireworks,
+html.ny .ny-fireworks {
+    display: block; position: absolute; inset: 0; pointer-events: none; z-index: 0;
+}
+html.ny .ny-fireworks i {
+    position: absolute; width: 6px; height: 6px; border-radius: 50%;
+    background: #fff6c4;
+    box-shadow: 0 0 14px 6px rgba(255, 215, 106, 0.55),
+                0 0 34px 12px rgba(224, 35, 59, 0.28);
+    opacity: 0;
+    animation: nyFirework 7.5s ease-out infinite;
+}
+html.ny .ny-fireworks i:nth-child(1) { left: 18%; top: 18%; animation-delay: 0s; }
+html.ny .ny-fireworks i:nth-child(2) { left: 78%; top: 12%; animation-delay: 2.4s;
+    box-shadow: 0 0 14px 6px rgba(124, 224, 255, 0.55), 0 0 34px 12px rgba(64, 130, 255, 0.28); }
+html.ny .ny-fireworks i:nth-child(3) { left: 60%; top: 46%; animation-delay: 4.8s;
+    box-shadow: 0 0 14px 6px rgba(255, 139, 160, 0.55), 0 0 34px 12px rgba(224, 35, 59, 0.3); }
+@keyframes nyFirework {
+    0%   { opacity: 0; transform: scale(0.2); }
+    6%   { opacity: 1; transform: scale(1); }
+    22%  { opacity: 0.75; transform: scale(2.6); }
+    46%  { opacity: 0; transform: scale(4); }
+    100% { opacity: 0; transform: scale(4); }
+}
+
+/* ---------- 6. АРЕНА ПО ПЕРИМЕТРУ + ХОККЕЙНАЯ РАЗМЕТКА (п.6) ----------
+   Заказчик: «бортики только по бокам — обвести всё поле по периметру,
+   добавить кружки/квадратики/линии как на реальной арене, шайба — картинка».
+   Бортики снимаем с боковых ::before/::after и вешаем на сам каток (border),
+   разметку рисуем внутри .hockey-scene / .arena-pie. */
+html.ny .hockey-field,
+html.ny .arena-circle {
+    border: 9px solid transparent !important;
+    border-image: none !important;
+    background-clip: padding-box !important;
+    /* «стенка» катка по всему периметру: белые щиты с красной и синей линией */
+    box-shadow:
+        0 0 0 9px #f4fbff,
+        0 0 0 11px #e0233b,
+        0 0 0 13px #1e6fb8,
+        inset 0 0 40px rgba(70, 130, 175, 0.35) !important;
+}
+/* Снимаем прежние боковые «стенки»: теперь периметр. */
+html.ny .hockey-field::before,
+html.ny .hockey-field::after { content: none !important; display: none !important; }
+html.ny .arena-circle::before,
+html.ny .arena-circle::after { content: none !important; display: none !important; }
+
+/* Разметка катка: синяя средняя линия, две красные, центральный круг,
+   точки вбрасывания и «квадратики»-зоны. Всё — фоном, ничего не двигаем. */
+html.ny .hockey-field .hockey-scene::before {
+    content: ''; position: absolute; inset: 0; z-index: 2; pointer-events: none;
+    background:
+        /* центральный круг + точка вбрасывания */
+        radial-gradient(circle at 50% 50%, transparent 0 27%, rgba(30, 111, 184, 0.55) 27% 28.5%, transparent 28.5%),
+        radial-gradient(circle at 50% 50%, #e0233b 0 3px, transparent 4px),
+        /* четыре круга вбрасывания */
+        radial-gradient(circle at 22% 28%, transparent 0 8%, rgba(224, 35, 59, 0.45) 8% 9.4%, transparent 9.4%),
+        radial-gradient(circle at 78% 28%, transparent 0 8%, rgba(224, 35, 59, 0.45) 8% 9.4%, transparent 9.4%),
+        radial-gradient(circle at 22% 72%, transparent 0 8%, rgba(224, 35, 59, 0.45) 8% 9.4%, transparent 9.4%),
+        radial-gradient(circle at 78% 72%, transparent 0 8%, rgba(224, 35, 59, 0.45) 8% 9.4%, transparent 9.4%),
+        /* «квадратики» зон за воротами */
+        linear-gradient(90deg, transparent 0 8%, rgba(30, 111, 184, 0.22) 8% 14%, transparent 14%),
+        linear-gradient(270deg, transparent 0 8%, rgba(30, 111, 184, 0.22) 8% 14%, transparent 14%),
+        /* синяя средняя линия и красные линии */
+        linear-gradient(90deg, transparent 0 49.4%, rgba(30, 111, 184, 0.6) 49.4% 50.6%, transparent 50.6%),
+        linear-gradient(90deg, transparent 0 26%, rgba(224, 35, 59, 0.45) 26% 27%, transparent 27%),
+        linear-gradient(90deg, transparent 0 73%, rgba(224, 35, 59, 0.45) 73% 74%, transparent 74%);
+}
+/* Командная арена — круглая: по периметру борт, внутри — круг вбрасывания
+   и «квадратики»-сектора, как разметка на льду. Слой ПОД секторами
+   (#arena-ice-marks), иначе сектора его перекрывают. */
+html.ny #hockey-arena .arena-ice-marks {
+    position: absolute; inset: 0; z-index: 2; pointer-events: none;
+    border-radius: 50%;
+    background:
+        radial-gradient(circle at 50% 50%, transparent 0 29%, rgba(30, 111, 184, 0.55) 29% 30%, transparent 30%),
+        radial-gradient(circle at 50% 50%, #e0233b 0 3px, transparent 4px),
+        radial-gradient(circle at 50% 12%, transparent 0 6%, rgba(224, 35, 59, 0.4) 6% 7%, transparent 7%),
+        radial-gradient(circle at 50% 88%, transparent 0 6%, rgba(224, 35, 59, 0.4) 6% 7%, transparent 7%);
+}
+/* На прямоугольном катке этот слой не нужен — там разметка на .hockey-scene. */
+html.ny .hockey-field .arena-ice-marks { display: none; }
+
+/* ШАЙБА — присланная картинка заказчика (не «чёрное с красным»). */
+html.ny .hockey-ball {
+    width: 26px !important; height: 26px !important;
+    border-radius: 0 !important;
+    background: url('puck.png') no-repeat center / contain !important;
+    box-shadow: none !important;
+    filter: drop-shadow(0 3px 6px rgba(0, 0, 0, 0.55));
+}
+/* Ореол у шайбы оставляем, но мягкий — иначе на льду её не видно в полёте. */
+html.ny .hockey-ball::after {
+    inset: -8px;
+    background: radial-gradient(circle, rgba(150, 220, 255, 0.45), transparent 70%) !important;
+}
+
+/* ---------- 7. КЛЮШКА — НАСТОЯЩАЯ ХОККЕЙНАЯ (п.7 ревью) ----------
+   Заказчик: «палка с красным наконечником — нужна нормальная клюшка».
+   Рисуем клюшку CSS: крюк (перо) под углом + обмотка из полос + пятка.
+   Заменяет прежние ::before/::after от з.92 (те полосы-«палку»). */
+html.ny .arena-pointer-head {
+    width: 0 !important; height: 0 !important;
+    border: none !important; background: none !important; box-shadow: none !important;
+}
+html.ny .arena-pointer-head::before {
+    /* шафт (рукоятка) клюшки: от указателя к центру круга */
+    content: ''; position: absolute; left: 50%; top: -4px; width: 6px; height: 34px;
+    margin-left: -3px; border-radius: 3px;
+    background:
+        repeating-linear-gradient(180deg,
+            #f6f9fc 0 4px, #dfe7ef 4px 6px),
+        linear-gradient(180deg, #f6f9fc, #cbd6e2);
+    box-shadow: inset 0 0 3px rgba(0, 0, 0, 0.25), 0 1px 4px rgba(0, 0, 0, 0.5);
+}
+html.ny .arena-pointer-head::after {
+    /* перо (крюк): тёмный «клин» с обмоткой чёрным скотчем */
+    content: ''; position: absolute; left: 50%; top: 26px; width: 26px; height: 12px;
+    margin-left: -13px;
+    border-radius: 2px 10px 10px 3px;
+    background:
+        linear-gradient(180deg, rgba(255, 255, 255, 0.35) 0 3px, transparent 3px),
+        linear-gradient(100deg, #2b3440 0 55%, #161c24 100%);
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.6), inset 0 -2px 3px rgba(0, 0, 0, 0.6);
+    transform: skewX(-8deg);
+}
+/* На «посадке» клюшку подсвечиваем золотом, как раньше подсвечивали стрелку. */
+html.ny .arena-pointer.landing .arena-pointer-head::after {
+    box-shadow: 0 0 14px rgba(255, 204, 0, 0.9), 0 2px 6px rgba(0, 0, 0, 0.6);
+}
+
+/* ---------- 8. АПГРЕЙД: БЕЗ КВАДРАТА ВОКРУГ КРУГА (п.8 ревью) ----------
+   Заказчик: «круг в квадрате не убрали». Квадрат — это центральная панель
+   (фон + рамка + тень). В новогоднем режиме панель-обёртку делаем прозрачной:
+   остаётся только круг, без рамки вокруг него. */
+html.ny .up-layout-v2 .up-panel-center,
+html.ny .up-panel-center {
+    background: transparent !important;
+    border: none !important;
+    box-shadow: none !important;
+    outline: none !important;
+    padding-left: 0 !important;
+    padding-right: 0 !important;
+}
+html.ny .up-circle,
+html.ny .up-circle-ring,
+html.ny .up-circle-inner { border-radius: 50% !important; }
+html.ny .up-circle { box-shadow: none !important; }
+html.ny .up-circle-ring { box-shadow: 0 0 26px rgba(23, 163, 90, 0.28) !important; }
+html.ny .up-arrow-wrap { border-radius: 50%; }
+
+/* ---------- 9. ПРОФИЛЬ: ЗАЯЧЬИ УШКИ НА АВАТАРКЕ (п.9 ревью) ----------
+   Заказчик: «на аватарку в профиле — присланные пушистые ушки». Картинка
+   bunny_ears.png, фон вырезан; ушки сидят на верхнем краю аватарки. */
+html.ny .profile-avatar-large,
+html.ny .profile-avatar-large.ny-ears { position: relative; overflow: visible; }
+html.ny .profile-avatar-large::after {
+    content: '';
+    position: absolute; left: 50%; top: -26px; width: 62px; height: 46px;
+    margin-left: -31px;
+    background: url('bunny_ears.png') no-repeat center bottom / contain;
+    z-index: 2; pointer-events: none;
+    filter: drop-shadow(0 3px 6px rgba(0, 0, 0, 0.45));
+}
+html.ny .profile-avatar-large img { border-radius: 50%; }
+
+/* ---------- 10. ЗАГРУЗКА АППКИ — НОВОГОДНЯЯ (п.1 ревью) ----------
+   Заказчик: «анимация загрузки не изменилась — сделай новогоднюю».
+   Из прошлой версии оставались только статичные снежинки и Дед Мороз.
+   Теперь: сани едут по экрану, ёлка качается, полоса загрузки «в снегу»,
+   логотип в золоте с гирляндой. Всё — под html.ny, обычная тема как была. */
+html.ny .app-loader {
+    background:
+        radial-gradient(70% 50% at 50% 30%, rgba(30, 80, 140, 0.55), transparent 70%),
+        radial-gradient(40% 30% at 12% 84%, rgba(255, 255, 255, 0.16), transparent 70%),
+        radial-gradient(40% 30% at 88% 84%, rgba(255, 255, 255, 0.16), transparent 70%),
+        linear-gradient(180deg, #050e1c 0%, #08182c 55%, #0a1f36 100%);
+}
+/* Снежный «наст» на заставке — горки внизу. */
+html.ny .app-loader::before {
+    content: '';
+    position: absolute; left: -6%; right: -6%; bottom: 0; height: 120px;
+    background:
+        radial-gradient(48% 40px at 12% 100%, #ffffff 0 62%, transparent 70%),
+        radial-gradient(52% 52px at 44% 100%, #f7fdff 0 62%, transparent 70%),
+        radial-gradient(46% 36px at 78% 100%, #ffffff 0 62%, transparent 70%),
+        radial-gradient(44% 30px at 96% 100%, #f2fbff 0 62%, transparent 70%);
+    pointer-events: none;
+}
+html.ny .app-loader-logo {
+    color: #fff3c4; letter-spacing: 4px;
+    text-shadow: 0 0 18px rgba(255, 215, 106, 0.7), 0 0 40px rgba(224, 35, 59, 0.35);
+    animation: nyLoaderLogo 1.8s ease-in-out infinite;
+}
+html.ny .app-loader-logo span { color: #ffd76a; }
+@keyframes nyLoaderLogo {
+    0%, 100% { transform: scale(1); filter: brightness(1); }
+    50% { transform: scale(1.04); filter: brightness(1.18); }
+}
+/* Полоса загрузки: красно-зелёно-золотая с «искрами» — новогодняя гирлянда. */
+html.ny .app-loader-bar {
+    height: 8px; background: rgba(255, 255, 255, 0.14);
+    box-shadow: inset 0 0 0 1px rgba(255, 215, 106, 0.35);
+}
+html.ny .app-loader-bar-fill {
+    background: linear-gradient(90deg, #e0233b, #17a35a 40%, #ffd76a 70%, #e0233b);
+    background-size: 220% 100%;
+    animation: loaderBar 1.4s ease-in-out infinite, nyLoaderBarShine 2.2s linear infinite;
+}
+@keyframes nyLoaderBarShine { from { background-position: 0% 50%; } to { background-position: 220% 50%; } }
+html.ny .app-loader-text { color: #ffe9a8; letter-spacing: 1px; }
+/* Сани Деда Мороза проезжают по низу заставки. */
+html.ny .app-loader .loader-ny::after {
+    content: '🛷';
+    position: absolute; left: -14%; bottom: 74px; font-size: 34px;
+    filter: drop-shadow(0 4px 10px rgba(0, 0, 0, 0.6));
+    animation: nyLoaderSleigh 6.5s linear infinite;
+}
+@keyframes nyLoaderSleigh {
+    0% { transform: translateX(0) rotate(-2deg); opacity: 0; }
+    8% { opacity: 1; }
+    92% { opacity: 1; }
+    100% { transform: translateX(128vw) rotate(2deg); opacity: 0; }
+}
+/* Дед Мороз и ёлка — чуть бодрее, чем «стоят». */
+html.ny .loader-tree { animation: loaderTree 2.2s ease-in-out infinite; }
+html.ny .loader-santa { animation: loaderSanta 2.2s ease-in-out infinite; }
+
+@media (prefers-reduced-motion: reduce) {
+    html.ny .app-loader-logo,
+    html.ny .app-loader-bar-fill,
+    html.ny .app-loader .loader-ny::after,
+    html.ny .ny-fireworks i { animation: none !important; }
+    html.ny .app-loader .loader-ny::after { display: none; }
+}

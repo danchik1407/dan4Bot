@@ -1465,7 +1465,12 @@ function switchTab(tabId, element) {
         if (typeof clearCatchFlakes === 'function') clearCatchFlakes();
         return;
     }
-    if (tabId === 'top') { loadGlobalTop(); }
+    if (tabId === 'top') {
+        // Задача 93: в новогоднем режиме вместо топа по балансу — лидерборд
+        // «кто больше заработал» (чистый доход). Обычный топ остаётся в classic.
+        loadNewYearBoard();
+        loadGlobalTop();
+    }
     if (tabId === 'shop') {
         // Задача 43: витрина рисуется мгновенно (кэш), обновление — фоном.
         // Раньше каждый вход на вкладку показывал «Загрузка магазина…».
@@ -1726,6 +1731,121 @@ async function refreshChannelTask() {
 // Тихая проверка при входе: если бонус уже получен — задание не показываем.
 async function checkSubscription() {
     return refreshChannelTask();
+}
+
+/* ==================== ЗАДАЧА 93: НОВОГОДНИЙ ЛИДЕРБОРД ====================
+   Заказчик: «лидерборд — таблица по заработку, как у остальных, но только на
+   этот раз» + скрин макета. Правила дословно ушли в модалку «?» (index.html),
+   здесь — данные и отрисовка.
+   ВАЖНО: считает сервер (/api/newyear_board), клиент ничего не начисляет; если
+   таблица недоступна — показываем «Не удалось загрузить», а топ по балансу
+   (classic) продолжает работать.
+============================================================================ */
+const BOARD_API = `${API_URL}`;
+let boardTimerTick = null;
+let boardData = null;
+let boardBusy = false;
+
+function boardDeadlineLeftText(seconds) {
+    const left = Math.max(0, Math.floor(Number(seconds) || 0));
+    const d = Math.floor(left / 86400);
+    const h = Math.floor((left % 86400) / 3600);
+    const m = Math.floor((left % 3600) / 60);
+    const sec = left % 60;
+    return `${d}д ${String(h).padStart(2, '0')}ч ${String(m).padStart(2, '0')}м ${String(sec).padStart(2, '0')}с`;
+}
+
+function boardPrizeText(prize) {
+    return prize > 0 ? `${formatCoins(prize)} ${COIN_IMG}` : 'Без приза';
+}
+
+function boardRowHtml(p) {
+    const place = _safeCoinNumber(p.place);
+    const medal = place === 1 ? '🥇' : place === 2 ? '🥈' : place === 3 ? '🥉' : String(place);
+    const cls = place <= 3 ? `ny-board-row top-${place}` : 'ny-board-row';
+    const earned = formatCoins(_safeCoinNumber(p.earned));
+    return `
+        <div class="${cls}">
+            <span class="ny-board-place">${place === 1 ? '<span class="ny-board-crown">👑</span>' : ''}${medal}</span>
+            <span class="ny-board-player">
+                <span class="ny-board-name">${escapeHtml(shortName(p.username || 'Игрок'))}</span>
+                <span class="ny-board-earned">заработано: ${earned} ${COIN_IMG}</span>
+            </span>
+            <span class="ny-board-prize${p.prize > 0 ? '' : ' no-prize'}">
+                <span class="ny-board-gift">🎁</span>${boardPrizeText(_safeCoinNumber(p.prize))}
+            </span>
+        </div>`;
+}
+
+// Тот же безопасный парсер числа, что и для баланса (строки/snake_case из SQL).
+function _safeCoinNumber(value) {
+    const number = Number(value);
+    return Number.isFinite(number) ? Math.max(0, Math.floor(number)) : 0;
+}
+
+function renderNewYearBoard(data) {
+    const box = document.getElementById('ny-board');
+    const list = document.getElementById('ny-board-list');
+    const timer = document.getElementById('ny-board-timer');
+    const sub = document.getElementById('ny-board-sub');
+    const classic = document.getElementById('classic-top');
+    if (!box || !list) return;
+    const ny = (typeof currentTheme === 'function') ? currentTheme() === THEME_NEWYEAR : false;
+    box.hidden = !ny;
+    if (classic) classic.hidden = ny;
+    if (!ny) return;
+    if (!data || !data.ok) {
+        list.innerHTML = '<p class="lb-empty">Не удалось загрузить лидерборд</p>';
+        return;
+    }
+    boardData = data;
+    if (timer) timer.textContent = boardDeadlineLeftText(data.seconds_left);
+    if (sub) sub.textContent = data.finished ? 'финиш пройден' : 'до финиша · 19 декабря, 21:00 МСК';
+    const rows = Array.isArray(data.players) ? data.players : [];
+    if (!rows.length) {
+        list.innerHTML = '<p class="lb-empty">Пока никто не заработал — будь первым</p>';
+        return;
+    }
+    list.innerHTML = rows.map(boardRowHtml).join('');
+    // Тикаем таймер сами, чтобы не дёргать сервер каждую секунду.
+    if (boardTimerTick) clearInterval(boardTimerTick);
+    let left = Number(data.seconds_left) || 0;
+    boardTimerTick = setInterval(() => {
+        const el = document.getElementById('ny-board-timer');
+        if (!el) { clearInterval(boardTimerTick); boardTimerTick = null; return; }
+        left = Math.max(0, left - 1);
+        el.textContent = boardDeadlineLeftText(left);
+        if (left <= 0) { clearInterval(boardTimerTick); boardTimerTick = null; loadNewYearBoard(); }
+    }, 1000);
+}
+
+async function loadNewYearBoard() {
+    const box = document.getElementById('ny-board');
+    if (!box) return;
+    const ny = (typeof currentTheme === 'function') ? currentTheme() === THEME_NEWYEAR : false;
+    box.hidden = !ny;
+    const classic = document.getElementById('classic-top');
+    if (classic) classic.hidden = ny;
+    if (!ny || boardBusy) return;
+    boardBusy = true;
+    try {
+        const res = await fetch(`${BOARD_API}/api/newyear_board?limit=21`);
+        const payload = await res.json().catch(() => null);
+        if (!res.ok || !payload) throw new Error((payload && payload.detail) || 'Лидерборд недоступен');
+        renderNewYearBoard(payload);
+    } catch (e) {
+        renderNewYearBoard({ ok: false });
+    } finally {
+        boardBusy = false;
+    }
+}
+
+function toggleBoardHelp() {
+    const panel = document.getElementById('ny-board-help-panel');
+    const btn = document.getElementById('ny-board-help');
+    if (!panel) return;
+    panel.hidden = !panel.hidden;
+    if (btn) btn.setAttribute('aria-expanded', panel.hidden ? 'false' : 'true');
 }
 
 async function loadGlobalTop() {
@@ -6937,6 +7057,18 @@ function applyTheme(theme, fallbackTheme) {
     }
     renderAdminThemeCard(null);
     syncSoundUi();
+    // Задача 93: лидерборд живёт только в новогоднем режиме — при переключении
+    // темы сразу показываем/прячем его, не дожидаясь нового входа на вкладку.
+    try {
+        if (typeof loadNewYearBoard === 'function') {
+            const box = document.getElementById('ny-board');
+            const classic = document.getElementById('classic-top');
+            const nyNow = next === THEME_NEWYEAR;
+            if (box) box.hidden = !nyNow;
+            if (classic) classic.hidden = nyNow;
+            if (nyNow) loadNewYearBoard();
+        }
+    } catch (e) { /* декор не должен ломать вход */ }
 }
 
 function startSnow() {

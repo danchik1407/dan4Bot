@@ -2179,6 +2179,11 @@ async def cmd_pocket(message: Message):
     love_line = await _pocket_love_line(target.id)
     if user.get("keys", 0) > 0: text += f"🔑 Ключи: <b>{user['keys']}</b>\n"
     if love_line: text += love_line
+    # Задача 93: снежинки видны и в кармане бота — та же коллекция, что в аппке.
+    # Это декор: передавать/покупать/обменивать нельзя, поэтому просто число.
+    snow = await asyncio.to_thread(_snowflakes_count_sync, target.id)
+    if snow > 0 or is_snow_decor_enabled():
+        text += f"❄️ Снежинки: <b>{snow}</b>\n"
     inventory_lines = []
     for item_id, item in visible_inventory_items(is_admin(message.from_user.id)).items():
         count = inv.count(item_id)
@@ -2189,6 +2194,41 @@ async def cmd_pocket(message: Message):
     else:
         text += "\n🎒 <b>Инвентарь:</b> Пусто\n"
     await message.answer(text, parse_mode="HTML")
+
+
+SNOWFLAKES_TABLE = "snowflakes"
+
+
+def _snowflakes_count_sync(user_id) -> int:
+    """Сколько снежинок у игрока (та же таблица, что пишет api.py).
+
+    Задача 93: заказчик просил показывать коллекцию и в кармане бота. Ошибка
+    базы/нет миграции — 0: карман должен открываться всегда.
+    """
+    try:
+        uid = int(user_id)
+    except (TypeError, ValueError):
+        return 0
+    try:
+        rows = (supabase.table(SNOWFLAKES_TABLE).select("count")
+                .eq("user_id", uid).limit(1).execute().data) or []
+    except Exception:  # noqa: BLE001 — нет таблицы: просто ноль
+        return 0
+    if not rows:
+        return 0
+    try:
+        return max(0, int(rows[0].get("count") or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def is_snow_decor_enabled() -> bool:
+    """Включён ли новогодний режим (общая настройка app_theme)."""
+    try:
+        raw = str(_setting_get_sync("app_theme") or "").strip().lower()
+    except Exception:  # noqa: BLE001
+        return False
+    return raw in ("newyear", "new_year", "ny", "1", "on")
 
 
 async def _pocket_love_line(user_id) -> str:

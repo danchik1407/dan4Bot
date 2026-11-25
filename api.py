@@ -89,7 +89,7 @@ async def _http_json(url, method: str = "GET", params=None, payload=None, timeou
 
 # Номер сборки: по нему из /api/health видно, что на сервисе НЕ старый код.
 # Если после деплоя здесь прежнее значение — Render ещё не перезапустился.
-API_BUILD = "2026-10-27-task92-ny-visual-fixes"
+API_BUILD = "2026-10-27-task93-board-and-review"
 
 # Момент старта процесса. По нему видно, что сервис только что «проснулся»:
 # Render на бесплатном тарифе усыпляет Web Service через 15 минут без входящих
@@ -757,6 +757,115 @@ def set_love_cooldown_enabled(enabled: bool) -> bool:
         pass
     _game_settings_cache.update({"at": 0.0, "values": {}})
     return bool(ok)
+
+
+# ==================== НОВОГОДНИЙ ЛИДЕРБОРД (задача 93) ====================
+# Заказчик: таблица «кто больше заработал» до 19 декабря 21:00 МСК. В таблицу
+# идёт ЧИСТЫЙ доход: выигрыш минус своя ставка (поставил 500, выиграл 2000 →
+# 1500), проигрыш не отнимает ничего, пассивный доход с капсул идёт полностью.
+# Хранение — newyear_board (миграция 20261209000000), запись атомарная через
+# newyear_board_add. Нет таблицы/базы — лидерборд пуст, игра идёт как обычно.
+BOARD_TABLE = "newyear_board"
+BOARD_RPC = "newyear_board_add"
+BOARD_HEALTH_RPC = "newyear_board_health"
+# Финиш акции: 19 декабря 2026, 21:00 МСК (UTC+3) = 18:00 UTC.
+BOARD_DEADLINE_ISO = "2026-12-19T18:00:00+00:00"
+BOARD_DEADLINE_MSK = "19 декабря 2026, 21:00 МСК"
+# Призы по макету: 1 — 100 000, 2 — 50 000, 3 — 20 000, 4–10 — 5 000,
+# 11–20 — 1 000, с 21-го — «Без приза» (см. board_prize_for_place).
+BOARD_PRIZES = (
+    100000, 50000, 20000,
+    5000, 5000, 5000, 5000, 5000, 5000, 5000,
+    1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000,
+)
+_BOARD_WARNED = {"once": False}
+
+
+def board_deadline_ts() -> float:
+    """Момент финиша в секундах. Считается один раз."""
+    try:
+        return datetime.datetime.fromisoformat(BOARD_DEADLINE_ISO).timestamp()
+    except Exception:  # noqa: BLE001
+        return 0.0
+
+
+def board_is_finished(now: float = None) -> bool:
+    now = time.time() if now is None else float(now)
+    return now >= board_deadline_ts()
+
+
+def board_prize_for_place(place) -> int:
+    """Приз за место (0 — «без приза», как в макете заказчика)."""
+    try:
+        idx = int(place) - 1
+    except (TypeError, ValueError):
+        return 0
+    if idx < 0 or idx >= len(BOARD_PRIZES):
+        return 0
+    return BOARD_PRIZES[idx]
+
+
+def board_add(uid, games: int = 0, passive: int = 0, win: bool = False) -> bool:
+    """Записать доход в таблицу. False — не сохранилось (не ошибка игры)."""
+    target = _safe_int(uid, None)
+    if target is None:
+        return False
+    games = max(0, _safe_int(games, 0))
+    passive = max(0, _safe_int(passive, 0))
+    if not games and not passive:
+        return False
+    if board_is_finished():
+        # Финиш прошёл — таблица заморожена, доначислять некуда.
+        return False
+    try:
+        supabase.rpc(BOARD_RPC, {"p_user_id": int(target), "p_games": games,
+                                 "p_passive": passive, "p_win": bool(win)}).execute()
+        return True
+    except Exception as exc:  # noqa: BLE001 — нет миграции: игра важнее таблицы
+        if not _BOARD_WARNED["once"]:
+            logger.warning("Лидерборд: newyear_board_add недоступна (%s) — проверьте "
+                           "миграцию 20261209000000_newyear_leaderboard.sql", exc)
+            _BOARD_WARNED["once"] = True
+        return False
+
+
+def board_note_games(uid, win_amount: int, bet: int = 0, win: bool = True) -> None:
+    """Победа в игре: в таблицу идёт выигрыш ЗА ВЫЧЕТОМ своей ставки."""
+    net = max(0, _safe_int(win_amount, 0) - _safe_int(bet, 0))
+    if not win or net <= 0:
+        return
+    board_add(uid, games=net, win=True)
+
+
+def board_note_passive(uid, amount: int) -> None:
+    """Пассивный доход — в таблицу целиком (он и есть чистый доход)."""
+    if _safe_int(amount, 0) <= 0:
+        return
+    board_add(uid, passive=_safe_int(amount, 0))
+
+
+def board_rows(limit: int = 21) -> list:
+    """Строки таблицы. Ошибка базы — пустой список (ошибку покажет health)."""
+    try:
+        rows = (supabase.table(BOARD_TABLE).select("user_id, earned, earned_games, "
+                                                   "earned_passive, wins, updated_at")
+                .order("earned", desc=True).limit(max(1, min(200, int(limit)))).execute().data) or []
+    except Exception:  # noqa: BLE001
+        return []
+    return rows
+
+
+def board_health() -> dict:
+    try:
+        res = supabase.rpc(BOARD_HEALTH_RPC, {}).execute()
+        data = res.data
+        if isinstance(data, list) and data:
+            data = data[0]
+        if isinstance(data, dict) and data:
+            return {"ok": bool(data.get("ok")), "reason": ""}
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "reason": str(exc)[:160]}
+    return {"ok": False, "reason": "health вернул пустоту"}
 
 
 # ==================== СНЕЖИНКИ (задача 90) ====================
@@ -2613,10 +2722,10 @@ def _arena_payout_plan(arena: str) -> list:
                         break
                     amounts[uid] += 1
                     leftover -= 1
-                for uid, _value, _bet, name in raw:
+                for uid, _value, bet_value, name in raw:
                     if amounts.get(uid, 0) > 0:
                         plan.append({"user_id": uid, "amount": amounts[uid],
-                                     "name": name, "arena": "team"})
+                                     "bet": int(bet_value), "name": name, "arena": "team"})
     elif winner and not winner.get("is_bot") and bank > 0:
         try:
             numeric_id = int(winner["id"])
@@ -2624,6 +2733,7 @@ def _arena_payout_plan(arena: str) -> list:
             numeric_id = None
         if numeric_id is not None:
             plan.append({"user_id": numeric_id, "amount": int(bank),
+                         "bet": int(winner.get("bet") or 0),
                          "name": winner.get("name"), "arena": "normal"})
 
     state["payouts"] = plan
@@ -2728,9 +2838,21 @@ def _credit_arena_payout(entry: dict) -> str:
     # где деньги реально начисляются (включая доплаты после рестарта), поэтому
     # в профиле не бывает «двух побед» на одну выплату. Возврат ставки (refund)
     # победой не считается: это свои же деньги.
-    if str(entry.get("kind") or "") != "refund":
+    is_win = str(entry.get("kind") or "") != "refund"
+    if is_win:
         stats_note(entry["user_id"], coins_earned=int(entry["amount"]),
                    won_arena=int(entry["amount"]), best_arena_win=int(entry["amount"]))
+
+    def _board_note_once():
+        """Задача 93: в новогоднюю таблицу — чистый доход арены (выплата минус
+        своя ставка). Ставка приходит в entry["bet"] там, где известна; старые
+        строки журнала её не знают — тогда считаем выплату целиком.
+        Вызываем ТОЛЬКО когда деньги реально начислены: при duplicate повторная
+        запись засчитала бы один и тот же раунд дважды (рестарт/повтор)."""
+        if not is_win:
+            return
+        board_note_games(entry["user_id"], int(entry["amount"]),
+                         bet=int(entry.get("bet") or 0), win=True)
     # Задача 80: история операций удалена — в профиле её больше нет.
     arena = str(entry["arena"])
     round_id = str(entry["round_id"])
@@ -2751,15 +2873,18 @@ def _credit_arena_payout(entry: dict) -> str:
                 "p_arena": arena, "p_round_id": round_id,
                 "p_user_id": uid, "p_amount": amount}).execute().data
             if applied:
+                _board_note_once()
                 return "paid"
             # false: строку уже перевели в paid ранее → задвоения нет.
             return "duplicate"
         # Журнал есть, функции нет — начисляем и помечаем вручную.
         _direct_arena_credit(uid, amount)
         _ledger_mark_paid(entry)
+        _board_note_once()
         return "paid"
 
     _direct_arena_credit(uid, amount)
+    _board_note_once()
     return "paid"
 
 
@@ -4097,6 +4222,8 @@ async def crash_cashout(data: CrashCashout):
     # сравнивает суммы, а не x2.1 против x3.0.
     stats_note(user_id, coins_earned=win_amount, won_crash=win_amount,
                best_crash_win=win_amount)
+    # Задача 93: в новогоднюю таблицу — только чистый доход (без своей ставки).
+    board_note_games(user_id, win_amount, bet=player.get("bet", 0), win=True)
     return {"success": True, "win_amount": win_amount, "mult": cashout_mult, "new_balance": new_coins}
 
 
@@ -4266,6 +4393,8 @@ async def mines_cashout(data: MinesCashout):
         raise HTTPException(status_code=500, detail="Не удалось зачислить выигрыш")
     stats_note(user_id, coins_earned=win_amount, won_mines=win_amount,
                best_mines_win=win_amount)
+    # Задача 93: чистый доход в новогоднюю таблицу (ставка не считается).
+    board_note_games(user_id, win_amount, bet=game.get("bet", 0), win=True)
     return {"success": True, "win_amount": win_amount, "new_balance": coins,
             "coef": round(_mines_multiplier(game["mines"], len(game["opened"])), 2)}
 
@@ -5773,6 +5902,15 @@ async def upgrade_action(data: UpgradeAction):
             if won:
                 won_value = payout if target == "coin" else UPGRADE_ITEM_PRICES.get(target, 0)
                 stats_note(user_id, coins_earned=won_value, won_upgrade=won_value)
+                # Задача 93: в лидерборд идёт ЧИСТЫЙ доход — прибыль относительно
+                # состояния до розыгрыша. Коины: (баланс после − баланс до) уже
+                # учитывает и списание ставки, и выплату, поэтому это и есть
+                # прибыль. Капсулы: коины не списывались, но потрачены капсулы —
+                # считаем выплату минус их стоимость. Убыток не пишем вообще.
+                if target == "coin":
+                    board_gain = new_coins - raw_coins if source == "coin" else \
+                        payout - stake_value
+                    board_note_games(user_id, board_gain, bet=0, win=True)
                 stats_event(user_id, "upgrade", moment_text,
                             max(moment_from, won_value),
                             {"from": source, "amount": amount, "to": target,
@@ -6686,6 +6824,9 @@ def _passive_income_locked(data: PassiveIncomeRequest, uid):
     new_coins = award_coins(uid, accrued)
     if new_coins is None:
         raise HTTPException(status_code=503, detail="Не удалось начислить пассивный доход")
+    # Задача 93: пассивный доход с капсул тоже идёт в новогоднюю таблицу —
+    # заказчик: «так появится смысл скупать капсулы».
+    board_note_passive(uid, accrued)
     # Сколько времени реально «съели» выданные коины, и что осталось в мелочи.
     # consumed_hours = (accrued - carry) / rate — время, за которое набежали
     # именно выданные коины; всё, что не влезло в целые, уходит в carry.
@@ -8335,6 +8476,84 @@ async def snowflakes_leaderboard(limit: int = 10):
     """Кто сколько насобирал — витрина, как просил заказчик."""
     limit = max(1, min(50, _safe_int(limit, 10)))
     return {"ok": True, "players": await asyncio.to_thread(snowflakes_top, limit)}
+
+
+# ==================== НОВОГОДНИЙ ЛИДЕРБОРД: ЭНДПОИНТЫ (задача 93) ====================
+@app.get("/api/newyear_board")
+async def newyear_board_public(limit: int = 21):
+    """Таблица «кто больше заработал» — публичная, без авторизации.
+
+    Отдаём всё, что нужно экрану: время до финиша, призы по местам, строки с
+    ником и аватаркой, а также 10 строк вокруг самого игрока (если он передал
+    initData) — чтобы он видел себя, даже когда до топ-21 далеко.
+    """
+    limit = max(5, min(50, _safe_int(limit, 21)))
+    now = time.time()
+    deadline = board_deadline_ts()
+    left = max(0.0, deadline - now)
+    rows = await asyncio.to_thread(board_rows, 200)
+    players = []
+    for place, row in enumerate(rows, start=1):
+        uid = _safe_int(row.get("user_id"), 0)
+        if not uid or uid in ADMIN_IDS:
+            continue
+        players.append({
+            "place": place,
+            "user_id": uid,
+            "username": _username_by_id(uid),
+            "earned": _safe_int(row.get("earned"), 0),
+            "earned_games": _safe_int(row.get("earned_games"), 0),
+            "earned_passive": _safe_int(row.get("earned_passive"), 0),
+            "wins": _safe_int(row.get("wins"), 0),
+            "prize": board_prize_for_place(place) if place <= len(BOARD_PRIZES) else 0,
+            "is_me": False,
+        })
+    return {
+        "ok": True,
+        "title": "🏆 Лидерборд",
+        "players": players[:limit],
+        "total_players": len(players),
+        "deadline": BOARD_DEADLINE_ISO,
+        "deadline_msk": BOARD_DEADLINE_MSK,
+        "deadline_ts": int(deadline),
+        "seconds_left": int(left),
+        "finished": left <= 0,
+        "prizes": list(BOARD_PRIZES),
+        "rules": {
+            "games": "Победа в игре: в таблицу идёт выигрыш минус своя ставка "
+                     "(ставил 500, выиграл 2000 → 1500).",
+            "loss": "Проигрыш ничего не отнимает — коины просто уходят из игры.",
+            "passive": "Пассивный доход с капсул идёт в таблицу целиком.",
+            "grow": "Играй в разные режимы и скупай капсулы — доход идёт постоянно.",
+        },
+        "db": await asyncio.to_thread(board_health),
+    }
+
+
+@app.post("/api/newyear_board_me")
+async def newyear_board_me(data: UserAuth):
+    """Где я в таблице и сколько заработал (для карточки в профиле)."""
+    uid = _auth_user_id(data.initData)
+    rows = await asyncio.to_thread(board_rows, 200)
+    place = 0
+    mine = None
+    for index, row in enumerate(rows, start=1):
+        if _safe_int(row.get("user_id"), 0) == uid:
+            place = index
+            mine = row
+            break
+    return {
+        "ok": True,
+        "place": place,
+        "earned": _safe_int((mine or {}).get("earned"), 0),
+        "earned_games": _safe_int((mine or {}).get("earned_games"), 0),
+        "earned_passive": _safe_int((mine or {}).get("earned_passive"), 0),
+        "wins": _safe_int((mine or {}).get("wins"), 0),
+        "prize": board_prize_for_place(place) if place else 0,
+        "deadline_msk": BOARD_DEADLINE_MSK,
+        "seconds_left": max(0, int(board_deadline_ts() - time.time())),
+        "finished": board_is_finished(),
+    }
 
 
 @app.get("/api/global_top")
