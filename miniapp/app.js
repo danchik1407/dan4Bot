@@ -1862,16 +1862,48 @@ function boardPrizeText(prize) {
     return prize > 0 ? formatCoins(prize) : 'Без приза';
 }
 
-// Маленький круглый аватар игрока слева от ника. Нет фото — буква на градиенте.
-function boardAvatarHtml(player) {
-    const name = String((player && player.username) || 'Игрок').trim();
-    const url = String((player && player.avatar) || '').trim();
-    if (/^https?:\/\//i.test(url)) {
-        return `<img class="ny-board-ava" src="${escapeHtml(url)}" alt="" ` +
-               `loading="lazy" referrerpolicy="no-referrer">`;
+// Маленький круглый аватар игрока слева от ника.
+// Задача 103: у части игроков Telegram не отдаёт ссылку на фото, и в списке
+// были буквы вперемешку с фотографиями. Теперь сервер на таких отдаёт свою
+// ссылку /api/avatar/{id} (фото достаёт бот), а если и там пусто — кружок с
+// буквой остаётся запасным вариантом (onerror).
+function boardAvatarSrc(url) {
+    const value = String(url === undefined || url === null ? '' : url).trim();
+    if (!value) return '';
+    if (/^https?:\/\//i.test(value)) return value;
+    if (value.charAt(0) === '/') {
+        const base = String(API_URL || '').replace(/\/+$/, '');
+        return base + value;
     }
-    const letter = escapeHtml((name.charAt(0) || '?').toUpperCase());
-    return `<span class="ny-board-ava is-empty" aria-hidden="true">${letter}</span>`;
+    return value;
+}
+
+function boardAvatarLetter(player) {
+    const name = String((player && player.username) || 'Игрок').trim();
+    return (name.charAt(0) || '?').toUpperCase();
+}
+
+function boardAvatarHtml(player) {
+    const url = boardAvatarSrc(player && player.avatar);
+    const letter = escapeHtml(boardAvatarLetter(player));
+    if (!url) {
+        return `<span class="ny-board-ava is-empty" aria-hidden="true">${letter}</span>`;
+    }
+    return `<img class="ny-board-ava" src="${escapeHtml(url)}" alt="" ` +
+           `loading="lazy" referrerpolicy="no-referrer" data-letter="${letter}" ` +
+           `onerror="boardAvatarFailed(this)">`;
+}
+
+// Фото не загрузилось (нет аватарки/нет сети) — аккуратно меняем на букву,
+// чтобы в строке не оставался битый значок.
+function boardAvatarFailed(img) {
+    if (!img || !img.parentNode) return;
+    const letter = (img.dataset && img.dataset.letter) || '?';
+    const span = document.createElement('span');
+    span.className = 'ny-board-ava is-empty';
+    span.setAttribute('aria-hidden', 'true');
+    span.textContent = letter;
+    img.parentNode.replaceChild(span, img);
 }
 
 function boardRowHtml(p) {

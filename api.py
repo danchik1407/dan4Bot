@@ -89,7 +89,7 @@ async def _http_json(url, method: str = "GET", params=None, payload=None, timeou
 
 # Номер сборки: по нему из /api/health видно, что на сервисе НЕ старый код.
 # Если после деплоя здесь прежнее значение — Render ещё не перезапустился.
-API_BUILD = "2026-10-27-task102-board-polish-payout"
+API_BUILD = "2026-10-27-task103-board-avatars"
 
 # Момент старта процесса. По нему видно, что сервис только что «проснулся»:
 # Render на бесплатном тарифе усыпляет Web Service через 15 минут без входящих
@@ -1280,6 +1280,162 @@ def _username_by_id(user_id) -> str:
         return ""
     name = rows[0].get("username")
     return str(name).strip() if name else ""
+
+
+# ==================== АВАТАРКИ ИГРОКОВ (задача 103) ====================
+# Заказчик: «почему в лидерборде кто-то с авой, кто-то без — исправь».
+# photo_url Telegram отдаёт в initData только тем, у кого фото открыто; у
+# остальных его нет. Поэтому недостающие фото берём у бота
+# (getUserProfilePhotos) и отдаём через свой /api/avatar/{id} — токен бота
+# никогда не попадает в ссылку.
+AVATAR_TTL = 6 * 3600.0          # сколько держим картинку в памяти
+AVATAR_MISS_TTL = 600.0          # «фото нет» — не спрашиваем чаще 10 минут
+AVATAR_RETRY_DAY = 24 * 3600.0   # в базе: повторный вопрос раз в сутки
+_AVATAR_CACHE = {}               # uid -> {"body": bytes, "mime": str, "at": float}
+_AVATAR_MISS = {}                # uid -> момент последней неудачи
+_AVATAR_FILE = {}                # uid -> (file_id, получен ли из базы)
+_AVATAR_PREFETCH = {"running": set()}
+
+
+def avatar_proxy_url(user_id) -> str:
+    """Относительная ссылка на наше API — клиент добавит свой API_URL."""
+    uid = _safe_int(user_id, None)
+    return f"/api/avatar/{int(uid)}" if uid is not None else ""
+
+
+def _user_avatar_row(uid: int) -> dict:
+    """Строка с фото/аватаркой из users. Пусто — колонок может не быть."""
+    for columns in ("photo_url, photo_file_id, avatar_checked_at", "photo_url"):
+        try:
+            rows = (supabase.table("users").select(columns)
+                    .eq("user_id", int(uid)).limit(1).execute().data) or []
+        except Exception:  # noqa: BLE001
+            continue
+        if rows:
+            return rows[0]
+        return {}
+    return {}
+
+
+def _save_avatar_file_id(uid: int, file_id) -> None:
+    """Запомнить file_id (или «фото нет») в базе — переживёт рестарт сервиса."""
+    try:
+        (supabase.table("users")
+         .update({"photo_file_id": file_id,
+                  "avatar_checked_at": datetime.datetime.now(datetime.timezone.utc).isoformat()})
+         .eq("user_id", int(uid)).execute())
+    except Exception:  # noqa: BLE001 — колонок нет: работаем на кэше в памяти
+        pass
+
+
+async def _tg_bot_api(method: str, payload: dict = None) -> dict:
+    token = _telegram_bot_token()
+    if not token:
+        return {}
+    try:
+        data = await _http_json(f"https://api.telegram.org/bot{token}/{method}",
+                                method="POST" if payload else "GET",
+                                payload=payload, timeout=8.0)
+    except Exception as exc:  # noqa: BLE001
+        logger.info("Аватарки: Telegram %s не ответил: %s", method, exc)
+        return {}
+    return data if isinstance(data, dict) and data.get("ok") else {}
+
+
+def _pick_photo_size(sizes) -> str:
+    """Самый крупный размер фото (у Telegram их несколько)."""
+    best, best_area = "", -1
+    for item in (sizes or []):
+        if not isinstance(item, dict):
+            continue
+        area = _safe_int(item.get("width"), 0) * _safe_int(item.get("height"), 0)
+        if area > best_area and item.get("file_id"):
+            best, best_area = str(item["file_id"]), area
+    return best
+
+
+async def avatar_bytes(uid) -> Optional[tuple]:
+    """(bytes, mime) фото игрока или None. Кэш в памяти + file_id в базе."""
+    target = _safe_int(uid, None)
+    if target is None:
+        return None
+    target = int(target)
+    now = time.time()
+    cached = _AVATAR_CACHE.get(target)
+    if cached and now - cached["at"] < AVATAR_TTL:
+        return cached["body"], cached["mime"]
+    missed = _AVATAR_MISS.get(target)
+    if missed and now - missed < AVATAR_MISS_TTL:
+        return None
+    token = _telegram_bot_token()
+    if not token:
+        return None
+
+    row = await asyncio.to_thread(_user_avatar_row, target)
+    file_id = str(row.get("photo_file_id") or "").strip()
+    if not file_id:
+        checked = row.get("avatar_checked_at")
+        fresh = False
+        if checked:
+            try:
+                stamp = datetime.datetime.fromisoformat(str(checked).replace("Z", "+00:00"))
+                fresh = (datetime.datetime.now(datetime.timezone.utc) - stamp).total_seconds() < AVATAR_RETRY_DAY
+            except Exception:  # noqa: BLE001
+                fresh = False
+        if not fresh:
+            photos = await _tg_bot_api("getUserProfilePhotos", {"user_id": target, "limit": 1})
+            found = ((photos.get("result") or {}).get("photos") or [])
+            file_id = _pick_photo_size(found[0] if found else [])
+            await asyncio.to_thread(_save_avatar_file_id, target, file_id or None)
+        if not file_id:
+            _AVATAR_MISS[target] = now
+            return None
+
+    info = await _tg_bot_api("getFile", {"file_id": file_id})
+    path = str(((info.get("result") or {}).get("file_path")) or "").strip()
+    if not path:
+        _AVATAR_MISS[target] = now
+        return None
+    url = f"https://api.telegram.org/file/bot{token}/{path}"
+    try:
+        body, mime = await asyncio.to_thread(_download_bytes, url)
+    except Exception as exc:  # noqa: BLE001
+        logger.info("Аватарки: файл %s не скачался: %s", target, exc)
+        _AVATAR_MISS[target] = now
+        return None
+    if not body:
+        _AVATAR_MISS[target] = now
+        return None
+    _AVATAR_MISS.pop(target, None)
+    _AVATAR_CACHE[target] = {"body": body, "mime": mime, "at": now}
+    if len(_AVATAR_CACHE) > 400:            # память не резиновая
+        for key in sorted(_AVATAR_CACHE, key=lambda k: _AVATAR_CACHE[k]["at"])[:100]:
+            _AVATAR_CACHE.pop(key, None)
+    return body, mime
+
+
+def _download_bytes(url: str) -> tuple:
+    """Скачать файл (jpeg/png) — блокирующе, вызывать через to_thread."""
+    request = urllib.request.Request(url, headers={"User-Agent": "aura-api"})
+    with urllib.request.urlopen(request, timeout=10) as response:
+        body = response.read()
+        mime = response.headers.get_content_type() or "image/jpeg"
+    return body, mime
+
+
+async def _avatar_prefetch(uids) -> None:
+    """Фоном прогреть аватарки, чтобы список не «дорастал» на глазах."""
+    for uid in uids:
+        target = _safe_int(uid, None)
+        if target is None or target in _AVATAR_PREFETCH["running"]:
+            continue
+        _AVATAR_PREFETCH["running"].add(target)
+        try:
+            await avatar_bytes(target)
+        except Exception:  # noqa: BLE001 — фон не должен ничего ронять
+            pass
+        finally:
+            _AVATAR_PREFETCH["running"].discard(target)
 
 
 def board_players_meta(uids) -> dict:
@@ -8936,10 +9092,20 @@ async def newyear_board_public(limit: int = 21, init: str = ""):
         visible.append(row)
     players = [_board_row_player(row, i) for i, row in enumerate(visible, start=1)]
     meta = await asyncio.to_thread(board_players_meta, [p["user_id"] for p in players])
+    need_avatar = []
     for player in players:
         info = meta.get(player["user_id"]) or {}
         player["username"] = player["username"] or info.get("username") or ""
-        player["avatar"] = info.get("avatar") or ""
+        photo = info.get("avatar") or ""
+        # Задача 103: «кто-то с авой, кто-то без». У кого Telegram не отдал
+        # ссылку — ведём на свой /api/avatar/{id}: он достанет фото через бота.
+        if not photo:
+            photo = avatar_proxy_url(player["user_id"])
+            need_avatar.append(player["user_id"])
+        player["avatar"] = photo
+    if need_avatar:
+        # Греем первые несколько фото фоном: список не должен «дорастать».
+        asyncio.create_task(_avatar_prefetch(need_avatar[:6]))
     me = None
     if me_uid is not None:
         mine = next((p for p in players if p["user_id"] == me_uid), None)
@@ -8959,13 +9125,18 @@ async def newyear_board_public(limit: int = 21, init: str = ""):
                 "prize": 0,
                 "is_me": True,
                 "hidden": True,
+                # Аватарка и у своей строки — иначе у «Ты» кружок без фото.
+                "avatar": ((meta.get(me_uid) or {}).get("avatar")
+                           or avatar_proxy_url(me_uid)),
             }
         else:
             # Ещё не заработал — покажем честный ноль, а не пустоту.
             me = {"place": 0, "user_id": me_uid,
                   "username": _username_by_id(me_uid), "earned": 0,
                   "earned_games": 0, "earned_passive": 0, "wins": 0,
-                  "prize": 0, "is_me": True, "hidden": False}
+                  "prize": 0, "is_me": True, "hidden": False,
+                  "avatar": ((meta.get(me_uid) or {}).get("avatar")
+                             or avatar_proxy_url(me_uid))}
     return {
         "ok": True,
         "title": "🏆 Лидерборд",
@@ -9122,6 +9293,21 @@ async def admin_board_probe(data: UserAuth):
                  "Примените supabase/migrations/20261211000000_newyear_board_full.sql "
                  "в SQL Editor Supabase — он создаёт таблицу и функцию заново."),
     }
+
+
+@app.get("/api/avatar/{user_id}")
+async def user_avatar(user_id: int):
+    """Фото игрока для лидерборда. Отдаём СВОИМ API, а не ссылкой Telegram:
+    в ссылке файла Telegram лежит токен бота, показывать его клиенту нельзя.
+
+    Нет фото/Telegram не ответил — 404, клиент рисует кружок с буквой.
+    """
+    data = await avatar_bytes(user_id)
+    if not data:
+        raise HTTPException(status_code=404, detail="Аватарки нет")
+    body, mime = data
+    return Response(content=body, media_type=mime or "image/jpeg",
+                    headers={"Cache-Control": "public, max-age=21600"})
 
 
 @app.post("/api/admin/board_payout")
