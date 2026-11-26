@@ -163,6 +163,7 @@ begin
             ('users', 'last_chest',      'bigint',      '0'),
             ('users', 'created_at',      'timestamptz', 'now()'),
             ('users', 'photo_url',       'text',        null),
+            ('users', 'gender',           'text',        null),
             ('users', 'ice',             'integer',     '0'),
             ('users', 'premium',         'boolean',     'false'),
             ('users', 'daily_buys',      'text',        '''{}'''),
@@ -435,6 +436,9 @@ alter table public.users alter column created_at set default now();
 -- Колонки, которые могли не появиться в старых базах.
 alter table public.users add column if not exists username         text;
 alter table public.users add column if not exists photo_url        text;
+-- Задача 105: пол игрока для склонений в РП («обнимает саму себя» /
+-- «самого себя» / нейтрально). Пустое значение — ещё не выбран.
+alter table public.users add column if not exists gender           text;
 alter table public.users add column if not exists chat_id          bigint      default 0;
 alter table public.users add column if not exists coins            bigint;
 alter table public.users add column if not exists keys             integer;
@@ -1579,3 +1583,49 @@ select 'ИТОГ' as check_name,
        case when exists (select 1 from problems)
             then 'НЕТ — см. строки выше (прокрутите лог SQL Editor вверх)'
             else 'ok — схема готова, очки будут писаться' end as result;
+
+
+-- ############################################################################
+-- ЧАСТЬ 99. ЗАДАЧА 105: ПОЛ В ПРОФИЛЕ + КУЛДАУН РП, КОТОРЫЙ НЕ ВЫКЛЮЧАЕТСЯ
+--   1) users.gender ('female' | 'male' | NULL) — для склонений в РП:
+--      «обнимает саму себя» / «обнимает самого себя» / «обнимает себя».
+--   2) game_settings: КД РП всегда включён и всегда 18000 секунд. Старое
+--      «выключен» из админки больше не действует — именно оно обнуляло
+--      ожидание, из-за чего кулдаун «не работал».
+-- ############################################################################
+do $$
+begin
+    if to_regclass('public.users') is not null then
+        alter table public.users add column if not exists gender text;
+        update public.users
+           set gender = case
+                            when lower(btrim(gender)) in ('female', 'f', 'ж', 'женский', 'жен', 'девушка', 'woman', 'girl')
+                                then 'female'
+                            when lower(btrim(gender)) in ('male', 'm', 'м', 'мужской', 'муж', 'парень', 'man', 'boy')
+                                then 'male'
+                            else null
+                        end
+         where gender is not null
+           and lower(btrim(gender)) not in ('female', 'male');
+    end if;
+
+    if to_regclass('public.game_settings') is not null then
+        insert into public.game_settings (key, value, updated_at)
+        values ('love_cooldown_enabled', '1', now())
+        on conflict (key) do update set value = '1', updated_at = now();
+
+        insert into public.game_settings (key, value, updated_at)
+        values ('love_cooldown_seconds', '18000', now())
+        on conflict (key) do update set value = '18000', updated_at = now();
+    end if;
+
+    raise notice 'ПОЛ и КД РП: готово (gender + 5 часов ожидания)';
+end $$;
+
+select 'ПОЛ / КД РП (задача 105)' as check_name,
+       case when exists (
+                select 1 from information_schema.columns
+                 where table_schema = 'public' and table_name = 'users'
+                   and column_name = 'gender')
+            then 'ok — пол выбирается в профиле, КД РП 5 часов у всех'
+            else 'НЕТ — колонки users.gender нет' end as result;

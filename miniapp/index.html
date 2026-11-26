@@ -12,7 +12,7 @@
     <meta http-equiv="Pragma" content="no-cache">
     <meta http-equiv="Expires" content="0">
     <title>AURA GAME</title>
-    <link rel="stylesheet" href="style.css?v=aura-104a">
+    <link rel="stylesheet" href="style.css?v=aura-105a">
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
 </head>
 <body>
@@ -373,6 +373,28 @@
                     <div class="stat-box"><span class="stat-icon"><img class="coin-img" src="coin.png" alt="монета"></span><span class="stat-value" id="profile-coins">…</span><span class="stat-label">Баланс</span></div>
                     <div class="stat-box"><span class="stat-icon">🔑</span><span class="stat-value" id="profile-keys">0</span><span class="stat-label">Ключи</span></div>
                     <div class="stat-box"><span class="stat-icon">📅</span><span class="stat-value" id="profile-days">0</span><span class="stat-label">Дней с нами</span></div>
+                </div>
+                <!-- Задача 105: пол игрока. Нужен для склонений в РП-командах:
+                     «обнимает саму себя» / «обнимает самого себя» / «обнимает
+                     себя». Сохраняется в users.gender через /api/user/gender,
+                     оттуда его читает бот. -->
+                <div class="profile-extra gender-card" id="gender-card">
+                    <div class="extra-head">
+                        <span class="extra-title">🧬 Обращение к тебе</span>
+                        <span class="extra-value" id="gender-state">не выбрано</span>
+                    </div>
+                    <div class="extra-hint" id="gender-hint">
+                        Нужно для фраз в любовных командах: «обнимает саму себя»
+                        или «обнимает самого себя».
+                    </div>
+                    <div class="gender-buttons">
+                        <button class="extra-btn gender-btn" type="button"
+                                data-gender="female" onclick="setGender('female')">Она</button>
+                        <button class="extra-btn gender-btn" type="button"
+                                data-gender="male" onclick="setGender('male')">Он</button>
+                        <button class="extra-btn gender-btn" type="button"
+                                data-gender="" onclick="setGender('')">Не указывать</button>
+                    </div>
                 </div>
                 <!-- Задача 75: инвентарь из профиля убран — он живёт во вкладке
                      «Карман» (там же баланс, ключи и любовь). В профиле остаются
@@ -923,6 +945,6 @@
          маленькой кнопкой ⚙️ рядом с ником в шапке (см. #admin-gear). -->
     </nav>
 
-    <script src="app.js?v=aura-104a" defer></script>
+    <script src="app.js?v=aura-105a" defer></script>
 </body>
 </html>

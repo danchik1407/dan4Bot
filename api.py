@@ -89,7 +89,7 @@ async def _http_json(url, method: str = "GET", params=None, payload=None, timeou
 
 # Номер сборки: по нему из /api/health видно, что на сервисе НЕ старый код.
 # Если после деплоя здесь прежнее значение — Render ещё не перезапустился.
-API_BUILD = "2026-10-27-task104-love-system"
+API_BUILD = "2026-10-27-task105-gender-rewards-cooldown"
 
 # Момент старта процесса. По нему видно, что сервис только что «проснулся»:
 # Render на бесплатном тарифе усыпляет Web Service через 15 минут без входящих
@@ -725,39 +725,31 @@ LOVE_COOLDOWN_CACHE_TTL = 10.0
 
 
 def love_cooldown_enabled() -> bool:
-    """Включён ли КД РП (кнопка админа). Ошибка базы — считаем, что ВКЛЮЧЁН.
+    """КД РП включён? Задача 105: всегда True.
 
-    Это осознанно: «не смогли прочитать» не должно превращаться в «награда
-    капает за каждое действие». Выключение — только явное действие админа.
+    Заказчик: «кулдаун должен работать одинаково во всех случаях: в паре, у
+    одинокого, у каждого участника свой». Прежний тумблер в админке читался
+    двумя сервисами с разными кэшами (10 и 30 секунд), поэтому после
+    «выключил → включил» бот продолжал видеть «off» и не ставил ожидание.
+    Теперь значение жёсткое, а старые записи в game_settings игнорируются.
     """
-    now = time.time()
-    if (now - float(_LOVE_COOLDOWN_CACHE["at"] or 0)) < LOVE_COOLDOWN_CACHE_TTL:
-        return bool(_LOVE_COOLDOWN_CACHE["value"])
-    value = bool(_LOVE_COOLDOWN_CACHE["value"])
-    try:
-        settings = _load_game_settings()
-        raw = settings.get(LOVE_COOLDOWN_SETTING_KEY)
-        if raw is not None:
-            text = str(raw).strip().lower()
-            value = text not in ("0", "false", "no", "off", "выкл", "")
-        else:
-            # Совместимость: `love_cooldown_seconds = off` из старой команды.
-            legacy = str(settings.get(LOVE_COOLDOWN_SECONDS_KEY) or "").strip().lower()
-            if legacy in ("off", "0", "выкл"):
-                value = False
-    except Exception:  # noqa: BLE001 — база недоступна: оставляем как было
-        pass
-    _LOVE_COOLDOWN_CACHE.update({"value": value, "at": now})
-    return value
+    _LOVE_COOLDOWN_CACHE.update({"value": True, "at": time.time()})
+    return True
 
 
-def set_love_cooldown_enabled(enabled: bool) -> bool:
-    """Записать тумблер КД. True — база приняла значение."""
-    ok = game_setting_set(LOVE_COOLDOWN_SETTING_KEY, "1" if enabled else "0")
-    _LOVE_COOLDOWN_CACHE.update({"value": bool(enabled), "at": time.time()})
-    # Старую метку снимаем, иначе она будет спорить с новой настройкой.
+def set_love_cooldown_enabled(enabled: bool = True) -> bool:
+    """Записать настройку КД. Задача 105: всегда «включён, 18000 секунд».
+
+    Функция оставлена, чтобы старый клиент или скрипт не уронил админку, но
+    ВЫКЛЮЧИТЬ кулдаун больше нельзя: параметр игнорируется, в базу всегда
+    пишется «включён». Раньше именно эта запись «off» и обнуляла ожидание —
+    отсюда жалоба «выключил и включил обратно, а эффекта нет».
+    """
+    ok = game_setting_set(LOVE_COOLDOWN_SETTING_KEY, "1")
+    _LOVE_COOLDOWN_CACHE.update({"value": True, "at": time.time()})
+    # Старая метка «off» больше не должна спорить с настройкой — перезаписываем.
     try:
-        game_setting_set(LOVE_COOLDOWN_SECONDS_KEY, "18000" if enabled else "off")
+        game_setting_set(LOVE_COOLDOWN_SECONDS_KEY, str(int(love_cooldown_seconds())))
     except Exception:  # noqa: BLE001
         pass
     _game_settings_cache.update({"at": 0.0, "values": {}})
@@ -1533,8 +1525,13 @@ def set_app_theme(theme: str) -> bool:
 
 
 def love_cooldown_now() -> int:
-    """Действующий КД РП в секундах: 18000 при включённом, 0 при выключенном."""
-    return love_cooldown_seconds() if love_cooldown_enabled() else 0
+    """Действующий КД РП в секундах: ВСЕГДА 18000 (задача 105).
+
+    Заказчик: «кулдаун должен работать одинаково во всех случаях» — в паре и
+    в одиночке, независимо от старых переключателей. Поэтому настройка из
+    админки больше не обнуляет ожидание.
+    """
+    return love_cooldown_seconds()
 
 
 def set_maintenance(enabled: bool) -> bool:
@@ -2469,6 +2466,9 @@ def _user_payload(row, is_admin, user_id=None):
         "maintenance_active": maintenance_now(),
         "maintenance_message": MAINTENANCE_MESSAGE if maintenance_now() else "",
         "created_at": created_text,
+        # Задача 105: пол для склонений в РП («обнимает саму себя» /
+        # «самого себя» / нейтрально). Пустая строка — ещё не выбран.
+        "gender": _normalized_gender(row.get("gender")),
         # Задача 43: дни считаем от ПЕРВОГО ЗАХОДА В АППКУ (app_first_seen),
         # а не от регистрации в боте. created_at оставлен для совместимости.
         "days_in_app": _days_since(days_start),
@@ -5021,6 +5021,55 @@ async def get_user(auth: UserAuth):
         logger.warning("Дубли профиля user_id=%s: %s", user_id,
                        [(_safe_int(item.get("id"), None), _safe_int(item.get("coins"), 0)) for item in rows])
     return _user_payload(row, is_admin, user_id)
+
+
+GENDER_VALUES = ("female", "male")
+
+
+def _normalized_gender(value) -> str:
+    """Пол из базы: «female»/«male» или пустая строка (не выбран)."""
+    text = str(value or "").strip().lower()
+    return text if text in GENDER_VALUES else ""
+
+
+class UserGenderRequest(BaseModel):
+    initData: str
+    gender: str = ""
+
+
+@app.post("/api/user/gender")
+async def set_user_gender(data: UserGenderRequest):
+    """Задача 105: выбор пола в профиле Mini App.
+
+    Заказчик: «пол должен браться из настроек профиля». Складываем в
+    users.gender; бот читает ту же колонку, поэтому склонения в РП сразу
+    правильные. Пустое значение — «не указывать» (нейтральные фразы).
+    """
+    user = verify_telegram_data(data.initData)
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid auth data")
+    user_id = _safe_int(user.get("id"), None)
+    if user_id is None:
+        raise HTTPException(status_code=400, detail="Некорректный id пользователя")
+    want = str(data.gender or "").strip().lower()
+    if want not in GENDER_VALUES + ("", "none", "unknown"):
+        raise HTTPException(status_code=400, detail="Неизвестное значение пола")
+    value = "" if want in ("", "none", "unknown") else want
+    try:
+        supabase.table("users").update({"gender": value}).eq(
+            "user_id", user_id).execute()
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Не удалось сохранить пол user_id=%s", user_id)
+        # Колонки может не быть, пока миграция не применена — говорим прямо.
+        raise HTTPException(status_code=503, detail=_db_error_detail(
+            exc, "Не удалось сохранить пол, попробуйте позже")) from exc
+    try:
+        supabase.table("users").update({"gender": value}).eq(
+            "user_id", str(user_id)).execute()
+    except Exception:  # noqa: BLE001 — вторая запись не обязательна
+        pass
+    logger.info("Пол user_id=%s: %s", user_id, value or "не указан")
+    return {"ok": True, "gender": value}
 
 
 @app.post("/api/self_check")
@@ -8023,17 +8072,17 @@ async def admin_set_maintenance(data: AdminMaintenanceRequest):
 async def admin_game_settings(data: UserAuth):
     """Что сейчас в настройках, которые читает игра (нужно админ-панели)."""
     _require_admin_api(data.initData)
-    enabled = love_cooldown_enabled()
     return {
         "ok": True,
         "maintenance": maintenance_now(),
         "maintenance_message": MAINTENANCE_MESSAGE,
-        # Задача 79: КД РП включается/выключается кнопкой в админ-панели.
-        "love_cooldown_enabled": enabled,
-        "love_cooldown_seconds": _love_cooldown_seconds(),
+        # Задача 105: КД РП — жёсткое правило: 5 часов всегда, для пары и для
+        # одиночки. Тумблер больше ничего не выключает (именно он раньше
+        # «съедал» кулдаун), значения оставлены для совместимости с аппкой.
+        "love_cooldown_enabled": True,
+        "love_cooldown_seconds": love_cooldown_seconds(),
         "love_cooldown_full_seconds": love_cooldown_seconds(),
-        "love_cooldown_note": ("включён — 5 часов на все РП" if enabled
-                               else "выключен — РП без ожидания"),
+        "love_cooldown_note": "всегда 5 часов на все РП-команды",
         # Задача 89: какое оформление сейчас включено для игроков.
         "theme": app_theme(),
     }
@@ -8076,16 +8125,15 @@ async def admin_set_love_cooldown(data: AdminLoveCooldownRequest):
     поэтому после переключения ждать деплоя не нужно.
     """
     admin_id = _require_admin_api(data.initData)
-    enabled = bool(data.enabled)
-    if not set_love_cooldown_enabled(enabled):
+    if not set_love_cooldown_enabled(True):
         raise HTTPException(status_code=503,
-                            detail="Не удалось сохранить настройку КД — попробуйте ещё раз")
-    logger.warning("КД РП %s (админ %s)", "ВКЛЮЧЁН (5 ч)" if enabled else "выключен (0 с)",
-                   admin_id)
-    return {"ok": True, "enabled": enabled, "love_cooldown_enabled": enabled,
-            "love_cooldown_seconds": _love_cooldown_seconds(),
-            "love_cooldown_note": ("включён — 5 часов на все РП" if enabled
-                                   else "выключен — РП без ожидания")}
+                            detail="Не удалось записать настройку КД — попробуйте ещё раз")
+    logger.warning("КД РП запрошен выключить (админ %s) — по ТЗ 105 он всегда "
+                   "5 часов, оставляем включённым", admin_id)
+    return {"ok": True, "enabled": True, "love_cooldown_enabled": True,
+            "love_cooldown_seconds": love_cooldown_seconds(),
+            "love_cooldown_note": "всегда 5 часов на все РП-команды",
+            "message": "⏳ КД РП всегда 5 часов — выключить его нельзя."}
 
 
 @app.post("/api/admin/give_coins")

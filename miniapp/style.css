@@ -3517,3 +3517,17 @@ html.ny .ny-board-place { font-size: 16px; color: #eaf3ff; }
 html.ny .ny-board-row.top-1 .ny-board-place,
 html.ny .ny-board-row.top-2 .ny-board-place,
 html.ny .ny-board-row.top-3 .ny-board-place { color: #ffd75e; }
+
+/* Задача 105: пол в профиле — три кнопки, выбранная подсвечена. */
+.gender-card .gender-buttons {
+    display: flex; gap: 8px; flex-wrap: wrap;
+}
+.gender-card .gender-btn {
+    width: auto; flex: 1 1 0; min-width: 88px; padding: 10px 12px;
+    font-size: 13px; background: #1c1c1e; color: #d7d7dc;
+    border: 1px solid #2c2c2e;
+}
+/* Заказчик: выбранный вариант должен читаться сразу, без «нажал-непонятно». */
+.gender-card .gender-btn.is-on {
+    background: var(--accent, #007aff); color: #fff; border-color: transparent;
+}

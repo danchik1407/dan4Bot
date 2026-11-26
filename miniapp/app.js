@@ -173,6 +173,9 @@ function inventoryImageFor(itemId, item) {
 }
 let balance = 0, keys = 0, currentBet = 10, inventory = [], lastChestTime = 0, isProcessing = false, userDataLoaded = false;
 let daysInGame = 0;
+// Задача 105: пол для склонений в РП («саму себя» / «самого себя» / «себя»).
+// Источник — users.gender (профиль), значение ставится кнопками ниже.
+let userGender = '';
 // Баланс показываем только когда он реально пришёл с сервера, иначе «…» вместо ложного 0.
 let balanceKnown = false;
 let profileLoadPromise = null, profileRetryTimer = null, profileRetryCount = 0, profileFailure = '';
@@ -769,6 +772,10 @@ function applyProfile(data) {
     }
     // Список ADMIN_IDS — главный источник; флаг сервера его подтверждает.
     isAdmin = isAdminId(user && user.id) || Boolean(data.is_admin);
+    // Задача 105: пол из профиля (users.gender) — по нему бот склоняет «себя».
+    userGender = (data && (data.gender === 'female' || data.gender === 'male'))
+        ? data.gender : '';
+    renderGenderCard();
     // Задача 88: список закрытых игр ставим ПОСЛЕ определения isAdmin.
     // Раньше это было на двадцать строк выше, и на первом профиле isAdmin ещё
     // false — админу карточки помечались «выключено», а вход закрывался.
@@ -1242,6 +1249,40 @@ function toggleAdminGames() {
 }
 
 
+// ============ ПОЛ В ПРОФИЛЕ (задача 105) ============
+// Заказчик: «пол должен браться из настроек профиля». Три состояния: она,
+// он и «не указывать» — тогда бот пишет нейтрально («обнимает себя»).
+function renderGenderCard() {
+    const card = document.getElementById('gender-card');
+    if (!card) return;
+    const label = document.getElementById('gender-state');
+    if (label) {
+        label.textContent = userGender === 'female' ? 'она'
+            : userGender === 'male' ? 'он' : 'не выбрано';
+    }
+    card.querySelectorAll('.gender-btn').forEach(btn => {
+        btn.classList.toggle('is-on', String(btn.dataset.gender || '') === userGender);
+    });
+}
+
+async function setGender(value) {
+    const want = (value === 'female' || value === 'male') ? value : '';
+    try {
+        const data = await apiPost('/api/user/gender',
+            { initData: tg.initData, gender: want });
+        userGender = (data && (data.gender === 'female' || data.gender === 'male'))
+            ? data.gender : '';
+        renderGenderCard();
+        if (typeof tg.showAlert === 'function') {
+            tg.showAlert(userGender === 'female' ? '✅ Записал: она'
+                : userGender === 'male' ? '✅ Записал: он'
+                : '✅ Пол не указываем — фразы будут нейтральными');
+        }
+    } catch (e) {
+        tg.showAlert(e.message || 'Не удалось сохранить — попробуй ещё раз');
+    }
+}
+
 // ============ КД РП: КНОПКА АДМИНА (задача 79) ============
 // Заказчик: «сделай кнопку в админ панели в апке чтобы я мог переключать есть
 // кд на рп команды все (5 часов) или нету (0 сек)». Состояние живёт на сервере
@@ -1257,23 +1298,22 @@ function renderLoveCooldownCard(data) {
     if (data && typeof data.love_cooldown_enabled === 'boolean') {
         loveCooldownEnabled = data.love_cooldown_enabled;
     }
-    const on = Boolean(loveCooldownEnabled);
+    // Задача 105: кулдаун стал жёстким правилом (5 часов на все РП, у пары
+    // и у одиночки), поэтому карточка просто показывает состояние — тумблера
+    // больше нет: именно «выключение» и ломало ожидание.
+    loveCooldownEnabled = true;
     const state = document.getElementById('admin-lovecd-state');
     const hint = document.getElementById('admin-lovecd-hint');
     const btn = document.getElementById('admin-lovecd-btn');
     if (state) {
-        state.textContent = on ? 'включён · 5 ч' : 'выключен · 0 сек';
-        state.classList.toggle('is-on', !on);
+        state.textContent = 'всегда 5 ч';
+        state.classList.toggle('is-on', false);
     }
     if (hint) {
-        hint.textContent = on
-            ? 'Одно РП-действие в 5 часов на все команды сразу. Нажми, чтобы выключить.'
-            : 'РП без ожидания: награду можно получать за каждое действие. Нажми, чтобы вернуть 5 часов.';
+        hint.textContent = 'Одно РП-действие в 5 часов на все команды сразу — '
+            + 'в паре и у одиночки, у каждого игрока своё время.';
     }
-    if (btn) {
-        btn.textContent = on ? 'Выключить КД' : 'Включить КД (5 ч)';
-        btn.classList.toggle('is-on', false);
-    }
+    if (btn) btn.hidden = true;
 }
 
 async function loadAdminLoveCooldown() {

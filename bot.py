@@ -50,8 +50,17 @@ from love import (
     rp_action_key,
     RP_MAIN_ACTIONS,
     rp_self_text,
+    rp_pair_text,
+    busy_warning,
+    gender_from_name,
+    normalize_gender,
+    GENDER_FEMALE,
+    GENDER_MALE,
+    GENDER_UNKNOWN,
     solo_state,
     celebration_text,
+    reset_solo_branch,
+    reset_to_solo,
     LOVE_STAGES,
     LOVE_MEMBER_REWARDS_TABLE,
 )
@@ -1106,8 +1115,16 @@ def love_cooldown_enabled_sync() -> bool:
 
 
 def active_love_cooldown_seconds() -> int:
-    """Действующий КД РП: 5 часов или 0, если админ выключил его кнопкой."""
-    return love_cooldown_seconds() if love_cooldown_enabled_sync() else 0
+    """Действующий КД РП: ВСЕГДА 5 часов (задача 105).
+
+    Заказчик: «кулдаун в паре не работает, тестировалось с выключенным через
+    админку и включённым обратно — эффекта нет» и «нужно, чтобы кулдаун
+    работал одинаково во всех случаях». Поэтому тумблер больше не влияет на
+    награду: 5 часов — жёсткое правило и для пары, и для одиночки. Старые
+    значения в game_settings (`love_cooldown_enabled = 0`, `…seconds = off`)
+    игнорируются — именно они и «выключали» кулдаун молча.
+    """
+    return love_cooldown_seconds()
 
 
 # ================= ПРЕДУПРЕЖДЕНИЯ В ЧАТЕ (задача 44) =================
@@ -3442,7 +3459,9 @@ async def cmd_pair_set(message: Message):
     # иначе у игроков остаётся Unlove, которого в паре уже не должно быть.
     for uid in (first_id, second_id):
         try:
-            await drop_solo_status(uid)
+            # Задача 105: при создании пары одиночная ветка сгорает целиком.
+            await settle_solo_rewards(uid)
+            await reset_solo_branch_bot(uid)
         except Exception as exc:  # noqa: BLE001
             logger.warning("Не удалось сбросить Unlove при сведении %s: %s", uid, exc)
     first_mention = await _player_display(first_id)
@@ -3495,6 +3514,12 @@ async def cmd_pair_unset(message: Message):
         return await message.answer("❌ Не удалось развести пару, попробуй позже.")
     love_proposals.pop(first_id, None)
     love_proposals.pop(partner, None)
+    for member_id in (first_id, partner):
+        if member_id:
+            try:
+                await asyncio.to_thread(reset_to_solo, supabase, int(member_id))
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Одиночная ветка %s не обнулилась: %s", member_id, exc)
     await message.answer(
         f"💔 <b>{safe_text(message.from_user.full_name)} развёл пару</b>\n\n"
         f"{await _player_display(first_id)} и {await _player_display(partner)} "
@@ -3573,20 +3598,27 @@ async def cb_love_answer(callback: CallbackQuery):
         logger.error(f"Не удалось создать пару: {e}")
         return await callback.answer(_relationship_failure_message(e), show_alert=True)
 
-    # Задача 83: одиночный прогресс НЕ сгорает — призы, которые человек уже
-    # заработал в одиночку, остаются за ним (заказчик: «кто раньше получал —
-    # не получает» быть не должно). Вызов оставлен для совместимости.
-    await drop_solo_status(proposer_id)
-    await drop_solo_status(target_id)
-    # Задача 84: перед вступлением в пару закрываем одиночные награды — иначе
-    # после смены ветки они бы «зависли» неподтверждёнными.
+    # Задача 105: при создании пары одиночная ветка СГОРАЕТ у обоих —
+    # прогресс, уровень и отметки наград. Заработанные коины не отбираем.
+    # Сначала закрываем недоплаченные одиночные награды (деньги игроку), и
+    # только потом чистим прогресс: иначе «долг» исчезнет вместе с ним.
     for member_id in (proposer_id, target_id):
         await settle_solo_rewards(member_id)
+        await reset_solo_branch_bot(member_id)
     love_proposals.pop(target_id, None)
     await callback.message.edit_text(
         f"💗 <b>Теперь вы пара!</b>\n\n{_stage_text(0)}",
         parse_mode="HTML")
     await callback.answer("💗")
+
+
+async def reset_solo_branch_bot(user_id) -> bool:
+    """Создание пары: одиночный прогресс и отметки наград сгорают (задача 105)."""
+    try:
+        return await asyncio.to_thread(reset_solo_branch, supabase, int(user_id))
+    except Exception as exc:  # noqa: BLE001 — пара важнее сброса
+        logger.warning("Одиночная ветка %s не сбросилась: %s", user_id, exc)
+        return False
 
 
 async def settle_solo_rewards(user_id) -> list:
@@ -3676,6 +3708,15 @@ async def cmd_love_break(message: Message):
     partner = _partner_of(row, message.from_user.id)
     love_proposals.pop(partner, None)
     love_proposals.pop(message.from_user.id, None)
+    # Задача 105: после разрыва оба уходят в одиночки с НУЛЁМ (уровень 1),
+    # прошлое значение в новую ветку не подтягивается. Коины остаются.
+    for member_id in (message.from_user.id, partner):
+        if not member_id:
+            continue
+        try:
+            await asyncio.to_thread(reset_to_solo, supabase, int(member_id))
+        except Exception as exc:  # noqa: BLE001 — разрыв важнее сброса
+            logger.warning("Одиночная ветка %s не обнулилась: %s", member_id, exc)
     partner_mention = await _player_display(partner)
     # Задача 84: честно говорим, что доплатили ИМЕННО этому игроку.
     my_break_rewards = _granted_for(paid_before_break, message.from_user.id)
@@ -3750,23 +3791,27 @@ async def love_top_rows():
 
 
 def _love_top_line(place, name_cell, score, solo: bool = False) -> str:
-    """Строка таблицы: место, ник, уровень, прогресс, заработанные коины."""
+    """Строка таблицы: место, ник(и), уровень и прогресс по шкале.
+
+    Задача 105: «в обеих таблицах убрать любые суммы: сколько получено,
+    сколько заработано, баланс, размеры призов». Остались только место, ник,
+    уровень и прогресс.
+    """
     heart = "💔" if solo else "❤️"
     level = public_stage(score, solo)["level"]
-    earned = _love_earned(score, solo)
     medals = {1: "🥇", 2: "🥈", 3: "🥉"}
     mark = medals.get(place, f"{place}.")
     return (f"{mark} <b>{name_cell}</b>\n"
-            f"     {level} ур. · {_love_progress_pair(score, solo)} {heart} · "
-            f"💰 {_coins_fmt(earned)}")
+            f"     {level} ур. · {_love_progress_pair(score, solo)} {heart}")
 
 
 @dp.message(F.text.func(is_top_love_cmd))
 async def cmd_top_love(message: Message):
     """«топ отношений» — ОДНА таблица: сверху пары, снизу одиночки (ТЗ 104).
 
-    Показываем место, ник, уровень, прогресс и уже заработанные коины.
-    Названий и сумм будущих наград нет: механика секретная.
+    Задача 105: в таблице только место, ник(и), уровень и прогресс по шкале.
+    Никаких сумм — ни «заработано», ни баланса, ни размеров призов: механика
+    наград секретная.
     """
     try:
         pairs, solos, names = await love_top_rows()
@@ -3774,9 +3819,11 @@ async def cmd_top_love(message: Message):
         logger.warning("Топ отношений недоступен: %s", exc)
         return await message.answer("❌ Не удалось загрузить топ, попробуй позже.")
 
+    # Сортировка: пары — по общей шкале любви, одиночки — по шкале одиночества,
+    # по убыванию (ТЗ). Нулевые одиночки тоже видны: после расставания человек
+    # должен появиться в таблице одиноких, а не исчезнуть из обеих.
     pairs = sorted(pairs, key=lambda row: int(row.get("love") or 0), reverse=True)
-    solos = sorted([row for row in solos if int(row.get("love") or 0) > 0],
-                   key=lambda row: int(row.get("love") or 0), reverse=True)
+    solos = sorted(solos, key=lambda row: int(row.get("love") or 0), reverse=True)
 
     lines = ["💗 <b>ТОП ОТНОШЕНИЙ</b>", "━━━━━━━━━━━━━━━━━━━━", ""]
     lines.append(f"💞 <b>В отношениях — {len(pairs)}</b>")
@@ -3832,16 +3879,6 @@ def _love_progress_pair(score, solo: bool = False) -> str:
     if info["next_level"] is None:
         return str(info["love"])
     return f"{info['love']}/{int(info['need'] or 0)}"
-
-
-def _love_earned(score, solo: bool = False) -> int:
-    """Сколько коинов игрок уже заработал на уровнях (награды 2..текущий)."""
-    current = stage_index(score, solo)
-    total = 0
-    for stage in stages_for(solo):
-        if 1 <= int(stage.get("index", -1)) <= current:
-            total += int(stage.get("reward") or 0)
-    return total
 
 
 async def _plain_name(user_id) -> str:
@@ -4440,8 +4477,9 @@ async def _notify_stage_rewards(row, actor_id, granted) -> None:
                 partner_name = ""
             if partner_name:
                 partner_name = "@" + partner_name.lstrip("@")
-        balance = await _stage_brand_new_balance(uid)
         for stage in mine:
+            # Баланс — после начисления именно этого уровня (задача 105).
+            balance = await _stage_brand_new_balance(uid)
             text = celebration_text(stage, stage.get("reward"),
                                     partner_name=partner_name,
                                     balance=balance,
@@ -4452,9 +4490,74 @@ async def _notify_stage_rewards(row, actor_id, granted) -> None:
                 logger.info("Не удалось написать о награде за этап игроку %s: %s", uid, exc)
 
 
+# ==================== ПОЛ ИГРОКА (задача 105) ====================
+# Порядок из ТЗ:
+#   1) пол, указанный игроком в настройках профиля (users.gender, ставит
+#      Mini App через /api/user/gender);
+#   2) пол из профиля Telegram — Bot API его НЕ отдаёт (в объекте User такого
+#      поля нет), поэтому шаг оставлен точкой расширения;
+#   3) по имени из списков типичных женских/мужских имён;
+#   4) нейтральная форма («обнимает себя»).
+_GENDER_CACHE = {}          # user_id -> (пол, время)
+_GENDER_CACHE_TTL = 600.0   # профиль могли поменять — раз в 10 минут перечитываем
+
+
+def _gender_from_profile_sync(uid: int) -> str:
+    """Пол из настроек профиля (колонка users.gender). Нет колонки — пусто."""
+    for columns in ("gender", "*"):
+        try:
+            rows = (supabase.table("users").select(columns)
+                    .eq("user_id", int(uid)).limit(1).execute().data) or []
+        except Exception:  # noqa: BLE001 — колонки/таблицы может не быть
+            continue
+        if rows:
+            return normalize_gender((rows[0] or {}).get("gender"))
+        return GENDER_UNKNOWN
+    return GENDER_UNKNOWN
+
+
+def _telegram_gender(user) -> str:
+    """Пол из профиля Telegram. Bot API его не отдаёт — всегда пусто.
+
+    Оставлено явным шагом, как требует ТЗ: если Telegram когда-нибудь начнёт
+    присылать поле, достаточно вернуть его здесь.
+    """
+    return GENDER_UNKNOWN
+
+
+async def detect_gender(user_id, name="") -> str:
+    """Пол игрока по цепочке из ТЗ: профиль → Telegram → имя → нейтрально."""
+    try:
+        uid = int(user_id)
+    except (TypeError, ValueError):
+        return gender_from_name(name)
+    now = time.time()
+    cached = _GENDER_CACHE.get(uid)
+    if cached and now - cached[1] < _GENDER_CACHE_TTL:
+        if cached[0]:
+            return cached[0]
+        return gender_from_name(name) or GENDER_UNKNOWN
+    profile = GENDER_UNKNOWN
+    try:
+        profile = await asyncio.to_thread(_gender_from_profile_sync, uid)
+    except Exception:  # noqa: BLE001
+        profile = GENDER_UNKNOWN
+    value = profile or gender_from_name(name) or GENDER_UNKNOWN
+    _GENDER_CACHE[uid] = (value, now)
+    if len(_GENDER_CACHE) > 5000:
+        for key in list(_GENDER_CACHE)[:1000]:
+            _GENDER_CACHE.pop(key, None)
+    return value
+
+
 def _rp_text(message: Message, key: str, meta: dict, target_id=None,
-             target_name=None) -> str:
-    """«🫂 Vika обнимает Макса» / «🫂 Vika обнимает саму себя»."""
+             target_name=None, actor_gender=GENDER_UNKNOWN) -> str:
+    """«🫂 Vika обнимает Макса» / «🫂 Vika обнимает саму себя».
+
+    Задача 105: «себя» склоняется по полу автора (саму себя / самого себя /
+    себя). Фразы про второго человека не меняются — глагол по роду не
+    склоняется.
+    """
     actor_id = message.from_user.id
     head = (f"{meta.get('emoji', '💗')} <a href=\"tg://user?id={actor_id}\">"
             f"{safe_text(message.from_user.full_name)}</a> ")
@@ -4464,19 +4567,31 @@ def _rp_text(message: Message, key: str, meta: dict, target_id=None,
         same = False
     if target_id and not same:
         name = str(target_name or f"id{target_id}")
-        return head + f"{meta.get('text', '')} {_player_mention(int(target_id), name)}"
-    # ТЗ 104: одинокий и никого не отметил — действие на себя, без «обнимает»,
-    # без повторов и без «обнимает обнимает себя».
-    return head + rp_self_text(key)
+        mention = _player_mention(int(target_id), name)
+        return head + rp_pair_text(key, mention)
+    return head + rp_self_text(key, actor_gender)
 
 
-async def _send_celebrations(message: Message, stages, balance=None, solo: bool = False):
-    """Каждый новый уровень — отдельным сообщением (ТЗ 104)."""
+async def _send_celebrations(message: Message, stages, balance=None,
+                             solo: bool = False, uid=None):
+    """Каждый новый уровень — отдельным сообщением (ТЗ 104).
+
+    Задача 105: «при прыжке через несколько уровней каждая награда отдельным
+    сообщением, баланс в сообщении — реальный, сразу после начисления».
+    Поэтому баланс перечитываем ПЕРЕД каждым сообщением, а не один раз на
+    весь список: иначе во втором поздравлении была бы старая сумма.
+    """
     for stage in stages:
         if int(stage.get("reward") or 0) <= 0:
             continue
+        shown_balance = balance
+        if uid is not None:
+            fresh = await _stage_brand_new_balance(uid)
+            if fresh is not None:
+                shown_balance = fresh
         text = celebration_text(stage, stage.get("reward"), solo=solo,
-                                balance=balance, next_stage=_next_stage_public(stage))
+                                balance=shown_balance,
+                                next_stage=_next_stage_public(stage))
         try:
             await message.answer(text, parse_mode="HTML")
         except Exception as exc:  # noqa: BLE001 — чат мог быть закрыт
@@ -4508,6 +4623,8 @@ async def cmd_rp_action(message: Message):
     except (TypeError, ValueError):
         target_id, target_name = None, None
     row = await get_relationship(actor_id)
+    # Задача 105: пол автора нужен для «саму себя / самого себя / себя».
+    actor_gender = await detect_gender(actor_id, message.from_user.full_name)
 
     if row:
         partner_id = _partner_of(row, actor_id)
@@ -4515,27 +4632,32 @@ async def cmd_rp_action(message: Message):
             # ТЗ п.1: с посторонним — обычное действие, ни Love, ни кулдауна,
             # никаких «этот RP не засчитан».
             return await message.answer(
-                _rp_text(message, action, meta, target_id, target_name),
+                _rp_text(message, action, meta, target_id, target_name, actor_gender),
                 parse_mode="HTML")
-        return await pair_rp_action(message, action, meta, row, partner_id, target_name)
+        return await pair_rp_action(message, action, meta, row, partner_id,
+                                    target_name, actor_gender)
 
     if target_id:
         target_row = await get_relationship(target_id)
         if target_row:
-            # ТЗ п.2: он(а) занят(а) — предупреждение, начислений нет.
-            text = _rp_text(message, action, meta, target_id, target_name)
-            text += ("\n\n⚠️ Осторожно, он(а) занят(а), "
-                     "смотри не разрушь их отношения.")
+            # ТЗ п.2: занят(а) — предупреждение, начислений нет.
+            # Задача 105: «он занят» / «она занята» / «человек занят» вместо
+            # «он(а) занят(а)».
+            target_gender = await detect_gender(target_id, target_name)
+            text = _rp_text(message, action, meta, target_id, target_name, actor_gender)
+            text += "\n\n" + busy_warning(target_gender)
             return await message.answer(text, parse_mode="HTML")
-    return await solo_rp_action(message, action, meta, target_id, target_name)
+    return await solo_rp_action(message, action, meta, target_id, target_name,
+                                actor_gender)
 
 
 async def pair_rp_action(message: Message, action: str, meta: dict, row,
-                         partner_id, target_name=None):
+                         partner_id, target_name=None,
+                         actor_gender=GENDER_UNKNOWN):
     """РП со своим партнёром: +1..10 ❤️ Love в общий счёт пары + кулдаун 5 ч."""
     actor_id = message.from_user.id
     partner_name = await _display_name(message, partner_id, target_name)
-    text = _rp_text(message, action, meta, partner_id, partner_name)
+    text = _rp_text(message, action, meta, partner_id, partner_name, actor_gender)
     async with love_action_lock(actor_id, action):
         left = await love_cooldown_left(actor_id, action)
         if left > 0:
@@ -4557,20 +4679,23 @@ async def pair_rp_action(message: Message, action: str, meta: dict, row,
     my_rewards = [item for item in _granted_for(granted, actor_id)
                   if int(item.get("reward") or 0) > 0]
     if my_rewards:
-        await _send_celebrations(message, my_rewards,
-                                 balance=await _stage_brand_new_balance(actor_id))
+        await _send_celebrations(message, my_rewards, uid=actor_id)
+    # Задача 105: поздравления уходят ОБОИМ, даже если автору в этот раз ничего
+    # не досталось (например, он уже получал этот уровень, а партнёр — нет).
+    if granted:
         await _notify_stage_rewards(row, actor_id, granted)
 
 
 async def solo_rp_action(message: Message, action: str, meta: dict,
-                         target_id=None, target_name=None):
+                         target_id=None, target_name=None,
+                         actor_gender=GENDER_UNKNOWN):
     """РП без пары: +1..10 💔 Unlove только автору (ТЗ 104)."""
     actor_id = message.from_user.id
     if target_id:
         name = await _display_name(message, target_id, target_name)
-        text = _rp_text(message, action, meta, target_id, name)
+        text = _rp_text(message, action, meta, target_id, name, actor_gender)
     else:
-        text = _rp_text(message, action, meta)
+        text = _rp_text(message, action, meta, actor_gender=actor_gender)
     async with love_action_lock(actor_id, action):
         left = await love_cooldown_left(actor_id, action)
         if left > 0:
@@ -4590,8 +4715,7 @@ async def solo_rp_action(message: Message, action: str, meta: dict,
         parse_mode="HTML")
     paid = [item for item in (granted or []) if int(item.get("reward") or 0) > 0]
     if paid:
-        await _send_celebrations(message, paid, solo=True,
-                                 balance=await _stage_brand_new_balance(actor_id))
+        await _send_celebrations(message, paid, solo=True, uid=actor_id)
 
 
 @dp.callback_query(F.data.startswith("love_ice|"))
