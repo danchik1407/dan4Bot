@@ -2607,31 +2607,33 @@ function renderAchievements() {
 // Сервер уже начислил коины ОБОИМ партнёрам, здесь только текст.
 function stageCelebrationText(items) {
     const list = Array.isArray(items) ? items : [];
-    if (!list.length) return '💗 ПОЗДРАВЛЯЕМ!\n\nВы перешли на новый уровень отношений — награда уже на балансе.';
+    if (!list.length) {
+        return '💗 ПОЗДРАВЛЯЕМ!\n\nВы перешли на новый уровень — награда уже на балансе.';
+    }
+    // Задача 104: формат один с ботом — блоки через пустую строку, «уровень
+    // одиночества» и 💔 у одиночек, название следующего уровня НЕ показываем
+    // (механика секретная), только его номер и сколько нужно.
     return list.map(item => {
+        const solo = Boolean(item.solo);
+        const heart = solo ? '💔' : '❤️';
+        const kind = solo ? 'одиночества' : 'отношений';
         const lines = ['🎉 ПОЗДРАВЛЯЕМ!', '',
-            `Вы перешли на ${item.level} уровень отношений`];
-        if (item.title) lines.push(`💗 «${item.title}»`);
+            `Вы перешли на ${item.level} уровень ${kind}`, ''];
+        if (item.title) lines.push(`${heart} «${item.title}»`, '');
         if (Number(item.reward) > 0) {
-            lines.push('');
-            if (item.solo) {
-                lines.push(`🎁 Награда: +${item.reward_text} коинов — уже на балансе`);
-            } else {
-                const partner = item.partner_name ? ` с ${item.partner_name}` : '';
-                lines.push(`🎁 Награда за новый уровень${partner}:`);
-                lines.push(`+${item.reward_text} коинов каждому — уже на балансе`);
-            }
+            lines.push(`🎁 Награда: +${item.reward_text} коинов — уже на балансе`, '');
         }
         if (item.balance != null) {
-            lines.push(`💰 Теперь на балансе: ${formatCoins(Number(item.balance))} коинов`);
+            lines.push(`💰 Теперь на балансе: ${formatCoins(Number(item.balance))} коинов`, '');
         }
         if (item.next_level) {
-            lines.push('');
             lines.push(`➡️ Следующий уровень — ${item.next_level}` +
-                (item.next_title ? ` «${item.next_title}»` : '') +
-                (Number(item.next_need) > 0 ? `, нужно ${formatCoins(Number(item.next_need))} Love❤️` : ''));
+                (Number(item.next_need) > 0
+                    ? `, нужно ${formatCoins(Number(item.next_need))} ${heart}` : ''));
+        } else {
+            lines.push(`💞 Это финальный уровень — счёт растёт дальше ${heart}`);
         }
-        return lines.join('\n');
+        return lines.join('\n').replace(/\n+$/, '');
     }).join('\n\n');
 }
 
