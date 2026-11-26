@@ -89,7 +89,7 @@ async def _http_json(url, method: str = "GET", params=None, payload=None, timeou
 
 # Номер сборки: по нему из /api/health видно, что на сервисе НЕ старый код.
 # Если после деплоя здесь прежнее значение — Render ещё не перезапустился.
-API_BUILD = "2026-10-27-task103-board-avatars"
+API_BUILD = "2026-10-27-task104-love-system"
 
 # Момент старта процесса. По нему видно, что сервис только что «проснулся»:
 # Render на бесплатном тарифе усыпляет Web Service через 15 минут без входящих
@@ -8621,7 +8621,8 @@ def _love_solo_for(user_id) -> dict:
     except Exception:
         raw = {}
     score = _safe_int(raw.get("love"), 0)
-    level = love_public_stage(score)
+    # Задача 104: у одиночек своя ветка названий уровней.
+    level = love_public_stage(score, solo=True)
     return {
         "solo": True,
         "unlove": score,
@@ -8791,7 +8792,8 @@ def _stage_celebration_payload(stage, amount, partner_name="", balance=None, sol
         "balance": balance,
         "solo": bool(solo),
         "next_level": nxt.get("level"),
-        "next_title": nxt.get("title") or "",
+        # Задача 104: название следующего уровня — секрет, не отдаём.
+        "next_title": "",
         "next_need": nxt.get("love_need") or 0,
     }
 

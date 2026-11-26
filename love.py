@@ -38,6 +38,28 @@ LOVE_STAGES = [
     {"index": 7, "min": 20000, "max": None, "title": "Вечная любовь", "reward": 500000},
 ]
 
+# Задача 104 (ТЗ «Система Любовь»): у одиночек СВОИ названия уровней при тех
+# же границах и тех же призах. Раньше одиночке показывали названия парных
+# этапов («Близость», «Вечная любовь») — по ТЗ это отдельная ветка:
+#   Знакомство с самим собой · Уверенный одиночка · Бродяга · Депрессивный ·
+#   Страдалец с бокалом вина · Одинокий волк · Легенда одиноких · Всю жизнь один
+SOLO_STAGES = [
+    {"index": 0, "min": 0, "max": 50, "title": "Знакомство с самим собой", "reward": 0},
+    {"index": 1, "min": 50, "max": 200, "title": "Уверенный одиночка", "reward": 1000},
+    {"index": 2, "min": 200, "max": 500, "title": "Бродяга", "reward": 3000},
+    {"index": 3, "min": 500, "max": 2000, "title": "Депрессивный", "reward": 8000},
+    {"index": 4, "min": 2000, "max": 5000, "title": "Страдалец с бокалом вина", "reward": 15000},
+    {"index": 5, "min": 5000, "max": 12000, "title": "Одинокий волк", "reward": 40000},
+    {"index": 6, "min": 12000, "max": 20000, "title": "Легенда одиноких", "reward": 100000},
+    {"index": 7, "min": 20000, "max": None, "title": "Всю жизнь один", "reward": 500000},
+]
+
+
+def stages_for(solo: bool = False) -> list:
+    """Список этапов нужной ветки: пары или одиночки."""
+    return SOLO_STAGES if solo else LOVE_STAGES
+
+
 # Этапы, за которые приз не выдаётся вообще (первый уровень).
 LOVE_FREE_STAGES = frozenset({0})
 
@@ -46,7 +68,20 @@ LOVE_FREE_STAGES = frozenset({0})
 LOVE_STAGE_TARGETS = [50, 200, 500, 2000, 5000, 12000, 20000]
 
 # Экономика Love.
-LOVE_ACTION_BONUS = 10              # +10 Love коинов в общий банк пары за действие
+# Задача 104 (ТЗ): «одна RP-команда даёт от 1 до 10 любви (рандом) — всегда
+# разное число, не фиксированные 10». LOVE_ACTION_BONUS оставлен как «сколько
+# максимум» (его читают старые сборки Mini App и админка), а начисляется
+# LOVE_GAIN_MIN..LOVE_GAIN_MAX через love_gain().
+LOVE_ACTION_BONUS = 10              # максимум за одно действие (совместимость)
+LOVE_GAIN_MIN = 1
+LOVE_GAIN_MAX = 10
+
+
+def love_gain(rng=None) -> int:
+    """Сколько Love/Unlove начислить за одно РП: случайное 1..10."""
+    import random as _random
+    source = rng or _random
+    return int(source.randint(LOVE_GAIN_MIN, LOVE_GAIN_MAX))
 # Задача 76 (прямое требование заказчика): «если использовали одну РП-команду,
 # больше никакие нельзя использовать в течение 5 часов». То есть КД — ОДИН на
 # игрока, общий для всех РП. Раньше (задача 61) он считался на каждую команду
@@ -141,67 +176,124 @@ def format_love_cooldown(seconds=None, action=None) -> str:
 # РП-команды: `поцеловать @user`, `обнять @user` и т.д. Ключи — то, что пишет
 # игрок; значение — эмодзи и текст для сообщения.
 RP_ACTIONS = {
-    "прижать": {"emoji": "🤗", "text": "крепко прижимает к себе"},
-    "поцеловать": {"emoji": "😘", "text": "целует"},
-    "обнять": {"emoji": "🫂", "text": "обнимает"},
-    "погладить": {"emoji": "🖐️", "text": "гладит по голове"},
-    "укусить": {"emoji": "😈", "text": "игриво кусает"},
-    "шлепнуть": {"emoji": "🍑", "text": "шлёпает"},
-    "держать за руку": {"emoji": "🤝", "text": "берёт за руку"},
-    "укрыть пледом": {"emoji": "🛌", "text": "укрывает пледом"},
-    "накормить": {"emoji": "🍰", "text": "угощает вкусненьким"},
-    "станцевать": {"emoji": "💃", "text": "приглашает на танец"},
-    # Расширенный набор (задача 29): список доступен командой «все рп».
-    "поцеловать в щёку": {"emoji": "😚", "text": "целует в щёку"},
-    "поцеловать в лоб": {"emoji": "😌", "text": "целует в лоб"},
-    "чмокнуть": {"emoji": "💋", "text": "чмокает"},
-    "обнять крепко": {"emoji": "🫂", "text": "обнимает так крепко, что не отпускает"},
-    "приобнять": {"emoji": "🫶", "text": "приобнимает за плечи"},
-    "погладить по волосам": {"emoji": "💆", "text": "перебирает волосы"},
-    "щекотать": {"emoji": "🤭", "text": "щекочет"},
-    "подмигнуть": {"emoji": "😉", "text": "подмигивает"},
-    "укутать": {"emoji": "🧣", "text": "укутывает в шарф"},
-    "носить на руках": {"emoji": "👐", "text": "берёт на руки"},
-    "сделать массаж": {"emoji": "💆‍♂️", "text": "делает массаж"},
-    "шептать на ушко": {"emoji": "🤫", "text": "шепчет что-то на ушко"},
-    "подарить цветы": {"emoji": "💐", "text": "дарит букет цветов"},
-    "спеть серенаду": {"emoji": "🎶", "text": "поёт серенаду"},
-    "дать пять": {"emoji": "🙌", "text": "даёт пять"},
-    "чокнуться": {"emoji": "🥂", "text": "чокается бокалом"},
-    "смотреть фильм": {"emoji": "🎬", "text": "устраивается смотреть фильм"},
-    "гулять под луной": {"emoji": "🌙", "text": "зовёт гулять под луной"},
-    "танцевать вальс": {"emoji": "🩰", "text": "кружит в вальсе"},
-    # Задача 70: интимные команды «на свой вкус» — по просьбе заказчика.
-    # Тексты держим флиртующими, но без пошлости: бот играет и в чатах.
-    "соблазнить": {"emoji": "🔥", "text": "соблазняет, глядя в глаза"},
-    "поцеловать в шею": {"emoji": "🫦", "text": "целует в шею"},
-    "прикусить за ушко": {"emoji": "😏", "text": "прикусывает за ушко"},
-    "обнять сзади": {"emoji": "🫂", "text": "обнимает со спины, прижимаясь"},
-    "затащить в постель": {"emoji": "🛏️", "text": "утаскивает в постель"},
-    "лечь в обнимку": {"emoji": "🌙", "text": "ложится рядом в обнимку"},
-    "провести ночь": {"emoji": "🌃", "text": "проводит вместе всю ночь"},
-    "снять одежду": {"emoji": "🫣", "text": "медленно снимает одежду"},
-    "заняться любовью": {"emoji": "💞", "text": "занимается любовью"},
-    "сделать сюрприз": {"emoji": "🎁", "text": "устраивает романтический сюрприз"},
+    # ---- Основной набор (ТЗ задачи 104: «Список (все рп)») ----
+    "обнять": {"emoji": "🫂", "text": "обнимает", "self": "обнимает саму себя"},
+    "взять за руку": {"emoji": "🤝", "text": "берёт за руку",
+                      "self": "берёт саму себя за руку"},
+    "помахать": {"emoji": "👋", "text": "машет", "self": "машет саму себе"},
+    "поцеловать": {"emoji": "😘", "text": "целует", "self": "целует саму себя"},
+    "обнять в сон": {"emoji": "😴", "text": "обнимает перед сном",
+                     "self": "обнимает саму себя перед сном"},
+    "поцеловать в щёку": {"emoji": "😚", "text": "целует в щёку",
+                          "self": "целует саму себя в щёку"},
+    "прижать к себе": {"emoji": "🤗", "text": "прижимает к себе",
+                       "self": "прижимает саму себя к себе"},
+    "подарить подарок": {"emoji": "🎁", "text": "дарит подарок",
+                         "self": "дарит подарок самой себе"},
+    "написать сообщение": {"emoji": "💌", "text": "пишет сообщение",
+                           "self": "пишет сообщение самой себе"},
+    # ---- Дополнительные команды (остались с прошлых задач, все работают) ----
+    "прижать": {"emoji": "🤗", "text": "крепко прижимает к себе",
+                "self": "крепко прижимает саму себя к себе"},
+    "погладить": {"emoji": "🖐️", "text": "гладит по голове",
+                  "self": "гладит саму себя по голове"},
+    "укусить": {"emoji": "😈", "text": "игриво кусает", "self": "игриво кусает саму себя"},
+    "шлепнуть": {"emoji": "🍑", "text": "шлёпает", "self": "шлёпает саму себя"},
+    "держать за руку": {"emoji": "🤝", "text": "берёт за руку",
+                        "self": "берёт саму себя за руку"},
+    "укрыть пледом": {"emoji": "🛌", "text": "укрывает пледом",
+                      "self": "укрывает саму себя пледом"},
+    "накормить": {"emoji": "🍰", "text": "угощает вкусненьким",
+                  "self": "угощает вкусненьким саму себя"},
+    "станцевать": {"emoji": "💃", "text": "приглашает на танец",
+                   "self": "приглашает саму себя на танец"},
+    "поцеловать в лоб": {"emoji": "😌", "text": "целует в лоб",
+                         "self": "целует саму себя в лоб"},
+    "чмокнуть": {"emoji": "💋", "text": "чмокает", "self": "чмокает саму себя"},
+    "обнять крепко": {"emoji": "🫂", "text": "обнимает так крепко, что не отпускает",
+                      "self": "обнимает саму себя так крепко, что не отпускает"},
+    "приобнять": {"emoji": "🫶", "text": "приобнимает за плечи",
+                  "self": "приобнимает саму себя за плечи"},
+    "погладить по волосам": {"emoji": "💆", "text": "перебирает волосы",
+                             "self": "перебирает свои волосы"},
+    "щекотать": {"emoji": "🤭", "text": "щекочет", "self": "щекочет саму себя"},
+    "подмигнуть": {"emoji": "😉", "text": "подмигивает", "self": "подмигивает саму себе"},
+    "укутать": {"emoji": "🧣", "text": "укутывает в шарф",
+                "self": "укутывает саму себя в шарф"},
+    "носить на руках": {"emoji": "👐", "text": "берёт на руки",
+                        "self": "берёт саму себя на руки"},
+    "сделать массаж": {"emoji": "💆‍♂️", "text": "делает массаж",
+                       "self": "делает массаж саму себе"},
+    "шептать на ушко": {"emoji": "🤫", "text": "шепчет что-то на ушко",
+                        "self": "шепчет что-то саму себе на ушко"},
+    "подарить цветы": {"emoji": "💐", "text": "дарит букет цветов",
+                       "self": "дарит букет цветов самой себе"},
+    "спеть серенаду": {"emoji": "🎶", "text": "поёт серенаду",
+                       "self": "поёт серенаду самой себе"},
+    "дать пять": {"emoji": "🙌", "text": "даёт пять", "self": "даёт пять саму себе"},
+    "чокнуться": {"emoji": "🥂", "text": "чокается бокалом",
+                  "self": "чокается бокалом сама с собой"},
+    "смотреть фильм": {"emoji": "🎬", "text": "устраивается смотреть фильм",
+                       "self": "устраивается смотреть фильм в одиночестве"},
+    "гулять под луной": {"emoji": "🌙", "text": "зовёт гулять под луной",
+                         "self": "зовёт саму себя гулять под луной"},
+    "танцевать вальс": {"emoji": "🩰", "text": "кружит в вальсе",
+                        "self": "кружит в вальсе саму себя"},
+    "соблазнить": {"emoji": "🔥", "text": "соблазняет, глядя в глаза",
+                   "self": "соблазняет саму себя, глядя в зеркало"},
+    "поцеловать в шею": {"emoji": "🫦", "text": "целует в шею",
+                         "self": "целует саму себя в шею"},
+    "прикусить за ушко": {"emoji": "😏", "text": "прикусывает за ушко",
+                          "self": "прикусывает саму себя за ушко"},
+    "обнять сзади": {"emoji": "🫂", "text": "обнимает со спины, прижимаясь",
+                     "self": "обнимает саму себя со спины"},
+    "затащить в постель": {"emoji": "🛏️", "text": "утаскивает в постель",
+                           "self": "утаскивает саму себя в постель"},
+    "лечь в обнимку": {"emoji": "🌙", "text": "ложится рядом в обнимку",
+                       "self": "ложится в обнимку сама с собой"},
+    "провести ночь": {"emoji": "🌃", "text": "проводит вместе всю ночь",
+                      "self": "проводит ночь наедине с собой"},
+    "снять одежду": {"emoji": "🫣", "text": "медленно снимает одежду",
+                     "self": "медленно снимает с себя одежду"},
+    "заняться любовью": {"emoji": "💞", "text": "занимается любовью",
+                         "self": "занимается любовью сама с собой"},
+    "сделать сюрприз": {"emoji": "🎁", "text": "устраивает романтический сюрприз",
+                        "self": "устраивает романтический сюрприз самой себе"},
 }
 
+# ТЗ задачи 104: этот набор — «список всех РП-действий» (команда «все рп»
+# показывает его первым, остальные команды идут ниже отдельной группой).
+RP_MAIN_ACTIONS = ["обнять", "взять за руку", "помахать", "поцеловать",
+                   "обнять в сон", "поцеловать в щёку", "прижать к себе",
+                   "подарить подарок", "написать сообщение"]
 
-def stage_index(score) -> int:
-    """Индекс этапа по накопленным Love коинам (мусор → 0)."""
+
+def rp_self_text(key) -> str:
+    """Как описать действие, когда игрок один и никого не отметил.
+
+    ТЗ: «🫂 Vika обнимает саму себя» — раньше бот писал без объекта
+    («обнимает») или дублировал слово («обнимает обнимает себя»).
+    """
+    meta = RP_ACTIONS.get(str(key or "")) or {}
+    return str(meta.get("self") or meta.get("text") or "обнимает саму себя")
+
+
+def stage_index(score, solo: bool = False) -> int:
+    """Индекс этапа по накопленным коинам любви (мусор → 0)."""
     try:
         value = max(0, int(float(score or 0)))
     except (TypeError, ValueError):
         value = 0
-    for stage in reversed(LOVE_STAGES):
+    for stage in reversed(stages_for(solo)):
         if value >= stage["min"]:
             return stage["index"]
     return 0
 
 
-def stage_info(score) -> dict:
+def stage_info(score, solo: bool = False) -> dict:
     """Полная карточка этапа: границы, название, награда и прогресс."""
-    index = stage_index(score)
-    stage = LOVE_STAGES[index]
+    index = stage_index(score, solo)
+    stage = stages_for(solo)[index]
     try:
         value = max(0, int(float(score or 0)))
     except (TypeError, ValueError):
@@ -223,19 +315,21 @@ def stage_info(score) -> dict:
     }
 
 
-def next_stage(score):
-    """Следующий этап (или None, если уже «Вечная любовь»)."""
-    index = stage_index(score)
-    if index + 1 >= len(LOVE_STAGES):
+def next_stage(score, solo: bool = False):
+    """Следующий этап (или None, если уровень уже финальный)."""
+    stages = stages_for(solo)
+    index = stage_index(score, solo)
+    if index + 1 >= len(stages):
         return None
-    return dict(LOVE_STAGES[index + 1])
+    return dict(stages[index + 1])
 
 
-def stages_reached(previous_score, new_score) -> list:
-    """Этапы, которые пара перешагнула за одно действие: за каждый — награда."""
-    previous_index = stage_index(previous_score)
-    new_index = stage_index(new_score)
-    return [dict(stage) for stage in LOVE_STAGES[previous_index + 1:new_index + 1]]
+def stages_reached(previous_score, new_score, solo: bool = False) -> list:
+    """Этапы, которые перешагнули за одно действие: за каждый — награда."""
+    stages = stages_for(solo)
+    previous_index = stage_index(previous_score, solo)
+    new_index = stage_index(new_score, solo)
+    return [dict(stage) for stage in stages[previous_index + 1:new_index + 1]]
 
 
 def stage_is_paid(stage) -> bool:
@@ -260,17 +354,19 @@ def _safe_int(value, default=0):
 # Задача 29: этапы и награды за них — СЕКРЕТНАЯ механика. Игрок видит только
 # текущий уровень пары и Love коины, без сумм наград и без «следующего этапа»:
 # интерес должен быть в самом процессе, а не в таблице выплат.
-def public_stage(score) -> dict:
-    """Уровень пары без наград: index, title, love, progress.
+def public_stage(score, solo: bool = False) -> dict:
+    """Уровень без наград: index, title, love, progress.
 
     Задача 55: добавляем «сколько до следующего уровня». Без этого игрок видел
     «Уровень 1 · Случайное знакомство · Love 0» и не понимал, что вообще
     двигает уровень: казалось, что счёт не растёт и наград нет.
+    Задача 104: у одиночек своя ветка названий (SOLO_STAGES).
     """
-    info = stage_info(score)
+    info = stage_info(score, solo)
+    stages = stages_for(solo)
     index = info["index"]
-    current = LOVE_STAGES[index]
-    nxt = LOVE_STAGES[index + 1] if index + 1 < len(LOVE_STAGES) else None
+    current = stages[index]
+    nxt = stages[index + 1] if index + 1 < len(stages) else None
     return {
         "level": index + 1,
         "index": index,
@@ -284,17 +380,24 @@ def public_stage(score) -> dict:
         # Сумму награды клиенту НЕ отдаём: призы не показываются заранее.
         "need": current["max"],
         "next_level": (index + 2) if nxt else None,
-        "next_title": nxt["title"] if nxt else None,
+        # Задача 104: название следующего уровня — секрет, наружу не отдаём.
+        "next_title": "",
         # Сколько Love осталось до следующего уровня (None — максимальный).
         "to_next": max(0, nxt["min"] - info["score"]) if nxt else None,
     }
 
 
-def public_stages() -> list:
-    """Список уровней для клиента: номер, название и «сколько нужно Love»."""
+def public_stages(solo: bool = False) -> list:
+    """Список уровней для клиента: номер и «сколько нужно».
+
+    Задача 104: названия уровней — секрет (ТЗ: «не раскрывать заранее ни в
+    сообщениях, ни в информации, ни в топе»). Поэтому в публичном списке
+    остаются только номера и границы, `title` отдаём пустым — ключ сохранён,
+    чтобы старые сборки Mini App не падали.
+    """
     return [{"level": stage["index"] + 1, "index": stage["index"],
-             "title": stage["title"], "need": stage["max"], "min": stage["min"]}
-            for stage in LOVE_STAGES]
+             "title": "", "need": stage["max"], "min": stage["min"]}
+            for stage in stages_for(solo)]
 
 
 def next_level_text(score, currency: str = "Love") -> str:
@@ -310,22 +413,26 @@ def next_level_text(score, currency: str = "Love") -> str:
 
 
 def action_progress_text(score, solo: bool = False) -> str:
-    """«До уровня 2 — 10/50💔» — прогресс внутри текущего уровня.
+    """«➡️ До уровня 3 — 320/500❤️» — прогресс до следующего уровня.
 
-    Задача 72: заказчик прислал ровно такой вид ответа на РП-команду:
-        🫂 Broker обнимает
-        +10 Unlove💔
-        ➡️ До уровня 2 — 10/40💔
-    Числа — «сколько Love уже есть на этом уровне / сколько нужно до
-    следующего», поэтому видно и прибавку, и остаток, без слова «всего».
+    Задача 104 (ТЗ): формат ровно такой — сколько накоплено / сколько нужно
+    до следующего уровня (для пар — ❤️, для одиночек — 💔).
     """
-    info = public_stage(score)
+    info = public_stage(score, solo)
     heart = "💔" if solo else "❤️"
     if info["next_level"] is None:
         return f"💞 Максимальный уровень — {info['love']}{heart}"
-    have = max(0, info["love"] - int(info["stage_min"] or 0))
-    need = max(0, int(info["need"] or 0) - int(info["stage_min"] or 0))
-    return f"➡️ До уровня {info['next_level']} — {have}/{need}{heart}"
+    return (f"➡️ До уровня {info['next_level']} — "
+            f"{info['love']}/{int(info['need'] or 0)}{heart}")
+
+
+def level_info_text(score, solo: bool = False) -> str:
+    """«➡️ До уровня 4: ещё 180 ❤️» — строка для «любовь инфа»."""
+    info = public_stage(score, solo)
+    heart = "💔" if solo else "❤️"
+    if info["next_level"] is None:
+        return "💞 Это финальный уровень — счёт растёт дальше"
+    return f"➡️ До уровня {info['next_level']}: ещё {info['to_next']} {heart}"
 
 
 def _coins_fmt(amount) -> str:
@@ -334,56 +441,64 @@ def _coins_fmt(amount) -> str:
     return f"{value:,}".replace(",", " ")
 
 
+def _coin_word(amount) -> str:
+    """«1 коин» / «2 коина» / «5 коинов» — как в остальных текстах бота."""
+    value = _safe_int(amount, 0)
+    tail = abs(value) % 100
+    if 11 <= tail <= 19:
+        return "коинов"
+    tail %= 10
+    return "коин" if tail == 1 else ("коина" if 2 <= tail <= 4 else "коинов")
+
+
 def celebration_text(stage, amount_per_partner=0, solo: bool = False,
                      partner_name: str = "", balance=None,
                      next_stage=None) -> str:
-    """ПОЗДРАВЛЕНИЕ о новом уровне отношений (задача 81).
+    """ПОЗДРАВЛЕНИЕ о новом уровне (формат из ТЗ задачи 104).
 
-    Заказчик: «сделай красивый текст поздравительный, типа ты перешёл на новый
-    уровень, вот тебе награда» — раньше в ответе была одна сухая строка без
-    суммы, без «поздравляем» и без пояснения, что деньги уже на балансе.
-
-    Возвращает HTML (parse_mode="HTML"):
         🎉 ПОЗДРАВЛЯЕМ!
-        Вы перешли на 2 уровень отношений
-        💗 «Дружба влюблённых»
-        🎁 Награда: +1 000 коинов — уже на балансе
-        ...
+
+        Вы перешли на 3 уровень отношений
+
+        💗 «Близость»
+
+        🎁 Награда: +3 000 коинов — уже на балансе
+
+        💰 Теперь на балансе: 4 544 коинов
+
+        ➡️ Следующий уровень — 4, нужно 500 ❤️
+
+    Для одиночки — «3 уровень одиночества» и 💔. Названия и суммы СЛЕДУЮЩЕГО
+    уровня не показываем (секретная механика): только номер и сколько нужно.
     """
     stage = stage or {}
     index = _safe_int(stage.get("index", stage.get("stage")), 0)
     level = index + 1
     title = str(stage.get("title") or "")
     amount = _safe_int(amount_per_partner, 0) or _safe_int(stage.get("reward"), 0)
+    heart = "💔" if solo else "❤️"
+    kind = "одиночества" if solo else "отношений"
 
-    lines = ["🎉 <b>ПОЗДРАВЛЯЕМ!</b>", ""]
-    lines.append(f"Вы перешли на <b>{level} уровень отношений</b>")
+    lines = ["🎉 <b>ПОЗДРАВЛЯЕМ!</b>", "",
+             f"Вы перешли на <b>{level} уровень {kind}</b>", ""]
     if title:
-        lines.append(f"💗 «{title}»")
-    lines.append("")
+        lines += [f"{heart} «{title}»", ""]
     if amount > 0:
-        if solo:
-            lines.append(f"🎁 Награда: <b>+{_coins_fmt(amount)} коинов</b> — уже на балансе")
-        else:
-            partner = f" с {partner_name}" if partner_name else ""
-            lines.append(f"🎁 Награда за новый уровень{partner}:")
-            lines.append(f"<b>+{_coins_fmt(amount)} коинов каждому</b> — уже на балансе")
-            lines.append("У вас обоих уровень вырос одновременно, поэтому коины "
-                         "получил каждый.")
+        lines += [f"🎁 Награда: <b>+{_coins_fmt(amount)} {_coin_word(amount)}</b> — "
+                  f"уже на балансе", ""]
     if balance is not None:
-        lines.append(f"💰 Теперь на балансе: <b>{_coins_fmt(balance)}</b> коинов")
-    nxt_title = str((next_stage or {}).get("title") or "")
-    nxt_level = _safe_int((next_stage or {}).get("level"), 0)  # 0 — финальный уровень
+        lines += [f"💰 Теперь на балансе: <b>{_coins_fmt(balance)} "
+                  f"{_coin_word(balance)}</b>", ""]
+    nxt_level = _safe_int((next_stage or {}).get("level"), 0)
     if nxt_level:
-        lines.append("")
-        line = f"➡️ Следующий уровень — <b>{nxt_level}</b>"
-        if nxt_title:
-            line += f" «{nxt_title}»"
         need = _safe_int((next_stage or {}).get("love_need"), 0)
+        line = f"➡️ Следующий уровень — <b>{nxt_level}</b>"
         if need > 0:
-            line += f", нужно {_coins_fmt(need)} Love❤️"
+            line += f", нужно {_coins_fmt(need)} {heart}"
         lines.append(line)
-    return "\n".join(lines)
+    else:
+        lines.append(f"💞 Это финальный уровень — счёт растёт дальше {heart}")
+    return "\n".join(lines).rstrip()
 
 
 def stage_reached_text(stage, amount_per_partner, solo: bool = False) -> str:
@@ -1060,10 +1175,10 @@ def claim_solo_stage_rewards(supabase, user_id, score) -> list:
     uid = _safe_int(user_id, 0)
     if uid <= 0:
         return []
-    current_index = stage_index(score)
+    current_index = stage_index(score, solo=True)
     already = solo_paid_stages(supabase, uid)
     granted = []
-    for stage in LOVE_STAGES:
+    for stage in SOLO_STAGES:
         index = _safe_int(stage.get("index"), -1)
         # Задача 72: 1-й уровень не оплачивается и в одиночной ветке.
         if not stage_is_paid(stage) or index > current_index or index in already:
