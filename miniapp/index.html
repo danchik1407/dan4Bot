@@ -12,7 +12,7 @@
     <meta http-equiv="Pragma" content="no-cache">
     <meta http-equiv="Expires" content="0">
     <title>AURA GAME</title>
-    <link rel="stylesheet" href="style.css?v=aura-101a">
+    <link rel="stylesheet" href="style.css?v=aura-102a">
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
 </head>
 <body>
@@ -57,9 +57,6 @@
     </div>
     <!-- Сюда падают искры/ёлочки от нажатий кнопок (см. burstForElement). -->
     <div id="fx-layer" class="fx-layer" aria-hidden="true"></div>
-    <!-- Кнопка «звук»: админские эффекты со звуком, у игроков по умолчанию тихо. -->
-    <button id="ny-sound-btn" class="ny-sound-btn" type="button" hidden
-            onclick="toggleUiSound()" aria-label="Звук">🔇</button>
 
     <!-- Задача 67: «Технических работ» для игроков больше нет — вход открыт всем.
          Этот экран остался только на случай «сервер не ответил» (Render спит или
@@ -234,8 +231,27 @@
                     <p>Играй в разные режимы и скупай капсулы — пассивный доход идёт
                        постоянно.</p>
                 </div>
+                <!-- Задача 102: после финиша сервис сам начисляет призы и
+                     пишет в личку — здесь видно, что выплата прошла. -->
+                <div class="ny-board-paid" id="ny-board-paid" hidden></div>
                 <div class="ny-board-list" id="ny-board-list">
                     <p class="lb-empty">Загрузка…</p>
+                </div>
+                <!-- Заказчик: «а где ёлку проебал?» — ёлка вернулась, но теперь
+                     живёт ВНУТРИ карточки под таблицей и ничего не накрывает
+                     (раньше висела поверх экрана и закрывала суммы призов). -->
+                <div class="ny-board-footer" aria-hidden="true">
+                    <div class="ny-board-gifts">
+                        <span class="ny-board-gift">🎁</span>
+                        <span class="ny-board-gift g2">🎁</span>
+                        <span class="ny-board-gift g3">🧦</span>
+                    </div>
+                    <div class="ny-tree ny-tree-inboard">
+                        <div class="ny-tree-star">⭐</div>
+                        <div class="ny-tree-body"></div>
+                        <div class="ny-tree-lights"><i></i><i></i><i></i><i></i><i></i><i></i></div>
+                        <div class="ny-tree-trunk"></div>
+                    </div>
                 </div>
             </div>
 
@@ -907,6 +923,6 @@
          маленькой кнопкой ⚙️ рядом с ником в шапке (см. #admin-gear). -->
     </nav>
 
-    <script src="app.js?v=aura-101a" defer></script>
+    <script src="app.js?v=aura-102a" defer></script>
 </body>
 </html>

@@ -1856,19 +1856,37 @@ function coinLabel(value) {
     return `${formatCoins(n)} ${coinWord(n)}`;
 }
 
-// Как на макете: приз — таблетка с подарочком, ниже 20-го места — «Без приза».
+// Задача 102: заказчик — «приз слишком растянутый, сожми и замени слово
+// «коинов» самой монетой». Поэтому приз — число + картинка монеты, без слова.
 function boardPrizeText(prize) {
-    return prize > 0 ? coinLabel(prize) : 'Без приза';
+    return prize > 0 ? formatCoins(prize) : 'Без приза';
+}
+
+// Маленький круглый аватар игрока слева от ника. Нет фото — буква на градиенте.
+function boardAvatarHtml(player) {
+    const name = String((player && player.username) || 'Игрок').trim();
+    const url = String((player && player.avatar) || '').trim();
+    if (/^https?:\/\//i.test(url)) {
+        return `<img class="ny-board-ava" src="${escapeHtml(url)}" alt="" ` +
+               `loading="lazy" referrerpolicy="no-referrer">`;
+    }
+    const letter = escapeHtml((name.charAt(0) || '?').toUpperCase());
+    return `<span class="ny-board-ava is-empty" aria-hidden="true">${letter}</span>`;
 }
 
 function boardRowHtml(p) {
     const place = _safeCoinNumber(p.place);
     const mine = Boolean(p && p.is_me);
-    const cls = (place > 0 && place <= 3 ? `ny-board-row top-${place}` : 'ny-board-row')
-        + (mine ? ' is-me' : '');
     const earnedCoins = _safeCoinNumber(p.earned);
     const earned = `${formatCoins(earnedCoins)} ${coinWord(earnedCoins)}`;
     const prize = _safeCoinNumber(p.prize);
+    const prizeWanted = prize > 0 && !(p && p.pinned);
+    // Призовые места (1..20) подсвечены золотом: «первое место жёлтым, так же
+    // остальные 20 мест которые призовые» — просьба заказчика.
+    const cls = 'ny-board-row'
+        + (place > 0 && place <= 3 ? ` top-${place}` : '')
+        + (prizeWanted ? ' prize' : '')
+        + (mine ? ' is-me' : '');
     // Своя строка без места — приза у неё нет, поэтому «—». Обычные места
     // ниже 20-го показывают «Без приза» (это текст макета, не пустота).
     const prizeText = p && p.pinned ? '—' : boardPrizeText(prize);
@@ -1876,16 +1894,21 @@ function boardRowHtml(p) {
     const placeHtml = place > 0
         ? `${place === 1 ? '<span class="ny-board-crown">👑</span>' : ''}${place}`
         : '<span class="ny-board-you">Ты</span>';
+    const prizeHtml = prizeWanted
+        ? `<span class="ny-board-gift">🎁</span>${boardPrizeText(prize)}` +
+          `<img class="coin-img" src="coin.png" alt="коин">`
+        : `<span class="ny-board-gift">🎁</span>${prizeText}`;
     return `
         <div class="${cls}">
             <span class="ny-board-place">${placeHtml}</span>
             <span class="ny-board-player">
-                <span class="ny-board-name">${escapeHtml(shortName(p.username || 'Игрок'))}</span>
+                <span class="ny-board-name-row">
+                    ${boardAvatarHtml(p)}
+                    <span class="ny-board-name">${escapeHtml(shortName(p.username || 'Игрок'))}</span>
+                </span>
                 <span class="ny-board-earned">заработано: <b>${earned}</b></span>
             </span>
-            <span class="ny-board-prize${prize > 0 ? '' : ' no-prize'}">
-                <span class="ny-board-gift">🎁</span>${prizeText}
-            </span>
+            <span class="ny-board-prize${prizeWanted ? '' : ' no-prize'}">${prizeHtml}</span>
         </div>`;
 }
 
@@ -1914,6 +1937,7 @@ function renderNewYearBoard(data) {
     // Подписи «до финиша · …» больше нет (просьба заказчика), но таймер тикает.
     if (sub) sub.hidden = true;
     startBoardTimer(Number(data.seconds_left) || 0);
+    renderBoardPaid(data);
     const rows = (Array.isArray(data.players) ? data.players : []).slice();
     // Свою строку показываем всегда: если игрока нет в видимом топе (или он
     // админ и в публичный список не попадает) — добавляем её отдельной строкой.
@@ -1929,6 +1953,25 @@ function renderNewYearBoard(data) {
         return;
     }
     list.innerHTML = rows.map(boardRowHtml).join('');
+}
+
+// Задача 102: после финиша призы начисляет сам сервис. Экран честно говорит,
+// на каком он этапе: «начисляем» → «призы начислены, смотри личку».
+function renderBoardPaid(data) {
+    const box = document.getElementById('ny-board-paid');
+    if (!box) return;
+    const payouts = (data && data.payouts) || {};
+    const paidCount = _safeCoinNumber(payouts.paid_count);
+    if (!data || !data.finished) { box.hidden = true; return; }
+    box.hidden = false;
+    if (paidCount > 0) {
+        const total = _safeCoinNumber(payouts.paid_total);
+        box.innerHTML = `<b>🏆 Призы начислены</b> · мест: ${paidCount}`
+            + (total > 0 ? ` · ${coinLabel(total)}` : '')
+            + '<span class="ny-board-paid-hint">Итоги пришли в личные сообщения от бота</span>';
+    } else {
+        box.innerHTML = '<b>⏳ Финиш прошёл</b> — начисляем призы, это займёт минуту';
+    }
 }
 
 // Таймер лидерборда: тикает КАЖДУЮ секунду с первого показа и не ждёт
@@ -7408,12 +7451,6 @@ function playUiSound(kind) {
 }
 
 function syncSoundUi() {
-    const fixed = document.getElementById('ny-sound-btn');
-    if (fixed) {
-        fixed.hidden = !isAdmin;
-        fixed.textContent = uiSoundOn ? '🔊' : '🔇';
-        fixed.title = uiSoundOn ? 'Звук эффектов включён' : 'Звук эффектов выключен';
-    }
     const card = document.getElementById('admin-theme-sound');
     if (card) card.textContent = uiSoundOn ? '🔊 Звук эффектов: вкл' : '🔇 Звук эффектов: выкл';
 }
@@ -7444,6 +7481,9 @@ function adminBoardRowsHtml(data) {
         ['Режим записи', data.write_mode === 'table' ? 'таблица (функции нет)' : 'атомарная функция'],
         ['Записей ок / сбоев', `${formatCoins(_safeCoins(data.writes_ok))} / ${formatCoins(_safeCoins(data.writes_fail))}`],
         ['Игроков в таблице', formatCoins(_safeCoins(data.players))],
+        ['Призы выданы', (data.payouts && _safeCoins(data.payouts.paid_count))
+            ? `${formatCoins(_safeCoins(data.payouts.paid_count))} мест · ${coinLabel(_safeCoins(data.payouts.paid_total))}`
+            : 'ещё нет (сервис выдаст сам после финиша)'],
         ['До финиша', boardDeadlineLeftText(data.seconds_left)],
         ['Финиш', data.finished ? 'уже прошёл' : '19 декабря, 21:00 МСК'],
     ];
@@ -7848,22 +7888,12 @@ function restoreSnowPending() {
     return snowCatchQueue;
 }
 
-// Маленький бейдж в шапке: сколько уже поймано (только в новогоднем режиме).
+// Задача 102: заказчик — «нахуя туда снежинки, они уже есть в профиле, убрать».
+// Бейдж со счётчиком из шапки убран (счётчик живёт в кармане, раздел
+// «Снежинки»). Ловля и сохранение остались как были — просто без плашки.
 function updateSnowBadge() {
-    let badge = document.getElementById('snow-badge');
-    const show = currentTheme() === THEME_NEWYEAR && snowflakes > 0 && isAdmin !== null;
-    if (!show) { if (badge) badge.hidden = true; return; }
-    if (!badge) {
-        badge = document.createElement('span');
-        badge.id = 'snow-badge';
-        badge.className = 'snow-badge';
-        const header = document.getElementById('main-header');
-        if (!header) return;
-        header.appendChild(badge);
-    }
-    badge.hidden = false;
-    badge.textContent = `❄ ${snowflakes}`;
-    badge.title = 'Поймано снежинок';
+    const badge = document.getElementById('snow-badge');
+    if (badge) badge.hidden = true;
 }
 
 function clearCatchFlakes() {
