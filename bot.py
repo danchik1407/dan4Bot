@@ -64,7 +64,8 @@ from love import (
     LOVE_STAGES,
     LOVE_MEMBER_REWARDS_TABLE,
 )
-from love import _coins_fmt
+from love import _coins_fmt, _coin_rows as coin_rows, \
+    _main_coin_row as main_coin_row
 import player_stats
 import game_flags
 from db_schema import audit as db_schema_audit, format_report as db_schema_report
@@ -4424,7 +4425,23 @@ def _next_stage_public(stage, solo: bool = False) -> dict:
 
 
 async def _stage_brand_new_balance(uid):
-    """Баланс игрока для строки «теперь на балансе» (нет данных — None)."""
+    """Баланс игрока для строки «теперь на балансе» (нет данных — None).
+
+    Задача 105: читаем РОВНО ту строку профиля, в которую легло начисление
+    (`love._coin_rows` + `_main_coin_row` — так же, как это делает само
+    начисление). Раньше баланс брался через `get_user`, который при дублях
+    профиля (или когда `user_id` в базе строкой) находил другую строку — и в
+    поздравлении появлялось «Теперь на балансе: 0 коинов» сразу после
+    «награда уже на балансе». ТЗ: «баланс должен показываться реальный, сразу
+    после начисления».
+    """
+    try:
+        rows = await asyncio.to_thread(coin_rows, supabase, uid)
+        row = main_coin_row(rows)
+        if row is not None:
+            return int(row.get("coins") or 0)
+    except Exception:  # noqa: BLE001 — упадём на обычное чтение профиля
+        pass
     try:
         row = await get_user(uid)
         return int((row or {}).get("coins") or 0)
@@ -4478,13 +4495,17 @@ async def _notify_stage_rewards(row, actor_id, granted) -> None:
         partner_id = next((other for other in partners if other != uid), None)
         partner_name = ""
         if partner_id:
+            # Задача 105: имя берём из общего кэша имён — раньше здесь был
+            # `get_user`, который при несовпадении типа user_id создавал ещё
+            # одну (пустую) строку профиля прямо в момент начисления.
             try:
-                partner_row = await get_user(partner_id)
-                partner_name = str((partner_row or {}).get("username") or "")
+                partner_name = await _player_name(partner_id)
             except Exception:  # noqa: BLE001
                 partner_name = ""
-            if partner_name:
+            if partner_name and not partner_name.startswith("id"):
                 partner_name = "@" + partner_name.lstrip("@")
+            else:
+                partner_name = ""
         for stage in mine:
             # Баланс — после начисления именно этого уровня (задача 105).
             balance = await _stage_brand_new_balance(uid)
