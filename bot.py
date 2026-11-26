@@ -3129,7 +3129,13 @@ async def resolve_partner_target(message: Message):
     """@username или ответ на сообщение → id партнёра."""
     if message.reply_to_message and message.reply_to_message.from_user:
         target = message.reply_to_message.from_user
-        return target.id, target.username or target.full_name
+        # Задача 105: в тексте РП — человеческое имя, как в примерах ТЗ
+        # («🫂 Vika обнимает Макса»), а не служебный @ник строчными буквами.
+        human = " ".join(part for part in (
+            getattr(target, "first_name", "") or "",
+            getattr(target, "last_name", "") or "",
+        ) if part).strip()
+        return target.id, human or target.username or target.full_name
     for part in strip_prefix(message_text(message)).split()[1:]:
         if part.startswith("@"):
             found = await get_user_global(part)
@@ -4075,28 +4081,28 @@ async def cmd_love_info(message: Message):
 
 @dp.message(F.text.func(is_rp_list_cmd))
 async def cmd_rp_list(message: Message):
-    """«все рп» — список всех доступных РП-действий (ТЗ 104)."""
-    lines = ["💞 <b>ВСЕ РП-КОМАНДЫ</b>", "━━━━━━━━━━━━━━━━━━━━", ""]
-    for key in RP_MAIN_ACTIONS:
+    """«все рп» — список всех доступных РП-действий.
+
+    Задача 105: раньше первые девять команд шли с эмодзи и описанием, а
+    остальные — голым перечнем `<code>команда</code>` без иконок и пояснений
+    («а потом вообще ничего, просто тупо текст»). Теперь КАЖДАЯ команда
+    показывается одинаково: эмодзи + команда + что она делает. Справки по
+    механике здесь нет — она живёт в «любовь инфа» (ТЗ).
+    """
+    def row(key: str) -> str:
         meta = RP_ACTIONS.get(key) or {}
-        lines.append(f"{meta.get('emoji', '💗')} <code>{key}</code> — "
-                     f"{meta.get('text', '')}")
-    extras = [key for key in RP_ACTIONS if key not in RP_MAIN_ACTIONS]
-    if extras:
-        lines.append("")
-        lines.append("<i>Ещё команды:</i>")
-        for key in extras:
-            lines.append(f"<code>{key}</code>")
-    lines.append("")
-    lines.append("Пиши команду и ник: <code>обнять @ник</code> "
-                 "(или ответом на сообщение).")
-    lines.append("")
-    lines.append("💗 В паре за действие — от 1 до 10 ❤️ Love, обоим идёт общий счёт.")
-    lines.append("💔 Одинокому — от 1 до 10 💔 Unlove, только себе.")
-    cooldown_seconds = active_love_cooldown_seconds()
-    if cooldown_seconds > 0:
-        lines.append(f"⏳ Кулдаун {format_love_cooldown(cooldown_seconds)} — один на все "
-                     f"команды сразу.")
+        return (f"{meta.get('emoji', '💗')} <code>{key}</code> — "
+                f"{meta.get('text', '')}")
+
+    main_keys = [key for key in RP_MAIN_ACTIONS if key in RP_ACTIONS]
+    extra_keys = [key for key in RP_ACTIONS if key not in RP_MAIN_ACTIONS]
+    lines = ["💞 <b>ВСЕ РП-КОМАНДЫ</b>", "━━━━━━━━━━━━━━━━━━━━", ""]
+    lines += [row(key) for key in main_keys]
+    if extra_keys:
+        lines += ["", "✨ <b>Остальные</b>", ""]
+        lines += [row(key) for key in extra_keys]
+    lines += ["", "Пиши команду и ник: <code>обнять @ник</code> "
+                  "(или ответом на сообщение)."]
     await message.answer("\n".join(lines), parse_mode="HTML")
 
 
@@ -4399,19 +4405,21 @@ def _cooldown_wait_text(action, left, currency="Love") -> str:
     return _cooldown_status_line(left)
 
 
-def _next_stage_public(stage) -> dict:
-    """Карточка следующего уровня: номер, название и сколько Love нужно.
+def _next_stage_public(stage, solo: bool = False) -> dict:
+    """Карточка следующего уровня: номер и сколько ещё нужно.
 
-    Нужна для строки «➡️ Следующий уровень — 3 «Близость», нужно 200 Love».
-    Суммы наград вперёд не показываем (это секретная механика, задача 29).
+    Нужна для строки «➡️ Следующий уровень — 4, нужно 500 ❤️».
+    Суммы наград и название следующего уровня вперёд не показываем (это
+    секретная механика), для одиночки берём её ветку этапов.
     """
     try:
         index = int((stage or {}).get("index", (stage or {}).get("stage")))
     except (TypeError, ValueError):
         return {}
-    if index + 1 >= len(LOVE_STAGES):
+    stages = stages_for(bool(solo))
+    if index + 1 >= len(stages):
         return {}
-    nxt = LOVE_STAGES[index + 1]
+    nxt = stages[index + 1]
     return {"level": nxt["index"] + 1, "title": nxt["title"], "love_need": nxt["min"]}
 
 
@@ -4591,7 +4599,7 @@ async def _send_celebrations(message: Message, stages, balance=None,
                 shown_balance = fresh
         text = celebration_text(stage, stage.get("reward"), solo=solo,
                                 balance=shown_balance,
-                                next_stage=_next_stage_public(stage))
+                                next_stage=_next_stage_public(stage, solo))
         try:
             await message.answer(text, parse_mode="HTML")
         except Exception as exc:  # noqa: BLE001 — чат мог быть закрыт
