@@ -2888,32 +2888,20 @@ html.ny .ny-board-bows { position: absolute; inset: 0; pointer-events: none; }
    поэтому выглядят как на макете, а не как эмодзи. Полупрозрачность у края
    даёт маска в самой картинке (ny_bow.png). */
 html.ny .ny-bow {
-    position: absolute; top: -6px; width: 92px; height: 98px;
+    position: absolute; top: -8px; width: 100px; height: 106px;
     background: url('ny_bow.png') no-repeat center / contain;
-    filter: drop-shadow(0 2px 8px rgba(0, 0, 0, 0.45));
-    opacity: 0.98;
+    filter: drop-shadow(0 2px 6px rgba(0, 0, 0, 0.5));
+    /* без прозрачности: заказчик просил, чтобы декор было видно нормально */
+    opacity: 1;
 }
 html.ny .ny-bow.bow-l { left: -10px; }
 html.ny .ny-bow.bow-r { right: -10px; transform: scaleX(-1); }
-/* Ветка под бантом тянется вдоль верхней кромки — как на референсе. */
-html.ny .ny-board-head::after {
-    content: ''; position: absolute; left: 40px; right: 40px; top: 2px; height: 26px;
-    background:
-        radial-gradient(20% 60% at 50% 40%, rgba(46, 122, 92, 0.5) 0 60%, transparent 72%),
-        radial-gradient(14% 46% at 20% 50%, rgba(46, 122, 92, 0.45) 0 60%, transparent 72%),
-        radial-gradient(14% 46% at 80% 50%, rgba(46, 122, 92, 0.45) 0 60%, transparent 72%);
-    pointer-events: none; opacity: 0.75;
-}
-/* Ветки со снегом под бантами. */
-html.ny .ny-board-head::before {
-    content: ''; position: absolute; left: -12px; right: -12px; top: -6px; height: 54px;
-    background:
-        radial-gradient(30% 60% at 4% 40%, rgba(46, 122, 92, 0.55) 0 60%, transparent 70%),
-        radial-gradient(26% 52% at 96% 40%, rgba(46, 122, 92, 0.55) 0 60%, transparent 70%),
-        radial-gradient(18% 26% at 8% 22%, rgba(255,255,255,0.75) 0 60%, transparent 70%),
-        radial-gradient(16% 24% at 92% 22%, rgba(255,255,255,0.75) 0 60%, transparent 70%);
-    pointer-events: none; opacity: 0.9;
-}
+/* Задача 102: «почему оно почти фул прозрачное, пусть нормально виднеется».
+   Раньше поверх шапки лежали размытые зелёные и белые пятна (их рисовали два
+   псевдоэлемента) — выглядело как грязные разводы. Убрали: остались только
+   настоящие банты с ветками из картинки заказчика, полностью непрозрачные. */
+html.ny .ny-board-head::before,
+html.ny .ny-board-head::after { display: none; }
 
 html.ny .ny-board-title {
     margin: 0; font-size: 20px; letter-spacing: 1.2px; text-transform: uppercase;
@@ -2929,11 +2917,14 @@ html.ny .ny-board-sub { margin-top: 2px; font-size: 11px; color: rgba(215, 235, 
 
 /* Круглая «?» в правом верхнем углу макета. */
 html.ny .ny-board-help {
-    position: absolute; top: 10px; right: 8px; width: 30px; height: 30px; padding: 0;
-    border-radius: 50%; border: 1px solid rgba(150, 210, 255, 0.65);
-    background: radial-gradient(circle at 30% 25%, rgba(140, 205, 255, 0.55), rgba(10, 32, 58, 0.9));
-    color: #eaf6ff; font-weight: 800; font-size: 15px; line-height: 1; cursor: pointer;
-    box-shadow: 0 0 12px rgba(110, 190, 255, 0.35);
+    /* Задача 102: кнопку «?» не было видно — её перекрывала плавающая кнопка
+       звука (её убрали) и банты. Поднимаем слой и делаем контрастнее. */
+    position: absolute; top: 10px; right: 8px; width: 32px; height: 32px; padding: 0;
+    z-index: 6;
+    border-radius: 50%; border: 1px solid rgba(170, 220, 255, 0.9);
+    background: radial-gradient(circle at 30% 25%, #2b6ea8, #0a2038 78%);
+    color: #ffffff; font-weight: 900; font-size: 16px; line-height: 1; cursor: pointer;
+    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.45), 0 0 12px rgba(110, 190, 255, 0.35);
 }
 html.ny .ny-board-help:active { transform: scale(0.94); }
 
@@ -2962,13 +2953,21 @@ html.ny .ny-board-row {
     border: 1px solid rgba(96, 160, 220, 0.28);
     box-shadow: inset 0 1px 0 rgba(180, 225, 255, 0.08);
 }
-html.ny .ny-board-row.top-1 {
-    border-color: rgba(255, 208, 88, 0.85);
-    background: linear-gradient(90deg, rgba(84, 60, 16, 0.92) 0%, rgba(16, 34, 58, 0.92) 100%);
-    box-shadow: 0 0 14px rgba(255, 200, 70, 0.25);
+/* Задача 102: «первое место жёлтым разукрасить, так же остальные 20 мест
+   которые призовые». Все призовые строки (1–20) — золотая рамка и тёплый
+   градиент, первое место — ярче всех. Места без приза остаются синими. */
+html.ny .ny-board-row.prize {
+    border-color: rgba(255, 208, 88, 0.55);
+    background: linear-gradient(90deg, rgba(64, 48, 18, 0.92) 0%, rgba(16, 34, 58, 0.92) 100%);
 }
-html.ny .ny-board-row.top-2 { border-color: rgba(206, 216, 232, 0.7); }
-html.ny .ny-board-row.top-3 { border-color: rgba(205, 127, 61, 0.75); }
+html.ny .ny-board-row.prize .ny-board-place { color: #ffd75e; }
+html.ny .ny-board-row.top-1 {
+    border-color: rgba(255, 216, 106, 0.95);
+    background: linear-gradient(90deg, rgba(96, 70, 18, 0.96) 0%, rgba(20, 38, 62, 0.96) 100%);
+    box-shadow: 0 0 16px rgba(255, 200, 70, 0.3), inset 0 1px 0 rgba(255, 236, 180, 0.25);
+}
+html.ny .ny-board-row.top-2 { border-color: rgba(255, 208, 88, 0.72); }
+html.ny .ny-board-row.top-3 { border-color: rgba(255, 208, 88, 0.65); }
 
 /* Своя строка: видно даже там, где игрока нет в публичном топе (админ). */
 html.ny .ny-board-row.is-me {
@@ -2991,6 +2990,20 @@ html.ny .ny-board-crown {
     font-size: 13px; filter: drop-shadow(0 2px 3px rgba(0,0,0,0.5));
 }
 html.ny .ny-board-player { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; }
+/* Задача 102: «слева от ника маленький кружок аватарки игрока, у каждого». */
+html.ny .ny-board-name-row {
+    display: flex; align-items: center; gap: 7px; min-width: 0;
+}
+html.ny .ny-board-ava {
+    flex: 0 0 auto; width: 24px; height: 24px; border-radius: 50%;
+    object-fit: cover; background: linear-gradient(180deg, #2f5f96, #17324f);
+    border: 1px solid rgba(150, 210, 255, 0.5);
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.45);
+}
+html.ny .ny-board-ava.is-empty {
+    display: inline-flex; align-items: center; justify-content: center;
+    font-size: 11px; font-weight: 900; color: #dff1ff; letter-spacing: 0;
+}
 html.ny .ny-board-name {
     font-weight: 700; font-size: 13.5px; color: #ffffff;
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
@@ -3001,22 +3014,55 @@ html.ny .ny-board-earned {
 }
 html.ny .ny-board-earned .coin-img { width: 0.95em; height: 0.95em; margin-left: 1px; }
 html.ny .ny-board-prize {
-    /* Ширина закреплена: призы не «пляшут» по строкам, а «100 000 коинов»
-       всегда целиком — раньше плашку сжимало на узких экранах. Задача 101:
-       валюта называется словами, поэтому плашка чуть шире. */
+    /* Задача 102: «приз слишком растянутый — сожми, слово «коинов» замени
+       монетой, и не делай вид кнопки». Теперь это плоская золотая плашка:
+       🎁 100 000 🪙 — без объёмного градиента и тяжёлой тени. */
     flex: 0 0 auto; display: inline-flex; align-items: center; justify-content: center;
-    gap: 3px; min-width: 130px;
-    padding: 4px 8px; border-radius: 999px; font-size: 11px; font-weight: 700;
-    color: #2a1a00; background: linear-gradient(180deg, #ffe08a 0%, #f5b93c 100%);
-    box-shadow: 0 2px 8px rgba(0,0,0,0.35);
+    gap: 4px; min-width: 0;
+    padding: 3px 8px; border-radius: 10px; font-size: 12px; font-weight: 800;
+    color: #ffdf8a;
+    background: rgba(255, 205, 90, 0.12);
+    border: 1px solid rgba(255, 208, 88, 0.45);
+    box-shadow: none;
     white-space: nowrap; font-variant-numeric: tabular-nums;
 }
-html.ny .ny-board-prize .coin-img { width: 0.95em; height: 0.95em; }
+html.ny .ny-board-prize .coin-img { width: 1.05em; height: 1.05em; margin-left: 1px; }
+html.ny .ny-board-prize .ny-board-gift { font-size: 0.95em; line-height: 1; }
 html.ny .ny-board-prize.no-prize {
-    color: rgba(200, 220, 240, 0.7); background: rgba(255, 255, 255, 0.08);
+    color: rgba(200, 220, 240, 0.66); background: rgba(255, 255, 255, 0.05);
+    border-color: rgba(150, 190, 230, 0.22);
     font-weight: 600; box-shadow: none;
 }
 html.ny .ny-board-prize.no-prize .ny-board-gift { display: none; }
+
+/* ---------- Ёлка и подарки ВНУТРИ карточки (задача 102) ----------
+   Раньше ёлка была fixed поверх экрана и закрывала суммы призов. Теперь она
+   стоит внизу карточки лидерборда: видно (заказчик спрашивал «где ёлка»),
+   но ничего не перекрывает. */
+html.ny .ny-board-footer {
+    position: relative; display: flex; align-items: flex-end; justify-content: space-between;
+    height: 96px; margin: 6px 10px 0; pointer-events: none;
+}
+html.ny .ny-board-gifts { display: flex; align-items: flex-end; gap: 3px; filter: drop-shadow(0 3px 6px rgba(0,0,0,0.5)); }
+html.ny .ny-board-gift { font-size: 22px; line-height: 1; }
+html.ny .ny-board-gift.g2 { font-size: 18px; }
+html.ny .ny-board-gift.g3 { font-size: 20px; }
+html.ny .ny-tree.ny-tree-inboard {
+    position: relative; right: auto; bottom: auto; margin-left: auto;
+    width: 58px; height: 92px; opacity: 1;
+}
+
+/* Плашка «призы начислены» после финиша. */
+html.ny .ny-board-paid {
+    margin: 8px 10px 2px; padding: 8px 12px; border-radius: 12px;
+    background: rgba(255, 208, 88, 0.12); border: 1px solid rgba(255, 208, 88, 0.45);
+    color: #ffe9ad; font-size: 12px; font-weight: 700; text-align: center;
+}
+html.ny .ny-board-paid-hint {
+    display: block; margin-top: 3px; font-size: 11px; font-weight: 600;
+    color: rgba(215, 235, 255, 0.75);
+}
+html.ny .ny-board-paid[hidden] { display: none !important; }
 
 /* На вкладке «Топ» украшения не должны накрывать таблицу: ёлка и подарки
    (fixed, z-index выше контента) и снежный вал внизу закрывали призы в
@@ -3024,6 +3070,10 @@ html.ny .ny-board-prize.no-prize .ny-board-gift { display: none; }
 html.ny body.ny-top .ny-tree,
 html.ny body.ny-top .ny-gifts { opacity: 0; visibility: hidden; }
 html.ny body.ny-top::after { opacity: 0; }
+/* Задача 102: белый снежный вал внизу и его свечение тоже перекрывали нижние
+   строки — убираем на этой вкладке ВСЕ фиксированные слои. */
+html.ny body.ny-top .ny-decor::after { opacity: 0; }
+html.ny body.ny-top .bottom-nav::before { opacity: 0; }
 /* Снежного вала на этой вкладке нет, поэтому и запас под ним (176 px) не
    нужен: оставляем ровно высоту нижнего меню, чтобы последняя строка
    таблицы дочитывалась, а под ней не было пустой дыры. */
@@ -3036,7 +3086,9 @@ html.ny body.ny-top { padding-bottom: 96px; }
     html.ny .ny-board-place { flex-basis: 26px; font-size: 13px; }
     html.ny .ny-board-name { font-size: 12.5px; }
     html.ny .ny-board-earned { font-size: 10.5px; }
-    html.ny .ny-board-prize { min-width: 118px; font-size: 10.5px; padding: 4px 7px; gap: 2px; }
+    html.ny .ny-board-prize { font-size: 11px; padding: 3px 6px; gap: 3px; }
+    html.ny .ny-board-ava { width: 21px; height: 21px; }
+    html.ny .ny-board-name-row { gap: 6px; }
     html.ny .ny-board { padding: 8px 6px 10px; }
     html.ny .ny-board-list { padding: 0 2px; }
 }

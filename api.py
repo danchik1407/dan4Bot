@@ -89,7 +89,7 @@ async def _http_json(url, method: str = "GET", params=None, payload=None, timeou
 
 # Номер сборки: по нему из /api/health видно, что на сервисе НЕ старый код.
 # Если после деплоя здесь прежнее значение — Render ещё не перезапустился.
-API_BUILD = "2026-10-27-task101-coin-name"
+API_BUILD = "2026-10-27-task102-board-polish-payout"
 
 # Момент старта процесса. По нему видно, что сервис только что «проснулся»:
 # Render на бесплатном тарифе усыпляет Web Service через 15 минут без входящих
@@ -994,6 +994,186 @@ def board_write_check() -> dict:
             "hint": "у public.newyear_board нет прав INSERT для service_role"}
 
 
+# ==================== ВЫПЛАТА ПРИЗОВ ПО ФИНИШУ (задача 102) ====================
+# Заказчик: «после таймера система сама должна выдать на аккаунт каждому приз
+# и сообщить в личных сообщениях — ты выиграл, занял такое-то место, вот приз».
+# Призы по местам — BOARD_PRIZES (1 — 100 000, 2 — 50 000, 3 — 20 000,
+# 4–10 — 5 000, 11–20 — 1 000, дальше без приза).
+# Один игрок = одна строка в newyear_board_payouts, поэтому повторный запуск
+# (рестарт сервиса, ручная кнопка) НИКОГДА не платит дважды.
+BOARD_PAYOUTS_TABLE = "newyear_board_payouts"
+BOARD_PAYOUT_STATUS = {"done": False, "at": 0.0}
+
+
+def board_payouts_available() -> bool:
+    """Есть ли таблица выплат (миграция 20261212000000)."""
+    try:
+        supabase.table(BOARD_PAYOUTS_TABLE).select("user_id").limit(1).execute()
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def board_prizes_plan() -> list:
+    """Кому сколько по итоговой таблице: только призовые места, без админов."""
+    rows = board_rows(200)
+    plan = []
+    place = 0
+    for row in rows:
+        uid = _safe_int(row.get("user_id"), 0)
+        if not uid or uid in ADMIN_IDS:
+            continue
+        place += 1
+        prize = board_prize_for_place(place)
+        if prize <= 0:
+            continue
+        plan.append({"user_id": int(uid), "place": place, "prize": int(prize),
+                     "username": _username_by_id(uid),
+                     "earned": _safe_int(row.get("earned"), 0)})
+    return plan
+
+
+def board_payout_rows() -> list:
+    try:
+        return (supabase.table(BOARD_PAYOUTS_TABLE).select("*").execute().data) or []
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def board_payout_summary() -> dict:
+    """Сколько уже выдано — для экрана и админки."""
+    rows = board_payout_rows()
+    paid = [r for r in rows if str(r.get("status") or "") == "paid"]
+    pending = [r for r in rows if str(r.get("status") or "") != "paid"]
+    return {
+        "available": bool(rows) or board_payouts_available(),
+        "paid_count": len(paid),
+        "pending_count": len(pending),
+        "paid_total": sum(_safe_int(r.get("prize"), 0) for r in paid),
+        "notified": sum(1 for r in paid if r.get("notified")),
+    }
+
+
+def board_payout_once(force: bool = False) -> dict:
+    """Выдать призы. Идемпотентно: один игрок — одна выплата.
+
+    force=True — выдать, не дожидаясь финиша (только для проверки админом).
+    Возвращает {'ok', 'winners': [...], 'paid', 'skipped', 'failed', 'reason'}.
+    """
+    result = {"ok": False, "paid": 0, "skipped": 0, "failed": 0,
+              "winners": [], "reason": ""}
+    if not force and not board_is_finished():
+        result["reason"] = "финиш ещё не наступил"
+        return result
+    if not board_payouts_available():
+        result["reason"] = ("нет таблицы " + BOARD_PAYOUTS_TABLE
+                            + " — примените миграцию 20261212000000_newyear_board_payouts.sql")
+        return result
+    plan = board_prizes_plan()
+    if not plan:
+        result["reason"] = "в таблице нет призовых мест"
+        return result
+    existing = {_safe_int(r.get("user_id"), 0): r for r in board_payout_rows()}
+    for item in plan:
+        uid = item["user_id"]
+        already = existing.get(uid)
+        if already and str(already.get("status") or "") == "paid":
+            result["skipped"] += 1
+            continue
+        if not already:
+            try:
+                supabase.table(BOARD_PAYOUTS_TABLE).insert({
+                    "user_id": uid, "place": item["place"], "prize": item["prize"],
+                    "status": "pending", "notified": False,
+                }).execute()
+            except Exception as exc:  # noqa: BLE001 — дубль строки: уже платили
+                logger.info("Лидерборд: выплата %s уже начата (%s)", uid, exc)
+                result["skipped"] += 1
+                continue
+        balance = award_coins(uid, item["prize"])
+        if balance is None:
+            result["failed"] += 1
+            logger.warning("Лидерборд: приз %s не начислен игроку %s", item["prize"], uid)
+            continue
+        try:
+            (supabase.table(BOARD_PAYOUTS_TABLE)
+             .update({"status": "paid", "paid_at": _now_iso()})
+             .eq("user_id", uid).execute())
+        except Exception as exc:  # noqa: BLE001 — деньги уже начислены
+            logger.warning("Лидерборд: отметка о выплате %s не записалась: %s", uid, exc)
+        result["paid"] += 1
+        result["winners"].append({**item, "balance": balance})
+    BOARD_PAYOUT_STATUS.update({"done": True, "at": time.time()})
+    result["ok"] = True
+    return result
+
+
+def board_notify_text(item: dict) -> str:
+    """Текст личного сообщения победителю."""
+    return (f"🏆 <b>Итоги новогоднего лидерборда</b>\n\n"
+            f"Ты занял <b>{item['place']}-е место</b> и заработал "
+            f"<b>{item['earned']:,}</b> коинов.".replace(",", " ") + "\n"
+            f"🎁 Приз <b>{item['prize']:,}</b> уже на балансе.".replace(",", " ") + "\n\n"
+            f"Спасибо за игру — заходи ещё!")
+
+
+async def board_payout_notify(winners=None) -> int:
+    """Разослать личные сообщения тем, кому приз начислен, но не сообщили.
+
+    Отметку `notified` ставим только после успешной отправки: если Telegram
+    в момент финиша был недоступен, сообщение уйдёт на следующем проходе.
+    """
+    rows = await asyncio.to_thread(board_payout_rows)
+    if not rows:
+        return 0
+    leaders = await asyncio.to_thread(board_rows, 200)
+    earned_by_uid = {_safe_int(r.get("user_id"), 0): _safe_int(r.get("earned"), 0)
+                     for r in leaders}
+    sent = 0
+    for row in rows:
+        if str(row.get("status") or "") != "paid" or row.get("notified"):
+            continue
+        uid = _safe_int(row.get("user_id"), 0)
+        if not uid:
+            continue
+        item = {"place": _safe_int(row.get("place"), 0),
+                "prize": _safe_int(row.get("prize"), 0),
+                "earned": _safe_int(row.get("earned"), 0) or earned_by_uid.get(uid, 0)}
+        if not await _send_user_dm(uid, board_notify_text(item)):
+            continue
+        sent += 1
+        try:
+            await asyncio.to_thread(
+                lambda uid=uid: supabase.table(BOARD_PAYOUTS_TABLE)
+                .update({"notified": True}).eq("user_id", uid).execute())
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Лидерборд: отметка об уведомлении %s не записалась: %s", uid, exc)
+    return sent
+
+
+async def board_payout_loop():
+    """Фон: дождаться финиша, выдать призы и написать каждому победителю.
+
+    Проверяем раз в минуту (дёшево: один SELECT). Пока финиш не наступил —
+    выходим сразу. Выплата идемпотентна, поэтому рестарт сервиса в момент
+    финиша не приведёт к двойному начислению.
+    """
+    await asyncio.sleep(20)
+    while True:
+        try:
+            if board_is_finished():
+                res = await asyncio.to_thread(board_payout_once)
+                if res.get("paid"):
+                    logger.warning("Лидерборд: выплачено призов %s (мест %s)",
+                                   res["paid"], len(res.get("winners") or []))
+                sent = await board_payout_notify()
+                if sent:
+                    logger.warning("Лидерборд: уведомлений отправлено %s", sent)
+        except Exception:  # noqa: BLE001 — фон не должен падать
+            logger.exception("Лидерборд: фоновая выплата призов упала")
+        await asyncio.sleep(60)
+
+
 # ==================== СНЕЖИНКИ (задача 90) ====================
 # Заказчик: «снежинки падают сверху вниз, ловишь — разлетаются, и в кармане
 # раздел Снежинки: 0❄️» и «для красоты: нельзя передавать, покупать, обменивать».
@@ -1100,6 +1280,39 @@ def _username_by_id(user_id) -> str:
         return ""
     name = rows[0].get("username")
     return str(name).strip() if name else ""
+
+
+def board_players_meta(uids) -> dict:
+    """user_id -> {'username', 'avatar'} для лидерборда — ОДНИМ запросом.
+
+    Раньше ник каждого игрока тянулся отдельным запросом (21 обращение на
+    экран). Заодно достаём photo_url: заказчик попросил маленький кружок
+    аватарки слева от ника у каждого игрока.
+    """
+    ids = []
+    for value in (uids or []):
+        uid = _safe_int(value, None)
+        if uid is not None and uid not in ids:
+            ids.append(int(uid))
+    if not ids:
+        return {}
+    for columns in ("user_id, username, photo_url", "user_id, username"):
+        try:
+            rows = (supabase.table("users").select(columns)
+                    .in_("user_id", ids).execute().data) or []
+        except Exception:  # noqa: BLE001 — колонки photo_url может не быть
+            continue
+        meta = {}
+        for row in rows:
+            uid = _safe_int(row.get("user_id"), None)
+            if uid is None:
+                continue
+            name = row.get("username")
+            avatar = row.get("photo_url") or ""
+            meta[int(uid)] = {"username": str(name).strip() if name else "",
+                              "avatar": str(avatar).strip() if avatar else ""}
+        return meta
+    return {}
 
 
 def snowflakes_top(limit: int = 10) -> list:
@@ -3531,6 +3744,9 @@ async def init_capsule_stock():
     # Задача 85: сверка донатов с Telegram. Работает в фоне: если бот был занят,
     # лежал или апдейт о платеже потерялся, коины всё равно придут сами.
     asyncio.create_task(stars_catchup_loop())
+    # Задача 102: призы новогоднего лидерборда. После финиша сервис сам
+    # начисляет коины призовым местам и пишет каждому в личку.
+    asyncio.create_task(board_payout_loop())
 
 
 # === РАКЕТА (CRASH) ===
@@ -4621,6 +4837,23 @@ async def get_user(auth: UserAuth):
     # Если в базе оказалось несколько строк (старые дубли), берём ту, где больше коинов —
     # иначе игрок видит 0, хотя в «кармане» бота лежат его деньги.
     row = max(rows, key=lambda item: _safe_int(item.get("coins"), 0))
+    # Задача 102: аватарка и ник для лидерборда. Telegram отдаёт их в initData;
+    # пишем в users.photo_url только если значение реально изменилось, чтобы не
+    # трогать базу на каждом открытии приложения.
+    try:
+        want_avatar = str(user.get("photo_url") or "").strip()
+        want_name = str(user.get("username") or "").strip()
+        patch = {}
+        if want_avatar and want_avatar != str(row.get("photo_url") or "").strip():
+            patch["photo_url"] = want_avatar
+        if want_name and want_name != str(row.get("username") or "").strip():
+            patch["username"] = want_name
+        if patch:
+            (supabase.table("users").update(patch)
+             .eq("user_id", _safe_int(row.get("user_id"), user_id)).execute())
+            row.update(patch)
+    except Exception:  # noqa: BLE001 — колонки могут не быть: лицо не главное
+        logger.debug("Не удалось обновить ник/аватарку user_id=%s", user_id)
     # «0 дней в игре» лечится здесь же: если у старого профиля нет created_at,
     # ставим текущий момент, и с этого дня счётчик начнёт расти. Раньше NULL
     # в базе навсегда оставлял игрока с нулём.
@@ -8702,6 +8935,11 @@ async def newyear_board_public(limit: int = 21, init: str = ""):
             continue
         visible.append(row)
     players = [_board_row_player(row, i) for i, row in enumerate(visible, start=1)]
+    meta = await asyncio.to_thread(board_players_meta, [p["user_id"] for p in players])
+    for player in players:
+        info = meta.get(player["user_id"]) or {}
+        player["username"] = player["username"] or info.get("username") or ""
+        player["avatar"] = info.get("avatar") or ""
     me = None
     if me_uid is not None:
         mine = next((p for p in players if p["user_id"] == me_uid), None)
@@ -8753,6 +8991,8 @@ async def newyear_board_public(limit: int = 21, init: str = ""):
         "write_mode": board_write_mode(),
         "writes_ok": _BOARD_STAT["ok"],
         "writes_fail": _BOARD_STAT["fail"],
+        # Задача 102: выданы ли уже призы (экран показывает «призы начислены»).
+        "payouts": await asyncio.to_thread(board_payout_summary),
         # Если запись уже падала — показываем причину админу (текстом в лог и в
         # /api/admin/board_check, игроку это поле просто не выводится).
         "last_error": board_last_error(),
@@ -8814,6 +9054,7 @@ async def admin_board_check(data: UserAuth):
         "players": len(rows),
         "top": top,
         "last_error": board_last_error(),
+        "payouts": await asyncio.to_thread(board_payout_summary),
         "deadline": BOARD_DEADLINE_ISO,
         "deadline_msk": BOARD_DEADLINE_MSK,
         "seconds_left": max(0, int(board_deadline_ts() - time.time())),
@@ -8881,6 +9122,31 @@ async def admin_board_probe(data: UserAuth):
                  "Примените supabase/migrations/20261211000000_newyear_board_full.sql "
                  "в SQL Editor Supabase — он создаёт таблицу и функцию заново."),
     }
+
+
+@app.post("/api/admin/board_payout")
+async def admin_board_payout(data: UserAuth, dry_run: bool = True, force: bool = False):
+    """Задача 102: призы по финишу — проверка и ручной запуск.
+
+    dry_run=True (по умолчанию) только показывает план: кто какое место занял
+    и сколько получит. dry_run=false — реальная выдача (сервис делает её сам
+    после финиша; кнопка нужна, если сервер лежал в момент финиша).
+    """
+    _require_admin_api(data.initData)
+    plan = await asyncio.to_thread(board_prizes_plan)
+    summary = await asyncio.to_thread(board_payout_summary)
+    if dry_run:
+        return {"ok": True, "dry_run": True, "finished": board_is_finished(),
+                "plan": plan, "total": sum(item["prize"] for item in plan),
+                "summary": summary}
+    # force=True только для внутренних проверок: обычный ручной запуск ждёт финиша.
+    result = await asyncio.to_thread(board_payout_once, force)
+    sent = await board_payout_notify()
+    return {"ok": bool(result.get("ok")), "dry_run": False,
+            "paid": result.get("paid"), "skipped": result.get("skipped"),
+            "failed": result.get("failed"), "reason": result.get("reason"),
+            "notified": sent, "winners": result.get("winners"),
+            "summary": await asyncio.to_thread(board_payout_summary)}
 
 
 @app.get("/api/global_top")
