@@ -461,15 +461,16 @@ let upgradeBusy = false, upgradeStartedAt = 0;
 let upgradeArrowAngle = 0, upgradeArrowRaf = null, upgradeSpinToken = 0;
 let upgradeFetchPending = false;     // ждём ответ сервера по текущей ставке
 let upgradeBusyTimer = null;         // сторож «кнопка залипла»
-// Задача 70: заказчик просил «5–4 секунды» вместо прежних 5.4 с + долгого
-// торможения. Полный раунд — 4 с: разгон, затем плавное затухание ~2.6 с.
-// Задача 106: заказчик просил срезать прокрут на 2 секунды — «резко стартует,
-// потом плавно тормозит и встаёт за 3–4 секунды». Было 4000 мс общего раунда
-// и минимум 2600 мс на затухание (в сумме до ~5 с). Стало: раунд 3000 мс,
-// затухание 1900 мс — итого ~3 с при нормальном ответе сервера.
-const UPGRADE_DURATION = 3000;        // полный раунд: быстрый спин + плавное затухание
+// Задача 106 (правка): заказчик: «апгрейд сделай короче, чтобы весь прокрут
+// длился 3–4 секунды». Раньше время считалось как «ожидание ответа сервера +
+// ПЛЮС 1.9 с торможения», и на медленном Render (ответ 1.5–2 с) выходило ~4 с.
+// Теперь есть ОДИН целевой бюджет на весь прокрут — UPGRADE_DURATION. Ждать
+// ответ приходится (результат приходит с сервера), но торможение тем короче,
+// чем дольше ждали: сумма «ожидание + торможение» ≈ 3 с, и никогда не больше
+// 3 с + страховочный минимум.
+const UPGRADE_DURATION = 3000;        // бюджет всего прокрута, мс
 const UPGRADE_ARROW_SPEED = 1080;     // градусов в секунду в фазе ожидания ответа сервера
-const UPGRADE_ARROW_MIN_LAND = 1900;  // минимум времени на «рулеточное» затухание, мс
+const UPGRADE_ARROW_MIN_LAND = 1200;  // минимум времени на «рулеточное» затухание, мс
 // Сколько ждём ответ сервера до решения «сеть/сервер не ответил». Было 8 с:
 // на холодном Render (сервис просыпается 20–50 с) запрос обрывался, игрок
 // видел «Сервер не ответил», хотя ставка уже была принята и сыграна.
@@ -479,8 +480,9 @@ const UPGRADE_MAX_CHANCE = 95;
 // Задача 25: x4 и x8 убраны. x1.12…x1.75 — «почти монетка», x20/x50 — риск.
 const UPGRADE_MULTS = [1.12, 1.35, 1.55, 1.75, 20, 50];
 // Куда именно крутится стрелка: одна CSS-кривая на весь финиш, без рывков.
-// Задача 106: 1900 вместо 2600 мс — прокрут короче на ~2 с суммарно.
-const UPGRADE_LAND_MS = 1900;
+// Задача 106: это ПОТОЛОК торможения (было 2600 мс), а не фиксированная
+// длительность — реальная считается от остатка бюджета UPGRADE_DURATION.
+const UPGRADE_LAND_MS = 2600;
 // Кривая: резкий старт (малая производная в начале координат X) и длинный
 // плавный хвост торможения — стрелка не «доезжает» рывком в конце.
 const UPGRADE_LAND_EASING = 'cubic-bezier(0.1, 0.7, 0.1, 1)';
@@ -4767,17 +4769,21 @@ function upgradeArrowTargetFor(won, chance, rollValue) {
 // Фаза 2 — «как в рулетке»: несколько полных оборотов и плавное затухание
 // ровно на выпавшем числе. Раньше торможение считалось вручную кусками, и на
 // стыке фаз стрелка дёргалась. Теперь один CSS-transition с кривой
-// cubic-bezier(0.1, 0.7, 0.1, 1) на 1.9 секунды (задача 106) — без рывков.
+// cubic-bezier(0.1, 0.7, 0.1, 1) на остаток бюджета раунда — без рывков.
 function landUpgradeArrow(won, chance, duration, token, onDone, rollValue) {
     stopUpgradeArrow();
     const arrow = document.getElementById('up-arrow');
     const desired = ((upgradeArrowTargetFor(won, chance, rollValue) % 360) + 360) % 360;
     const current = ((upgradeArrowAngle % 360) + 360) % 360;
     const delta = ((desired - current) % 360 + 360) % 360;
+    // Длительность торможения — из бюджета раунда (не больше потолка).
+    const total = Math.max(UPGRADE_ARROW_MIN_LAND,
+                           Math.min(UPGRADE_LAND_MS, Number(duration) || UPGRADE_LAND_MS));
     // Обороты: не меньше трёх — иначе при совпадении углов стрелка «не крутится».
-    const turns = Math.max(3, Math.ceil(UPGRADE_LAND_MS / 900));
+    // Считаем от реальной длительности, иначе на коротком торможении стрелка
+    // делает 4 оборота за 1.2 с и выглядит как рябь.
+    const turns = Math.max(3, Math.ceil(total / 900));
     const target = upgradeArrowAngle + turns * 360 + delta;
-    const total = Math.max(1500, Math.min(UPGRADE_LAND_MS, Number(duration) || UPGRADE_LAND_MS));
     let finished = false;
     let fallbackTimer = null;      // объявлен до finish: иначе TDZ при раннем выходе
 
@@ -5045,10 +5051,13 @@ async function startUpgrade() {
         return;
     }
 
-    // Общая длительность анимации — UPGRADE_DURATION (3 с): остаток времени
-    // уходит на торможение стрелки, но не меньше UPGRADE_ARROW_MIN_LAND.
+    // Задача 106: бюджет ОДИН на весь прокрут. Торможение = остаток до
+    // UPGRADE_DURATION, с полом UPGRADE_ARROW_MIN_LAND (иначе на быстром
+    // сервере оно было бы нулевым) и потолком UPGRADE_LAND_MS. Раньше остаток
+    // только рос от ожидания и прибавлялся сверху — отсюда «4 секунды».
     const elapsed = Date.now() - upgradeStartedAt;
-    const remaining = Math.max(UPGRADE_ARROW_MIN_LAND, UPGRADE_DURATION - elapsed);
+    const remaining = Math.min(UPGRADE_LAND_MS,
+        Math.max(UPGRADE_ARROW_MIN_LAND, UPGRADE_DURATION - elapsed));
 
     if (errorText || !data) {
         stopUpgradeArrow();

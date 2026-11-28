@@ -4114,8 +4114,10 @@ async def cmd_rp_list(message: Message):
     extra_keys = [key for key in RP_ACTIONS if key not in RP_MAIN_ACTIONS]
     lines = ["💞 <b>ВСЕ РП-КОМАНДЫ</b>", "━━━━━━━━━━━━━━━━━━━━", ""]
     lines += [row(key) for key in main_keys]
+    # Задача 106 (правка): заказчик попросил убрать заголовок «✨ Остальные» —
+    # список идёт одним потоком, без слова-разделителя.
     if extra_keys:
-        lines += ["", "✨ <b>Остальные</b>", ""]
+        lines += [""]
         lines += [row(key) for key in extra_keys]
     lines += ["", "Пиши команду и ник: <code>обнять @ник</code> "
                   "(или ответом на сообщение)."]
