@@ -6,6 +6,7 @@
 сервер и бот не могут разойтись в цифрах.
 """
 
+import json
 import logging
 import time
 
@@ -1013,7 +1014,7 @@ def _member_mark(supabase, relationship_id, user_id, stage_index) -> bool:
         return False
 
 
-def member_paid_stages(supabase, relationship_id, user_id) -> set:
+def member_paid_stages(supabase, relationship_id, user_id, allow_markers: bool = True) -> set:
     """Какие уровни ЭТОТ игрок в ЭТОЙ паре реально получил.
 
     Задача 84, главное правило: **журнал `love_rewards_log` — единственная
@@ -1039,6 +1040,12 @@ def member_paid_stages(supabase, relationship_id, user_id) -> set:
     except Exception as exc:  # noqa: BLE001 — журнала нет: работаем по отметкам
         logger.info("Журнал наград недоступен (%s) — сверяюсь с отметками "
                     "(примените миграцию 20261205000000_love_rewards_log.sql)", exc)
+    if not allow_markers:
+        # Задача 106: если в строке пары есть поле цикла, служебные отметки
+        # больше НЕ участвуют. Именно они и «съедали» награду: оставались от
+        # старого сбоя, когда деньги не дошли, и уровень навсегда считался
+        # оплаченным.
+        return set()
     try:
         res = (supabase.table(LOVE_MEMBER_REWARDS_TABLE).select("stage")
                .eq("relationship_id", relationship_id).eq("user_id", uid).execute())
@@ -1082,6 +1089,89 @@ def _memory_mark_paid(relationship_id, user_id, stage_index) -> None:
     if len(_MEMORY_PAID) > _MEMORY_PAID_LIMIT:
         for old_key in list(_MEMORY_PAID)[:500]:
             _MEMORY_PAID.pop(old_key, None)
+
+
+# ============ ЗАДАЧА 106 (правка): НАГРАДЫ СЧИТАЮТСЯ ПО ТЕКУЩЕМУ ЦИКЛУ ============
+# Заказчик: «выдача награды при достижении следующего этапа в любовных и
+# одиночных отношениях — выдача даже если забирал раньше (типа если был раньше
+# в отношениях)».
+#
+# Значит: история выплат НЕ должна мешать новой паре и новому одиночному
+# циклу. Раньше «оплачено» определялось по служебным таблицам отметок и журналу
+# на уровне игрока/пары, и любой мусор от прошлых сбоев (отметка осталась,
+# деньги не дошли; миграция перенесла старые строки; журнал не записался) мог
+# навсегда «съесть» награду.
+#
+# Теперь список оплаченных этапов лежит ПРЯМО В СТРОКЕ ЦИКЛА:
+#   • у пары — jsonb-поле `relationships.rewards`;
+#   • у одиночки — jsonb-поле `solo_love.rewards`.
+# Новая пара = новая строка с пустым полем, новый одиночный цикл = сброс поля.
+# Значит награды за этапы всегда выдаются заново, а внутри одного цикла
+# повторной выплаты нет.
+CYCLE_REWARDS_COLUMN = "rewards"
+
+
+def _cycle_entries(row) -> list:
+    """Разобрать jsonb «кто что уже получил» из строки пары/одиночки.
+
+    Формат: [{"user_id": 1, "stage": 2}, ...]; в одиночной строке user_id нет.
+    """
+    raw = (row or {}).get(CYCLE_REWARDS_COLUMN)
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except Exception:  # noqa: BLE001 — битая строка не должна ломать награды
+            return []
+    if not isinstance(raw, list):
+        return []
+    entries = []
+    for item in raw:
+        if isinstance(item, dict):
+            entries.append((_safe_int(item.get("user_id"), 0),
+                            _safe_int(item.get("stage"), -1)))
+        else:
+            entries.append((0, _safe_int(item, -1)))     # старый/короткий формат
+    return [entry for entry in entries if entry[1] >= 0]
+
+
+def _cycle_paid_stages(row, user_id=None) -> set:
+    """Какие этапы уже оплачены в ЭТОМ цикле (user_id=None — одиночная ветка)."""
+    if user_id is None:
+        return {stage for _uid, stage in _cycle_entries(row)}
+    uid = _safe_int(user_id, 0)
+    return {stage for owner, stage in _cycle_entries(row) if owner in (0, uid)}
+
+
+def _cycle_remember(supabase, table, row, user_id, stage_index, match=None) -> bool:
+    """Дописать «этот этап оплачен» в строку цикла (jsonb) и вернуть успех.
+
+    `match` — чем найти строку (у пары это id, у одиночки user_id, потому что
+    в solo_love нет колонки id). Нет колонки `rewards` (миграция не применена) —
+    возвращаем False: работаем по старым отметкам, награда всё равно выдана.
+    """
+    if not row:
+        return False
+    entries = _cycle_entries(row)
+    entry = (_safe_int(user_id, 0), _safe_int(stage_index, -1))
+    if entry in entries or (user_id is None and (0, entry[1]) in entries):
+        return True
+    entries.append(entry)
+    payload = [{"user_id": uid, "stage": stage} for uid, stage in entries]
+    query = supabase.table(table).update({CYCLE_REWARDS_COLUMN: payload})
+    if match:
+        for column, value in match.items():
+            query = query.eq(column, value)
+    elif row.get("id") is not None:
+        query = query.eq("id", row["id"])
+    else:
+        return False
+    try:
+        query.execute()
+    except Exception as exc:  # noqa: BLE001 — колонки может не быть
+        logger.info("%s: поле наград не записалось (%s)", table, exc)
+        return False
+    row[CYCLE_REWARDS_COLUMN] = payload
+    return True
 
 
 def paid_stage_owners(supabase, relationship_id) -> set:
@@ -1347,10 +1437,17 @@ def claim_stage_rewards(supabase, relationship) -> list:
     # Кто что РЕАЛЬНО получил: журнал начислений (+ старые отметки) и память
     # процесса. Память нужна, если база вообще не даёт писать служебные
     # строки — иначе при сбое начисления платили бы за уровень каждое действие.
-    member_paid = {pid: member_paid_stages(supabase, relationship_id, pid)
+    # Задача 106: есть ли в строке пары поле цикла (миграция применена).
+    cycle_known = CYCLE_REWARDS_COLUMN in (relationship or {})
+    member_paid = {pid: member_paid_stages(supabase, relationship_id, pid,
+                                           allow_markers=not cycle_known)
                    for pid in partners}
     for pid in partners:
         member_paid[pid] |= _memory_paid_stages(relationship_id, pid)
+        # Главный источник — сама строка пары. Новая пара всегда начинается с
+        # пустого списка, поэтому «забирал раньше в других отношениях» больше
+        # ничего не блокирует.
+        member_paid[pid] |= _cycle_paid_stages(relationship, pid)
     legacy_paid = set() if per_player else paid_stages(supabase, relationship_id)
     granted = []
     for stage in LOVE_STAGES:
@@ -1366,9 +1463,13 @@ def claim_stage_rewards(supabase, relationship) -> list:
                 if index in member_paid.get(partner_id, set()):
                     continue          # этот игрок уровень уже получил
                 # Свежая проверка перед начислением: между чтением и записью
-                # мог отработать второй апдейт (кнопка + сообщение).
-                if index in member_paid_stages(supabase, relationship_id, partner_id) \
-                        or index in _memory_paid_stages(relationship_id, partner_id):
+                # мог отработать второй апдейт (кнопка + сообщение). Отметки
+                # в этой проверке участвуют только в старой схеме — иначе
+                # «висящая» отметка опять съела бы награду (задача 106).
+                fresh_paid = set(_memory_paid_stages(relationship_id, partner_id))
+                if not cycle_known:
+                    fresh_paid |= member_paid_stages(supabase, relationship_id, partner_id)
+                if index in fresh_paid:
                     member_paid.setdefault(partner_id, set()).add(index)
                     continue
                 marked = _mark_ignoring_duplicate(
@@ -1389,6 +1490,9 @@ def claim_stage_rewards(supabase, relationship) -> list:
                 log_reward(supabase, relationship_id, partner_id, index, reward)
                 _memory_mark_paid(relationship_id, partner_id, index)
                 _remember_stage(supabase, relationship_id, index)
+                # И фиксируем выплату в строке пары: она и есть «цикл».
+                _cycle_remember(supabase, "relationships", relationship,
+                                partner_id, index)
                 granted.append({"stage": index, "title": stage["title"],
                                 "reward": stage["reward"], "user_id": partner_id})
         else:
@@ -1408,6 +1512,8 @@ def claim_stage_rewards(supabase, relationship) -> list:
                 # «награда каждому» уходят тому, кто её не получил.
                 log_reward(supabase, relationship_id, partner_id, index, reward)
                 _memory_mark_paid(relationship_id, partner_id, index)
+                _cycle_remember(supabase, "relationships", relationship,
+                                partner_id, index)
                 granted.append({"stage": index, "title": stage["title"],
                                 "reward": stage["reward"], "user_id": partner_id})
             if not ok:
@@ -1443,8 +1549,15 @@ def love_rewards_gap(supabase, relationship) -> dict:
     legacy_paid = set() if per_player else paid_stages(supabase, relationship_id)
     current_index = stage_index(_safe_int(relationship.get("love"), 0))
     gaps = {}
+    cycle_known = CYCLE_REWARDS_COLUMN in (relationship or {})
     for partner_id in partners:
-        paid = member_paid_stages(supabase, relationship_id, partner_id) if per_player else legacy_paid
+        if per_player:
+            paid = member_paid_stages(supabase, relationship_id, partner_id,
+                                      allow_markers=not cycle_known)
+            paid |= _cycle_paid_stages(relationship, partner_id)
+            paid |= _memory_paid_stages(relationship_id, partner_id)
+        else:
+            paid = legacy_paid
         missing = []
         for stage in LOVE_STAGES:
             index = _safe_int(stage.get("index"), -1)
@@ -1561,6 +1674,18 @@ def _clear_memory_rewards(user_id) -> None:
         _MEMORY_PAID.pop(key, None)
 
 
+def _cycle_reset_solo(supabase, user_id) -> None:
+    """Новый одиночный цикл: список оплаченных этапов начинается с нуля."""
+    uid = _safe_int(user_id, 0)
+    if uid <= 0:
+        return
+    try:
+        (supabase.table(SOLO_LOVE_TABLE)
+         .update({CYCLE_REWARDS_COLUMN: []}).eq("user_id", uid).execute())
+    except Exception as exc:  # noqa: BLE001 — колонки может ещё не быть
+        logger.info("Одиночный цикл %s: поле наград не сбросилось (%s)", uid, exc)
+
+
 def _delete_marks(supabase, table: str, user_id) -> bool:
     """Удалить отметки наград игрока (таблицы может не быть — не падаем)."""
     try:
@@ -1584,6 +1709,7 @@ def reset_solo_branch(supabase, user_id) -> bool:
         logger.warning("Одиночный счёт %s не обнулился: %s", uid, exc)
         ok = False
     ok = _delete_marks(supabase, SOLO_REWARDS_TABLE, uid) and ok
+    _cycle_reset_solo(supabase, uid)
     # Журнал одиночных начислений (relationship_id = 0) тоже чистим: иначе
     # «догон» наград будет считать старые уровни оплаченными.
     try:
@@ -1608,6 +1734,7 @@ def reset_to_solo(supabase, user_id) -> bool:
         logger.warning("Одиночный счёт %s не обнулился: %s", uid, exc)
         ok = False
     ok = _delete_marks(supabase, SOLO_REWARDS_TABLE, uid) and ok
+    _cycle_reset_solo(supabase, uid)
     try:
         (supabase.table(LOVE_LOG_TABLE).delete()
          .eq("relationship_id", 0).eq("user_id", uid).execute())
@@ -1615,6 +1742,19 @@ def reset_to_solo(supabase, user_id) -> bool:
         pass
     _clear_memory_rewards(uid)
     return ok
+
+
+def solo_cycle_row(supabase, user_id) -> dict:
+    """Строка одиночного цикла (id, love, rewards). Нет таблицы — пустой словарь."""
+    uid = _safe_int(user_id, 0)
+    if uid <= 0:
+        return {}
+    try:
+        rows = (supabase.table(SOLO_LOVE_TABLE).select("*")
+                .eq("user_id", uid).limit(1).execute().data) or []
+    except Exception:  # noqa: BLE001 — таблицы может не быть
+        return {}
+    return dict(rows[0]) if rows else {}
 
 
 def solo_paid_stages(supabase, user_id) -> set:
@@ -1636,7 +1776,14 @@ def claim_solo_stage_rewards(supabase, user_id, score) -> list:
     if uid <= 0:
         return []
     current_index = stage_index(score, solo=True)
-    already = solo_paid_stages(supabase, uid)
+    # Задача 106: оплаченное текущего одиночного цикла лежит в самой строке
+    # solo_love. Вступление в пару/расставание её обнуляет — значит в новом
+    # цикле награды снова выдаются, даже если раньше он их уже забирал.
+    cycle_row = solo_cycle_row(supabase, uid)
+    cycle_known = CYCLE_REWARDS_COLUMN in cycle_row
+    already = set() if cycle_known else solo_paid_stages(supabase, uid)
+    already |= _memory_paid_stages(0, uid)
+    already |= _cycle_paid_stages(cycle_row)
     granted = []
     for stage in SOLO_STAGES:
         index = _safe_int(stage.get("index"), -1)
@@ -1655,6 +1802,8 @@ def claim_solo_stage_rewards(supabase, user_id, score) -> list:
         already.add(index)
         log_reward(supabase, 0, uid, index, stage.get("reward"))
         _memory_mark_paid(0, uid, index)
+        _cycle_remember(supabase, SOLO_LOVE_TABLE, cycle_row, None, index,
+                        match={"user_id": uid})
         granted.append({"stage": index, "title": stage["title"],
                         "reward": stage["reward"]})
     return granted
