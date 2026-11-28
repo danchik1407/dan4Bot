@@ -14,7 +14,7 @@ from typing import Optional, Union
 from db_schema import audit as db_schema_audit
 from shop_catalog import SHOP_ITEMS, ShopPurchaseError, is_admin_id, parse_inventory, purchase_shop_item, \
     serialize_shop_items, missing_stock_rows, shop_stock_snapshot, stock_diagnostics, \
-    sold_out_items, STOCK_LIMITS_ENABLED
+    sold_out_items, STOCK_LIMITS_ENABLED, PASSIVE_INCOME_RATES as PASSIVE_INCOME_RATES_FROM_CATALOG
 import player_stats
 import game_flags
 from love import (LOVE_ACTION_BONUS, LOVE_ICE_COST, action_progress_text,
@@ -89,7 +89,7 @@ async def _http_json(url, method: str = "GET", params=None, payload=None, timeou
 
 # Номер сборки: по нему из /api/health видно, что на сервисе НЕ старый код.
 # Если после деплоя здесь прежнее значение — Render ещё не перезапустился.
-API_BUILD = "2026-10-27-task105-gender-rewards-cooldown"
+API_BUILD = "2026-10-27-task106-speed-bets-referrals"
 
 # Момент старта процесса. По нему видно, что сервис только что «проснулся»:
 # Render на бесплатном тарифе усыпляет Web Service через 15 минут без входящих
@@ -725,31 +725,45 @@ LOVE_COOLDOWN_CACHE_TTL = 10.0
 
 
 def love_cooldown_enabled() -> bool:
-    """КД РП включён? Задача 105: всегда True.
+    """КД РП включён? Читается из game_settings с коротким кэшем (10 с).
 
-    Заказчик: «кулдаун должен работать одинаково во всех случаях: в паре, у
-    одинокого, у каждого участника свой». Прежний тумблер в админке читался
-    двумя сервисами с разными кэшами (10 и 30 секунд), поэтому после
-    «выключил → включил» бот продолжал видеть «off» и не ставил ожидание.
-    Теперь значение жёсткое, а старые записи в game_settings игнорируются.
+    Задача 106: заказчик попросил ВЕРНУТЬ кнопку «КД на РП» в админке апки
+    («Где кнопка???»). Задача 105 убирала тумблер, но вернула баг «выключил →
+    включил, а эффекта нет»: бот читал настройку со своим кэшем 10 с, api — со
+    своим. Теперь оба читают одну строку `love_cooldown_enabled`, и после
+    переключения кэш сбрасывается немедленно (см. set_love_cooldown_enabled),
+    поэтому эффект виден сразу. Значение по умолчанию — ВКЛЮЧЁН, 5 часов.
     """
-    _LOVE_COOLDOWN_CACHE.update({"value": True, "at": time.time()})
-    return True
+    now = time.time()
+    if (now - float(_LOVE_COOLDOWN_CACHE.get("at") or 0)) < LOVE_COOLDOWN_CACHE_TTL:
+        return bool(_LOVE_COOLDOWN_CACHE.get("value", True))
+    value = True
+    try:
+        raw = _load_game_settings().get(LOVE_COOLDOWN_SETTING_KEY)
+        if raw is not None and str(raw).strip() != "":
+            value = str(raw).strip().lower() not in ("0", "false", "no", "off", "выкл")
+    except Exception:  # noqa: BLE001 — база не ответила: живём по последнему
+        value = bool(_LOVE_COOLDOWN_CACHE.get("value", True))
+    _LOVE_COOLDOWN_CACHE.update({"value": value, "at": now})
+    return value
 
 
 def set_love_cooldown_enabled(enabled: bool = True) -> bool:
-    """Записать настройку КД. Задача 105: всегда «включён, 18000 секунд».
+    """Записать настройку КД РП (задача 106: тумблер в админке снова живой).
 
-    Функция оставлена, чтобы старый клиент или скрипт не уронил админку, но
-    ВЫКЛЮЧИТЬ кулдаун больше нельзя: параметр игнорируется, в базу всегда
-    пишется «включён». Раньше именно эта запись «off» и обнуляла ожидание —
-    отсюда жалоба «выключил и включил обратно, а эффекта нет».
+    `enabled=True` — одно РП-действие в 5 часов на все команды сразу;
+    `enabled=False` — без ожидания (0 секунд). Значение читают ОБА сервиса,
+    кэш сбрасывается сразу после записи, поэтому «выключил → включил»
+    срабатывает с первого раза.
     """
-    ok = game_setting_set(LOVE_COOLDOWN_SETTING_KEY, "1")
-    _LOVE_COOLDOWN_CACHE.update({"value": True, "at": time.time()})
-    # Старая метка «off» больше не должна спорить с настройкой — перезаписываем.
+    want = bool(enabled)
+    ok = game_setting_set(LOVE_COOLDOWN_SETTING_KEY, "1" if want else "0")
+    _LOVE_COOLDOWN_CACHE.update({"value": want, "at": time.time()})
+    # Длительность всегда одна и та же (5 часов) — пишем её, чтобы старые
+    # сборки не «додумывали» своё значение из устаревшей метки.
     try:
-        game_setting_set(LOVE_COOLDOWN_SECONDS_KEY, str(int(love_cooldown_seconds())))
+        game_setting_set(LOVE_COOLDOWN_SECONDS_KEY,
+                         str(int(love_cooldown_seconds())) if want else "off")
     except Exception:  # noqa: BLE001
         pass
     _game_settings_cache.update({"at": 0.0, "values": {}})
@@ -1577,14 +1591,9 @@ SUBSCRIPTIONS_TABLE = "subscriptions_history"
 CHANNEL_BONUS_STRICT = _env_flag("CHANNEL_BONUS_STRICT", False)
 
 # ==================== ПАССИВНЫЙ ДОХОД С КАПСУЛ ====================
-# Сколько коинов в час приносит одна капсула каждого типа.
-PASSIVE_INCOME_RATES = {
-    "capsule": 0.1,
-    "uniq_capsule": 0.5,
-    "ruby": 5.0,
-    "diamond": 20.0,
-    "galactic": 50.0,
-}
+# Сколько коинов в час приносит одна капсула каждого типа. Задача 106: ставки
+# живут в shop_catalog, чтобы бот (`!аурапрофиль`) и api считали ОДНО и то же.
+PASSIVE_INCOME_RATES = PASSIVE_INCOME_RATES_FROM_CATALOG
 # Задача 91 (заказчик): «должно капать без лимитов 24/7 даже когда ты офлайн и
 # у тебя апка и тг закрыты». Поэтому потолка накопления больше НЕТ: сколько
 # времени прошло — столько и начислено, хоть месяц. Ночного понижения (было
@@ -3324,12 +3333,20 @@ def _ledger_add_pending(entry: dict) -> bool:
 
     insert (а не upsert) — существующую строку нельзя сбросить из paid в
     pending, иначе после рестарта можно было бы заплатить дважды.
+
+    Задача 106: в журнал пишем и СТАВКУ игрока (`bet`). Раньше она терялась:
+    после рестарта/доплаты чистый доход посчитать было нельзя, и в лидерборд
+    уходила ВАЛОВАЯ выплата арены — отсюда «пвп даёт слишком много коинов».
+    Если колонки `bet` в базе ещё нет (миграция не применена), вставка идёт
+    без неё: выплата важнее статистики, лидерборд тогда просто не считает
+    этот раунд (см. _credit_arena_payout).
     """
     payload = {
         "arena": str(entry["arena"]),
         "round_id": str(entry["round_id"]),
         "user_id": int(entry["user_id"]),
         "amount": int(entry["amount"]),
+        "bet": max(0, int(entry.get("bet") or 0)),
         "status": "pending",
         "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
     }
@@ -3339,6 +3356,16 @@ def _ledger_add_pending(entry: dict) -> bool:
     except Exception as exc:  # noqa: BLE001 — дубль ключа тоже сюда попадает
         logger.debug("arena_payouts: строка %s/%s/%s не создана: %s",
                      payload["arena"], payload["round_id"], payload["user_id"], exc)
+        if _ledger_row_status(payload["arena"], payload["round_id"],
+                              payload["user_id"]) is not None:
+            return True
+    # Вторая попытка — без колонки bet (старая схема журнала).
+    payload.pop("bet", None)
+    try:
+        supabase.table(ARENA_PAYOUTS_TABLE).insert(payload).execute()
+        return True
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("arena_payouts: строка без bet не создана: %s", exc)
         return _ledger_row_status(payload["arena"], payload["round_id"],
                                   payload["user_id"]) is not None
 
@@ -3370,14 +3397,21 @@ def _credit_arena_payout(entry: dict) -> str:
 
     def _board_note_once():
         """Задача 93: в новогоднюю таблицу — чистый доход арены (выплата минус
-        своя ставка). Ставка приходит в entry["bet"] там, где известна; старые
-        строки журнала её не знают — тогда считаем выплату целиком.
+        своя ставка). Задача 106: ставка обязательна. Если её нет (старая
+        строка журнала, колонка `bet` не заполнена), выплату НЕ засчитываем:
+        раньше в таблицу уходила вся сумма, и одна игра в пвп давала в разы
+        больше, чем реально заработано.
         Вызываем ТОЛЬКО когда деньги реально начислены: при duplicate повторная
         запись засчитала бы один и тот же раунд дважды (рестарт/повтор)."""
         if not is_win:
             return
-        board_note_games(entry["user_id"], int(entry["amount"]),
-                         bet=int(entry.get("bet") or 0), win=True)
+        bet = max(0, int(entry.get("bet") or 0))
+        if bet <= 0:
+            logger.info("Лидерборд: арена %s/%s игрока %s без ставки в журнале — "
+                        "в таблицу не пишем", entry.get("arena"),
+                        entry.get("round_id"), entry.get("user_id"))
+            return
+        board_note_games(entry["user_id"], int(entry["amount"]), bet=bet, win=True)
     # Задача 80: история операций удалена — в профиле её больше нет.
     arena = str(entry["arena"])
     round_id = str(entry["round_id"])
@@ -3599,6 +3633,9 @@ def _queue_payout_entries(arena: str, round_id: str, plan, paid_keys) -> None:
             PENDING_PAYOUTS[key] = {
                 "arena": arena, "round_id": round_id,
                 "user_id": int(entry["user_id"]), "amount": int(entry["amount"]),
+                # Задача 106: ставку тащим через очередь — иначе чистый доход
+                # арены (выплата минус ставка) в лидерборде не посчитать.
+                "bet": max(0, int(entry.get("bet") or 0)),
                 "attempts": 0, "last_error": "",
             }
 
@@ -3734,6 +3771,8 @@ def _resume_pending_payouts() -> int:
                 "arena": str(row.get("arena") or ""),
                 "round_id": str(row.get("round_id") or ""),
                 "user_id": uid, "amount": amount,
+                # Задача 106: ставка из журнала (колонка может отсутствовать).
+                "bet": max(0, _safe_int(row.get("bet"), 0)),
                 "attempts": 0, "last_error": "",
             })
     if rows:
@@ -8076,15 +8115,79 @@ async def admin_game_settings(data: UserAuth):
         "ok": True,
         "maintenance": maintenance_now(),
         "maintenance_message": MAINTENANCE_MESSAGE,
-        # Задача 105: КД РП — жёсткое правило: 5 часов всегда, для пары и для
-        # одиночки. Тумблер больше ничего не выключает (именно он раньше
-        # «съедал» кулдаун), значения оставлены для совместимости с аппкой.
-        "love_cooldown_enabled": True,
-        "love_cooldown_seconds": love_cooldown_seconds(),
+        # Задача 106: тумблер КД РП снова рабочий (включён = 5 часов на все
+        # команды, выключен = без ожидания). Читаем то же значение, что и бот.
+        "love_cooldown_enabled": love_cooldown_enabled(),
+        "love_cooldown_seconds": love_cooldown_seconds() if love_cooldown_enabled() else 0,
         "love_cooldown_full_seconds": love_cooldown_seconds(),
-        "love_cooldown_note": "всегда 5 часов на все РП-команды",
+        "love_cooldown_note": ("5 часов на все РП-команды" if love_cooldown_enabled()
+                               else "без ожидания"),
         # Задача 89: какое оформление сейчас включено для игроков.
         "theme": app_theme(),
+    }
+
+
+@app.post("/api/admin/referrals_top")
+async def admin_referrals_top(data: UserAuth):
+    """Задача 106: топ-10 рефералов для админки.
+
+    Заказчик: «в админке сделать статистику по рефералам — топ 10, ник, сколько
+    пригласил и сколько заработал с рефералов». Считаем по фактической таблице
+    referrals: приглашённые = все строки, где игрок referrer; заработано =
+    сумма его наград (reward) по подтверждённым приглашениям.
+    """
+    _require_admin_api(data.initData)
+    rows = []
+    try:
+        rows = (supabase.table(REFERRALS_TABLE)
+                .select("referrer_id, referred_id, reward, status")
+                .limit(20000).execute().data) or []
+    except Exception as exc:  # noqa: BLE001 — таблицы может не быть
+        logger.info("Рефералы: статистика недоступна (%s)", exc)
+    agg = {}
+    for row in rows:
+        referrer = _safe_int(row.get("referrer_id"), 0)
+        if referrer <= 0:
+            continue
+        item = agg.setdefault(referrer, {"user_id": referrer, "invited": 0,
+                                         "earned": 0, "pending": 0})
+        item["invited"] += 1
+        reward = _safe_int(row.get("reward"), 0)
+        if str(row.get("status") or "paid").lower() in ("paid", "ok", "done"):
+            item["earned"] += reward
+        else:
+            item["pending"] += reward
+    table = sorted(agg.values(), key=lambda item: (-item["earned"], -item["invited"]))
+    top = table[:10]
+    # Ники одним запросом: отдельный запрос на строку — лишние 10 кругов к базе.
+    names = {}
+    ids = [item["user_id"] for item in top]
+    if ids:
+        try:
+            cards = (supabase.table("users").select("user_id, username")
+                     .in_("user_id", ids).execute().data) or []
+            for card in cards:
+                names[_safe_int(card.get("user_id"), 0)] = _admin_username(card)
+        except Exception as exc:  # noqa: BLE001
+            logger.info("Рефералы: ники не подтянулись (%s)", exc)
+    out = []
+    for place, item in enumerate(top, start=1):
+        out.append({
+            "place": place,
+            "user_id": item["user_id"],
+            "username": names.get(item["user_id"]) or f"id{item['user_id']}",
+            "invited": item["invited"],
+            "earned": item["earned"],
+            "pending": item["pending"],
+        })
+    earned_total = sum(item["earned"] for item in table)
+    return {
+        "ok": True,
+        "rows": out,
+        "referrals_total": len(rows),
+        "referrers_total": len(table),
+        "earned_total": earned_total,
+        "updated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
     }
 
 
@@ -8121,19 +8224,23 @@ async def admin_set_love_cooldown(data: AdminLoveCooldownRequest):
     """Кнопка «КД РП»: включить (5 часов) или выключить (0 секунд).
 
     Заказчик: «сделай кнопку в админ панели в апке чтобы я мог переключать есть
-    кд на рп команды все (5 часов) или нету (0 сек)». Значение читает и бот,
-    поэтому после переключения ждать деплоя не нужно.
+    кд на рп команды все (5 часов) или нету (0 сек)» и в задаче 106 —
+    «Где кнопка???». Значение читает и бот, и api, кэш сбрасывается сразу.
     """
     admin_id = _require_admin_api(data.initData)
-    if not set_love_cooldown_enabled(True):
+    want = bool(data.enabled)
+    if not set_love_cooldown_enabled(want):
         raise HTTPException(status_code=503,
                             detail="Не удалось записать настройку КД — попробуйте ещё раз")
-    logger.warning("КД РП запрошен выключить (админ %s) — по ТЗ 105 он всегда "
-                   "5 часов, оставляем включённым", admin_id)
-    return {"ok": True, "enabled": True, "love_cooldown_enabled": True,
-            "love_cooldown_seconds": love_cooldown_seconds(),
-            "love_cooldown_note": "всегда 5 часов на все РП-команды",
-            "message": "⏳ КД РП всегда 5 часов — выключить его нельзя."}
+    state = love_cooldown_enabled()
+    logger.warning("КД РП переключён админом %s: %s", admin_id, "включён" if state else "выключен")
+    return {"ok": True, "enabled": state, "love_cooldown_enabled": state,
+            "love_cooldown_seconds": love_cooldown_seconds() if state else 0,
+            "love_cooldown_note": ("5 часов на все РП-команды" if state
+                                   else "без ожидания"),
+            "message": ("✅ КД включён: одно РП-действие в 5 часов на все команды."
+                        if state else
+                        "✅ КД выключен: РП-команды работают без ожидания.")}
 
 
 @app.post("/api/admin/give_coins")

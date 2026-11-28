@@ -175,7 +175,7 @@ let balance = 0, keys = 0, currentBet = 10, inventory = [], lastChestTime = 0, i
 let daysInGame = 0;
 // Задача 105: пол для склонений в РП («саму себя» / «самого себя» / «себя»).
 // Источник — users.gender (профиль), значение ставится кнопками ниже.
-let userGender = '';
+let userGender = '';   // остаётся только для чтения старых профилей
 // Баланс показываем только когда он реально пришёл с сервера, иначе «…» вместо ложного 0.
 let balanceKnown = false;
 let profileLoadPromise = null, profileRetryTimer = null, profileRetryCount = 0, profileFailure = '';
@@ -463,9 +463,13 @@ let upgradeFetchPending = false;     // ждём ответ сервера по 
 let upgradeBusyTimer = null;         // сторож «кнопка залипла»
 // Задача 70: заказчик просил «5–4 секунды» вместо прежних 5.4 с + долгого
 // торможения. Полный раунд — 4 с: разгон, затем плавное затухание ~2.6 с.
-const UPGRADE_DURATION = 4000;        // полный раунд: быстрый спин + плавное затухание
+// Задача 106: заказчик просил срезать прокрут на 2 секунды — «резко стартует,
+// потом плавно тормозит и встаёт за 3–4 секунды». Было 4000 мс общего раунда
+// и минимум 2600 мс на затухание (в сумме до ~5 с). Стало: раунд 3000 мс,
+// затухание 1900 мс — итого ~3 с при нормальном ответе сервера.
+const UPGRADE_DURATION = 3000;        // полный раунд: быстрый спин + плавное затухание
 const UPGRADE_ARROW_SPEED = 1080;     // градусов в секунду в фазе ожидания ответа сервера
-const UPGRADE_ARROW_MIN_LAND = 2600;  // минимум времени на «рулеточное» затухание, мс
+const UPGRADE_ARROW_MIN_LAND = 1900;  // минимум времени на «рулеточное» затухание, мс
 // Сколько ждём ответ сервера до решения «сеть/сервер не ответил». Было 8 с:
 // на холодном Render (сервис просыпается 20–50 с) запрос обрывался, игрок
 // видел «Сервер не ответил», хотя ставка уже была принята и сыграна.
@@ -475,7 +479,10 @@ const UPGRADE_MAX_CHANCE = 95;
 // Задача 25: x4 и x8 убраны. x1.12…x1.75 — «почти монетка», x20/x50 — риск.
 const UPGRADE_MULTS = [1.12, 1.35, 1.55, 1.75, 20, 50];
 // Куда именно крутится стрелка: одна CSS-кривая на весь финиш, без рывков.
-const UPGRADE_LAND_MS = 2600;
+// Задача 106: 1900 вместо 2600 мс — прокрут короче на ~2 с суммарно.
+const UPGRADE_LAND_MS = 1900;
+// Кривая: резкий старт (малая производная в начале координат X) и длинный
+// плавный хвост торможения — стрелка не «доезжает» рывком в конце.
 const UPGRADE_LAND_EASING = 'cubic-bezier(0.1, 0.7, 0.1, 1)';
 const UPGRADE_FALLBACK_PRICES = {
     capsule: 100, uniq_capsule: 500, ruby: 1000, diamond: 5000,
@@ -775,7 +782,6 @@ function applyProfile(data) {
     // Задача 105: пол из профиля (users.gender) — по нему бот склоняет «себя».
     userGender = (data && (data.gender === 'female' || data.gender === 'male'))
         ? data.gender : '';
-    renderGenderCard();
     // Задача 88: список закрытых игр ставим ПОСЛЕ определения isAdmin.
     // Раньше это было на двадцать строк выше, и на первом профиле isAdmin ещё
     // false — админу карточки помечались «выключено», а вход закрывался.
@@ -1249,38 +1255,68 @@ function toggleAdminGames() {
 }
 
 
-// ============ ПОЛ В ПРОФИЛЕ (задача 105) ============
-// Заказчик: «пол должен браться из настроек профиля». Три состояния: она,
-// он и «не указывать» — тогда бот пишет нейтрально («обнимает себя»).
-function renderGenderCard() {
-    const card = document.getElementById('gender-card');
-    if (!card) return;
-    const label = document.getElementById('gender-state');
-    if (label) {
-        label.textContent = userGender === 'female' ? 'она'
-            : userGender === 'male' ? 'он' : 'не выбрано';
-    }
-    card.querySelectorAll('.gender-btn').forEach(btn => {
-        btn.classList.toggle('is-on', String(btn.dataset.gender || '') === userGender);
-    });
+// ============ ПОЛ (задача 106) ============
+// Кнопки «Она / Он / Не указывать» из профиля убраны: их не просили для всех.
+// Пол бот определяет сам — по имени/нику, а если не понял, пишет «он(а)».
+// Значение users.gender по-прежнему читается и учитывается, если оно уже есть
+// (старые записи не ломаем), но выставить его из апки больше нечем.
+// ============ РЕФЕРАЛЫ В АДМИНКЕ (задача 106) ============
+// Заказчик: «сделай в админке статистику по рефералам — топ 10 юзеров: ник,
+// сколько пригласил, сколько с них заработал». Все числа приходят с сервера,
+// клиент только рисует строки.
+let adminRefsLoaded = false;
+
+function toggleAdminReferrals() {
+    const panel = document.getElementById('admin-refs-panel');
+    const btn = document.getElementById('admin-refs-btn');
+    if (!panel) return;
+    const open = panel.hidden;
+    panel.hidden = !open;
+    if (btn) btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+    if (open) loadAdminReferrals(true);
 }
 
-async function setGender(value) {
-    const want = (value === 'female' || value === 'male') ? value : '';
+async function loadAdminReferrals(force) {
+    if (!isAdmin) return;
+    if (adminRefsLoaded && !force) return;
+    const list = document.getElementById('admin-refs-list');
+    const hint = document.getElementById('admin-refs-hint');
+    if (list) list.innerHTML = '<div class="ach-empty">Считаем…</div>';
     try {
-        const data = await apiPost('/api/user/gender',
-            { initData: tg.initData, gender: want });
-        userGender = (data && (data.gender === 'female' || data.gender === 'male'))
-            ? data.gender : '';
-        renderGenderCard();
-        if (typeof tg.showAlert === 'function') {
-            tg.showAlert(userGender === 'female' ? '✅ Записал: она'
-                : userGender === 'male' ? '✅ Записал: он'
-                : '✅ Пол не указываем — фразы будут нейтральными');
-        }
+        const data = await apiPost('/api/admin/referrals_top', { initData: tg.initData });
+        renderAdminReferrals(data);
     } catch (e) {
-        tg.showAlert(e.message || 'Не удалось сохранить — попробуй ещё раз');
+        if (list) list.innerHTML = `<div class="ach-empty">${escapeHtml(e.message || 'Не удалось получить статистику')}</div>`;
+        if (hint) hint.textContent = 'Сервер не ответил — потяни ещё раз.';
     }
+}
+
+function renderAdminReferrals(data) {
+    const list = document.getElementById('admin-refs-list');
+    const hint = document.getElementById('admin-refs-hint');
+    if (!list) return;
+    adminRefsLoaded = true;
+    const rows = (data && Array.isArray(data.rows)) ? data.rows : [];
+    if (hint) {
+        const total = Number(data && data.referrals_total) || 0;
+        hint.textContent = total
+            ? `Всего приглашений: ${total} · приглашали: ${Number(data.referrers_total) || 0} чел.`
+            : 'Пока никто никого не приглашал.';
+    }
+    if (!rows.length) {
+        list.innerHTML = '<div class="ach-empty">Список пуст</div>';
+        return;
+    }
+    list.innerHTML = rows.map(row => `
+        <div class="admin-refs-top-row">
+            <span class="admin-refs-place">${Number(row.place) || ''}</span>
+            <span class="admin-refs-name">${escapeHtml(row.username || ('id' + row.user_id))}</span>
+            <span class="admin-refs-nums">
+                <span class="admin-refs-inv">👥 ${Number(row.invited) || 0}</span>
+                <span class="admin-refs-earned">${coinAmount(Number(row.earned) || 0)}</span>
+            </span>
+        </div>
+    `).join('');
 }
 
 // ============ КД РП: КНОПКА АДМИНА (задача 79) ============
@@ -1298,22 +1334,27 @@ function renderLoveCooldownCard(data) {
     if (data && typeof data.love_cooldown_enabled === 'boolean') {
         loveCooldownEnabled = data.love_cooldown_enabled;
     }
-    // Задача 105: кулдаун стал жёстким правилом (5 часов на все РП, у пары
-    // и у одиночки), поэтому карточка просто показывает состояние — тумблера
-    // больше нет: именно «выключение» и ломало ожидание.
-    loveCooldownEnabled = true;
+    // Задача 106: кнопку вернули — «Где кнопка???». Тумблер снова рабочий:
+    // включён — одно РП-действие в 5 часов на все команды, выключен — без
+    // ожидания. Значение одно на бота и апку, кэш сбрасывается сразу.
     const state = document.getElementById('admin-lovecd-state');
     const hint = document.getElementById('admin-lovecd-hint');
     const btn = document.getElementById('admin-lovecd-btn');
     if (state) {
-        state.textContent = 'всегда 5 ч';
-        state.classList.toggle('is-on', false);
+        state.textContent = loveCooldownEnabled ? 'включён · 5 ч' : 'выключен · 0 сек';
+        state.classList.toggle('is-on', !loveCooldownEnabled);
     }
     if (hint) {
-        hint.textContent = 'Одно РП-действие в 5 часов на все команды сразу — '
-            + 'в паре и у одиночки, у каждого игрока своё время.';
+        hint.textContent = loveCooldownEnabled
+            ? 'Одно РП-действие в 5 часов на все команды сразу — в паре и у '
+              + 'одиночки, у каждого игрока своё время. Нажми, чтобы отключить.'
+            : 'КД выключен: РП-команды работают без ожидания. Нажми, чтобы включить.';
     }
-    if (btn) btn.hidden = true;
+    if (btn) {
+        btn.hidden = false;
+        btn.disabled = false;
+        btn.textContent = loveCooldownEnabled ? 'Выключить КД' : 'Включить КД';
+    }
 }
 
 async function loadAdminLoveCooldown() {
@@ -1544,6 +1585,13 @@ function switchTab(tabId, element) {
         renderAdminMaintenanceCard({ maintenance_active: serverMaintenance });
         // Задача 79: состояние КД РП читаем с сервера (его же читает бот).
         loadAdminLoveCooldown();
+        // Задача 106: топ рефералов обновляем при каждом входе в панель.
+        adminRefsLoaded = false;
+        const refsPanel = document.getElementById('admin-refs-panel');
+        if (refsPanel) refsPanel.hidden = true;
+        const refsBtn = document.getElementById('admin-refs-btn');
+        if (refsBtn) refsBtn.setAttribute('aria-expanded', 'false');
+        loadAdminReferrals(true);
         // Задача 89: какое оформление включено сейчас (кнопка в этой панели).
         loadAdminTheme();
         adminPlayers = [];
@@ -4719,7 +4767,7 @@ function upgradeArrowTargetFor(won, chance, rollValue) {
 // Фаза 2 — «как в рулетке»: несколько полных оборотов и плавное затухание
 // ровно на выпавшем числе. Раньше торможение считалось вручную кусками, и на
 // стыке фаз стрелка дёргалась. Теперь один CSS-transition с кривой
-// cubic-bezier(0.1, 0.7, 0.1, 1) на 5 секунд — без рывков и без «доводки».
+// cubic-bezier(0.1, 0.7, 0.1, 1) на 1.9 секунды (задача 106) — без рывков.
 function landUpgradeArrow(won, chance, duration, token, onDone, rollValue) {
     stopUpgradeArrow();
     const arrow = document.getElementById('up-arrow');
@@ -4997,7 +5045,8 @@ async function startUpgrade() {
         return;
     }
 
-    // Общая длительность анимации — 3.4 секунды: остаток времени уходит на торможение стрелки.
+    // Общая длительность анимации — UPGRADE_DURATION (3 с): остаток времени
+    // уходит на торможение стрелки, но не меньше UPGRADE_ARROW_MIN_LAND.
     const elapsed = Date.now() - upgradeStartedAt;
     const remaining = Math.max(UPGRADE_ARROW_MIN_LAND, UPGRADE_DURATION - elapsed);
 
@@ -5366,7 +5415,20 @@ async function startMines() {
     if (!isAdminId(user && user.id) && bet > 10000) return tg.showAlert("Максимальная ставка 10 000 коинов");
 
     isProcessing = true;
-    setMinesButton('Загрузка...', '#555', true);
+    // Задача 106: ставка в минах принимается мгновенно — баланс и сетка
+    // переключаются сразу, а ответ сервера только подтверждает раунд. Раньше
+    // кнопка писала «Загрузка...», и до ответа ничего не происходило.
+    const balanceBefore = balance;
+    balance = Math.max(0, balance - bet);
+    balanceKnown = true;
+    updateUI();
+    minesActive = true; minesCoef = 1.0; minesSafeOpened = 0; minesBet = bet;
+    currentBet = bet;
+    resetMinesCells();
+    lockMinesCells();                 // откроем, когда сервер подтвердит раунд
+    updateMinesInfo(1, bet);
+    setMinesButton('Ставка принята…', '#555', true);
+    playSound('click');
     try {
         const res = await fetch(`${API_URL}/api/mines_start`, {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -5374,17 +5436,25 @@ async function startMines() {
                                    request_id: requestId() })
         });
         const data = await res.json().catch(() => ({}));
-        if (!res.ok) { tg.showAlert(data.detail || "Не удалось начать игру"); return; }
+        if (!res.ok) {
+            // Раунд не начался — откатываем ставку и сетку.
+            balance = balanceBefore; updateUI();
+            resetMinesCells();
+            resetMinesRound();
+            tg.showAlert(data.detail || "Не удалось начать игру");
+            return;
+        }
         balance = Number(data.new_balance); balanceKnown = true; updateUI();
-        minesActive = true; minesCoef = 1.0; minesSafeOpened = 0; minesBet = bet;
-        currentBet = bet;
-        resetMinesCells();
-        updateMinesInfo(1, bet);
+        minesCoef = 1.0; minesSafeOpened = 0; minesBet = bet;
+        // Сервер подтвердил раунд — клетки снова доступны.
+        document.querySelectorAll('.cell').forEach(c => { c.style.pointerEvents = 'auto'; });
         setMinesButton(`Забрать (${coinAmount(bet)})`, '#34c759', false);
-        playSound('click');
         // Задача 79: профиль и история должны увидеть катку сразу, а не через кэш.
         refreshProfileStatsSoon();
     } catch (e) {
+        balance = balanceBefore; updateUI();
+        resetMinesCells();
+        resetMinesRound();
         tg.showAlert("Ошибка соединения. Ставка не принята, попробуйте ещё раз.");
     } finally {
         isProcessing = false;
@@ -5502,6 +5572,19 @@ async function placeHockeyBet(team) {
     if (!isAdminId(user && user.id) && bet > 10000) return tg.showAlert("Максимальная ставка 10 000 коинов");
 
     isProcessing = true;
+    // Задача 106: «Поставить ставку» откликается МГНОВЕННО. Заказчик: «при
+    // нажатии поставить ставку есть небольшие лаги, ставка идёт около 1 сек».
+    // Раньше кнопка ждала ответ сервера (до 3 попыток по 8 с), и всё это время
+    // экран выглядел мёртвым. Теперь списываем ставку и помечаем кнопку сразу,
+    // а ответ сервера только уточняет баланс. Не приняли — откатываем.
+    const balanceBefore = balance;
+    balance = Math.max(0, balance - bet);
+    balanceKnown = true;
+    updateUI();
+    playSound('click');
+    const betButton = document.getElementById(team ? `team-${team}-btn` : 'hockey-btn');
+    const betButtonLabel = betButton ? betButton.textContent : '';
+    if (betButton) { betButton.disabled = true; betButton.textContent = 'Ставка идёт…'; }
     try {
         // team передаём только в командном режиме: сервер сам проверит, что
         // игрок не ставит за обе команды в одном раунде.
@@ -5530,15 +5613,20 @@ async function placeHockeyBet(team) {
         if (!data) throw (lastError || new Error("Ошибка соединения"));
         balance = Number(data.new_balance);
         if (Number.isFinite(balance)) { balanceKnown = true; updateUI(); }
-        playSound('click');
         if (team) { arenaState.myTeam = team; updateArenaModeUI(arenaState.view, team); }
         pollHockeyState();
     } catch (e) {
+        // Ставку не приняли — возвращаем показанный баланс, чтобы на экране не
+        // осталось «списанных» коинов.
+        balance = balanceBefore;
+        updateUI();
         // Настоящая причина вместо «Ставки закрыты!» на любой сбой.
         tg.showAlert(e && e.message ? e.message : "Ошибка соединения");
         // Ставка могла дойти до сервера, а ответ — нет. Перечитываем профиль,
         // чтобы на экране был настоящий баланс, а не догадка.
         if (typeof loadUserData === 'function') loadUserData({ attempts: 1 }).catch(() => {});
+    } finally {
+        if (betButton) { betButton.disabled = false; betButton.textContent = betButtonLabel; }
     }
     isProcessing = false;
 }
@@ -6912,7 +7000,13 @@ async function crashAction() {
             await loadUserData();
             if (!userDataLoaded) { isProcessing = false; return tg.showAlert("Не удалось загрузить баланс. Проверьте соединение и попробуйте снова."); }
         }
-        await pollCrashState();
+        // Задача 106: не ждём опрос состояния, если оно уже свежее (до 5 с).
+        // Раньше здесь стоял безусловный `await pollCrashState()` — кнопка
+        // «Поставить ставку» откликалась только после сетевого круга, отсюда
+        // секундная задержка. Опрос нужен, лишь когда данных нет или они старые.
+        if (!currentCrashData || Date.now() - crashStateUpdatedAt > 5000) {
+            await pollCrashState();
+        }
         const s = currentCrashData;
         if (!s || Date.now() - crashStateUpdatedAt > 5000) {
             isProcessing = false;
@@ -6926,22 +7020,34 @@ async function crashAction() {
             if (balance < bet) { isProcessing = false; return tg.showAlert("Недостаточно коинов!"); }
             if (!isAdminId(user && user.id) && bet > 10000) { isProcessing = false; return tg.showAlert("Максимальная ставка 10 000 коинов"); }
 
+            // Мгновенный отклик: коины списываются на экране и кнопка гаснет
+            // ДО ответа сервера. Не приняли — баланс вернём как было.
+            const balanceBefore = balance;
+            const btn = document.getElementById('crash-btn');
+            balance = Math.max(0, balance - bet); balanceKnown = true; updateUI();
+            playSound('click');
+            if (btn) { btn.disabled = true; btn.innerText = 'Ставка идёт…'; }
             const res = await fetch(`${API_URL}/api/crash_bet`, {
                 method: 'POST', headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ initData: tg.initData, amount: bet })
             });
             if (!res.ok) {
                 const e = await res.json().catch(() => ({}));
+                balance = balanceBefore; updateUI();
+                if (btn) btn.disabled = false;
                 if (res.status >= 500) { await loadUserData(); await pollCrashState(); }
                 isProcessing = false;
                 return tg.showAlert(e.detail || "Ошибка");
             }
             const data = await res.json();
             balance = data.new_balance; balanceKnown = true; updateUI();
-            playSound('click');
             refreshProfileStatsSoon();
             await pollCrashState();
         } else if (s.my_status === 'bet' && s.status === 'flying') {
+            // Забрать — тоже без задержки: кнопку гасим и звук играем сразу.
+            const crashBtn = document.getElementById('crash-btn');
+            if (crashBtn) { crashBtn.disabled = true; crashBtn.innerText = 'Забираем…'; }
+            playSound('click');
             const res = await fetch(`${API_URL}/api/crash_cashout`, {
                 method: 'POST', headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ initData: tg.initData })

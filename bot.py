@@ -70,6 +70,7 @@ import player_stats
 import game_flags
 from db_schema import audit as db_schema_audit, format_report as db_schema_report
 from shop_catalog import (
+    PASSIVE_INCOME_RATES as PASSIVE_INCOME_RATES_SHARED,
     DAILY_LIMITS_ENABLED,
     ShopPurchaseError,
     available_shop_items,
@@ -1116,15 +1117,16 @@ def love_cooldown_enabled_sync() -> bool:
 
 
 def active_love_cooldown_seconds() -> int:
-    """Действующий КД РП: ВСЕГДА 5 часов (задача 105).
+    """Действующий КД РП: 5 часов, пока админ не выключил тумблер (задача 106).
 
-    Заказчик: «кулдаун в паре не работает, тестировалось с выключенным через
-    админку и включённым обратно — эффекта нет» и «нужно, чтобы кулдаун
-    работал одинаково во всех случаях». Поэтому тумблер больше не влияет на
-    награду: 5 часов — жёсткое правило и для пары, и для одиночки. Старые
-    значения в game_settings (`love_cooldown_enabled = 0`, `…seconds = off`)
-    игнорируются — именно они и «выключали» кулдаун молча.
+    Задача 105 сделала КД жёстким и убрала тумблер из апки — заказчик вернул
+    кнопку («Где кнопка???»). Теперь значение снова читается из game_settings
+    (`love_cooldown_enabled`), одинаково для пары и одиночки и одинаково для
+    всех команд; после переключения в админке кэш живёт не дольше 10 секунд,
+    поэтому «выключил → включил» срабатывает сразу.
     """
+    if not love_cooldown_enabled_sync():
+        return 0
     return love_cooldown_seconds()
 
 
@@ -4055,6 +4057,19 @@ async def cmd_love_info(message: Message):
     row = await get_relationship(target_id)
     left = await love_cooldown_left(target_id)
     if row:
+        # Задача 106: награда за уровень ПАРЫ добирается при каждом заходе в
+        # «любовь инфа». Раньше выплата висела только на РП-действии и на
+        # команде «награды», поэтому пара, поднявшая уровень другим путём
+        # (подарок/догон после сбоя), оставалась без награды — заказчик и решил,
+        # что «награду дают только одиноким». Одиночная ветка так уже умела
+        # (settle_solo_rewards), теперь и пара.
+        try:
+            got = await asyncio.to_thread(claim_stage_rewards, supabase, row)
+            got = [item for item in got if int(item.get("reward") or 0) > 0]
+            if got:
+                await _notify_stage_rewards(row, target_id, got)
+        except Exception as exc:  # noqa: BLE001 — инфо важнее догона
+            logger.warning("Догон наград пары %s не сработал: %s", row.get("id"), exc)
         partner_id = _partner_of(row, target_id)
         score = int(row.get("love") or 0)
         info = public_stage(score)
@@ -4554,24 +4569,33 @@ def _telegram_gender(user) -> str:
     return GENDER_UNKNOWN
 
 
-async def detect_gender(user_id, name="") -> str:
-    """Пол игрока по цепочке из ТЗ: профиль → Telegram → имя → нейтрально."""
+async def detect_gender(user_id, name="", username="") -> str:
+    """Пол игрока по цепочке из ТЗ: профиль → Telegram → имя/ник → «он(а)».
+
+    Задача 106: кнопки пола в апке убраны — заказчик просил определять пол
+    самому «по аватарке или нику». Bot API аватарку не анализирует (и пол в
+    объекте User не приходит), поэтому смотрим имя и @ник: точные имена,
+    уменьшительные формы, маркеры в нике («girl», «king», «кошка») и типичные
+    женские окончания. Совсем не опознали — в тексте будет «он(а)».
+    """
     try:
         uid = int(user_id)
     except (TypeError, ValueError):
-        return gender_from_name(name)
+        return gender_from_name(name) or gender_from_name(username) or GENDER_UNKNOWN
     now = time.time()
     cached = _GENDER_CACHE.get(uid)
     if cached and now - cached[1] < _GENDER_CACHE_TTL:
         if cached[0]:
             return cached[0]
-        return gender_from_name(name) or GENDER_UNKNOWN
+        return (gender_from_name(name) or gender_from_name(username)
+                or GENDER_UNKNOWN)
     profile = GENDER_UNKNOWN
     try:
         profile = await asyncio.to_thread(_gender_from_profile_sync, uid)
     except Exception:  # noqa: BLE001
         profile = GENDER_UNKNOWN
-    value = profile or gender_from_name(name) or GENDER_UNKNOWN
+    value = (profile or gender_from_name(name) or gender_from_name(username)
+             or GENDER_UNKNOWN)
     _GENDER_CACHE[uid] = (value, now)
     if len(_GENDER_CACHE) > 5000:
         for key in list(_GENDER_CACHE)[:1000]:
@@ -4652,8 +4676,9 @@ async def cmd_rp_action(message: Message):
     except (TypeError, ValueError):
         target_id, target_name = None, None
     row = await get_relationship(actor_id)
-    # Задача 105: пол автора нужен для «саму себя / самого себя / себя».
-    actor_gender = await detect_gender(actor_id, message.from_user.full_name)
+    # Задача 105/106: пол автора нужен для «саму себя / самого себя / он(а)».
+    actor_gender = await detect_gender(actor_id, message.from_user.full_name,
+                                       message.from_user.username or "")
 
     if row:
         partner_id = _partner_of(row, actor_id)
@@ -4672,7 +4697,10 @@ async def cmd_rp_action(message: Message):
             # ТЗ п.2: занят(а) — предупреждение, начислений нет.
             # Задача 105: «он занят» / «она занята» / «человек занят» вместо
             # «он(а) занят(а)».
-            target_gender = await detect_gender(target_id, target_name)
+            target_username = ""
+            if message.reply_to_message and message.reply_to_message.from_user:
+                target_username = message.reply_to_message.from_user.username or ""
+            target_gender = await detect_gender(target_id, target_name, target_username)
             text = _rp_text(message, action, meta, target_id, target_name, actor_gender)
             text += "\n\n" + busy_warning(target_gender)
             return await message.answer(text, parse_mode="HTML")
@@ -5536,9 +5564,187 @@ async def cmd_help(message: Message):
     await message.answer(text, parse_mode="HTML")
 
 
-@dp.message(F.text.func(lambda t: strip_prefix(t).lower().startswith("тег")))
+@dp.message(F.text.func(lambda t: strip_prefix(t).lower().startswith("тег")
+                        or strip_prefix(t).lower().startswith("tag")))
 async def cmd_tag(message: Message):
-    await message.answer(f"👋 Я на месте, {safe_text(message.from_user.full_name)}!")
+    """`тег` / `!тег` — проверка бота: приветствие + фактическая задержка в мс.
+
+    Задача 106: заказчик просил «👋 Я на месте, Broker!» и строку нагрузки
+    («⚡ Нагрузка: 12 мс»), как у Iris. Миллисекунды — реальные: время от
+    начала обработки команды до ответа Telegram на отправку сообщения.
+    """
+    started = time.perf_counter()
+    name = safe_text(message.from_user.full_name)
+    sent = await message.answer(f"👋 Я на месте, {name}!")
+    ping = max(1, int(round((time.perf_counter() - started) * 1000)))
+    text = f"👋 Я на месте, {name}!\n⚡ Нагрузка: {ping} мс"
+    try:
+        await sent.edit_text(text)
+    except Exception:  # noqa: BLE001 — правка не прошла: просто ещё сообщение
+        await message.answer(text)
+
+
+# ==================== !АУРАПРОФИЛЬ (задача 106) ====================
+# Заказчик: «добавь команду Аурапрофиль — при вводе @юз или ответом на
+# сообщение будет выдавать в тг такую же таблицу как профиль в апке, пока
+# только для владельцев бота».
+#
+# Все числа — из тех же таблиц, что читает апка (users, player_stats,
+# relationships / solo_love, referrals, snowflakes, newyear_board). Никаких
+# «примерных» значений: чего нет в базе — того нет и в таблице.
+_AURA_PROFILE_ALIASES = ("аурапрофиль", "auraprofile", "аура профиль")
+
+
+def _aura_profile_sync(uid: int) -> dict:
+    """Сырьё для таблицы профиля: всё, что можно прочитать без сети."""
+    data = {
+        "user_id": int(uid), "coins": 0, "keys": 0, "days": 0,
+        "inventory": [], "ref_invited": 0, "ref_earned": 0,
+        "snowflakes": 0, "board_earned": None, "board_place": None,
+        "stats": {},
+    }
+    row = None
+    try:
+        rows = (supabase.table("users").select("coins, keys, inventory, created_at")
+                .eq("user_id", int(uid)).limit(1).execute().data) or []
+        row = rows[0] if rows else None
+    except Exception as exc:  # noqa: BLE001 — профиль не должен падать
+        logger.info("Аурапрофиль: users недоступна (%s)", exc)
+    if row:
+        try:
+            data["coins"] = int(row.get("coins") or 0)
+        except (TypeError, ValueError):
+            data["coins"] = 0
+        try:
+            data["keys"] = int(row.get("keys") or 0)
+        except (TypeError, ValueError):
+            data["keys"] = 0
+        data["inventory"] = parse_inventory(row.get("inventory"))
+        created = row.get("created_at")
+        if created:
+            try:
+                text = str(created).replace("Z", "+00:00")
+                stamp = datetime.fromisoformat(text)
+                if stamp.tzinfo is None:
+                    stamp = stamp.replace(tzinfo=timezone.utc)
+                data["days"] = max(0, int((time.time() - stamp.timestamp()) // 86400))
+            except Exception:  # noqa: BLE001
+                data["days"] = 0
+    try:
+        data["stats"] = player_stats.read_stats(supabase, int(uid)) or {}
+    except Exception as exc:  # noqa: BLE001
+        logger.info("Аурапрофиль: статистика недоступна (%s)", exc)
+    try:
+        refs = (supabase.table("referrals").select("reward, status")
+                .eq("referrer_id", int(uid)).limit(5000).execute().data) or []
+        data["ref_invited"] = len(refs)
+        data["ref_earned"] = sum(
+            int(ref.get("reward") or 0) for ref in refs
+            if str(ref.get("status") or "paid").lower() in ("paid", "ok", "done"))
+    except Exception:  # noqa: BLE001 — таблицы может не быть
+        pass
+    try:
+        data["snowflakes"] = _snowflakes_count_sync(int(uid))
+    except Exception:  # noqa: BLE001
+        data["snowflakes"] = 0
+    try:
+        board = (supabase.table("newyear_board").select("user_id, earned, wins")
+                 .order("earned", desc=True).limit(200).execute().data) or []
+        for place, item in enumerate(board, start=1):
+            if int(item.get("user_id") or 0) == int(uid):
+                data["board_earned"] = int(item.get("earned") or 0)
+                data["board_place"] = place
+                break
+    except Exception:  # noqa: BLE001 — лидерборд может быть не создан
+        pass
+    return data
+
+
+def _passive_rate_bot(inventory) -> float:
+    """Коинов в час с инвентаря — по общей таблице ставок (shop_catalog)."""
+    counts = {}
+    for item_id in inventory or []:
+        key = str(item_id)
+        counts[key] = counts.get(key, 0) + 1
+    return round(sum(PASSIVE_INCOME_RATES_SHARED.get(item_id, 0.0) * count
+                     for item_id, count in counts.items()), 4)
+
+
+def _free_love_label(name) -> str:
+    """«Свободен» / «Свободна» / «Свободен(на)» — как плашка в апке."""
+    gender = gender_from_name(name)
+    if gender == GENDER_FEMALE:
+        return "Свободна"
+    if gender == GENDER_MALE:
+        return "Свободен"
+    return "Свободен(на)"
+
+
+@dp.message(F.text.func(lambda t: strip_prefix(t).lower().startswith(_AURA_PROFILE_ALIASES)))
+async def cmd_aura_profile(message: Message):
+    """`!аурапрофиль` — профиль игрока таблицей в Telegram (только владельцы)."""
+    if not message.from_user or message.from_user.is_bot:
+        return
+    if not is_admin(message.from_user.id):
+        # Скрытая команда: не админам не отвечаем вовсе.
+        return
+    target_id, _target_name = await resolve_partner_target(message)
+    if target_id is None:
+        target_id = message.from_user.id
+    detail = await asyncio.to_thread(_aura_profile_sync, int(target_id))
+    name = await _plain_name(target_id)
+    stats = detail.get("stats") or {}
+    rate = _passive_rate_bot(detail.get("inventory"))
+
+    def _stat(key):
+        try:
+            return int(stats.get(key) or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    lines = [
+        "👤 <b>AURA-ПРОФИЛЬ</b>",
+        "━━━━━━━━━━━━━━━━━━━━",
+        f"🆔 Игрок: <b>{safe_text(name)}</b> · <code>{int(target_id)}</code>",
+        f"💰 Баланс: <b>{detail.get('coins', 0):,}</b> коинов".replace(",", " "),
+        f"🔑 Ключи: <b>{detail.get('keys', 0)}</b>",
+        f"📅 Дней с нами: <b>{detail.get('days', 0)}</b>",
+        f"❄️ Снежинки: <b>{detail.get('snowflakes', 0)}</b>",
+    ]
+    row = await get_relationship(target_id)
+    if row:
+        partner_id = _partner_of(row, target_id)
+        score = int(row.get("love") or 0)
+        info = public_stage(score)
+        # Имя партнёра — человеческое; если бот его ещё не знает (в кэше только
+        # «id123»), пишем «партнёр», как это делает плашка в апке.
+        partner_name = await _plain_name(partner_id)
+        if not partner_name or partner_name.startswith("id"):
+            partner_name = "партнёр"
+        lines.append(
+            f"💗 В отношениях с <b>{safe_text(partner_name)}</b> · "
+            f"{info['level']} ур. · {_love_progress_pair(score)} ❤️")
+    else:
+        solo = await get_solo_love(target_id)
+        info = public_stage(solo, solo=True)
+        lines.append(
+            f"💚 <b>{_free_love_label(name)}</b> · {info['level']} ур. · "
+            f"{_love_progress_pair(solo, solo=True)} 💔")
+    lines.append(
+        f"📊 Достижения: игр <b>{_stat('games_played')}</b> · "
+        f"побед <b>{_stat('games_won')}</b> · "
+        f"потрачено <b>{_stat('coins_spent'):,}</b> · "
+        f"заработано <b>{_stat('coins_earned'):,}</b>".replace(",", " "))
+    best = max(_stat("best_crash_win"), _stat("best_arena_win"), _stat("best_mines_win"),
+               _stat("best_dice_win"), _stat("best_upgrade_win"))
+    lines.append(f"🏆 Лучший занос: <b>{best:,}</b> коинов".replace(",", " "))
+    lines.append(f"💤 Пассив: <b>{rate:g}</b> коинов/час")
+    lines.append(f"👥 Рефералы: приглашено <b>{detail.get('ref_invited', 0)}</b> · "
+                 f"заработано <b>{detail.get('ref_earned', 0):,}</b>".replace(",", " "))
+    if detail.get("board_place"):
+        lines.append(f"🎄 Лидерборд: <b>#{detail['board_place']}</b> · "
+                     f"<b>{detail.get('board_earned', 0):,}</b>".replace(",", " "))
+    await message.answer("\n".join(lines), parse_mode="HTML")
 
 
 # ================= СКРЫТЫЕ КОМАНДЫ =================
